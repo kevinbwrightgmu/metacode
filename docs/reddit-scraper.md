@@ -27,15 +27,17 @@ Browser (Scraper page)                          MetaCode server (Node.js)
 POST /api/scraper/jobs ───────────────────────▶ JobManager (queue, status, logs, results)
 GET  /api/scraper/jobs/:id/events  ◀── SSE ───        │
 GET  /api/scraper/jobs/:id/results                    ├─ standard scraper ─┐
-GET  /api/scraper/jobs/:id/export                     └─ custom code ──────┤ (QuickJS sandbox process,
-                                                                           │  asks the server over IPC)
+GET  /api/scraper/jobs/:id/export                     └─ custom code ──────┤ (Pyodide or QuickJS sandbox
+                                                                           │  process, asks the server over IPC)
                                                        RedditHttpClient  ◀─┘
                                                        destination check · robots.txt · rate limiter ·
                                                        retries · OAuth token · redirects
                                                               │
-                                                       epoxy-tls (WASM, TLS client)
-                                                              │  WebSocket
-                                                       Wisp endpoint /wisp/ (wisp-js, allow-list)
+                                                       server engine (SCRAPER_SERVER_TRANSPORT):
+                                                       Python worker python/reddit_fetch.py
+                                                         (allow-list, no private IPs, TLS verify)
+                                                       — or, without Python —
+                                                       epoxy-tls (WASM) → WebSocket → Wisp /wisp/
                                                               │  TCP
                                                               ▼
                                                      www.reddit.com / oauth.reddit.com
@@ -85,6 +87,10 @@ reloading the tab mid-job pauses its requests; MetaCode warns before you leave, 
 | **Epoxy transport** | `@mercuryworkshop/epoxy-transport` 3.0.1 | In the browser tab, shared by the Scramjet controller and browser-mode scrape jobs | The proxy-transports implementation Scramjet uses to fetch: epoxy-tls in the browser, connected to `wss://<MetaCode>/wisp/`. Browser-mode jobs fetch their Reddit requests with it (`scraper/network/browser-relay.js`) |
 | **Bare transport** | `@mercuryworkshop/bare-transport` | **Not used** | It is a proxy-transports implementation for the legacy TompHTTP *Bare server* protocol — an alternative to Wisp, not a layer on top of it. Using it would require running a Bare server (an HTTP proxy endpoint) next to Wisp, adding a second egress path and attack surface with no benefit, so MetaCode uses the Wisp + epoxy transport only. (Scramjet's own bootstrapper doesn't implement the Bare option either.) |
 
+Server-side jobs use the Python engine (`python/reddit_fetch.py`) when Python 3.8+ is installed. In that case epoxy-tls
+over Wisp is their fallback, and it can be forced with `SCRAPER_SERVER_TRANSPORT=epoxy`. The in-app browser and
+browser-mode jobs always use Scramjet + epoxy-transport over Wisp.
+
 Request flow of the in-app browser:
 
 ```
@@ -131,7 +137,10 @@ Invalid values are ignored with a warning in the start-up banner.
 | `SCRAPER_MAX_RESPONSE_BYTES` | `8388608` | Largest accepted Reddit response |
 | `SCRAPER_CUSTOM_CODE_ENABLED` | `true` | Allow the Custom code mode |
 | `SCRAPER_CUSTOM_TIMEOUT_MS` | `120000` | Wall-clock limit per custom run (1 s – 15 min) |
-| `SCRAPER_CUSTOM_MEMORY_MB` | `64` | Memory limit of the QuickJS sandbox |
+| `SCRAPER_CUSTOM_MEMORY_MB` | `64` | Memory limit of the QuickJS (JavaScript/TypeScript) sandbox |
+| `SCRAPER_CUSTOM_PYTHON_MEMORY_MB` | `256` | WebAssembly memory limit of the Python (Pyodide) sandbox |
+| `SCRAPER_SERVER_TRANSPORT` | `auto` | Who makes the server's HTTPS requests: `python` (python/reddit_fetch.py), `epoxy` (epoxy-tls over Wisp), or `auto` (Python when found, else epoxy-tls) |
+| `SCRAPER_PYTHON` | — | Python command for the server engine (default: `python3`, then `python`, then `py -3` on Windows) |
 | `SCRAPER_BROWSER_ENABLED` | `true` | Serve the in-app Reddit browser (Scramjet) and allow the browser engine |
 | `REDDIT_BASE_URL` / `REDDIT_OAUTH_BASE_URL` | `https://www.reddit.com` / `https://oauth.reddit.com` | Where Reddit is reached. Change only for testing against a mock |
 | `SCRAPER_ALLOW_PRIVATE_NETWORK` | `false` | Lets the Wisp proxy connect to private/loopback addresses. **Testing only** |
@@ -272,7 +281,20 @@ scraped text is untrusted.
 
 ## 5. Writing custom scraper code
 
-Switch to **Custom code**. Define `scrape(ctx)`; emit records as you go or return them:
+Switch to **Custom code**. Pick a language: **Python** (the default), **JavaScript** or **TypeScript**.
+Define `scrape(ctx)`; emit records as you go, or return them.
+
+```python
+import statistics
+
+async def scrape(ctx):
+    sub = ctx.params.get("subreddit", "AskScience")
+    async for page in ctx.reddit.pages(f"/r/{sub}/new", max_pages=3):
+        busy = [p for p in page["records"] if p["num_comments"] >= 10]
+        ctx.emit(busy)
+        if busy:
+            print("page", page["number"], "median score", statistics.median(p["score"] for p in busy))
+```
 
 ```js
 async function scrape(ctx) {
@@ -284,19 +306,63 @@ async function scrape(ctx) {
 }
 ```
 
-- **Load an example…** offers ready-made scripts (pagination, keyword filter, post comments, raw fetch
-  with retries, TypeScript).
+- **Load an example…** offers ready-made scripts for each language:
+  - Python:
+    - pagination;
+    - keyword matches with a regex and a `Counter`;
+    - post comments plus `statistics`;
+    - a per-author summary;
+    - raw fetch with retries.
+  - JavaScript: the same kinds of examples.
+  - TypeScript: one example.
+  Switching the language swaps an untouched example for the same example in the new language.
 - **Parameters** (JSON object) become `ctx.params`. The target form is optional in this mode
-  (`ctx.target` is the normalized target, or `null` for "No target").
-- The limits form applies: `ctx.options.maxItems` caps results, `maxPages` caps `ctx.reddit.pages`, the
-  delay/concurrency/retries apply to every request your code makes.
-- Return an array, `{ data: [...] }`, `{ data, meta }` (meta appears in the Metadata tab), or nothing.
-  Records must be JSON-serializable objects; records with the same Reddit `fullname` are kept once.
-- TypeScript: choose **TypeScript**; type annotations are stripped before running (enums, namespaces and
-  parameter properties aren't supported).
-- `console.log` writes to the job log.
+  (`ctx.target` is the normalized target, or `null`/`None` for "No target").
+- The limits form applies:
+  - `ctx.options.maxItems` caps results;
+  - `maxPages` caps `ctx.reddit.pages`;
+  - the delay, concurrency and retries apply to every request your code makes.
+- Return a list/array of records, `{data: [...]}`, `{data, meta}` (`meta` appears in the Metadata tab), or nothing.
+  Records must be JSON-serializable (in Python, `datetime`s and sets are converted for you). Records with the
+  same Reddit `fullname` are kept once.
+- **Python**:
+  - `print()` writes to the job log.
+  - The whole standard library is available (`re`, `json`, `statistics`, `collections`, `datetime`, `itertools`,
+    `math`, `csv`, `html`…).
+  - Third-party packages (pandas, requests, praw…) are not. Export the results and analyse them in your own Python.
+  - A plain `def scrape(ctx)` works too, but anything that talks to Reddit must be awaited, so use `async def`.
+  - Errors show a normal Python traceback of your code.
+- **TypeScript**: type annotations are stripped before running. Enums, namespaces and parameter properties
+  aren't supported.
+- **JavaScript**: `console.log` writes to the job log.
 
 ## 6. API available to custom code
+
+### Python
+
+| API | Description |
+|---|---|
+| `ctx.target`, `ctx.params`, `ctx.options` | Dicts: the normalized target (or `None`), the parameters, the limits (`maxItems`, `maxPages`, `commentLimit`, …) |
+| `ctx.mode` | `"oauth"`, `"public"`, `"browser"` or `"redditapis"` |
+| `await ctx.reddit.json(path, query=None)` | GET a Reddit JSON endpoint → parsed JSON |
+| `async for page in ctx.reddit.pages(path, max_pages=None, limit=100, after=None, query=None)` | Listing pages: dicts with `number, records, children, after` |
+| `await ctx.reddit.listing(path, max_items=None, max_pages=None, query=None)` | → `{"items": [...], "pages": n}` |
+| `await ctx.reddit.post(post_id, limit=None, depth=None, sort="confidence")` | → `{"post", "comments", "more_count"}` |
+| `await ctx.reddit.subreddit(name)` / `await ctx.reddit.user(name)` | Info records |
+| `ctx.reddit.normalize_post / normalize_comment / normalize_subreddit / normalize_user / normalize_thing / flatten_comments / extract_media / to_iso` | The standard scraper's formatters |
+| `await ctx.fetch(url, method="GET", headers=None)` | GET/HEAD to Reddit hosts only → requests-style response: `.ok`, `.status`/`.status_code`, `.url`, `.headers.get()`, `.text`, `.json()`, `.raise_for_status()` |
+| `ctx.emit(record_or_list)` / `ctx.remaining()` | Add results now → items still allowed |
+| `ctx.log(...)`, `ctx.log.debug/info/warn/error(...)`, `print(...)` | Job log (max 2000 lines) |
+| `ctx.progress(message=None, pages=None)` | Progress line / page counter |
+| `await ctx.sleep(seconds)` | Wait (≤ 60 s per call) |
+| `await ctx.retry(fn, retries=2, delay=2.0, factor=2.0)` | Calls `fn(attempt)` (sync or async) with exponential backoff |
+| `ctx.utils.get(obj, "a.b.0", default)`, `pick`, `unique(items, key=None)`, `chunk`, `strip_html`, `decode_entities` | Helpers |
+
+Failed host requests raise `ScraperError` (available by name in your code). Its `.type` is one of
+`"not_found"`, `"rate_limited"`, `"forbidden"`, `"host_not_allowed"`, `"robots_disallowed"` and so on. If you
+don't catch it, the job fails with the same type and message.
+
+### JavaScript / TypeScript
 
 | API | Description |
 |---|---|
@@ -325,18 +391,40 @@ same message.
 
 ## 7. Security model and limitations
 
-Custom code is untrusted and never runs in the MetaCode server's JavaScript engine. Two layers:
+Custom code is untrusted and never runs in the MetaCode server's own JavaScript engine or in the server's
+Python. Each run gets a fresh, locked-down process.
 
-1. **QuickJS sandbox** (`quickjs-emscripten`): the code runs in a separate JavaScript engine compiled to
-   WebAssembly. It has no `require`, `process`, file system, timers, `fetch` or any Node object. The only
-   bridge is two functions that exchange JSON strings with the host; the host decides what each call may
-   do. Memory is capped (`SCRAPER_CUSTOM_MEMORY_MB`), CPU loops are interrupted at the deadline, stack
-   depth is limited.
-2. **Restricted process**: each run gets a fresh Node process started with Node's permission model
-   (`--permission`): it may read only the QuickJS engine files; it cannot write files, read `.env` or any
-   other file, spawn processes, start workers, load native addons or use WASI. Its environment is empty
-   (no API keys or secrets), its V8 heap is capped, string code generation is disabled, and the parent
-   kills it (SIGKILL) at the timeout or on cancellation.
+**JavaScript / TypeScript — QuickJS** (`quickjs-emscripten`):
+
+- The code runs in a separate JavaScript engine compiled to WebAssembly.
+- It has no `require`, `process`, file system, timers, `fetch` or any Node object.
+- The only bridge is two functions that exchange JSON strings with the host.
+- Memory is capped (`SCRAPER_CUSTOM_MEMORY_MB`), CPU loops are interrupted at the deadline, and stack depth is limited.
+
+**Python — Pyodide** (CPython compiled to WebAssembly). Pyodide can call into JavaScript, so its process takes
+away everything network-shaped before your code runs:
+
+- Python's `js` module is an empty object (timers only), not Node's global scope.
+- The networking built-ins (`net`, `tls`, `http(s)`, `dns`, `vm`, `child_process`, …) can't be loaded: there is a
+  module resolve hook and `process.getBuiltinModule` is removed.
+- `fetch`, `WebSocket` and similar globals are deleted.
+- Pyodide's opt-in Node sockets, host-folder mounts (`NODEFS`) and package downloads are disabled.
+- `os.system` and similar functions raise `PermissionError`.
+- WebAssembly memory can't grow past `SCRAPER_CUSTOM_PYTHON_MEMORY_MB` (your code gets `MemoryError`).
+- An infinite loop is killed at the timeout; records emitted before that are kept.
+
+The test suite checks each of these from inside Python: Node globals, the `Function` constructor, `run_js`, Node
+sockets, `socket`, `asyncio` connections, `urllib`, `pyfetch`, host mounts, package installs, `os.system`,
+`subprocess`, server files and secrets. A walk over every JavaScript object Python can reach finds no route to
+`process`, `require` or the global scope.
+
+**Both languages** run in a process started with:
+
+- Node's permission model (`--permission`). The process may read only its engine's own files. It can't write
+  files, read `.env` or any other file, spawn processes, start workers, load native addons or use WASI.
+- An empty environment: no API keys or secrets.
+- A capped V8 heap and string code generation disabled.
+- A hard kill (SIGKILL) from the parent at the timeout or on cancellation.
 
 All network access is performed by the server (or, in browser mode, relayed to your MetaCode tab) on
 the sandbox's behalf: Reddit hosts only, GET/HEAD
@@ -347,9 +435,12 @@ Every message from the sandbox is size-capped (1 MB per batch, 64 MB per run).
 Limitations to be aware of:
 
 - Node's permission model doesn't restrict network sockets in Node 22. A hypothetical escape from
-  QuickJS's WebAssembly memory into the child's Node runtime would still have no files, no secrets and
-  no child processes, but could open network connections. Run MetaCode on a trusted network, or set
+  QuickJS's or Pyodide's WebAssembly sandbox into the child's Node runtime would still have no files, no
+  secrets and no child processes. For Python, the module hook and the removed globals also stand in the
+  way. It could, however, try to open network connections. Run MetaCode on a trusted network, or set
   `SCRAPER_CUSTOM_CODE_ENABLED=false` on shared deployments.
+- Python scrapers need Node.js 22.15+ (for the module hook). Each run starts a fresh interpreter, which
+  takes about 2 seconds.
 - Browser mode: the tab only fetches GET/HEAD requests to Reddit hosts that the server already
   validated, and checks the host again itself. Relay answers are accepted only from MetaCode's own
   origin. Requests go out with your browser's User-Agent from your own connection, and robots.txt is
@@ -425,7 +516,11 @@ API (same-origin; errors are `{ error: { message, type } }`):
 | "Reddit sent a web page instead of data …" | Block/login/age page; use API credentials |
 | "Reddit rejected REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET" | Check the values, the app type (script/web) and restart |
 | Job completed with 0 items | Empty listing, no search matches, or limits too small — see the Logs tab |
-| "Your scraper threw an error: …" / ran past the time limit / out of memory | Fix the code (the message includes the line in `scraper.js`); emit in batches; raise `SCRAPER_CUSTOM_TIMEOUT_MS` / `SCRAPER_CUSTOM_MEMORY_MB` if needed |
+| "Your scraper threw an error: …" / ran past the time limit / out of memory | Fix the code (the message includes the line in `scraper.py` / `scraper.js`); emit in batches; raise `SCRAPER_CUSTOM_TIMEOUT_MS` / `SCRAPER_CUSTOM_PYTHON_MEMORY_MB` / `SCRAPER_CUSTOM_MEMORY_MB` if needed |
+| "Your scraper tried to use something the sandbox doesn't allow" | Python code reached for networking or programs; use `ctx.fetch` / `ctx.reddit` |
+| "Python scrapers need Node.js 22.15 or newer" / "The Python sandbox (Pyodide) isn't installed" | Update Node.js / run `npm install` |
+| "Python 3.8+ wasn't found for the Python scraper engine" | Only with `SCRAPER_SERVER_TRANSPORT=python`: install Python 3 or set `SCRAPER_PYTHON`. With `auto`, MetaCode uses epoxy-tls instead |
+| "Couldn't verify the server's TLS certificate … (Python engine)" | On macOS with Python from python.org run *Install Certificates.command* (or `pip install certifi`); otherwise an HTTPS-inspecting proxy is in the way |
 | "The custom-code sandbox needs Node.js 22 …" / "TypeScript needs Node.js 22.13 …" | Upgrade Node.js |
 | Browse Reddit: "couldn't start" | Needs a browser with service workers and MetaCode at `http://localhost` or `https://`; check that `SCRAPER_BROWSER_ENABLED` isn't `false` |
 | Results disappeared | Jobs are kept in memory for `SCRAPER_JOB_RETENTION_MINUTES` and lost on restart — export or add to the project |

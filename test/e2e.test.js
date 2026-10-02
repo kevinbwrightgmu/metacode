@@ -175,12 +175,15 @@ test('custom code: write a scraper, run it in the sandbox, see results', { skip 
   await page.click('text=API reference');
   assert.match(await page.textContent('#modal-body'), /ctx\.reddit\.pages/);
   await page.click('#modal-close');
+  assert.equal(await page.inputValue('#sc-language'), 'python');     // Python is the default
   await page.fill('#sc-code', [
-    'async function scrape(ctx) {',
-    '  const { items } = await ctx.reddit.listing("/r/" + ctx.params.sub + "/hot", { maxPages: 1, maxItems: 5 });',
-    '  ctx.log.info("custom run", items.length);',
-    '  return items.map(p => ({ record_type: "post", post_id: p.post_id, fullname: p.fullname, title: "[custom] " + p.title, score: p.score }));',
-    '}'
+    'import statistics',
+    '',
+    'async def scrape(ctx):',
+    '    result = await ctx.reddit.listing("/r/" + ctx.params["sub"] + "/hot", max_pages=1, max_items=5)',
+    '    items = result["items"]',
+    '    print("custom run", len(items), "median", statistics.median(p["score"] for p in items))',
+    '    return [{"record_type": "post", "post_id": p["post_id"], "fullname": p["fullname"], "title": "[custom] " + p["title"], "score": p["score"]} for p in items]'
   ].join('\n'));
   await page.fill('#sc-params', '{ "sub": "test" }');
   await page.selectOption('#sc-target-type', 'none');
@@ -189,9 +192,10 @@ test('custom code: write a scraper, run it in the sandbox, see results', { skip 
   await page.waitForFunction(() => document.querySelectorAll('.sc-table tbody tr').length === 5);
   assert.match(await page.textContent('.sc-table tbody tr'), /\[custom\] Post/);
   await page.click('.sc-tab[data-tab="logs"]');
-  assert.match(await page.textContent('#sc-logs'), /\[code\] custom run 5/);
+  assert.match(await page.textContent('#sc-logs'), /\[code\] custom run 5 median/);
 
-  // A failing script shows the sandbox's error.
+  // JavaScript still works; a failing script shows the sandbox's error.
+  await page.selectOption('#sc-language', 'javascript');
   await page.fill('#sc-code', 'async function scrape(ctx) {\n  throw new Error("deliberate failure");\n}');
   await page.click('#sc-start');
   await page.waitForFunction(() => document.querySelector('#sc-job-status') && document.querySelector('#sc-job-status').textContent === 'Failed', null, { timeout: 30000 });

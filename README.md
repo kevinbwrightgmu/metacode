@@ -11,7 +11,7 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 | Module | Description |
 |---|---|
 | **Import Data** | Upload CSVs for posts, engagement metrics, and social network data. The `text` column is optional — if no text-like column is found by name, AI reads the file's structure and maps it for you |
-| **Reddit Scraper** | Collect subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed JavaScript/TypeScript (custom code mode); live progress, results table/JSON, CSV/JSON export, and **Add to project** to code the posts. Networking runs through a Wisp proxy with epoxy-tls; an in-app Reddit browser uses Scramjet. See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
+| **Reddit Scraper** | Collect subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed Python, JavaScript or TypeScript (custom code mode); live progress, results table/JSON, CSV/JSON export, and **Add to project** to code the posts. Server requests go through a Python worker (or epoxy-tls over Wisp without Python); an in-app Reddit browser uses Scramjet. See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
 | **Codebook Builder** | Define custom coding dimensions and codes; each code has an optional AI Fine-Tuning Notes field the model reads during Auto-Coding, separate from the Description shown to human coders; import/export as CSV |
 | **AI Auto-Coding** | The AI applies your codebook to posts and provides confidence scores + reasoning |
 | **Human Coding** | Efficient post-by-post manual coding interface with AI suggestions |
@@ -168,10 +168,18 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 - **Standard scraper** — subreddit listings, search, a post with its comments, user profiles, any Reddit URL
   (auto-detected), front page / domain listings, subreddit and user info. Limits for items, pages, delay,
   timeout, concurrency and retries; optional comments for listing posts.
-- **Custom code** — `async function scrape(ctx)` in JavaScript or TypeScript with a Reddit SDK
-  (`ctx.reddit.pages/listing/post/json`, `ctx.fetch`, `ctx.emit`, `ctx.log`, `ctx.retry`, …). It runs in a
-  QuickJS (WebAssembly) sandbox inside a permission-restricted Node process with no files, secrets or
-  direct network access, and with time and memory limits.
+- **Custom code** — `async def scrape(ctx)` in **Python** (the default), or `async function scrape(ctx)` in
+  JavaScript/TypeScript, with a Reddit SDK:
+  - `ctx.reddit.pages/listing/post/json`;
+  - `ctx.fetch`, `ctx.emit`, `ctx.log`, `ctx.retry`, and more;
+  - Python's whole standard library (`re`, `statistics`, `collections`, …).
+
+  Python runs in Pyodide (CPython compiled to WebAssembly) and JS/TS in QuickJS. Either way the code runs in a
+  permission-restricted Node process with no files, secrets or direct network access, and with time and memory
+  limits.
+- **Python server engine** — server-side jobs make their HTTPS requests through `python/reddit_fetch.py`, which
+  uses only Python's standard library. Without Python, they fall back to epoxy-tls over Wisp
+  (`SCRAPER_SERVER_TRANSPORT`).
 - **With Reddit API keys**: combine sorts to collect past Reddit's ~1,000-post listing limit, and load comments
   collapsed behind "load more".
 - **Jobs** run in the background (queued → running → completed / failed / cancelled) with live progress over
@@ -199,7 +207,9 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 | `SCRAPER_RESPECT_ROBOTS_TXT` | `true` | Check robots.txt in public mode |
 | `SCRAPER_MIN_DELAY_MS` / `SCRAPER_PUBLIC_MIN_DELAY_MS` | `1000` / `6000` | Minimum delay between requests per host |
 | `SCRAPER_MAX_ITEMS` / `SCRAPER_MAX_PAGES` | `5000` / `50` | Hard per-job caps |
-| `SCRAPER_CUSTOM_CODE_ENABLED` / `SCRAPER_CUSTOM_TIMEOUT_MS` / `SCRAPER_CUSTOM_MEMORY_MB` | `true` / `120000` / `64` | Custom-code sandbox |
+| `SCRAPER_CUSTOM_CODE_ENABLED` / `SCRAPER_CUSTOM_TIMEOUT_MS` / `SCRAPER_CUSTOM_MEMORY_MB` | `true` / `120000` / `64` | Custom-code sandbox (memory: JavaScript) |
+| `SCRAPER_CUSTOM_PYTHON_MEMORY_MB` | `256` | Memory limit of Python custom scrapers |
+| `SCRAPER_SERVER_TRANSPORT` / `SCRAPER_PYTHON` | `auto` / — | Server HTTPS engine: `python`, `epoxy` or `auto`; Python command to use |
 
 All scraper variables (concurrency, retention, response size, browser on/off, test-only overrides) are listed in
 `.env.example` and the guide.
@@ -344,15 +354,16 @@ metacode/
 │   ├── config.js               SCRAPER_* / REDDIT_* settings
 │   ├── errors.js               Error types and user-facing messages
 │   ├── export.js               CSV / JSON / NDJSON
-│   ├── network/                Wisp endpoint, epoxy-tls transport, rate limiter, robots.txt, Reddit HTTP client
+│   ├── network/                Python + epoxy-tls transports, Wisp endpoint, rate limiter, robots.txt, Reddit HTTP client
 │   ├── reddit/                 Targets/URL parsing, record formatters, standard scraper
 │   ├── jobs/job-manager.js     Job queue, status, logs, results
-│   └── sandbox/                Custom code: QuickJS sandbox process, SDK prelude, runner
+│   └── sandbox/                Custom code: Pyodide (Python) and QuickJS (JS/TS) sandbox processes, SDKs, runner
 ├── docs/reddit-scraper.md      Scraper guide
 ├── test/                       node:test suites (+ Playwright browser tests) and a mock Reddit
 ├── python/
 │   ├── network_analysis.py     Reads edges JSON on stdin, runs NetworkX, writes stats JSON on stdout
-│   └── check_env.py            Reports whether NetworkX is installed
+│   ├── check_env.py            Reports whether NetworkX is installed
+│   └── reddit_fetch.py         Scraper's Python HTTPS engine (standard library only)
 ├── public/
 │   ├── index.html                Landing page — explains MetaCode, links to app.html
 │   ├── scramjet-sw.js            Service worker for the Scraper's in-app Reddit browser (Scramjet)

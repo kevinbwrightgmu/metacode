@@ -53,6 +53,7 @@ function transportAvailable() {
 class EpoxyWispTransport {
   // getWispUrl: () => 'ws://127.0.0.1:<port>/wisp/' (known once the server listens)
   constructor(opts) {
+    this.kind = 'epoxy';
     this.getWispUrl = opts.getWispUrl;
     this.userAgent = opts.userAgent;
     this.maxResponseBytes = opts.maxResponseBytes || 8 * 1024 * 1024;

@@ -4,3 +4,5 @@ reddit-credentials.json
 reddit-credentials.json.tmp
 redditapis-key.json
 redditapis-key.json.tmp
+__pycache__/
+*.pyc

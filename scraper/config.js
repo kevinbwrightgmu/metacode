@@ -28,7 +28,9 @@ const DEFAULTS = {
   customCodeEnabled:     true,
   customTimeoutMs:       120000,
   customMemoryMb:        64,
+  customPythonMemoryMb:  256,      // WebAssembly memory for Python (Pyodide) scrapers
   browserEnabled:        true,
+  serverTransport:       'auto',   // python | epoxy | auto (Python if found, else epoxy-tls)
   allowPrivateNetwork:   false
 };
 
@@ -120,7 +122,11 @@ function loadScraperConfig(env) {
   c.customCodeEnabled     = bool(env, 'SCRAPER_CUSTOM_CODE_ENABLED', DEFAULTS.customCodeEnabled, warnings);
   c.customTimeoutMs       = int(env, 'SCRAPER_CUSTOM_TIMEOUT_MS', DEFAULTS.customTimeoutMs, 1000, 15 * 60000, warnings);
   c.customMemoryMb        = int(env, 'SCRAPER_CUSTOM_MEMORY_MB', DEFAULTS.customMemoryMb, 8, 1024, warnings);
+  c.customPythonMemoryMb  = int(env, 'SCRAPER_CUSTOM_PYTHON_MEMORY_MB', DEFAULTS.customPythonMemoryMb, 64, 2048, warnings);
   c.browserEnabled        = bool(env, 'SCRAPER_BROWSER_ENABLED', DEFAULTS.browserEnabled, warnings);
+  const st = String(env.SCRAPER_SERVER_TRANSPORT || '').trim().toLowerCase();
+  if (st && !['auto', 'python', 'epoxy'].includes(st)) warnings.push('SCRAPER_SERVER_TRANSPORT must be auto, python or epoxy; using auto.');
+  c.serverTransport = ['auto', 'python', 'epoxy'].includes(st) ? st : DEFAULTS.serverTransport;
   c.allowPrivateNetwork   = bool(env, 'SCRAPER_ALLOW_PRIVATE_NETWORK', DEFAULTS.allowPrivateNetwork, warnings);
   if (c.allowPrivateNetwork) {
     warnings.push('SCRAPER_ALLOW_PRIVATE_NETWORK is on: the Wisp proxy may connect to private/loopback addresses. Use this only for testing against a local mock server.');

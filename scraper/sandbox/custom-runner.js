@@ -15,8 +15,12 @@ const { ScraperError, isScraperError, cancelledError, sanitize } = require('../e
 const { sleep } = require('../network/rate-limiter');
 
 const CHILD = path.join(__dirname, 'sandbox-child.js');
+const PY_CHILD = path.join(__dirname, 'python-child.js');
 const PRELUDE_SOURCE = fs.readFileSync(path.join(__dirname, 'guest-prelude.js'), 'utf8');
-const FORMAT_SOURCE = fs.readFileSync(path.join(__dirname, '..', 'reddit', 'format.js'), 'utf8');
+const PY_PRELUDE_SOURCE = fs.readFileSync(path.join(__dirname, 'python-prelude.py'), 'utf8');
+const FORMAT_PATH = path.join(__dirname, '..', 'reddit', 'format.js');
+const FORMAT_SOURCE = fs.readFileSync(FORMAT_PATH, 'utf8');
+const LANGUAGES = ['python', 'javascript', 'typescript'];
 const MAX_CODE_BYTES = 200 * 1024;
 const MAX_SLEEP_MS = 60000;
 const PASS_HEADERS = ['content-type', 'content-length', 'etag', 'last-modified', 'retry-after', 'location',
@@ -46,13 +50,35 @@ function sandboxReadablePaths() {
   return readablePaths;
 }
 
-function sandboxSupported() {
+function sandboxSupported(language) {
   const flags = process.allowedNodeEnvironmentFlags;
   if (!flags || !flags.has('--permission')) {
     return { ok: false, reason: 'The custom-code sandbox needs Node.js 22 or newer (Node\'s --permission model).' };
   }
+  if (language === 'python') return pythonSupported();
   try { sandboxReadablePaths(); } catch (e) {
     return { ok: false, reason: 'The QuickJS sandbox engine isn\'t installed. Run "npm install" and restart MetaCode.' };
+  }
+  return { ok: true };
+}
+
+let pyPaths = null;
+function pythonReadablePaths() {
+  if (!pyPaths) {
+    const dir = packageRoot('pyodide');
+    pyPaths = { entry: path.join(dir, 'pyodide.js'), dir: dir + path.sep, dirs: [PY_CHILD, FORMAT_PATH, dir] };
+  }
+  return pyPaths;
+}
+
+// Python runs in Pyodide (CPython compiled to WebAssembly) inside the same
+// kind of locked-down process; its network lock-down needs module hooks.
+function pythonSupported() {
+  if (typeof require('node:module').registerHooks !== 'function') {
+    return { ok: false, reason: 'Python scrapers need Node.js 22.15 or newer on the MetaCode server. Update Node.js, or switch the language to JavaScript.' };
+  }
+  try { pythonReadablePaths(); } catch (e) {
+    return { ok: false, reason: 'The Python sandbox (Pyodide) isn\'t installed. Run "npm install" and restart MetaCode.' };
   }
   return { ok: true };
 }
@@ -60,7 +86,7 @@ function sandboxSupported() {
 function validateCode(code, language) {
   if (typeof code !== 'string' || !code.trim()) throw new ScraperError('invalid_request', 'Write your scraper code first.', { status: 400 });
   if (Buffer.byteLength(code) > MAX_CODE_BYTES) throw new ScraperError('invalid_request', 'The scraper code is too long (200 KB at most).', { status: 400 });
-  if (!['javascript', 'typescript'].includes(language)) throw new ScraperError('invalid_request', 'Language must be javascript or typescript.', { status: 400 });
+  if (!LANGUAGES.includes(language)) throw new ScraperError('invalid_request', 'Language must be python, javascript or typescript.', { status: 400 });
 }
 
 function createCustomRunner(opts) {
@@ -68,22 +94,24 @@ function createCustomRunner(opts) {
 
   return function runCustom(job, ctx) {
     return new Promise((resolve, reject) => {
-      const support = sandboxSupported();
+      const python = job.language === 'python';
+      const support = sandboxSupported(job.language);
       if (!support.ok) return reject(new ScraperError('not_available', support.reason, { status: 503 }));
 
-      const paths = sandboxReadablePaths();
-      const memoryMb = config.customMemoryMb;
+      const paths = python ? pythonReadablePaths() : sandboxReadablePaths();
+      const memoryMb = python ? (config.customPythonMemoryMb || 256) : config.customMemoryMb;
       const execArgv = [
         '--permission',
         ...paths.dirs.map(p => '--allow-fs-read=' + p),
-        '--max-old-space-size=' + (memoryMb * 2 + 64),
+        '--max-old-space-size=' + (python ? 192 : memoryMb * 2 + 64),
         '--disallow-code-generation-from-strings',
         '--no-warnings'
       ];
       const env = process.platform === 'win32' && process.env.SystemRoot ? { SystemRoot: process.env.SystemRoot } : {};
+      const childArgs = python ? [paths.entry, paths.dir, FORMAT_PATH] : [paths.entry];
       let child;
       try {
-        child = fork(CHILD, [paths.entry], { execArgv, env, cwd: path.dirname(CHILD), stdio: ['ignore', 'ignore', 'pipe', 'ipc'], serialization: 'json' });
+        child = fork(python ? PY_CHILD : CHILD, childArgs, { execArgv, env, cwd: path.dirname(CHILD), stdio: ['ignore', 'ignore', 'pipe', 'ipc'], serialization: 'json' });
       } catch (err) {
         return reject(new ScraperError('sandbox_error', 'The sandbox process couldn\'t be started.', { status: 500, detail: String(err && err.message) }));
       }
@@ -119,6 +147,11 @@ function createCustomRunner(opts) {
       child.on('exit', (code, sig) => {
         if (settled) return;
         const detail = 'exit ' + code + (sig ? ' ' + sig : '') + (stderr ? ': ' + sanitize(stderr, 300) : '');
+        const blocked = stderr.match(/"([^"]{1,60})" is not available in the MetaCode sandbox|(\w{1,40}) is not available in the MetaCode sandbox/);
+        if (blocked) {
+          return settle(new ScraperError('custom_code_error', 'Your scraper tried to use something the sandbox doesn\'t allow (' +
+            (blocked[1] || blocked[2]) + '). Custom code can only reach Reddit through ctx.', { status: 400, detail }));
+        }
         if (/heap out of memory|Allocation failed/i.test(stderr)) {
           return settle(new ScraperError('custom_code_memory', 'Your scraper used too much memory and the sandbox was stopped.', { status: 500, detail }));
         }
@@ -189,8 +222,8 @@ function createCustomRunner(opts) {
           type: 'start',
           code: job.code,
           language: job.language,
-          formatSource: FORMAT_SOURCE,
-          preludeSource: PRELUDE_SOURCE,
+          formatSource: python ? undefined : FORMAT_SOURCE,
+          preludeSource: python ? PY_PRELUDE_SOURCE : PRELUDE_SOURCE,
           limits: { memoryBytes: memoryMb * 1024 * 1024, timeoutMs },
           init: { target: job.target, options: job.options, params: job.params || {}, mode: ctx.http.mode }
         });
@@ -201,4 +234,4 @@ function createCustomRunner(opts) {
   };
 }
 
-module.exports = { createCustomRunner, sandboxSupported, validateCode, MAX_CODE_BYTES };
+module.exports = { createCustomRunner, sandboxSupported, validateCode, MAX_CODE_BYTES, LANGUAGES };

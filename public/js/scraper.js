@@ -4,8 +4,8 @@
    Two modes:
      • Standard — pick a target (subreddit, search, post, profile, any Reddit
        URL…) and limits; the server scrapes and normalizes the data.
-     • Custom code — write scrape(ctx) in JavaScript/TypeScript; it runs on
-       the server in an isolated QuickJS sandbox with a small SDK.
+     • Custom code — write scrape(ctx) in Python, JavaScript or TypeScript; it runs on
+       the server in an isolated sandbox (Python in Pyodide, JavaScript/TypeScript in QuickJS) with a small SDK.
    Jobs run on the server (/api/scraper); this page starts them, follows
    their progress over server-sent events, shows and exports the results,
    and can add them to the project as posts for coding.
@@ -40,7 +40,143 @@ const RedditScraper = (() => {
   const TYPE_BADGE = { post: 'badge-blue', comment: 'badge-teal', subreddit: 'badge-violet', user: 'badge-amber' };
   const STATUS_BADGE = { queued: 'badge-gray', running: 'badge-blue', completed: 'badge-green', failed: 'badge-red', cancelled: 'badge-amber' };
 
+  const LANGUAGES = [
+    { id: 'python', label: 'Python' },
+    { id: 'javascript', label: 'JavaScript' },
+    { id: 'typescript', label: 'TypeScript' }
+  ];
+
   const TEMPLATES = {
+    'py-subreddit-posts': {
+      label: 'Subreddit posts (pagination)',
+      language: 'python',
+      code:
+`# Collects posts from a subreddit, page by page.
+# ctx.target is the target chosen in the form (or None); ctx.params is the JSON below.
+async def scrape(ctx):
+    sub = (ctx.target or {}).get("subreddit") or ctx.params.get("subreddit", "AskScience")
+    sort = ctx.params.get("sort", "new")
+    ctx.log.info(f"Scraping r/{sub} ({sort})")
+
+    count = 0
+    async for page in ctx.reddit.pages(f"/r/{sub}/{sort}"):
+        for post in page["records"]:
+            if ctx.remaining() == 0:      # item limit reached
+                return
+            ctx.emit(post)                # normalized post record
+            count += 1
+        ctx.progress(f"{count} posts so far")
+` },
+    'py-keywords': {
+      label: 'Keyword matches across subreddits (regex)',
+      language: 'python',
+      code:
+`# Scans new posts in several subreddits and keeps those matching keywords.
+# Parameters example: { "subreddits": ["science", "environment"], "keywords": ["climate", "emission"] }
+import re
+from collections import Counter
+
+async def scrape(ctx):
+    subs = ctx.params.get("subreddits", ["science"])
+    words = ctx.params.get("keywords", ["climate"])
+    pattern = re.compile(r"\\b(" + "|".join(map(re.escape, words)) + r")\\w*", re.IGNORECASE)
+    hits = Counter()
+
+    for sub in subs:
+        result = await ctx.reddit.listing(f"/r/{sub}/new", max_pages=2)
+        for post in result["items"]:
+            text = f"{post['title'] or ''} {post['selftext'] or ''}"
+            found = sorted({m.lower() for m in pattern.findall(text)})
+            if found:
+                hits.update(found)
+                ctx.emit({**post, "matched_keywords": ";".join(found)})
+        ctx.log.info(f"r/{sub}: scanned {len(result['items'])} posts")
+        if ctx.remaining() == 0:
+            break
+
+    return {"meta": {"keyword_counts": dict(hits.most_common())}}
+` },
+    'py-post-comments': {
+      label: 'Post comments + text statistics',
+      language: 'python',
+      code:
+`# Fetches one post and its comment tree; adds word counts and reply depth stats.
+# Use the "Post + comments" target (or set { "postId": "abc123" } in parameters).
+import statistics
+
+async def scrape(ctx):
+    post_id = (ctx.target or {}).get("postId") or ctx.params.get("postId")
+    if not post_id:
+        raise ValueError("Choose a post target or set params.postId")
+
+    thread = await ctx.reddit.post(post_id, limit=200, depth=8, sort="top")
+    ctx.emit(thread["post"])
+    comments = [{**c, "word_count": len((c["body"] or "").split())} for c in thread["comments"]]
+    ctx.emit(comments)
+
+    if thread["more_count"]:
+        ctx.log.warn(f"{thread['more_count']} collapsed comments were not loaded")
+    counts = [c["word_count"] for c in comments] or [0]
+    return {"meta": {
+        "post_title": thread["post"]["title"],
+        "comments": len(comments),
+        "median_words": statistics.median(counts),
+        "max_depth": max((c["depth"] or 0 for c in comments), default=0),
+    }}
+` },
+    'py-author-summary': {
+      label: 'Per-author summary of a subreddit',
+      language: 'python',
+      code:
+`# Builds one summary row per author from a subreddit's top posts.
+# Parameters example: { "subreddit": "dataisbeautiful", "t": "month" }
+from collections import defaultdict
+
+async def scrape(ctx):
+    sub = (ctx.target or {}).get("subreddit") or ctx.params.get("subreddit", "dataisbeautiful")
+    result = await ctx.reddit.listing(f"/r/{sub}/top", query={"t": ctx.params.get("t", "month")}, max_pages=3)
+
+    authors = defaultdict(lambda: {"posts": 0, "score": 0, "comments": 0, "titles": []})
+    for post in result["items"]:
+        a = authors[post["author"] or "[deleted]"]
+        a["posts"] += 1
+        a["score"] += post["score"] or 0
+        a["comments"] += post["num_comments"] or 0
+        a["titles"].append(post["title"])
+
+    rows = [{"author": name, "subreddit": sub, "posts": a["posts"], "total_score": a["score"],
+             "avg_score": round(a["score"] / a["posts"], 1), "total_comments": a["comments"],
+             "top_title": a["titles"][0]}
+            for name, a in authors.items()]
+    rows.sort(key=lambda r: r["total_score"], reverse=True)
+    ctx.log.info(f"{len(result['items'])} posts from {len(rows)} authors")
+    return rows
+` },
+    'py-raw-fetch': {
+      label: 'Raw fetch + manual parsing + retries',
+      language: 'python',
+      code:
+`# Low-level example: ctx.fetch() with ctx.retry(), parsing the JSON yourself.
+# ctx.fetch only reaches Reddit, uses GET/HEAD, and is rate-limited by the server.
+async def scrape(ctx):
+    sub = ctx.params.get("subreddit", "AskHistorians")
+
+    async def get(attempt):
+        r = await ctx.fetch(f"https://www.reddit.com/r/{sub}/top.json?t=week&limit=25&raw_json=1")
+        if r.status == 429 or r.status >= 500:
+            raise RuntimeError(f"HTTP {r.status}")
+        return r
+
+    res = await ctx.retry(get, retries=2, delay=5)
+    res.raise_for_status()
+    return [{
+        "id": child["data"]["id"],
+        "title": child["data"]["title"],
+        "score": child["data"]["score"],
+        "created_at": ctx.reddit.to_iso(child["data"]["created_utc"]),
+        "text": ctx.utils.strip_html(child["data"].get("selftext_html") or ""),
+    } for child in res.json()["data"]["children"]]
+` },
     'subreddit-posts': {
       label: 'Subreddit posts (pagination)',
       code:
@@ -165,8 +301,8 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       customTarget: 'none',
       options: { maxItems: 100, maxPages: 5, delaySec: null, timeoutSec: null, concurrency: 1, retries: 2,
         includeComments: false, commentPosts: 10, commentLimit: 100, commentDepth: 5, includeMetadata: true },
-      language: 'javascript',
-      code: TEMPLATES['subreddit-posts'].code,
+      language: 'python',
+      code: TEMPLATES['py-subreddit-posts'].code,
       params: '{\n  "subreddit": "AskScience"\n}',
       engine: null,             // null = the server's default (browser without API credentials)
       lastJobId: null
@@ -542,6 +678,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     if (engine === 'redditapis') {
       const bal = status.redditApis && status.redditApis.balance;
       parts.push('<span class="badge badge-green">RedditAPIs.com</span>');
+      parts.push('<span class="badge badge-gray">' + esc(transportLabel()) + '</span>');
       parts.push('<span class="text-second">Requests go to the third-party RedditAPIs.com service with your API key (billed per request by them' +
         (bal ? '; balance at last check: ' + esc(String(bal.value)) : '') + '). At least ' + (lim.minDelayMs / 1000) + ' s between requests · up to ' +
         fmtNum(lim.maxItems) + ' items per job. Supports subreddits, search, posts with comments, user posts/comments and info.</span>');
@@ -554,7 +691,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       parts.push(status.mode === 'oauth'
         ? '<span class="badge badge-green">Server · Reddit Data API (OAuth)</span>'
         : '<span class="badge badge-amber">Server · public pages (no API credentials)</span>');
-      parts.push('<span class="badge badge-gray">epoxy-tls over Wisp</span>');
+      parts.push('<span class="badge badge-gray">' + esc(transportLabel()) + '</span>');
       parts.push('<span class="text-second">At least ' + (lim.minDelayMs / 1000) + ' s between requests · up to ' + fmtNum(lim.maxItems) + ' items per job</span>');
       if (!status.transport.available) parts.push('<span class="text-error">&#10007; Server-side scraping needs Node.js 22+ (found ' + esc(status.node) + ').</span>');
       if (status.mode === 'public' && status.respectRobotsTxt) {
@@ -564,6 +701,14 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       if (status.userAgentIsDefault) parts.push('<span class="sc-banner-warn">Set SCRAPER_USER_AGENT in .env so Reddit can identify your client.</span>');
     }
     el.innerHTML = parts.join('');
+  }
+
+  // Which engine makes the server's HTTPS requests (python/reddit_fetch.py, or epoxy-tls).
+  function transportLabel() {
+    const t = status.transport || {};
+    if (t.kind === 'python' && t.python) return 'Python ' + t.python.version;
+    if (t.kind === 'epoxy') return 'epoxy-tls over Wisp' + (t.setting === 'auto' && t.pythonError ? ' (Python not found)' : '');
+    return t.setting === 'epoxy' ? 'epoxy-tls over Wisp' : 'Python engine';
   }
 
   /* ── Mode ─────────────────────────────────── */
@@ -586,7 +731,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const customBox = $('sc-custom');
     const startBtn = $('sc-start');
     if (form.mode === 'custom') {
-      if (hint) hint.textContent = 'Your JavaScript/TypeScript runs on the server in an isolated sandbox and can only reach Reddit.';
+      if (hint) hint.textContent = 'Your Python, JavaScript or TypeScript runs on the server in an isolated sandbox and can only reach Reddit.';
       if (startBtn) startBtn.textContent = 'Run custom scraper';
       if (customBox) { customBox.hidden = false; if (!customBox.dataset.ready) renderCustom(); }
       const title = $('sc-target-title'); if (title) title.textContent = 'Target (optional — passed to your code as ctx.target)';
@@ -817,18 +962,21 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
           <div class="flex gap-2" style="flex-wrap:wrap">
             <select class="form-select" id="sc-template" aria-label="Load an example" onchange="RedditScraper.loadTemplate(this.value)">
               <option value="">Load an example…</option>
-              ${Object.keys(TEMPLATES).map(k => '<option value="' + k + '">' + esc(TEMPLATES[k].label) + '</option>').join('')}
+              ${LANGUAGES.map(l => '<optgroup label="' + l.label + '">' + Object.keys(TEMPLATES).filter(k => templateLanguage(k) === l.id)
+                .map(k => '<option value="' + k + '">' + esc(TEMPLATES[k].label) + '</option>').join('') + '</optgroup>').join('')}
             </select>
-            <select class="form-select" id="sc-language" aria-label="Language" onchange="RedditScraper.setLanguage(this.value)">
-              <option value="javascript"${form.language === 'javascript' ? ' selected' : ''}>JavaScript</option>
-              <option value="typescript"${form.language === 'typescript' ? ' selected' : ''}>TypeScript</option>
+            <select class="form-select" id="sc-language" aria-label="Language" onchange="RedditScraper.setLanguage(this.value, true)">
+              ${LANGUAGES.map(l => {
+                const off = languageUnavailable(l.id);
+                return '<option value="' + l.id + '"' + (form.language === l.id ? ' selected' : '') + (off ? ' disabled title="' + esc(off) + '"' : '') + '>' +
+                  l.label + (off ? ' (unavailable)' : '') + '</option>';
+              }).join('')}
             </select>
             <button class="btn btn-secondary btn-sm" type="button" onclick="RedditScraper.showApi()">API reference</button>
           </div>
         </div>
         <div class="sc-editor" id="sc-editor"></div>
-        <div class="form-hint mt-2">Define <span class="sc-code-inline">async function scrape(ctx)</span>. Records you <span class="sc-code-inline">ctx.emit()</span> or return become the results.
-          Limits: ${status ? Math.round(status.customCode.timeoutMs / 1000) + ' s, ' + status.customCode.memoryMb + ' MB' : 'time and memory capped'}; network only to Reddit through the server's rate limiter.</div>
+        <div class="form-hint mt-2" id="sc-code-hint">${codeHint()}</div>
         <div class="form-group mt-3">
           <label class="form-label" for="sc-params">Parameters <span>(JSON object, available as ctx.params)</span></label>
           <textarea class="form-textarea sc-params" id="sc-params" spellcheck="false" oninput="RedditScraper.onParams(this.value)">${esc(form.params)}</textarea>
@@ -864,6 +1012,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       cmPromise = loadScriptOnce(CM_BASE + 'lib/codemirror.min.js')
         .then(() => Promise.all([
           loadScriptOnce(CM_BASE + 'mode/javascript/javascript.min.js'),
+          loadScriptOnce(CM_BASE + 'mode/python/python.min.js'),
           loadScriptOnce(CM_BASE + 'addon/edit/matchbrackets.min.js'),
           loadScriptOnce(CM_BASE + 'addon/edit/closebrackets.min.js')
         ]))
@@ -886,15 +1035,16 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       if (e.key === 'Tab' && !e.shiftKey && !e.ctrlKey && !e.metaKey) {
         e.preventDefault();
         const s = ta.selectionStart;
-        ta.setRangeText('  ', s, ta.selectionEnd, 'end');
+        ta.setRangeText(form.language === 'python' ? '    ' : '  ', s, ta.selectionEnd, 'end');
         form.code = ta.value; saveForm();
       }
     });
     loadCodeMirror().then(ok => {
       if (!ok || !window.CodeMirror || !document.body.contains(ta)) return;
+      const indent = form.language === 'python' ? 4 : 2;
       editor = window.CodeMirror.fromTextArea(ta, {
-        mode: form.language === 'typescript' ? 'text/typescript' : 'text/javascript',
-        lineNumbers: true, indentUnit: 2, tabSize: 2, matchBrackets: true, autoCloseBrackets: true, lineWrapping: false,
+        mode: editorMode(form.language),
+        lineNumbers: true, indentUnit: indent, tabSize: indent, matchBrackets: true, autoCloseBrackets: true, lineWrapping: false,
         extraKeys: { Tab: cm => cm.execCommand(cm.somethingSelected() ? 'indentMore' : 'insertSoftTab') }
       });
       editor.on('change', () => { form.code = editor.getValue(); saveForm(); });
@@ -920,21 +1070,57 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       return;
     }
     setCode(t.code);
-    setLanguage(t.language || 'javascript');
+    setLanguage(templateLanguage(key));
     $('sc-template').value = '';
   }
 
-  function setLanguage(lang) {
-    form.language = lang === 'typescript' ? 'typescript' : 'javascript';
+  function templateLanguage(key) { return (TEMPLATES[key] && TEMPLATES[key].language) || 'javascript'; }
+  function editorMode(lang) { return lang === 'python' ? 'text/x-python' : lang === 'typescript' ? 'text/typescript' : 'text/javascript'; }
+  function languageUnavailable(lang) {
+    const cc = status && status.customCode;
+    if (!cc) return null;
+    if (lang === 'python') return cc.python && !cc.python.available ? (cc.python.reason || 'Python isn\'t available on this server.') : null;
+    return cc.languages && !cc.languages.includes(lang) ? (cc.reason || 'Not available on this server.') : null;
+  }
+  function codeHint() {
+    const cc = status && status.customCode;
+    const py = form.language === 'python';
+    const mem = cc ? (py && cc.python ? cc.python.memoryMb : cc.memoryMb) : null;
+    return (py
+      ? 'Define <span class="sc-code-inline">async def scrape(ctx)</span>. Runs in ' + (cc && cc.python ? esc(cc.python.runtime) : 'Pyodide') +
+        ', with the whole standard library (<span class="sc-code-inline">re</span>, <span class="sc-code-inline">json</span>, <span class="sc-code-inline">statistics</span>, <span class="sc-code-inline">collections</span>…). '
+      : 'Define <span class="sc-code-inline">async function scrape(ctx)</span>. ') +
+      'Records you <span class="sc-code-inline">ctx.emit()</span> or return become the results. Limits: ' +
+      (cc ? Math.round(cc.timeoutMs / 1000) + ' s, ' + mem + ' MB' : 'time and memory capped') + '; network only to Reddit through the server\'s rate limiter.';
+  }
+
+  // fromUser: picked in the language menu — an untouched example switches to
+  // the same kind of example in the new language.
+  function setLanguage(lang, fromUser) {
+    const next = LANGUAGES.some(l => l.id === lang) ? lang : 'javascript';
+    if (fromUser && next !== form.language) {
+      const current = getCode().trim();
+      const shown = Object.keys(TEMPLATES).find(k => TEMPLATES[k].code.trim() === current);
+      const swap = { python: 'py-subreddit-posts', javascript: 'subreddit-posts', typescript: 'typescript' }[next];
+      if ((!current || shown) && swap && templateLanguage(shown || '') !== next) setCode(TEMPLATES[swap].code);
+    }
+    form.language = next;
     const sel = $('sc-language'); if (sel) sel.value = form.language;
-    if (editor) editor.setOption('mode', form.language === 'typescript' ? 'text/typescript' : 'text/javascript');
+    if (editor) {
+      const indent = next === 'python' ? 4 : 2;
+      editor.setOption('mode', editorMode(next));
+      editor.setOption('indentUnit', indent);
+      editor.setOption('tabSize', indent);
+    }
+    const hint = $('sc-code-hint'); if (hint) hint.innerHTML = codeHint();
     saveForm();
   }
 
   function onParams(v) { form.params = v; saveForm(); }
 
-  function showApi() {
-    App.openModal('Custom scraper API', `
+  function showApi(lang) {
+    if ((lang || form.language) === 'python') return showPythonApi();
+    App.openModal('Custom scraper API — JavaScript', `
       <div class="sc-api">
         <h4>Execution model</h4>
         <p>Your code defines <code>async function scrape(ctx)</code>. It runs on the MetaCode server inside a QuickJS sandbox (a separate
@@ -988,7 +1174,72 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     ctx.emit(page.records.filter(p => p.num_comments > 50));
   }
 }</pre>
-      </div>`, '<button class="btn btn-primary" onclick="App.closeModal()">Close</button>');
+      </div>`, '<button class="btn btn-secondary" onclick="RedditScraper.showApi(\'python\')">Python version</button><button class="btn btn-primary" onclick="App.closeModal()">Close</button>');
+  }
+
+  function showPythonApi() {
+    const cc = status && status.customCode;
+    const hosts = esc(status ? status.allowedHosts.join(', ') : 'www.reddit.com, old.reddit.com, oauth.reddit.com');
+    App.openModal('Custom scraper API — Python', `
+      <div class="sc-api">
+        <h4>Execution model</h4>
+        <p>Your code defines <code>async def scrape(ctx)</code>. It runs on the MetaCode server in
+        ${cc && cc.python ? esc(cc.python.runtime) : 'Pyodide (CPython in WebAssembly)'}, inside its own restricted process: the whole
+        Python standard library works (<code>re</code>, <code>json</code>, <code>statistics</code>, <code>collections</code>, <code>datetime</code>,
+        <code>itertools</code>, <code>math</code>, <code>csv</code>, <code>html</code>…), but there are no third-party packages (no pip), no files on the server,
+        no environment variables, no programs and no direct network access — only <code>ctx</code> reaches Reddit.
+        <code>print()</code> writes to the job log. Records you <code>ctx.emit()</code> are kept even if the run later fails or is cancelled;
+        whatever you <code>return</code> (a list of dicts, or <code>{"data": [...], "meta": {...}}</code>) is added at the end.
+        Values must be JSON-serializable (dates become ISO strings).</p>
+        <h4>Inputs</h4>
+        <dl>
+          <dt>ctx.target</dt><dd>The target from the form as a dict (e.g. <code>{"type": "subreddit", "subreddit": …, "sort": …}</code>), or <code>None</code>.</dd>
+          <dt>ctx.params</dt><dd>The parameters JSON object, as a dict.</dd>
+          <dt>ctx.options</dt><dd>Limits from the form: <code>maxItems, maxPages, delayMs, commentLimit, commentDepth…</code></dd>
+          <dt>ctx.mode</dt><dd><code>"oauth"</code>, <code>"public"</code>, <code>"browser"</code> or <code>"redditapis"</code>.</dd>
+        </dl>
+        <h4>Reddit helpers (await them)</h4>
+        <dl>
+          <dt>await ctx.reddit.json(path, query=None)</dt><dd>GET a Reddit JSON endpoint, e.g. <code>"/r/science/new"</code>, <code>{"limit": 50}</code> → parsed JSON.</dd>
+          <dt>async for page in ctx.reddit.pages(path, max_pages=None, limit=100, after=None, query=None)</dt><dd>A listing page by page; each page is a dict with <code>number, records, children, after</code>.</dd>
+          <dt>await ctx.reddit.listing(path, max_items=None, max_pages=None, query=None)</dt><dd>Collects a listing → <code>{"items": [...], "pages": n}</code>.</dd>
+          <dt>await ctx.reddit.post(post_id, limit=None, depth=None, sort="confidence")</dt><dd>A post and its comment tree → <code>{"post", "comments", "more_count"}</code>.</dd>
+          <dt>await ctx.reddit.subreddit(name) · await ctx.reddit.user(name)</dt><dd>Info records.</dd>
+          <dt>ctx.reddit.normalize_post / normalize_comment / normalize_subreddit / normalize_user / normalize_thing / flatten_comments / extract_media / to_iso</dt>
+          <dd>The same formatters the standard scraper uses (no await).</dd>
+        </dl>
+        <h4>Network</h4>
+        <dl>
+          <dt>await ctx.fetch(url, method="GET", headers=None)</dt><dd>GET/HEAD to Reddit hosts only (<code>${hosts}</code>) → a requests-style
+          response: <code>.ok, .status (.status_code), .url, .headers.get(), .text, .json(), .raise_for_status()</code>.</dd>
+        </dl>
+        <p>All requests go through the server's rate limiter (your delay, at least the server minimum), retries and robots.txt policy.
+        Failed requests raise <code>ScraperError</code> with <code>.type</code> (<code>"not_found"</code>, <code>"rate_limited"</code>, <code>"forbidden"</code>…).</p>
+        <h4>Output, logging &amp; control</h4>
+        <dl>
+          <dt>ctx.emit(record_or_records)</dt><dd>Add dict(s) to the results now → how many more fit. Duplicates (same Reddit id) are dropped.</dd>
+          <dt>ctx.remaining()</dt><dd>How many more items fit under Maximum items.</dd>
+          <dt>ctx.log(…), ctx.log.info/warn/error/debug</dt><dd>Write to the job log (<code>print()</code> works too).</dd>
+          <dt>ctx.progress(message=None, pages=None)</dt><dd>Update the progress line / page count.</dd>
+          <dt>await ctx.sleep(seconds)</dt><dd>Wait (max 60 s per call).</dd>
+          <dt>await ctx.retry(fn, retries=2, delay=2.0, factor=2.0)</dt><dd>Calls <code>fn(attempt)</code> (sync or async) with exponential backoff.</dd>
+        </dl>
+        <h4>Utilities</h4>
+        <dl>
+          <dt>ctx.utils.get(obj, "a.b.0.c", default)</dt><dd>None-safe nested lookup.</dd>
+          <dt>ctx.utils.pick(obj, keys) · unique(items, key=None) · chunk(items, n)</dt><dd>Small helpers.</dd>
+          <dt>ctx.utils.strip_html(html) · decode_entities(text)</dt><dd>HTML → plain text.</dd>
+        </dl>
+        <h4>Example</h4>
+        <pre>import statistics
+
+async def scrape(ctx):
+    async for page in ctx.reddit.pages("/r/science/top", query={"t": "week"}, max_pages=2):
+        busy = [p for p in page["records"] if p["num_comments"] > 50]
+        ctx.emit(busy)
+        if busy:
+            print("median score", statistics.median(p["score"] for p in busy))</pre>
+      </div>`, '<button class="btn btn-secondary" onclick="RedditScraper.showApi(\'javascript\')">JavaScript version</button><button class="btn btn-primary" onclick="App.closeModal()">Close</button>');
   }
 
   function parseParams() {

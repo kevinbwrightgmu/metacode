@@ -22,6 +22,7 @@ const { loadScraperConfig } = require('./config');
 const { ScraperError, isScraperError, sanitize } = require('./errors');
 const { createUpgradeHandler, WISP_PATH } = require('./network/wisp-server');
 const { EpoxyWispTransport, transportAvailable } = require('./network/epoxy-transport');
+const { PythonTransport, AutoTransport } = require('./network/python-transport');
 const { HostRateLimiter } = require('./network/rate-limiter');
 const { RedditHttpClient } = require('./network/reddit-http');
 const { RelayHub } = require('./network/browser-relay');
@@ -32,6 +33,7 @@ const { normalizeTarget, normalizeOptions } = require('./reddit/targets');
 const { runStandardScrape } = require('./reddit/standard-scraper');
 const { JobManager, FINISHED } = require('./jobs/job-manager');
 const { createCustomRunner, sandboxSupported, validateCode } = require('./sandbox/custom-runner');
+const PYODIDE_VERSION = (() => { try { return require('pyodide/package.json').version; } catch (e) { return 'not installed'; } })();
 const exporter = require('./export');
 
 const SCRAMJET_FILES = {
@@ -110,7 +112,18 @@ function createScraper(opts) {
   let port = null;
   const getWispUrl = () => (port ? 'ws://127.0.0.1:' + port + WISP_PATH : null);
 
-  const transport = opts.transport || new EpoxyWispTransport({ getWispUrl, userAgent: config.userAgent, maxResponseBytes: config.maxResponseBytes });
+  // Server-side HTTPS: Python (python/reddit_fetch.py) when available, else
+  // epoxy-tls over Wisp — see network/python-transport.js.
+  const transport = opts.transport || new AutoTransport({
+    mode: config.serverTransport,
+    python: new PythonTransport({ config }),
+    epoxy: new EpoxyWispTransport({ getWispUrl, userAgent: config.userAgent, maxResponseBytes: config.maxResponseBytes }),
+    onChoose: (t, err) => {
+      if (opts.logToConsole === false) return;
+      if (t.kind === 'python') console.log('[scraper] Server engine: Python ' + t.info.python + ' (' + t.info.command + ')');
+      else if (err) console.warn('[scraper] Python engine unavailable (' + err.message + '); using epoxy-tls over Wisp.');
+    }
+  });
   const limiter = new HostRateLimiter({ maxConcurrent: config.maxConcurrentRequests });
   const http = new RedditHttpClient({ config, transport, limiter });
 
@@ -147,7 +160,8 @@ function createScraper(opts) {
   jobs.on('removed', job => relay.cancelJob(job.id));
 
   function status() {
-    const sandbox = sandboxSupported();
+    const sandbox = sandboxSupported('javascript');
+    const pySandbox = sandboxSupported('python');
     const floor = http.mode === 'oauth' ? config.minDelayMs : Math.max(config.minDelayMs, config.publicMinDelayMs);
     return {
       enabled: config.enabled,
@@ -163,20 +177,27 @@ function createScraper(opts) {
       respectRobotsTxt: config.respectRobotsTxt,
       userAgent: config.userAgent,
       userAgentIsDefault: config.userAgent === DEFAULT_USER_AGENT,
-      transport: {
-        name: 'epoxy-tls over Wisp',
-        available: transportAvailable(),
+      transport: Object.assign({
+        name: transport.kind === 'python' ? 'Python' : 'epoxy-tls over Wisp',
+        kind: transport.kind,
+        available: transport.kind === 'python' || transportAvailable(),
         epoxyVersion: transport.info ? transport.info.version : null,
         wispPath: WISP_PATH
-      },
+      }, typeof transport.status === 'function' ? transport.status() : {}),
       allowedHosts: config.apiHosts,
       customCode: {
         enabled: config.customCodeEnabled,
-        available: config.customCodeEnabled && sandbox.ok,
+        available: config.customCodeEnabled && (sandbox.ok || pySandbox.ok),
         reason: !config.customCodeEnabled ? 'Custom code is turned off (SCRAPER_CUSTOM_CODE_ENABLED=false).' : (sandbox.ok ? null : sandbox.reason),
         timeoutMs: config.customTimeoutMs,
         memoryMb: config.customMemoryMb,
-        languages: ['javascript', 'typescript']
+        languages: (pySandbox.ok ? ['python'] : []).concat(sandbox.ok ? ['javascript', 'typescript'] : []),
+        python: {
+          available: config.customCodeEnabled && pySandbox.ok,
+          reason: pySandbox.ok ? null : pySandbox.reason,
+          memoryMb: config.customPythonMemoryMb,
+          runtime: 'Pyodide ' + PYODIDE_VERSION + ' (CPython in WebAssembly)'
+        }
       },
       browser: { enabled: config.enabled && config.browserEnabled },
       // Where a job's Reddit requests are made: "browser" = an open MetaCode tab
@@ -247,10 +268,10 @@ function createScraper(opts) {
       return Object.assign({ mode, target, options, capacity: capacityFor(target, options) }, engineSpec);
     }
     if (!config.customCodeEnabled) throw new ScraperError('not_available', 'Custom code is turned off on this server (SCRAPER_CUSTOM_CODE_ENABLED=false).', { status: 403 });
-    const support = sandboxSupported();
-    if (!support.ok) throw new ScraperError('not_available', support.reason, { status: 503 });
-    const language = body.language === 'typescript' ? 'typescript' : (body.language === undefined || body.language === 'javascript' ? 'javascript' : body.language);
+    const language = body.language === undefined || body.language === null || body.language === '' ? 'javascript' : body.language;
     validateCode(body.code, language);
+    const support = sandboxSupported(language);
+    if (!support.ok) throw new ScraperError('not_available', support.reason, { status: 503 });
     let target = null;
     const t = body.target;
     const hasTarget = t && typeof t === 'object' && Object.keys(t).some(k => k !== 'type' && t[k] !== '' && t[k] !== null && t[k] !== undefined);
@@ -539,7 +560,10 @@ function createScraper(opts) {
 
   return {
     config, http, jobs, relay, router, scramjetRouter, onUpgrade, status,
-    setPort(p) { port = p; },
+    setPort(p) {
+      port = p;
+      if (typeof transport.choose === 'function') transport.choose().catch(() => {});
+    },
     shutdown() {
       jobs.shutdown();
       if (typeof transport.close === 'function') transport.close();
