@@ -9,6 +9,7 @@ const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { createMockReddit } = require('./helpers/mock-reddit');
+const { createMockRedditApis } = require('./helpers/mock-redditapis');
 const { testEnv } = require('./helpers/harness');
 
 function findChromium() {
@@ -26,7 +27,7 @@ function findChromium() {
 const chromiumPath = findChromium();
 const skip = !chromiumPath && 'no Chromium found (set CHROMIUM_PATH)';
 
-let mock, apiMock, server, baseUrl, browser;
+let mock, apiMock, rapiMock, server, baseUrl, browser;
 
 test.before(async () => {
   if (skip) return;
@@ -34,7 +35,9 @@ test.before(async () => {
   const redditBase = await mock.listen();
   apiMock = createMockReddit({ requireToken: true });     // stands in for oauth.reddit.com
   const apiBase = await apiMock.listen();
-  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: redditBase, REDDIT_OAUTH_BASE_URL: apiBase, SCRAPER_DEFAULT_DELAY_MS: '100', EMIS_API_KEY: '' }));
+  rapiMock = createMockRedditApis();                       // stands in for api.redditapis.com
+  const rapiBase = await rapiMock.listen();
+  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: redditBase, REDDIT_OAUTH_BASE_URL: apiBase, REDDITAPIS_BASE_URL: rapiBase, SCRAPER_DEFAULT_DELAY_MS: '100', EMIS_API_KEY: '' }));
   const { start } = require('../server');
   server = await start(0);
   baseUrl = 'http://localhost:' + server.address().port;
@@ -46,6 +49,7 @@ test.after(async () => {
   if (server) await new Promise(resolve => server.close(resolve));
   if (mock) await mock.close();
   if (apiMock) await apiMock.close();
+  if (rapiMock) await rapiMock.close();
 });
 
 async function openApp(hash) {
@@ -295,6 +299,47 @@ test('Reddit API access card: a blocked subreddit offers setup; keys are checked
     page.once('dialog', d => d.accept());
     await page.click('#sc-api >> text=Disconnect');
     await page.waitForFunction(() => /Set up/.test(document.querySelector('#sc-api').textContent));
+  } finally {
+    await context.close();
+  }
+});
+
+test('RedditAPIs.com key: checked, saved, selected as the engine and used for a job', { skip }, async () => {
+  const { page, context, errors } = await openApp('#scraper');
+  try {
+    await page.waitForFunction(() => document.querySelector('#sc-status').textContent.trim().length > 0);
+    await page.click('.sc-mode[data-mode="standard"]');
+    await page.click('#sc-api >> text=Add key');
+    await page.fill('#sc-rapi-key', 'wrong_key_000000');
+    await page.click('#sc-rapi-save');
+    await page.waitForFunction(() => document.querySelector('#sc-rapi-error').textContent.length > 0, null, { timeout: 20000 });
+    assert.match(await page.textContent('#sc-rapi-error'), /key/i);
+
+    await page.fill('#sc-rapi-key', 'rapi_test_key_123456');
+    await page.click('#sc-rapi-save');
+    await page.waitForFunction(() => /Connected/.test(document.querySelector('#sc-api').textContent) && /3456/.test(document.querySelector('#sc-api').textContent), null, { timeout: 20000 });
+    assert.equal(await page.inputValue('#sc-engine'), 'redditapis');
+    assert.match(await page.textContent('#sc-api'), /balance at last check: 4\.5/);
+    assert.ok(!(await page.content()).includes('rapi_test_key_123456'));
+
+    const before = await page.evaluate(() => JSON.parse(localStorage.getItem('metacode_scraper_form_v1')).lastJobId);
+    await page.selectOption('#sc-target-type', 'subreddit');
+    await page.fill('#sc-f-subreddit', 'science');
+    await page.fill('#sc-o-maxItems', '30');
+    await page.click('#sc-start');
+    await page.waitForFunction(id => {
+      const f = JSON.parse(localStorage.getItem('metacode_scraper_form_v1'));
+      const s = document.querySelector('#sc-job-status');
+      return f.lastJobId !== id && s && /Completed|Failed/.test(s.textContent);
+    }, before, { timeout: 60000 });
+    assert.equal(await page.textContent('#sc-job-status'), 'Completed', await page.textContent('#sc-job'));
+    assert.ok(rapiMock.state.requests.some(q => q.path === '/api/reddit/posts' && q.query.subreddit === 'science' && q.headers.authorization === 'Bearer rapi_test_key_123456'));
+
+    page.once('dialog', d => d.accept());
+    await page.click('#sc-api >> text=Remove');
+    await page.waitForFunction(() => /Add key/.test(document.querySelector('#sc-api').textContent));
+    assert.notEqual(await page.inputValue('#sc-engine'), 'redditapis');
+    assert.deepEqual(errors.filter(e => !/is not defined/.test(e)), []);
   } finally {
     await context.close();
   }

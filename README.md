@@ -184,7 +184,7 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 - **No setup by default — "This browser (Scramjet)"**: jobs run on the server, but your open MetaCode tab makes
   the Reddit requests through the same Scramjet/epoxy connection as Browse Reddit, so no API keys or `.env`
   changes are needed. Keep MetaCode open until a job finishes. With `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`
-  you can instead run jobs entirely on the server through Reddit's API.
+  you can instead run jobs entirely on the server through Reddit's API, or with a `REDDITAPIS_KEY` through the third-party RedditAPIs.com service (paid per request).
 - **Responsible use**: shared per-host rate limiter with a server-enforced minimum delay, Reddit rate-limit
   headers and `Retry-After` honoured, caps on items/pages, no login/CAPTCHA/age-gate circumvention. The server
   engine checks robots.txt when it reads public pages without credentials.
@@ -195,6 +195,7 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 |---|---|---|
 | `SCRAPER_USER_AGENT` | generic MetaCode UA | Identify your client: `nodejs:metacode-scraper:1.0 (by /u/you)` |
 | `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Optional: run jobs on the server through Reddit's API. Or paste them on the Scraper page (**Reddit API access**) — needed when Reddit blocks logged-out access from your network (HTTP 403) |
+| `REDDITAPIS_KEY` | — | Optional: key from [RedditAPIs.com](https://www.redditapis.com/dashboard/api-keys), a third-party paid (per-request) Reddit data API. Or paste it on the Scraper page (**Reddit API access → RedditAPIs.com key**) |
 | `SCRAPER_RESPECT_ROBOTS_TXT` | `true` | Check robots.txt in public mode |
 | `SCRAPER_MIN_DELAY_MS` / `SCRAPER_PUBLIC_MIN_DELAY_MS` | `1000` / `6000` | Minimum delay between requests per host |
 | `SCRAPER_MAX_ITEMS` / `SCRAPER_MAX_PAGES` | `5000` / `50` | Hard per-job caps |

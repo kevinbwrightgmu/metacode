@@ -93,7 +93,9 @@ const MAX_MORE_CALLS = 20;
 async function expandMoreComments(ctx, options, post, comments, moreIds, sort) {
   if (!moreIds.length) return [];
   if (ctx.http.mode !== 'oauth') {
-    ctx.log('info', 'Loading collapsed comments needs Reddit API access (Scraper page → Reddit API access); skipped.');
+    ctx.log('info', ctx.http.mode === 'redditapis'
+      ? 'Loading collapsed comments isn\'t offered through RedditAPIs.com; skipped.'
+      : 'Loading collapsed comments needs Reddit API access (Scraper page → Reddit API access); skipped.');
     return [];
   }
   const have = new Set(comments.map(c => c.comment_id));

@@ -173,6 +173,54 @@ error says which it is.
 MetaCode uses the application-only `client_credentials` grant: it reads public data only and never logs
 in as a user.
 
+### RedditAPIs.com API key (third-party, paid)
+
+[RedditAPIs.com](https://www.redditapis.com) is a **third-party commercial service, not Reddit**. It sells
+Reddit data through its own REST API (`https://api.redditapis.com`) and charges per request. MetaCode can use
+it as a third way to fetch data: **Fetch Reddit through → RedditAPIs.com (API key, paid per request)**.
+Pricing, terms and how it sources its data are between you and that vendor. Read its terms and check that
+using it fits your research ethics/IRB requirements.
+
+1. Create a key at <https://www.redditapis.com/dashboard/api-keys>.
+2. On the Scraper page open **Reddit API access → RedditAPIs.com key**, paste the key and click
+   **Check & save**. MetaCode checks the key against `GET /account/me`, which costs nothing, and saves it only if
+   it works. The card shows the last four characters and your balance.
+   Or set `REDDITAPIS_KEY` in `.env` (this takes precedence). `REDDITAPIS_BASE_URL` overrides the API origin.
+3. The engine switches to RedditAPIs.com. Run the job.
+
+The key is saved in `redditapis-key.json` next to `server.js` (file mode 600, git-ignored). Set
+`SCRAPER_REDDITAPIS_KEY_FILE` to store it somewhere else. It is never sent back to the browser, logged, or
+given to custom code. **Remove** deletes the file.
+
+Every request is a billed call, so keep **Maximum items/pages** modest. The rate limiter still applies
+(`SCRAPER_MIN_DELAY_MS`).
+
+What works with this engine:
+
+- subreddit listings (all sorts, plus time range for top/controversial);
+- search (site-wide or in a subreddit);
+- post + comments;
+- subreddit info;
+- user info;
+- a user's **Posts** or **Comments**;
+- the combine-sorts sweep;
+- custom code through `ctx.reddit.*` / `ctx.reddit.json(path)` for those same paths.
+
+What doesn't work:
+
+- the user *overview*: pick Posts or Comments instead;
+- front page / domain listings;
+- loading collapsed comments (`/api/morechildren`);
+- `ctx.fetch()`.
+
+These fail with a clear "not available with the RedditAPIs.com engine" message.
+
+The errors you may see map to:
+
+- an invalid key → "check the key";
+- out of credit (HTTP 402) → top up;
+- a rate limit (429) → backs off and retries.
+
 ## 4. Running a standard scrape
 
 1. Sidebar → **Scraper**. Leave **Standard scraper** selected. **Fetch Reddit through** is *This browser

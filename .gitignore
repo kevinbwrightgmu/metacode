@@ -2,3 +2,5 @@ node_modules/
 .env
 reddit-credentials.json
 reddit-credentials.json.tmp
+redditapis-key.json
+redditapis-key.json.tmp
