@@ -142,7 +142,7 @@ class RedditHttpClient {
     let entry = this.robots.get(origin);
     const now = this.now();
     if (!entry || now - entry.fetchedAt > (entry.failed ? ROBOTS_FAIL_TTL_MS : ROBOTS_TTL_MS)) {
-      entry = { groups: null, failed: false, fetchedAt: now };
+      entry = { groups: null, failed: false, failure: null, fetchedAt: now };
       try {
         const res = await this.request(origin + '/robots.txt', Object.assign({}, ctx, { internal: true, skipRobots: true, retries: 1 }));
         if (res.status >= 200 && res.status < 300) entry.groups = parseRobots(res.body);
@@ -151,9 +151,12 @@ class RedditHttpClient {
       } catch (err) {
         if (isScraperError(err) && err.type === 'cancelled') throw err;
         entry.failed = true;
+        // A transport failure (TLS, network, proxy) is the real problem: report it as such.
+        if (isScraperError(err)) entry.failure = err;
       }
       this.robots.set(origin, entry);
     }
+    if (entry.failed && entry.failure) throw entry.failure;
     if (entry.failed) {
       throw new ScraperError('robots_unavailable', 'Reddit\'s robots.txt couldn\'t be read, so the scraper can\'t confirm automated access is allowed. ' +
         'Check the connection and try again, or configure Reddit API credentials (see docs/reddit-scraper.md).', { status: 503, retryable: true });

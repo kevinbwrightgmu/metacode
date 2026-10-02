@@ -47,7 +47,7 @@ function createMockReddit(opts) {
     failures: {},             // path prefix → number of 500s left to send
     delayMs: 0,
     token: 'test-token-123',
-    clientId: 'cid', clientSecret: 'csecret'
+    clientId: 'test-client-id', clientSecret: 'test-client-secret'
   };
 
   function send(res, status, body, headers) {

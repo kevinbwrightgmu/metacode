@@ -327,7 +327,10 @@ function createScraper(opts) {
   return {
     config, http, jobs, router, scramjetRouter, onUpgrade, status,
     setPort(p) { port = p; },
-    shutdown() { jobs.shutdown(); }
+    shutdown() {
+      jobs.shutdown();
+      if (typeof transport.close === 'function') transport.close();
+    }
   };
 }
 

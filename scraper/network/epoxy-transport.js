@@ -72,6 +72,14 @@ class EpoxyWispTransport {
     this.clientUrl = null;
   }
 
+  // Server shutdown: stop using the client. (epoxy-tls keeps idle pooled
+  // connections alive with its own timers — up to ~90 s — which is why the
+  // test runner uses --test-force-exit; freeing the WASM client doesn't
+  // cancel them and could race with in-flight requests.)
+  close() {
+    this.resetClient();
+  }
+
   // → { status, statusText, headers: {lowercase name: value}, body: string, url }
   async request(req) {
     const timeoutMs = req.timeoutMs || 20000;
