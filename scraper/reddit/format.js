@@ -189,17 +189,25 @@
   }
 
   // A comment tree (the second element of /comments/<id>.json) → flat list in
-  // reading order. "more" stubs (comments Reddit didn't include) are counted.
+  // reading order. "more" stubs (comments Reddit didn't include) are counted,
+  // and their comment ids collected (moreIds) so they can be loaded later.
   function flattenComments(children, extra, limit) {
     var out = [];
     var more = 0;
+    var moreIds = [];
     var max = typeof limit === 'number' && limit > 0 ? limit : Infinity;
     (function walk(list) {
       if (!Array.isArray(list)) return;
       for (var i = 0; i < list.length; i++) {
         var c = list[i];
         if (!c || typeof c !== 'object') continue;
-        if (c.kind === 'more') { more += (c.data && typeof c.data.count === 'number') ? c.data.count : 0; continue; }
+        if (c.kind === 'more') {
+          more += (c.data && typeof c.data.count === 'number') ? c.data.count : 0;
+          if (c.data && Array.isArray(c.data.children)) {
+            c.data.children.forEach(function (id) { if (typeof id === 'string' && moreIds.length < 10000) moreIds.push(id); });
+          }
+          continue;
+        }
         if (c.kind !== 't1') continue;
         if (out.length >= max) { more++; continue; }
         out.push(normalizeComment(c.data, extra));
@@ -207,7 +215,7 @@
         if (replies && typeof replies === 'object' && replies.data) walk(replies.data.children);
       }
     })(children);
-    return { comments: out, moreCount: more };
+    return { comments: out, moreCount: more, moreIds: moreIds };
   }
 
   // Unique key for de-duplication.

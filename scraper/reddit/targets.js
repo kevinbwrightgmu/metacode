@@ -249,7 +249,12 @@ function normalizeOptions(input, config) {
     commentPosts:   clampInt(o.commentPosts, 1, 100, 10, 'Posts to fetch comments for'),
     commentLimit:   clampInt(o.commentLimit, 1, 500, 100, 'Comments per post'),
     commentDepth:   clampInt(o.commentDepth, 1, 10, 5, 'Comment depth'),
-    includeMetadata: o.includeMetadata !== false
+    includeMetadata: o.includeMetadata !== false,
+    // Subreddits: also page through other sorts (new, hot, top/…, controversial,
+    // rising) to collect past the ~1,000 items Reddit serves per listing.
+    sweepSorts:     o.sweepSorts === true,
+    // Load comments hidden behind "load more" (Reddit API only).
+    expandMore:     o.expandMore === true
   };
 }
 

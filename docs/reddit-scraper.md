@@ -191,6 +191,14 @@ in as a user.
 3. **Limits & politeness**: maximum items and pages (≤ 100 items per page), delay between requests (the
    server minimum always applies), request timeout, concurrent requests, retries. Optionally fetch the
    comments of the first N listing posts (one request per post) and subreddit/profile metadata.
+   Two options for larger collections:
+   - **Combine sorts** (subreddits) — Reddit serves at most ~1,000 items per listing. With this on, the
+     scraper pages through the chosen sort, then new, hot, top (all/year/month/week), controversial
+     (all/year) and rising, keeping only posts it hasn't seen, until *Maximum items* unique posts.
+     *Maximum pages* applies to each sort, so one job can make up to 10 × that many listing requests.
+   - **Load collapsed comments** — fetches comments hidden behind "load more" through the API's
+     `/api/morechildren` (up to 100 per request, at most 20 requests per post), up to *Comments per post*.
+     Needs Reddit API access; in other modes the log says it was skipped.
 4. **Start scrape**. The job card shows status, items, pages, requests, skipped duplicates, errors, start
    time and duration; tabs show **Results**, **JSON**, **Logs** and **Metadata**.
 5. Results: search, filter by type, sort, click a row for all fields (and a post's comments), **Copy

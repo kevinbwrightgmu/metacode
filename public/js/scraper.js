@@ -702,6 +702,8 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
           num('sc-o-commentPosts', 'commentPosts', 'Posts to fetch comments for', o.commentPosts, 1, 100, 1, 'One request per post') +
           num('sc-o-commentLimit', 'commentLimit', 'Comments per post', o.commentLimit, 1, 500, 1) +
         '</div>' +
+        check('sc-o-expandMore', 'expandMore', 'Load collapsed comments ("load more") — Reddit API only, up to "Comments per post"') +
+        check('sc-o-sweepSorts', 'sweepSorts', 'Subreddits: combine sorts to get past Reddit\'s ~1,000-post listing limit (Maximum pages applies to each sort)') +
         check('sc-o-includeMetadata', 'includeMetadata', 'Include subreddit / profile metadata') +
       '</div>' +
     '</div>';
@@ -720,6 +722,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const out = {
       maxItems: o.maxItems, maxPages: o.maxPages, concurrency: o.concurrency, retries: o.retries,
       includeComments: !!o.includeComments, commentPosts: o.commentPosts, commentLimit: o.commentLimit,
+      expandMore: !!o.expandMore, sweepSorts: !!o.sweepSorts,
       commentDepth: o.commentDepth, includeMetadata: o.includeMetadata !== false
     };
     const d = $('sc-o-delay'), t = $('sc-o-timeout');

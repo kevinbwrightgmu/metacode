@@ -107,3 +107,13 @@ test('robots.txt: group selection, longest match, wildcards', () => {
   const tie = parseRobots('User-agent: *\nDisallow: /page\nAllow: /page\n');
   assert.equal(isAllowed(tie, ua, '/page').allowed, true);
 });
+
+test('flattenComments collects the ids behind "load more" stubs', () => {
+  const tree = [
+    { kind: 't1', data: { id: 'a', name: 't1_a', link_id: 't3_p', parent_id: 't3_p', replies: { kind: 'Listing', data: { children: [{ kind: 'more', data: { count: 2, children: ['b', 'c'] } }] } } } },
+    { kind: 'more', data: { count: 0, children: [] } }
+  ];
+  const flat = F.flattenComments(tree, {});
+  assert.deepEqual(flat.moreIds, ['b', 'c']);
+  assert.equal(flat.moreCount, 2);
+});

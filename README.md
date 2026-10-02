@@ -172,6 +172,8 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
   (`ctx.reddit.pages/listing/post/json`, `ctx.fetch`, `ctx.emit`, `ctx.log`, `ctx.retry`, …). It runs in a
   QuickJS (WebAssembly) sandbox inside a permission-restricted Node process with no files, secrets or
   direct network access, and with time and memory limits.
+- **With Reddit API keys**: combine sorts to collect past Reddit's ~1,000-post listing limit, and load comments
+  collapsed behind "load more".
 - **Jobs** run in the background (queued → running → completed / failed / cancelled) with live progress over
   server-sent events. Results: table with search/filter/sort and record details, JSON, logs, metadata;
   export CSV/JSON/NDJSON or a reply-network edge list for Analyze CSV; **Add to project** turns posts and
