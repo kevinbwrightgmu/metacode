@@ -355,17 +355,80 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const el = $('sc-api');
     if (!el || !status || !status.enabled) return;
     el.hidden = false;
+    el.innerHTML = redditApisSection() + '<hr class="divider" style="margin:16px 0">' + redditAppSection();
+  }
+
+  // RedditAPIs.com: a third-party pay-per-call Reddit data API (one bearer key).
+  let rapiOpen = false;
+  function redditApisSection() {
+    const r = status.redditApis || {};
+    const title = '<div class="card-title" style="display:flex;align-items:center;justify-content:space-between;margin:0"><span>RedditAPIs.com key ' +
+      (r.configured ? '<span class="badge badge-green" style="margin-left:8px">Connected</span>' : '<span class="badge badge-gray" style="margin-left:8px">Optional · paid</span>') + '</span>';
+    if (r.configured) {
+      return title + (r.source === 'saved' ? '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.removeRedditApisKey()">Remove</button>' : '') + '</div>' +
+        '<div class="form-hint mt-2">Key ' + esc(r.keyHint || '') + (r.source === 'env' ? ' · from the server\'s .env file (REDDITAPIS_KEY)' : '') +
+        (r.balance ? ' · balance at last check: ' + esc(String(r.balance.value)) : '') +
+        '. Choose <strong>RedditAPIs.com</strong> under "Fetch Reddit through". Manage keys and credit at ' +
+        '<a href="' + esc(r.dashboardUrl) + '" target="_blank" rel="noopener noreferrer" style="color:var(--blue)">redditapis.com</a>.</div>';
+    }
+    return title + '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.toggleRedditApis()" aria-expanded="' + rapiOpen + '">' + (rapiOpen ? 'Hide' : 'Add key') + '</button></div>' +
+      '<div class="form-hint mt-2">A third-party service (not Reddit) that sells Reddit data per request with one API key — no Reddit app needed. Its own pricing and terms apply.</div>' +
+      (rapiOpen ? `
+      <ol style="font-size:13px;color:var(--tx-second);line-height:1.7;margin:12px 0 14px 18px">
+        <li>Open <a href="${esc(r.dashboardUrl || 'https://www.redditapis.com/dashboard/api-keys')}" target="_blank" rel="noopener noreferrer" style="color:var(--blue)">redditapis.com → Dashboard → API keys</a> and copy a key.</li>
+        <li>Paste it below and click <strong>Check &amp; save</strong> (the check uses their free account endpoint).</li>
+      </ol>
+      <div class="sc-inline">
+        <input class="form-input" id="sc-rapi-key" type="password" autocomplete="off" spellcheck="false" placeholder="RedditAPIs.com API key" aria-label="RedditAPIs.com API key">
+        <button class="btn btn-primary" id="sc-rapi-save" onclick="RedditScraper.saveRedditApisKey()">Check &amp; save</button>
+      </div>
+      <div class="form-hint mt-2">Saved on the MetaCode server (redditapis-key.json); never shown again or sent to custom code.</div>
+      <div class="form-error mt-2" id="sc-rapi-error" role="alert"></div>` : '');
+  }
+
+  function toggleRedditApis() { rapiOpen = !rapiOpen; renderApiAccess(); }
+
+  async function saveRedditApisKey() {
+    const btn = $('sc-rapi-save');
+    const errEl = $('sc-rapi-error');
+    if (errEl) errEl.textContent = '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking…'; }
+    try {
+      status = await api('/redditapis-key', { method: 'POST', body: { key: $('sc-rapi-key').value } });
+      rapiOpen = false;
+      form.engine = 'redditapis';
+      saveForm();
+      renderEngine(); renderStatus(); renderApiAccess(); renderOptions();
+      App.notify('RedditAPIs.com key saved — jobs now use RedditAPIs.com', 'success', 4500);
+    } catch (e) {
+      if (errEl) errEl.textContent = e.message;
+    } finally {
+      if (btn && document.body.contains(btn)) { btn.disabled = false; btn.textContent = 'Check & save'; }
+    }
+  }
+
+  async function removeRedditApisKey() {
+    if (!confirm('Remove the saved RedditAPIs.com key from this MetaCode server?')) return;
+    try {
+      status = await api('/redditapis-key', { method: 'DELETE' });
+      if (form.engine === 'redditapis') { form.engine = null; saveForm(); }
+      renderEngine(); renderStatus(); renderApiAccess(); renderOptions();
+      App.notify('RedditAPIs.com key removed', 'success');
+    } catch (e) { App.notify(e.message, 'error'); }
+  }
+
+  // Reddit's own API (free "script" app).
+  function redditAppSection() {
     const c = status.credentials || {};
     if (c.configured) {
-      el.innerHTML = '<div class="card-title" style="display:flex;align-items:center;justify-content:space-between;margin:0">' +
+      return '<div class="card-title" style="display:flex;align-items:center;justify-content:space-between;margin:0">' +
         '<span>Reddit API access <span class="badge badge-green" style="margin-left:8px">Connected</span></span>' +
         (c.source === 'saved' ? '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.disconnectApi()">Disconnect</button>' : '') + '</div>' +
         '<div class="form-hint mt-2">Reddit app ' + esc(c.clientIdHint || '') + (c.username ? ' · u/' + esc(c.username) : '') +
         (c.source === 'env' ? ' · from the server\'s .env file' : '') +
         '. Choose <strong>MetaCode server (Reddit API)</strong> under "Fetch Reddit through" to use it.</div>';
-      return;
     }
-    el.innerHTML = '<div class="card-title" style="display:flex;align-items:center;justify-content:space-between;margin:0">' +
+    return '<div class="card-title" style="display:flex;align-items:center;justify-content:space-between;margin:0">' +
       '<span>Reddit API access <span class="badge badge-gray" style="margin-left:8px">Optional</span></span>' +
       '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.toggleApi()" aria-expanded="' + apiOpen + '">' + (apiOpen ? 'Hide' : 'Set up') + '</button></div>' +
       '<div class="form-hint mt-2">Needed when Reddit answers "refused this request because it was made without a Reddit login or API key" (HTTP 403). Free, takes about 2 minutes.</div>' +
@@ -432,9 +495,11 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
   // "server": the MetaCode server fetches them (Reddit API credentials, or
   // public pages subject to robots.txt).
   function currentEngine() {
-    const browserOk = !status || (status.engines && status.engines.browser.available);
-    const chosen = form.engine || (status && status.defaultEngine) || 'browser';
-    return chosen === 'browser' && !browserOk ? 'server' : chosen;
+    const avail = e => !status || !status.engines || (status.engines[e] && status.engines[e].available);
+    let chosen = form.engine || (status && status.defaultEngine) || 'browser';
+    if (!avail(chosen)) chosen = status && avail(status.defaultEngine) ? status.defaultEngine : 'server';
+    if (chosen === 'browser' && !avail('browser')) chosen = 'server';
+    return chosen;
   }
 
   function renderEngine() {
@@ -443,12 +508,14 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const engine = currentEngine();
     const browserOk = !status || (status.engines && status.engines.browser.available);
     const serverLabel = status && status.mode === 'oauth' ? 'MetaCode server (Reddit API)' : 'MetaCode server (needs Reddit API keys)';
-    sel.innerHTML = (browserOk ? '<option value="browser"' + (engine === 'browser' ? ' selected' : '') + '>This browser (Scramjet) — no setup</option>' : '') +
+    const rapiOk = status && status.engines && status.engines.redditapis && status.engines.redditapis.available;
+    sel.innerHTML = (rapiOk ? '<option value="redditapis"' + (engine === 'redditapis' ? ' selected' : '') + '>RedditAPIs.com (API key, paid per request)</option>' : '') +
+      (browserOk ? '<option value="browser"' + (engine === 'browser' ? ' selected' : '') + '>This browser (Scramjet) — no setup</option>' : '') +
       '<option value="server"' + (engine === 'server' ? ' selected' : '') + '>' + esc(serverLabel) + '</option>';
   }
 
   function setEngine(value) {
-    form.engine = value === 'server' ? 'server' : 'browser';
+    form.engine = ['server', 'redditapis'].includes(value) ? value : 'browser';
     saveForm();
     renderEngine();
     renderStatus();
@@ -472,7 +539,13 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const parts = [];
     const engine = currentEngine();
     const lim = engineLimits();
-    if (engine === 'browser') {
+    if (engine === 'redditapis') {
+      const bal = status.redditApis && status.redditApis.balance;
+      parts.push('<span class="badge badge-green">RedditAPIs.com</span>');
+      parts.push('<span class="text-second">Requests go to the third-party RedditAPIs.com service with your API key (billed per request by them' +
+        (bal ? '; balance at last check: ' + esc(String(bal.value)) : '') + '). At least ' + (lim.minDelayMs / 1000) + ' s between requests · up to ' +
+        fmtNum(lim.maxItems) + ' items per job. Supports subreddits, search, posts with comments, user posts/comments and info.</span>');
+    } else if (engine === 'browser') {
       parts.push('<span class="badge badge-green">This browser (Scramjet)</span>');
       parts.push('<span class="badge badge-gray">epoxy-tls over Wisp</span>');
       parts.push('<span class="text-second">Reddit requests are made by this tab through the same connection as Browse Reddit — no API keys or setup. ' +
@@ -702,6 +775,8 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
           num('sc-o-commentPosts', 'commentPosts', 'Posts to fetch comments for', o.commentPosts, 1, 100, 1, 'One request per post') +
           num('sc-o-commentLimit', 'commentLimit', 'Comments per post', o.commentLimit, 1, 500, 1) +
         '</div>' +
+        check('sc-o-expandMore', 'expandMore', 'Load collapsed comments ("load more") — Reddit API only, up to "Comments per post"') +
+        check('sc-o-sweepSorts', 'sweepSorts', 'Subreddits: combine sorts to get past Reddit\'s ~1,000-post listing limit (Maximum pages applies to each sort)') +
         check('sc-o-includeMetadata', 'includeMetadata', 'Include subreddit / profile metadata') +
       '</div>' +
     '</div>';
@@ -720,6 +795,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const out = {
       maxItems: o.maxItems, maxPages: o.maxPages, concurrency: o.concurrency, retries: o.retries,
       includeComments: !!o.includeComments, commentPosts: o.commentPosts, commentLimit: o.commentLimit,
+      expandMore: !!o.expandMore, sweepSorts: !!o.sweepSorts,
       commentDepth: o.commentDepth, includeMetadata: o.includeMetadata !== false
     };
     const d = $('sc-o-delay'), t = $('sc-o-timeout');
@@ -1661,7 +1737,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
   }, 0);
 
   return {
-    render, setMode, setEngine, toggleApi, connectApi, disconnectApi, onTargetType, onField, onOption, checkTarget, start, cancel,
+    render, setMode, setEngine, toggleApi, connectApi, disconnectApi, toggleRedditApis, saveRedditApisKey, removeRedditApisKey, onTargetType, onField, onOption, checkTarget, start, cancel,
     loadTemplate, setLanguage, onParams, showApi, setTab, onSearch, onType, onSort, showMore,
     showRecord, copyJson, exportAs, addToProject, confirmAdd, refreshJobs, openJob, deleteJob,
     toggleBrowser, browse, browseRecord, useBrowserPage,

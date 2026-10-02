@@ -23,34 +23,116 @@ function readListing(json, what) {
 
 // Listing items count against options.maxItems; ctx.remaining() is the
 // job's overall capacity (which also covers comments fetched afterwards).
-async function paginate(ctx, options, path, query, what) {
+// `shared` carries the unique items and page count across several listings
+// (the sort sweep), so items seen in an earlier sort aren't counted twice.
+function newShared() { return { collected: 0, keys: new Set(), pages: 0, posts: [] }; }
+
+async function paginate(ctx, options, path, query, what, shared) {
+  shared = shared || newShared();
   let after = null;
   let pages = 0;
   let seen = 0;
-  let collected = 0;
-  const posts = [];
-  const left = () => Math.min(options.maxItems - collected, ctx.remaining());
+  const left = () => Math.min(options.maxItems - shared.collected, ctx.remaining());
   while (pages < options.maxPages && left() > 0) {
-    const limit = Math.min(100, left());
+    // Ask for a full page when items may repeat from an earlier sort.
+    const limit = shared.keys.size ? 100 : Math.min(100, left());
     const q = Object.assign({}, query, { limit, after, count: seen || undefined });
     const { json } = await ctx.http.getJson(path, Object.assign({}, ctx.requestOpts, { query: q, context: what }));
     pages++;
+    shared.pages++;
     const data = readListing(json, what);
-    const records = data.children.map(c => F.normalizeThing(c)).filter(Boolean).slice(0, left());
+    const fresh = [];
+    for (const r of data.children.map(c => F.normalizeThing(c)).filter(Boolean)) {
+      if (fresh.length >= left()) break;
+      const key = F.recordKey(r);
+      if (key && shared.keys.has(key)) continue;
+      if (key) shared.keys.add(key);
+      fresh.push(r);
+    }
     seen += data.children.length;
-    collected += records.length;
-    records.forEach(r => { if (r.record_type === 'post') posts.push(r); });
-    ctx.emit(records);
-    ctx.progress({ pagesFetched: pages, message: 'Page ' + pages + ': ' + records.length + ' item' + (records.length === 1 ? '' : 's') });
+    shared.collected += fresh.length;
+    fresh.forEach(r => { if (r.record_type === 'post') shared.posts.push(r); });
+    ctx.emit(fresh);
+    ctx.progress({ pagesFetched: shared.pages, message: what + ' page ' + pages + ': ' + fresh.length + ' new item' + (fresh.length === 1 ? '' : 's') });
     after = typeof data.after === 'string' && data.after ? data.after : null;
     if (!after || data.children.length === 0) {
       ctx.log('info', after ? 'Reddit returned an empty page; stopping.' : 'Reached the end of the listing.');
       break;
     }
   }
-  if (pages >= options.maxPages && after) ctx.log('info', 'Stopped at the page limit (' + options.maxPages + ').');
+  if (pages >= options.maxPages && after) ctx.log('info', what + ': stopped at the page limit (' + options.maxPages + ').');
   else if (left() <= 0 && after) ctx.log('info', 'Stopped at the item limit (' + options.maxItems + ').');
-  return posts;
+  return shared.posts;
+}
+
+// Reddit serves at most ~1,000 items per listing. Other sorts of the same
+// subreddit surface different posts, so the sweep pages through each in turn
+// (the chosen sort first) until maxItems unique posts are collected.
+// maxPages applies to each sort.
+const SWEEP_SORTS = [['new'], ['hot'], ['top', 'all'], ['top', 'year'], ['top', 'month'], ['top', 'week'],
+  ['controversial', 'all'], ['controversial', 'year'], ['rising']];
+
+async function sweepSubreddit(ctx, options, target) {
+  const shared = newShared();
+  const order = [[target.sort, target.time]].concat(SWEEP_SORTS.filter(([s, t]) => !(s === target.sort && (t || undefined) === (target.time || undefined))));
+  ctx.log('info', 'Combining sorts to get past Reddit\'s ~1,000-item listing limit (up to ' + options.maxPages + ' page(s) per sort).');
+  for (const [sort, time] of order) {
+    if (shared.collected >= options.maxItems || ctx.remaining() <= 0) break;
+    const before = shared.collected;
+    const label = 'r/' + target.subreddit + '/' + sort + (time ? ' (' + time + ')' : '');
+    await paginate(ctx, options, '/r/' + target.subreddit + '/' + sort, { t: time }, label, shared);
+    ctx.log('info', label + ': ' + (shared.collected - before) + ' new post(s), ' + shared.collected + ' unique so far.');
+  }
+  return shared.posts;
+}
+
+// Comments Reddit collapsed behind "load more" links, via the API's
+// /api/morechildren (up to 100 ids per request), until commentLimit comments.
+const MAX_MORE_CALLS = 20;
+
+async function expandMoreComments(ctx, options, post, comments, moreIds, sort) {
+  if (!moreIds.length) return [];
+  if (ctx.http.mode !== 'oauth') {
+    ctx.log('info', ctx.http.mode === 'redditapis'
+      ? 'Loading collapsed comments isn\'t offered through RedditAPIs.com; skipped.'
+      : 'Loading collapsed comments needs Reddit API access (Scraper page → Reddit API access); skipped.');
+    return [];
+  }
+  const have = new Set(comments.map(c => c.comment_id));
+  const queue = moreIds.filter(id => !have.has(id));
+  const added = [];
+  const extra = { post_id: post.post_id, post_title: post.title, post_permalink: post.permalink };
+  let calls = 0;
+  try {
+    while (queue.length && comments.length + added.length < options.commentLimit && calls < MAX_MORE_CALLS) {
+      const batch = queue.splice(0, 100);
+      const { json } = await ctx.http.getJson('/api/morechildren', Object.assign({}, ctx.requestOpts, {
+        query: { api_type: 'json', link_id: 't3_' + post.post_id, children: batch.join(','), sort, limit_children: 'false', depth: options.commentDepth },
+        context: 'Collapsed comments'
+      }));
+      calls++;
+      const things = json && json.json && json.json.data && Array.isArray(json.json.data.things) ? json.json.data.things : null;
+      if (!things) throw new ScraperError('parse_error', 'Reddit\'s answer for collapsed comments wasn\'t readable.', { status: 502 });
+      for (const t of things) {
+        if (!t || !t.data) continue;
+        if (t.kind === 'more') {
+          (Array.isArray(t.data.children) ? t.data.children : []).forEach(id => { if (typeof id === 'string' && !have.has(id)) queue.push(id); });
+          continue;
+        }
+        if (t.kind !== 't1') continue;
+        const c = F.normalizeComment(t.data, extra);
+        if (!c.comment_id || have.has(c.comment_id)) continue;
+        have.add(c.comment_id);
+        added.push(c);
+        if (comments.length + added.length >= options.commentLimit) break;
+      }
+    }
+  } catch (err) {
+    if (isScraperError(err) && err.type === 'cancelled') throw err;
+    ctx.log('warn', 'Loading collapsed comments of post ' + post.post_id + ' stopped: ' + (err.message || 'unknown error'));
+  }
+  ctx.log('info', 'Loaded ' + added.length + ' collapsed comment(s) for post ' + post.post_id + '.');
+  return added;
 }
 
 async function fetchPostWithComments(ctx, options, postId, extra) {
@@ -66,7 +148,14 @@ async function fetchPostWithComments(ctx, options, postId, extra) {
   const post = F.normalizePost(postThing.data);
   const commentData = readListing(json[1], 'the comments of post ' + postId);
   const flat = F.flattenComments(commentData.children, { post_id: post.post_id, post_title: post.title, post_permalink: post.permalink }, options.commentLimit);
-  return { post, comments: flat.comments, moreCount: flat.moreCount };
+  let comments = flat.comments;
+  let expanded = 0;
+  if (options.expandMore && flat.moreIds.length && comments.length < options.commentLimit) {
+    const more = await expandMoreComments(ctx, options, post, comments, flat.moreIds, query.sort);
+    expanded = more.length;
+    comments = comments.concat(more);
+  }
+  return { post, comments, moreCount: Math.max(0, flat.moreCount - expanded) };
 }
 
 async function addMetadata(ctx, key, path, normalize) {
@@ -89,7 +178,9 @@ async function runStandardScrape(target, options, ctx) {
       if (options.includeMetadata && !target.subreddit.includes('+') && !['all', 'popular'].includes(target.subreddit.toLowerCase())) {
         await addMetadata(ctx, 'subreddit', '/r/' + target.subreddit + '/about', F.normalizeSubreddit);
       }
-      const posts = await paginate(ctx, options, target.path, { t: target.time }, 'r/' + target.subreddit);
+      const posts = options.sweepSorts
+        ? await sweepSubreddit(ctx, options, target)
+        : await paginate(ctx, options, target.path, { t: target.time }, 'r/' + target.subreddit);
       if (options.includeComments) await addComments(ctx, options, posts);
       return;
     }
@@ -116,7 +207,10 @@ async function runStandardScrape(target, options, ctx) {
       ctx.emit([res.post]);
       ctx.emit(res.comments);
       ctx.progress({ pagesFetched: 1, message: 'Post and ' + res.comments.length + ' comments' });
-      if (res.moreCount) ctx.log('info', res.moreCount + ' more comment(s) are collapsed behind "load more" links on Reddit and weren\'t fetched.');
+      if (res.moreCount) {
+        ctx.log('info', res.moreCount + ' more comment(s) are collapsed behind "load more" links on Reddit and weren\'t fetched' +
+          (options.expandMore ? ' (comment limit reached, or Reddit API access is needed).' : ' — turn on "Load collapsed comments" to fetch them.'));
+      }
       return;
     }
     case 'subreddit_about': {

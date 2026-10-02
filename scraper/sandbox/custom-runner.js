@@ -11,7 +11,7 @@
 const { fork } = require('child_process');
 const path = require('path');
 const fs = require('fs');
-const { ScraperError, isScraperError, cancelledError, sanitize, httpError } = require('../errors');
+const { ScraperError, isScraperError, cancelledError, sanitize } = require('../errors');
 const { sleep } = require('../network/rate-limiter');
 
 const CHILD = path.join(__dirname, 'sandbox-child.js');
@@ -148,10 +148,9 @@ function createCustomRunner(opts) {
             return reply(msg.id, true, JSON.stringify({ status: res.status, statusText: res.statusText, url: res.url, headers, body: res.body }));
           }
           if (msg.name === 'redditJson') {
-            const url = ctx.http.buildApiUrl(String(args && args.path), args && args.query);
-            const res = await ctx.http.request(url, ctx.requestOpts);
-            if (res.status < 200 || res.status >= 300) throw httpError(res.status, null, res);
-            return reply(msg.id, true, JSON.stringify({ url: res.url, body: res.body }));
+            // getJson works for every engine (the RedditAPIs.com one translates paths).
+            const out = await ctx.http.getJson(String(args && args.path), Object.assign({}, ctx.requestOpts, { query: (args && args.query) || undefined }));
+            return reply(msg.id, true, JSON.stringify({ url: out.url, body: JSON.stringify(out.json) }));
           }
           throw new ScraperError('invalid_request', 'Unknown sandbox call.', { status: 400 });
         } catch (err) {

@@ -20,6 +20,12 @@ function harness(httpOverride, limits) {
     http: Object.assign({
       mode: 'public',
       buildApiUrl: (p, q) => 'https://www.reddit.com' + p + '.json' + (q ? '?' + new URLSearchParams(q) : ''),
+      // Same contract as RedditHttpClient.getJson, on top of this fake request().
+      async getJson(p, opts) {
+        const r = await this.request(this.buildApiUrl(p, opts && opts.query), opts);
+        if (r.status < 200 || r.status >= 300) throw require('../scraper/errors').httpError(r.status, null, r);
+        return { json: JSON.parse(r.body), url: r.url, headers: r.headers };
+      },
       request: async (url, opts) => {
         out.calls.push({ url, opts });
         const u = new URL(url);

@@ -56,8 +56,40 @@ function validate(input) {
   return { clientId, clientSecret, username: username || null };
 }
 
+// ── RedditAPIs.com key (third-party engine) ──
+const RAPI_FILE = path.join(__dirname, '..', 'redditapis-key.json');
+const RAPI_KEY_RE = /^[\x21-\x7E]{8,512}$/;
+
+function redditApisKeyFile(env) {
+  const custom = String((env || process.env).SCRAPER_REDDITAPIS_KEY_FILE || '').trim();
+  return custom ? path.resolve(custom) : RAPI_FILE;
+}
+
+function loadRedditApisKey(file) {
+  try {
+    const j = JSON.parse(fs.readFileSync(file, 'utf8'));
+    return j && RAPI_KEY_RE.test(j.key || '') ? j.key : null;
+  } catch (e) {
+    return null;
+  }
+}
+
+function saveRedditApisKey(file, key) {
+  const tmp = file + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify({ key, savedAt: new Date().toISOString() }, null, 2) + '\n', { mode: 0o600 });
+  fs.renameSync(tmp, file);
+  try { fs.chmodSync(file, 0o600); } catch (e) { /* e.g. Windows */ }
+}
+
+function validateRedditApisKey(raw) {
+  const key = String(raw || '').replace(/[\s\u200B-\u200D\uFEFF]/g, '').replace(/^Bearer/i, '');
+  if (!RAPI_KEY_RE.test(key)) throw new Error('Paste the API key from redditapis.com → Dashboard → API keys.');
+  return key;
+}
+
 function userAgentFor(username) {
   return 'nodejs:metacode-reddit-scraper:1.0' + (username ? ' (by /u/' + username + ')' : ' (self-hosted research tool)');
 }
 
-module.exports = { credentialsFile, loadSaved, save, remove, validate, userAgentFor };
+module.exports = { credentialsFile, loadSaved, save, remove, validate, userAgentFor,
+  redditApisKeyFile, loadRedditApisKey, saveRedditApisKey, validateRedditApisKey };

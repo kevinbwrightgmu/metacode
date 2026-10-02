@@ -3,7 +3,19 @@ const cors    = require('cors');
 const path    = require('path');
 const fs      = require('fs');
 const { spawn } = require('child_process');
-require('dotenv').config();
+// Read .env from MetaCode's own folder, not the folder the server was started
+// from: `node path/to/server.js`, shortcuts and IDE run buttons often start it
+// elsewhere, and then none of the keys would load. Variables already set in
+// the real environment still win.
+const ENV_FILE = path.join(__dirname, '.env');
+const ENV_LOAD = (() => {
+  if (!fs.existsSync(ENV_FILE)) {
+    const misnamed = ['.env.txt', 'env', '.env.example.txt'].find(n => fs.existsSync(path.join(__dirname, n)));
+    return { loaded: false, misnamed };
+  }
+  const out = require('dotenv').config({ path: ENV_FILE });
+  return { loaded: !out.error, error: out.error ? out.error.message : null, count: out.parsed ? Object.keys(out.parsed).length : 0 };
+})();
 
 const { createScraper } = require('./scraper');
 
@@ -1442,6 +1454,10 @@ function printBanner(PORT) {
   console.log('  ║   MetaCode — Social Media Coding Platform ║');
   console.log('  ╚══════════════════════════════════════════╝\n');
   console.log('  Running at → http://localhost:' + PORT);
+  if (ENV_LOAD.loaded) console.log('  Settings   → ' + ENV_FILE + ' (' + ENV_LOAD.count + ' value' + (ENV_LOAD.count === 1 ? '' : 's') + ')');
+  else if (ENV_LOAD.misnamed) console.warn('  ⚠ No .env file found, but there is "' + ENV_LOAD.misnamed + '" in ' + __dirname + '. Rename it to exactly ".env" (no extension), then restart.');
+  else if (ENV_LOAD.error) console.warn('  ⚠ Couldn\'t read ' + ENV_FILE + ': ' + ENV_LOAD.error);
+  else console.log('  Settings   → no .env file in ' + __dirname + ' (copy .env.example to .env to add keys)');
   const keyCount = EMIS.keys.length;
   console.log('  AI (EMIS)  → ' + (EMIS.problem ? 'NOT READY — ' + EMIS.problem
     : keyCount ? keyCount + ' key' + (keyCount === 1 ? '' : 's') + ' set via .env ✓'
@@ -1467,6 +1483,8 @@ function printBanner(PORT) {
   if (sc.enabled) {
     console.log('  Sandbox    → ' + (sc.customCode.available ? 'custom code in QuickJS (' + sc.customCode.memoryMb + ' MB, ' +
       Math.round(sc.customCode.timeoutMs / 1000) + ' s limit)' : 'custom code unavailable — ' + sc.customCode.reason));
+    const viaEnv = [sc.credentials.source === 'env' && 'Reddit app (REDDIT_CLIENT_ID/SECRET)', sc.redditApis.source === 'env' && 'RedditAPIs.com (REDDITAPIS_KEY)'].filter(Boolean);
+    if (viaEnv.length) console.log('  API keys   → from .env: ' + viaEnv.join(', '));
     scraper.config.warnings.forEach(w => console.warn('  ⚠ ' + w));
   }
   console.log('\n  Open http://localhost:' + PORT + ' in your browser.\n');

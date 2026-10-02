@@ -87,6 +87,19 @@ function createMockReddit(opts) {
     }
 
     let m;
+    // Collapsed comments ("load more"): each requested id becomes a reply to c1;
+    // id "y" also returns a nested "more" stub for "z1".
+    if (p === '/api/morechildren') {
+      const ids = String(url.searchParams.get('children') || '').split(',').filter(Boolean);
+      const link = String(url.searchParams.get('link_id') || '').replace(/^t3_/, '');
+      const things = [];
+      ids.forEach(id => {
+        things.push({ kind: 't1', data: { id, name: 't1_' + id, link_id: 't3_' + link, parent_id: 't1_c1', author: 'more_' + id, subreddit: 'test',
+          body: 'collapsed comment ' + id, score: 1, created_utc: 1700002000, depth: 1, permalink: '/r/test/comments/' + link + '/x/' + id + '/' } });
+        if (id === 'y') things.push({ kind: 'more', data: { count: 1, children: ['z1'], parent_id: 't1_y' } });
+      });
+      return send(res, 200, { json: { errors: [], data: { things } } });
+    }
     if ((m = p.match(/^\/r\/([^/]+)\/about$/))) {
       const sub = m[1];
       if (sub === 'missing') return send(res, 404, { error: 404 });
@@ -128,7 +141,11 @@ function createMockReddit(opts) {
       let start = 0;
       if (after) start = Number(after.split('_')[2] || 0);
       const children = [];
-      for (let i = start; i < Math.min(total, start + limit); i++) children.push(post(sub, i));
+      // Each sort family surfaces different posts (new/hot share theirs), so a
+      // sort sweep can collect more than one listing holds.
+      const sortName = m && m[2] ? m[2] : 'hot';
+      const base = { top: 300, controversial: 600, rising: 900 }[sortName] || 0;
+      for (let i = start; i < Math.min(total, start + limit); i++) children.push(post(sub, base + i));
       const next = start + limit < total ? 't3_after_' + (start + limit) : null;
       return send(res, 200, listing(children, next));
     }

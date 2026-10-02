@@ -12,6 +12,7 @@ const os = require('os');
 const path = require('path');
 // Never read a developer's real saved Reddit keys during tests.
 const TEST_CREDENTIALS_FILE = path.join(os.tmpdir(), 'metacode-test-credentials-' + process.pid + '.json');
+const TEST_REDDITAPIS_KEY_FILE = path.join(os.tmpdir(), 'metacode-test-redditapis-key-' + process.pid + '.json');
 
 function testEnv(extra) {
   return Object.assign({
@@ -20,7 +21,8 @@ function testEnv(extra) {
     SCRAPER_MIN_DELAY_MS: '0',
     SCRAPER_PUBLIC_MIN_DELAY_MS: '0',
     SCRAPER_DEFAULT_DELAY_MS: '0',
-    SCRAPER_CREDENTIALS_FILE: TEST_CREDENTIALS_FILE
+    SCRAPER_CREDENTIALS_FILE: TEST_CREDENTIALS_FILE,
+    SCRAPER_REDDITAPIS_KEY_FILE: TEST_REDDITAPIS_KEY_FILE
   }, extra || {});
 }
 
@@ -30,7 +32,8 @@ function testConfig(extra) {
 
 async function startScraperApp(env, opts) {
   const config = loadScraperConfig(testEnv(env));
-  const scraper = createScraper({ config, logToConsole: false, credentialsFile: (opts && opts.credentialsFile) || TEST_CREDENTIALS_FILE });
+  const scraper = createScraper({ config, logToConsole: false, credentialsFile: (opts && opts.credentialsFile) || TEST_CREDENTIALS_FILE,
+    redditApisKeyFile: (opts && opts.redditApisKeyFile) || TEST_REDDITAPIS_KEY_FILE });
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   app.use('/api/scraper', scraper.router);
@@ -127,4 +130,4 @@ class FakeTransport {
 
 const json = (body, extraHeaders) => ({ status: 200, headers: Object.assign({ 'content-type': 'application/json' }, extraHeaders || {}), body: JSON.stringify(body) });
 
-module.exports = { TEST_CREDENTIALS_FILE, TEST_UA, testEnv, testConfig, startScraperApp, postJson, getJson, readEvents, waitForJob, FakeTransport, json };
+module.exports = { TEST_CREDENTIALS_FILE, TEST_REDDITAPIS_KEY_FILE, TEST_UA, testEnv, testConfig, startScraperApp, postJson, getJson, readEvents, waitForJob, FakeTransport, json };

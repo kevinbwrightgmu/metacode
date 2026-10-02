@@ -450,3 +450,66 @@ test('Reddit API access: keys from .env take precedence and can\'t be changed fr
     configureWisp(app.config);
   }
 });
+
+test('Reddit API: sort sweep collects past one listing, without duplicates', async () => {
+  const apiMock = createMockReddit({ requireToken: true });
+  const apiBase = await apiMock.listen();
+  const a = await startScraperApp({ REDDIT_BASE_URL: base, REDDIT_OAUTH_BASE_URL: apiBase, REDDIT_CLIENT_ID: 'test-client-id', REDDIT_CLIENT_SECRET: 'test-client-secret' });
+  try {
+    // Without the sweep: one listing only (250 posts in the mock).
+    let r = await postJson(a.api + '/jobs', { engine: 'server', target: { type: 'subreddit', subreddit: 'sweepsub', sort: 'new' }, options: { maxItems: 900, maxPages: 5, includeMetadata: false } });
+    let job = await waitForJob(a.api, r.json.job.id);
+    assert.equal(job.status, 'completed', JSON.stringify(job.error));
+    assert.equal(job.itemCount, 250);
+
+    r = await postJson(a.api + '/jobs', { engine: 'server', target: { type: 'subreddit', subreddit: 'sweepsub', sort: 'new' }, options: { maxItems: 900, maxPages: 5, sweepSorts: true, includeMetadata: false } });
+    job = await waitForJob(a.api, r.json.job.id, 30000);
+    assert.equal(job.status, 'completed', JSON.stringify(job.error));
+    assert.equal(job.itemCount, 900);
+    const { records } = (await getJson(a.api + '/jobs/' + job.id + '/results?limit=5000')).json;
+    assert.equal(new Set(records.map(x => x.post_id)).size, 900, 'all unique');
+    assert.ok(job.logs.some(l => /Combining sorts/.test(l.message)));
+    assert.ok(job.logs.some(l => /sweepsub\/hot: 0 new post/.test(l.message)), 'hot repeats new and adds nothing');
+    const paths = apiMock.state.requests.map(q => q.path);
+    assert.ok(paths.includes('/r/sweepsub/top') && paths.includes('/r/sweepsub/controversial'));
+    assert.ok(apiMock.state.requests.every(q => q.headers.authorization === 'bearer test-token-123'));
+  } finally {
+    await a.close();
+    await apiMock.close();
+    configureWisp(app.config);
+  }
+});
+
+test('Reddit API: collapsed "load more" comments are loaded (public mode skips with a note)', async () => {
+  const apiMock = createMockReddit({ requireToken: true });
+  const apiBase = await apiMock.listen();
+  const a = await startScraperApp({ REDDIT_BASE_URL: base, REDDIT_OAUTH_BASE_URL: apiBase, REDDIT_CLIENT_ID: 'test-client-id', REDDIT_CLIENT_SECRET: 'test-client-secret' });
+  try {
+    const r = await postJson(a.api + '/jobs', { engine: 'server', target: { type: 'post', postId: 'abc123' }, options: { expandMore: true, commentLimit: 50 } });
+    const job = await waitForJob(a.api, r.json.job.id);
+    assert.equal(job.status, 'completed', JSON.stringify(job.error));
+    const { records } = (await getJson(a.api + '/jobs/' + job.id + '/results?type=comment')).json;
+    assert.deepEqual(records.map(c => c.comment_id), ['c1', 'c1a', 'c2', 'x', 'y', 'z1']);
+    assert.equal(records[3].parent_id, 't1_c1');
+    assert.equal(records[3].post_id, 'abc123');
+    const more = apiMock.state.requests.filter(q => q.path === '/api/morechildren');
+    assert.equal(more.length, 2);
+    assert.equal(more[0].query.link_id, 't3_abc123');
+    assert.equal(more[0].query.children, 'x,y');
+    assert.ok(job.logs.some(l => /Loaded 3 collapsed comment/.test(l.message)));
+
+    // The comment limit is respected.
+    const r2 = await postJson(a.api + '/jobs', { engine: 'server', target: { type: 'post', postId: 'abc123' }, options: { expandMore: true, commentLimit: 4 } });
+    const j2 = await waitForJob(a.api, r2.json.job.id);
+    assert.equal((await getJson(a.api + '/jobs/' + j2.id + '/results?type=comment')).json.total, 4);
+  } finally {
+    await a.close();
+    await apiMock.close();
+    configureWisp(app.config);
+  }
+  // Public mode: no API → skipped with an explanation.
+  const r = await start({ target: { type: 'post', postId: 'abc123' }, options: { expandMore: true } });
+  const job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'completed');
+  assert.ok(job.logs.some(l => /needs Reddit API access/.test(l.message)));
+});

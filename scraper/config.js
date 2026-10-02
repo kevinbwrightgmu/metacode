@@ -95,6 +95,16 @@ function loadScraperConfig(env) {
     else c.oauth = { clientId: id, clientSecret: secret };
   }
 
+  // Optional third-party engine: redditapis.com (pay-per-call Reddit data API).
+  c.redditApisBaseUrl = baseUrl(env, 'REDDITAPIS_BASE_URL', 'https://api.redditapis.com', warnings);
+  // Accept the key as copied from a curl example ("Bearer …") too.
+  const rapiKey = String(env.REDDITAPIS_KEY || env.REDDIT_APIS_KEY || '').trim().replace(/^bearer\s+/i, '').trim();
+  c.redditApisKey = null;
+  if (rapiKey) {
+    if (/^[\x21-\x7E]{8,512}$/.test(rapiKey)) c.redditApisKey = rapiKey;
+    else warnings.push('REDDITAPIS_KEY contains characters that cannot be used; ignoring it.');
+  }
+
   c.respectRobotsTxt      = bool(env, 'SCRAPER_RESPECT_ROBOTS_TXT', DEFAULTS.respectRobotsTxt, warnings);
   c.minDelayMs            = int(env, 'SCRAPER_MIN_DELAY_MS', DEFAULTS.minDelayMs, 0, 60000, warnings);
   c.publicMinDelayMs      = int(env, 'SCRAPER_PUBLIC_MIN_DELAY_MS', DEFAULTS.publicMinDelayMs, 0, 120000, warnings);
@@ -132,14 +142,14 @@ function loadScraperConfig(env) {
     /^(?:[a-z0-9-]+\.)*redditmedia\.com$/i,
     /^(?:[a-z0-9-]+\.)*redd\.it$/i
   ];
-  [c.redditBaseUrl, c.redditOAuthBaseUrl].forEach(u => {
+  [c.redditBaseUrl, c.redditOAuthBaseUrl, c.redditApisBaseUrl].forEach(u => {
     const host = new URL(u).hostname;
     if (!c.wispHostPatterns.some(re => re.test(host))) {
       c.wispHostPatterns.push(new RegExp('^' + host.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i'));
     }
   });
   const ports = new Set([443]);
-  [c.redditBaseUrl, c.redditOAuthBaseUrl].forEach(u => {
+  [c.redditBaseUrl, c.redditOAuthBaseUrl, c.redditApisBaseUrl].forEach(u => {
     const url = new URL(u);
     ports.add(url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80));
   });
