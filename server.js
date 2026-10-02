@@ -1461,8 +1461,9 @@ function printBanner(PORT) {
   console.log('  Python     → child_process bridge ready (auto-detects python3/python)');
   const sc = scraper.status();
   console.log('  Scraper    → ' + (!sc.enabled ? 'off (SCRAPER_ENABLED=false)'
-    : (sc.mode === 'oauth' ? 'Reddit Data API (OAuth app credentials)' : 'public Reddit pages' + (sc.respectRobotsTxt ? ', robots.txt respected' : '')) +
-      ' via epoxy-tls over Wisp (' + sc.transport.wispPath + ')' + (sc.transport.available ? '' : ' — needs Node.js 22+')));
+    : (sc.defaultEngine === 'browser' ? 'default: your browser via Scramjet (no setup); server: ' : 'server: ') +
+      (sc.mode === 'oauth' ? 'Reddit Data API (OAuth app credentials)' : 'public Reddit pages' + (sc.respectRobotsTxt ? ', robots.txt respected' : '')) +
+      ' — epoxy-tls over Wisp (' + sc.transport.wispPath + ')' + (sc.transport.available ? '' : ' — needs Node.js 22+')));
   if (sc.enabled) {
     console.log('  Sandbox    → ' + (sc.customCode.available ? 'custom code in QuickJS (' + sc.customCode.memoryMb + ' MB, ' +
       Math.round(sc.customCode.timeoutMs / 1000) + ' s limit)' : 'custom code unavailable — ' + sc.customCode.reason));

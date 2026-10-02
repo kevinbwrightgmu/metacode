@@ -168,6 +168,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       language: 'javascript',
       code: TEMPLATES['subreddit-posts'].code,
       params: '{\n  "subreddit": "AskScience"\n}',
+      engine: null,             // null = the server's default (browser without API credentials)
       lastJobId: null
     };
   }
@@ -292,6 +293,8 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       </div>
 
       <div class="sc-runbar">
+        <label class="form-label" for="sc-engine" style="margin:0">Fetch Reddit through</label>
+        <select class="form-select" id="sc-engine" style="width:auto" onchange="RedditScraper.setEngine(this.value)"></select>
         <button class="btn btn-primary" id="sc-start" onclick="RedditScraper.start()">Start scrape</button>
         <button class="btn btn-secondary" id="sc-cancel" onclick="RedditScraper.cancel()" hidden>Cancel job</button>
         <div class="form-error" id="sc-form-error" role="alert"></div>
@@ -309,6 +312,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     `;
     renderMode();
     renderTargetType();
+    renderEngine();
     renderOptions();
     loadStatus();
     refreshJobs();
@@ -331,9 +335,45 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     }
     RedditBrowser.configure({ allowedHosts: status.allowedHosts });
     if (!isActive()) return;
+    renderEngine();
     renderStatus();
     renderOptions();
     renderMode();
+  }
+
+  /* ── Engine: where Reddit requests are made ── */
+  // "browser": this tab fetches them through Scramjet's transport (epoxy-tls
+  // over MetaCode's Wisp endpoint) — no API credentials or .env setup.
+  // "server": the MetaCode server fetches them (Reddit API credentials, or
+  // public pages subject to robots.txt).
+  function currentEngine() {
+    const browserOk = !status || (status.engines && status.engines.browser.available);
+    const chosen = form.engine || (status && status.defaultEngine) || 'browser';
+    return chosen === 'browser' && !browserOk ? 'server' : chosen;
+  }
+
+  function renderEngine() {
+    const sel = $('sc-engine');
+    if (!sel) return;
+    const engine = currentEngine();
+    const browserOk = !status || (status.engines && status.engines.browser.available);
+    const serverLabel = status && status.mode === 'oauth' ? 'MetaCode server (Reddit API)' : 'MetaCode server (needs Reddit API keys)';
+    sel.innerHTML = (browserOk ? '<option value="browser"' + (engine === 'browser' ? ' selected' : '') + '>This browser (Scramjet) — no setup</option>' : '') +
+      '<option value="server"' + (engine === 'server' ? ' selected' : '') + '>' + esc(serverLabel) + '</option>';
+  }
+
+  function setEngine(value) {
+    form.engine = value === 'server' ? 'server' : 'browser';
+    saveForm();
+    renderStatus();
+    renderOptions();
+  }
+
+  function engineLimits() {
+    if (!status) return null;
+    const e = status.engines && status.engines[currentEngine()];
+    const minDelayMs = e ? e.minDelayMs : status.limits.minDelayMs;
+    return Object.assign({}, status.limits, { minDelayMs, defaultDelayMs: Math.max(minDelayMs, status.limits.defaultDelayMs) });
   }
 
   function renderStatus() {
@@ -344,18 +384,26 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       return;
     }
     const parts = [];
-    parts.push(status.mode === 'oauth'
-      ? '<span class="badge badge-green">Reddit Data API (OAuth)</span>'
-      : '<span class="badge badge-amber">Public pages (no API credentials)</span>');
-    parts.push('<span class="badge badge-gray">epoxy-tls over Wisp</span>');
-    parts.push('<span class="text-second">At least ' + (status.limits.minDelayMs / 1000) + ' s between requests · up to ' +
-      fmtNum(status.limits.maxItems) + ' items per job</span>');
-    if (!status.transport.available) parts.push('<span class="text-error">&#10007; Scraping needs Node.js 22+ on the server (found ' + esc(status.node) + ').</span>');
-    if (status.mode === 'public' && status.respectRobotsTxt) {
-      parts.push('<span class="sc-banner-warn">Without Reddit API credentials, requests must be allowed by Reddit\'s robots.txt, which currently disallows most automated access. ' +
-        'Add REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET to .env for reliable results.</span>');
+    const engine = currentEngine();
+    const lim = engineLimits();
+    if (engine === 'browser') {
+      parts.push('<span class="badge badge-green">This browser (Scramjet)</span>');
+      parts.push('<span class="badge badge-gray">epoxy-tls over Wisp</span>');
+      parts.push('<span class="text-second">Reddit requests are made by this tab through the same connection as Browse Reddit — no API keys or setup. ' +
+        'Keep MetaCode open until a job finishes. At least ' + (lim.minDelayMs / 1000) + ' s between requests · up to ' + fmtNum(lim.maxItems) + ' items per job.</span>');
+    } else {
+      parts.push(status.mode === 'oauth'
+        ? '<span class="badge badge-green">Server · Reddit Data API (OAuth)</span>'
+        : '<span class="badge badge-amber">Server · public pages (no API credentials)</span>');
+      parts.push('<span class="badge badge-gray">epoxy-tls over Wisp</span>');
+      parts.push('<span class="text-second">At least ' + (lim.minDelayMs / 1000) + ' s between requests · up to ' + fmtNum(lim.maxItems) + ' items per job</span>');
+      if (!status.transport.available) parts.push('<span class="text-error">&#10007; Server-side scraping needs Node.js 22+ (found ' + esc(status.node) + ').</span>');
+      if (status.mode === 'public' && status.respectRobotsTxt) {
+        parts.push('<span class="sc-banner-warn">Without Reddit API credentials the server only reads pages Reddit\'s robots.txt allows, which excludes most of Reddit. ' +
+          'Choose "This browser (Scramjet)" below, or add REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET to .env.</span>');
+      }
+      if (status.userAgentIsDefault) parts.push('<span class="sc-banner-warn">Set SCRAPER_USER_AGENT in .env so Reddit can identify your client.</span>');
     }
-    if (status.userAgentIsDefault) parts.push('<span class="sc-banner-warn">Set SCRAPER_USER_AGENT in .env so Reddit can identify your client.</span>');
     el.innerHTML = parts.join('');
   }
 
@@ -547,7 +595,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const el = $('sc-options');
     if (!el) return;
     const o = form.options;
-    const lim = status ? status.limits : null;
+    const lim = engineLimits();
     const minDelay = lim ? lim.minDelayMs / 1000 : 1;
     const delay = o.delaySec !== null && o.delaySec !== undefined && o.delaySec !== '' ? o.delaySec : (lim ? lim.defaultDelayMs / 1000 : 2);
     const timeout = o.timeoutSec !== null && o.timeoutSec !== undefined && o.timeoutSec !== '' ? o.timeoutSec : (lim ? lim.requestTimeoutMs / 1000 : 20);
@@ -799,11 +847,11 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       if (form.mode === 'custom') {
         syncEditorToForm();
         if (!form.code.trim()) throw new Error('Write your scraper code first.');
-        body = { mode: 'custom', code: form.code, language: form.language, params: parseParams(), options };
+        body = { mode: 'custom', code: form.code, language: form.language, params: parseParams(), options, engine: currentEngine() };
         const target = buildTarget();
         if (target) body.target = target;
       } else {
-        body = { mode: 'standard', target: buildTarget(), options };
+        body = { mode: 'standard', target: buildTarget(), options, engine: currentEngine() };
       }
     } catch (e) {
       setFormError(e.message);
@@ -812,6 +860,8 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const btn = $('sc-start');
     if (btn) btn.disabled = true;
     try {
+      // Browser mode: this tab must be listening before the job's first request.
+      if (body.engine === 'browser') await ensureRelay();
       const data = await api('/jobs', { method: 'POST', body });
       setJob(data.job);
       App.notify('Scraper job started', 'info');
@@ -973,6 +1023,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
           <span class="badge ${STATUS_BADGE[job.status] || 'badge-gray'}" id="sc-job-status">${esc(cap(job.status))}</span>
           <span class="sc-label" title="${esc(job.label)}">${esc(job.label)}</span>
           <span class="badge ${job.mode === 'custom' ? 'badge-violet' : 'badge-gray'}">${job.mode === 'custom' ? 'Custom code' : 'Standard'}</span>
+          <span class="badge badge-gray">${job.engine === 'browser' ? 'Browser' : 'Server'}</span>
         </div>
         <div class="flex gap-2">
           ${running ? '<button class="btn btn-secondary btn-sm" onclick="RedditScraper.cancel()">Cancel</button>' : ''}
@@ -1337,7 +1388,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     }
     el.innerHTML = '<div class="table-wrap"><table class="table"><thead><tr><th>Job</th><th>Mode</th><th>Status</th><th class="sc-cell-num">Items</th><th>Created</th><th></th></tr></thead><tbody>' +
       jobsList.map(j => '<tr><td><div class="sc-cell-text" title="' + esc(j.label) + '">' + esc(j.label) + '</div></td>' +
-        '<td>' + (j.mode === 'custom' ? 'Custom code' : 'Standard') + '</td>' +
+        '<td>' + (j.mode === 'custom' ? 'Custom code' : 'Standard') + (j.engine === 'browser' ? ' · browser' : ' · server') + '</td>' +
         '<td><span class="badge ' + (STATUS_BADGE[j.status] || 'badge-gray') + '">' + esc(cap(j.status)) + '</span></td>' +
         '<td class="sc-cell-num">' + fmtNum(j.itemCount) + '</td>' +
         '<td style="white-space:nowrap">' + fmtDate(j.createdAt) + '</td>' +
@@ -1434,8 +1485,92 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     checkTarget().then(t => { if (t) App.notify('Target set: ' + t.label, 'success'); });
   }
 
+  /* ── Browser relay client ─────────────────── */
+  // Browser-mode jobs run on the server but ask an open MetaCode tab to make
+  // their Reddit requests. This tab listens on /api/scraper/relay/events,
+  // claims a request (so only one tab fetches it), fetches it through the
+  // Scramjet transport and posts the answer back.
+  const RELAY_MAX_BYTES = 8 * 1024 * 1024;
+  let relaySource = null;
+  let relayReady = null;
+  const relayActive = new Map();     // request id → AbortController
+
+  function ensureRelay() {
+    if (relaySource && relaySource.readyState !== 2 /* CLOSED */) return relayReady;
+    if (typeof EventSource !== 'function') return Promise.reject(new Error('This browser doesn\'t support server-sent events.'));
+    const source = new EventSource(API + '/relay/events');
+    relaySource = source;
+    relayReady = new Promise(resolve => {
+      source.addEventListener('ready', () => resolve(), { once: true });
+      setTimeout(resolve, 4000);
+    });
+    source.addEventListener('ready', e => {
+      try { RedditBrowser.configure({ allowedHosts: JSON.parse(e.data).allowedHosts }); } catch (err) { /* keep the previous host list */ }
+    });
+    source.addEventListener('relay', e => {
+      let req = null;
+      try { req = JSON.parse(e.data); } catch (err) { return; }
+      handleRelay(req);
+    });
+    source.addEventListener('relay-cancel', e => {
+      try { const c = relayActive.get(JSON.parse(e.data).id); if (c) c.abort(); } catch (err) { /* ignore */ }
+    });
+    return relayReady;
+  }
+
+  async function handleRelay(req) {
+    if (!req || typeof req.id !== 'string' || relayActive.has(req.id)) return;
+    const ac = new AbortController();
+    relayActive.set(req.id, ac);
+    const path = '/relay/' + encodeURIComponent(req.id);
+    try {
+      try {
+        await api(path + '/claim', { method: 'POST', body: {} });
+      } catch (e) {
+        return;                       // another tab took it, or it already ended
+      }
+      let payload;
+      if (!['GET', 'HEAD'].includes(req.method) || !RedditBrowser.isAllowedUrl(req.url)) {
+        payload = { error: 'HostBlocked: the browser refused a request that is not to Reddit' };
+      } else {
+        try {
+          payload = await RedditBrowser.fetchThrough(req.url, req.method, req.headers, ac.signal, RELAY_MAX_BYTES);
+        } catch (e) {
+          payload = { error: String((e && e.message) || e || 'request failed') };
+        }
+      }
+      if (ac.signal.aborted) return;
+      await api(path, { method: 'POST', body: payload }).catch(() => {});
+    } finally {
+      relayActive.delete(req.id);
+    }
+  }
+
+  function browserJobRunning() {
+    const mine = j => j && j.engine === 'browser' && !FINISHED.includes(j.status);
+    return mine(job) || jobsList.some(mine) || relayActive.size > 0;
+  }
+
+  // Closing or reloading the tab would stop a browser-mode job's requests.
+  window.addEventListener('beforeunload', e => {
+    if (!browserJobRunning()) return;
+    e.preventDefault();
+    e.returnValue = '';
+  });
+
+  // After a reload (on any page), resume serving browser-mode jobs that are still running.
+  setTimeout(async () => {
+    try {
+      const res = await fetch(API + '/jobs');
+      if (!res.ok) return;
+      const data = await res.json();
+      jobsList = data.jobs || [];
+      if (jobsList.some(j => j.engine === 'browser' && !FINISHED.includes(j.status))) ensureRelay();
+    } catch (e) { /* server unreachable: nothing to resume */ }
+  }, 0);
+
   return {
-    render, setMode, onTargetType, onField, onOption, checkTarget, start, cancel,
+    render, setMode, setEngine, onTargetType, onField, onOption, checkTarget, start, cancel,
     loadTemplate, setLanguage, onParams, showApi, setTab, onSearch, onType, onSort, showMore,
     showRecord, copyJson, exportAs, addToProject, confirmAdd, refreshJobs, openJob, deleteJob,
     toggleBrowser, browse, browseRecord, useBrowserPage,

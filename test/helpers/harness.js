@@ -27,7 +27,7 @@ async function startScraperApp(env) {
   const config = loadScraperConfig(testEnv(env));
   const scraper = createScraper({ config, logToConsole: false });
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '10mb' }));
   app.use('/api/scraper', scraper.router);
   app.use('/scramjet', scraper.scramjetRouter);
   const server = http.createServer(app);

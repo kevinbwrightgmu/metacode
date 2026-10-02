@@ -67,7 +67,7 @@ test('sidebar navigation opens the Scraper page', { skip }, async () => {
   assert.equal(new URL(page.url()).hash, '#scraper');
   assert.equal(await page.textContent('#topbar-title'), 'Reddit Scraper');
   assert.ok(await nav.evaluate(el => el.classList.contains('active')));
-  await page.waitForFunction(() => /Public pages|Reddit Data API/.test(document.querySelector('#sc-status').textContent));
+  await page.waitForFunction(() => /This browser|Public pages|Reddit Data API/.test(document.querySelector('#sc-status').textContent));
   assert.deepEqual(await page.$$eval('#sc-target-type option', o => o.map(x => x.value)),
     ['subreddit', 'search', 'post', 'user', 'url', 'listing', 'subreddit_about', 'user_about']);
   assert.deepEqual(errors.filter(e => !/is not defined/.test(e)), []);
@@ -209,7 +209,7 @@ test('cancel a running job from the UI', { skip }, async () => {
 
 test('in-app Reddit browser (Scramjet) loads pages through Wisp and sets the target', { skip }, async () => {
   const { page, context } = await openApp('#scraper');
-  await page.waitForFunction(() => /Public pages|Reddit Data API/.test(document.querySelector('#sc-status').textContent));
+  await page.waitForFunction(() => /This browser|Public pages|Reddit Data API/.test(document.querySelector('#sc-status').textContent));
   await page.click('#sc-browser-toggle');
   const redditBase = 'http://localhost:' + mock.server.address().port;
   await page.fill('#sc-browser-url', redditBase + '/r/test/');
@@ -225,4 +225,30 @@ test('in-app Reddit browser (Scramjet) loads pages through Wisp and sets the tar
   // Requests from the browser reached the mock only through the Wisp proxy.
   assert.ok(mock.state.requests.some(r => r.path === '/r/test/comments/abc123/hello/'));
   await context.close();
+});
+
+test('browser mode (default without API keys): the tab fetches Reddit through Scramjet', { skip }, async () => {
+  const prev = mock.state.robots;
+  mock.state.robots = 'User-agent: *\nDisallow: /\n';     // irrelevant in browser mode
+  const { page, context } = await openApp('#scraper');
+  try {
+    await page.waitForFunction(() => /This browser \(Scramjet\)/.test(document.querySelector('#sc-status').textContent));
+    assert.equal(await page.inputValue('#sc-engine'), 'browser');
+    await page.click('.sc-mode[data-mode="standard"]');
+    await page.selectOption('#sc-target-type', 'subreddit');
+    await page.fill('#sc-f-subreddit', 'browsermode');
+    await page.fill('#sc-o-maxItems', '30');
+    const before = mock.state.requests.length;
+    await page.click('#sc-start');
+    await page.waitForFunction(() => { const s = document.querySelector('#sc-job-status'); return s && s.textContent === 'Completed'; }, null, { timeout: 30000 });
+    await page.waitForFunction(() => document.querySelectorAll('.sc-table tbody tr').length === 30);
+    const sent = mock.state.requests.slice(before).filter(q => q.path.startsWith('/r/browsermode/'));
+    assert.ok(sent.length >= 1);
+    assert.match(sent[0].headers['user-agent'], /Chrome/, 'sent by the browser');
+    assert.ok(!mock.state.requests.slice(before).some(q => q.path === '/robots.txt'));
+    assert.match(await page.textContent('.sc-job-head'), /Browser/);
+  } finally {
+    mock.state.robots = prev;
+    await context.close();
+  }
 });

@@ -55,16 +55,25 @@ GET  /api/scraper/jobs/:id/export                     └─ custom code ──�
    `SCRAPER_JOB_RETENTION_MINUTES`. Export them, or click **Add to project** to store them in the
    project (browser localStorage) as posts.
 
-Data access modes:
+Where requests are made — **Fetch Reddit through** (next to *Start scrape*):
 
-| Mode | When | Endpoint | Notes |
+| Engine | Default when | How | Notes |
 |---|---|---|---|
-| **Reddit Data API** (recommended) | `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` set | `oauth.reddit.com` | Application-only OAuth token; Reddit's documented API and limits apply |
-| **Public pages** | no credentials | `www.reddit.com/….json` | Subject to Reddit's robots.txt (checked before each path) and much lower rate limits |
+| **This browser (Scramjet)** | no Reddit API credentials | The job runs on the server, but each Reddit request is handed to your open MetaCode tab, which fetches it through the same Scramjet transport as **Browse Reddit** (epoxy-tls over MetaCode's Wisp endpoint) and sends the answer back | **No setup.** Requests carry your browser's own User-Agent; no credentials are used; the server's robots.txt check doesn't apply (these are your browser's requests). Rate limiting, retries, caps and the Reddit-only allow-list still apply. Keep MetaCode open until the job finishes |
+| **MetaCode server – Reddit Data API** | `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` set | `oauth.reddit.com` | Application-only OAuth token; Reddit's documented API and limits apply. Works without a tab open |
+| **MetaCode server – public pages** | (choose it explicitly) | `www.reddit.com/….json` | Checks Reddit's robots.txt before each path, which currently refuses most of Reddit |
 
-> Reddit's robots.txt currently disallows automated access for generic clients, so **public mode is
-> refused for most paths** while `SCRAPER_RESPECT_ROBOTS_TXT=true` (the default). Configure API
-> credentials — see [Reddit API credentials](#reddit-api-credentials).
+Browser-mode request flow:
+
+```
+job (server) → RedditHttpClient → RelayHub ── SSE /api/scraper/relay/events ──▶ MetaCode tab
+                                     ▲                                             │ claim, then fetch via
+                                     └──── POST /api/scraper/relay/:id ◀───────────┘ epoxy-transport → /wisp/ → Reddit
+```
+
+The first tab to claim a request fetches it (several open tabs don't duplicate requests). Closing or
+reloading the tab mid-job pauses its requests; MetaCode warns before you leave, and reopening MetaCode
+(any page) resumes serving the job if it hasn't timed out. Custom code works in browser mode too.
 
 ## 2. How the MercuryWorkshop components are used
 
@@ -73,7 +82,7 @@ Data access modes:
 | **Wisp protocol** | spec: [wisp-protocol](https://github.com/MercuryWorkshop/wisp-protocol); server: `@mercuryworkshop/wisp-js` 0.5.0 | `/wisp/` WebSocket endpoint on the MetaCode server (`scraper/network/wisp-server.js`) | MetaCode's single egress point to Reddit. It multiplexes TCP streams over one WebSocket and enforces the allow-list (Reddit hosts, port 443, no UDP, no direct IPs, no private/loopback addresses) for both the server-side scraper and the in-app browser |
 | **Epoxy TLS** | `@mercuryworkshop/epoxy-tls` 2.1.19-1 | In the server process (`scraper/network/epoxy-transport.js`) | HTTP + TLS client compiled to WebAssembly that tunnels through Wisp. TLS runs end-to-end between epoxy and Reddit with certificate verification (never disabled); the Wisp hop only sees ciphertext |
 | **Scramjet** | `@mercuryworkshop/scramjet` 2.0.67-alpha.2 + `@mercuryworkshop/scramjet-controller` 0.0.14 | In the browser tab: service worker `public/scramjet-sw.js`, page code `public/js/scraper-browser.js`, files served at `/scramjet/*` | The **Browse Reddit** panel: an interception proxy that rewrites Reddit pages so they can be browsed inside MetaCode; "Use this page as target" turns the current page into a scrape target |
-| **Epoxy transport** | `@mercuryworkshop/epoxy-transport` 3.0.1 | In the browser tab, used by the Scramjet controller | The proxy-transports implementation Scramjet uses to fetch: epoxy-tls in the browser, connected to `wss://<MetaCode>/wisp/` |
+| **Epoxy transport** | `@mercuryworkshop/epoxy-transport` 3.0.1 | In the browser tab, shared by the Scramjet controller and browser-mode scrape jobs | The proxy-transports implementation Scramjet uses to fetch: epoxy-tls in the browser, connected to `wss://<MetaCode>/wisp/`. Browser-mode jobs fetch their Reddit requests with it (`scraper/network/browser-relay.js`) |
 | **Bare transport** | `@mercuryworkshop/bare-transport` | **Not used** | It is a proxy-transports implementation for the legacy TompHTTP *Bare server* protocol — an alternative to Wisp, not a layer on top of it. Using it would require running a Bare server (an HTTP proxy endpoint) next to Wisp, adding a second egress path and attack surface with no benefit, so MetaCode uses the Wisp + epoxy transport only. (Scramjet's own bootstrapper doesn't implement the Bare option either.) |
 
 Request flow of the in-app browser:
@@ -108,10 +117,10 @@ Invalid values are ignored with a warning in the start-up banner.
 |---|---|---|
 | `SCRAPER_ENABLED` | `true` | Turns the scraper (API, Wisp endpoint, browser files) on or off |
 | `SCRAPER_USER_AGENT` | `nodejs:metacode-reddit-scraper:1.0 (self-hosted research tool)` | Sent with every request. Reddit asks for `<platform>:<app id>:<version> (by /u/<username>)` — set your own |
-| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Reddit app credentials → Reddit Data API mode (recommended). Never sent to the browser, the sandbox, or logs |
+| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Optional. Reddit app credentials → server engine uses the Reddit Data API (and becomes the default). Never sent to the browser, the sandbox, or logs |
 | `SCRAPER_RESPECT_ROBOTS_TXT` | `true` | In public mode, check Reddit's robots.txt before each path |
 | `SCRAPER_MIN_DELAY_MS` | `1000` | Minimum delay between two requests to the same host (all jobs combined) |
-| `SCRAPER_PUBLIC_MIN_DELAY_MS` | `6000` | Higher minimum in public mode (Reddit allows ≈10 unauthenticated requests/minute) |
+| `SCRAPER_PUBLIC_MIN_DELAY_MS` | `6000` | Higher minimum without API credentials — server public mode and browser mode (Reddit allows ≈10 unauthenticated requests/minute) |
 | `SCRAPER_DEFAULT_DELAY_MS` | `2000` | Default "Delay between requests" in the form |
 | `SCRAPER_REQUEST_TIMEOUT_MS` | `20000` | Maximum time per request (1000–120000) |
 | `SCRAPER_MAX_CONCURRENT_REQUESTS` | `2` | Requests in flight per Reddit host, shared by all jobs (1–8) |
@@ -122,7 +131,7 @@ Invalid values are ignored with a warning in the start-up banner.
 | `SCRAPER_CUSTOM_CODE_ENABLED` | `true` | Allow the Custom code mode |
 | `SCRAPER_CUSTOM_TIMEOUT_MS` | `120000` | Wall-clock limit per custom run (1 s – 15 min) |
 | `SCRAPER_CUSTOM_MEMORY_MB` | `64` | Memory limit of the QuickJS sandbox |
-| `SCRAPER_BROWSER_ENABLED` | `true` | Serve the in-app Reddit browser (Scramjet) |
+| `SCRAPER_BROWSER_ENABLED` | `true` | Serve the in-app Reddit browser (Scramjet) and allow the browser engine |
 | `REDDIT_BASE_URL` / `REDDIT_OAUTH_BASE_URL` | `https://www.reddit.com` / `https://oauth.reddit.com` | Where Reddit is reached. Change only for testing against a mock |
 | `SCRAPER_ALLOW_PRIVATE_NETWORK` | `false` | Lets the Wisp proxy connect to private/loopback addresses. **Testing only** |
 
@@ -131,6 +140,9 @@ for the sandbox; TypeScript needs 22.13+). The rest of MetaCode still runs on No
 then explains what's missing.
 
 ### Reddit API credentials
+
+Optional — browser mode needs none. Use them to scrape without keeping a tab open, or for Reddit's
+official API limits.
 
 1. Sign in to Reddit and open <https://www.reddit.com/prefs/apps>. Read and accept Reddit's
    [Data API Terms](https://www.redditinc.com/policies/data-api-terms) and
@@ -145,7 +157,8 @@ in as a user.
 
 ## 4. Running a standard scrape
 
-1. Sidebar → **Scraper**. Leave **Standard scraper** selected.
+1. Sidebar → **Scraper**. Leave **Standard scraper** selected. **Fetch Reddit through** is *This browser
+   (Scramjet)* unless API credentials are configured — nothing else to set up.
 2. **What to scrape**:
    - **Subreddit** — name (combine with `+`, e.g. `science+askscience`), sort (hot/new/top/rising/
      controversial), time range for top/controversial.
@@ -251,7 +264,8 @@ Custom code is untrusted and never runs in the MetaCode server's JavaScript engi
    (no API keys or secrets), its V8 heap is capped, string code generation is disabled, and the parent
    kills it (SIGKILL) at the timeout or on cancellation.
 
-All network access is performed by the server on the sandbox's behalf: Reddit hosts only, GET/HEAD
+All network access is performed by the server (or, in browser mode, relayed to your MetaCode tab) on
+the sandbox's behalf: Reddit hosts only, GET/HEAD
 only, through the rate limiter, robots.txt policy and the Wisp allow-list. OAuth tokens are added by
 the server and never visible to the code; `set-cookie` and other response headers are filtered out.
 Every message from the sandbox is size-capped (1 MB per batch, 64 MB per run).
@@ -262,6 +276,10 @@ Limitations to be aware of:
   QuickJS's WebAssembly memory into the child's Node runtime would still have no files, no secrets and
   no child processes, but could open network connections. Run MetaCode on a trusted network, or set
   `SCRAPER_CUSTOM_CODE_ENABLED=false` on shared deployments.
+- Browser mode: the tab only fetches GET/HEAD requests to Reddit hosts that the server already
+  validated, and checks the host again itself. Relay answers are accepted only from MetaCode's own
+  origin. Requests go out with your browser's User-Agent from your own connection, and robots.txt is
+  not consulted — you are responsible for using it within Reddit's terms.
 - MetaCode has no user accounts: anyone who can open the MetaCode page can start jobs. The scraper API
   only answers same-origin requests and refuses cross-site state changes, and the Wisp endpoint refuses
   other origins — but don't expose MetaCode to untrusted networks.
@@ -318,7 +336,8 @@ API (same-origin; errors are `{ error: { message, type } }`):
 
 | Message / symptom | Cause and fix |
 |---|---|
-| "Reddit's robots.txt doesn't allow automated access …" | Public mode with robots.txt respected. Configure [Reddit API credentials](#reddit-api-credentials) |
+| "Reddit's robots.txt doesn't allow automated access …" | Server engine without credentials. Switch **Fetch Reddit through** to *This browser (Scramjet)*, or configure [Reddit API credentials](#reddit-api-credentials) |
+| "No MetaCode browser tab is connected …" | A browser-mode job needs MetaCode open in a tab. Reopen MetaCode (any page) and start the job again |
 | "Couldn't verify Reddit's TLS certificate …" | A proxy, firewall or antivirus intercepts HTTPS. epoxy-tls verifies certificates end-to-end and won't accept an interception certificate; run MetaCode on a network without HTTPS inspection |
 | "The Wisp proxy closed the connection before TLS started …" | The host isn't allowed, resolved to a private address, or is unreachable from the server. Check internet access; don't point `REDDIT_BASE_URL` at private hosts without `SCRAPER_ALLOW_PRIVATE_NETWORK` |
 | "MetaCode couldn't reach its Wisp proxy endpoint" | The server's own `/wisp/` WebSocket failed — restart MetaCode; check that a reverse proxy forwards WebSocket upgrades |

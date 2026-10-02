@@ -277,3 +277,96 @@ test('Scramjet browser files are served with the right types', async () => {
   assert.equal((await fetch(app.url + '/scramjet/package.json')).status, 404);
   assert.equal((await fetch(app.url + '/scramjet/..%2f..%2fserver.js')).status, 404);
 });
+
+// A stand-in for a MetaCode tab serving browser-mode jobs: listens on the relay
+// stream, claims each request, fetches it (here with Node's fetch) and answers.
+function fakeTab(api, opts) {
+  opts = opts || {};
+  const controller = new AbortController();
+  const handled = [];
+  (async () => {
+    const res = await fetch(api + '/relay/events', { signal: controller.signal });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let i;
+      while ((i = buffer.indexOf('\n\n')) !== -1) {
+        const block = buffer.slice(0, i);
+        buffer = buffer.slice(i + 2);
+        if (!block.startsWith('event: relay\n')) continue;
+        const req = JSON.parse(block.split('\ndata: ')[1]);
+        (async () => {
+          const claim = await postJson(api + '/relay/' + req.id + '/claim', {});
+          if (claim.status !== 200) return;
+          handled.push(req);
+          let payload;
+          try {
+            const r = await fetch(req.url, { method: req.method, headers: Object.assign({ 'user-agent': 'FakeBrowser/1.0' }, req.headers) });
+            payload = { status: r.status, statusText: r.statusText, headers: Object.fromEntries(r.headers), body: await r.text() };
+          } catch (e) { payload = { error: String(e.message) }; }
+          await postJson(api + '/relay/' + req.id, payload);
+        })().catch(() => {});
+      }
+    }
+  })().catch(() => {});
+  return { handled, stop: () => controller.abort() };
+}
+
+test('browser engine: requests are fetched by the tab — no robots.txt, no credentials', async () => {
+  const prev = mock.state.robots;
+  mock.state.robots = 'User-agent: *\nDisallow: /\n';          // would block the server engine
+  const tab = fakeTab(app.api);
+  try {
+    await new Promise(r => setTimeout(r, 100));
+    const status = (await getJson(app.api + '/status')).json;
+    assert.equal(status.defaultEngine, 'browser');
+    assert.equal(status.engines.browser.connectedTabs, 1);
+    const before = mock.state.requests.length;
+    const r = await start({ engine: 'browser', target: { type: 'subreddit', subreddit: 'test', sort: 'new' }, options: { maxItems: 120 } });
+    assert.equal(r.status, 202);
+    assert.equal(r.json.job.engine, 'browser');
+    const job = await waitForJob(app.api, r.json.job.id);
+    assert.equal(job.status, 'completed', JSON.stringify(job.error));
+    assert.equal(job.itemCount, 120);
+    const sent = mock.state.requests.slice(before);
+    assert.ok(!sent.some(q => q.path === '/robots.txt'), 'robots.txt not consulted');
+    assert.ok(sent.every(q => q.headers['user-agent'] === 'FakeBrowser/1.0'), 'the browser\'s own User-Agent');
+    assert.ok(sent.every(q => !q.headers.authorization));
+    assert.ok(tab.handled.every(h => /^http:\/\/localhost:\d+\//.test(h.url)));
+
+    // Custom code uses the same path.
+    const c = await start({ engine: 'browser', mode: 'custom', code: 'async function scrape(ctx) { return (await ctx.reddit.listing("/r/test/new", { maxPages: 1, maxItems: 3 })).items; }' });
+    const cj = await waitForJob(app.api, c.json.job.id, 30000);
+    assert.equal(cj.status, 'completed', JSON.stringify(cj.error));
+    assert.equal(cj.itemCount, 3);
+
+  } finally {
+    tab.stop();
+    mock.state.robots = prev;
+  }
+});
+
+test('browser engine: relay endpoints reject unknown requests, foreign origins and bad engines', async () => {
+  assert.equal((await postJson(app.api + '/relay/nope/claim', {})).status, 409);
+  assert.equal((await postJson(app.api + '/relay/nope', { status: 200, body: '' })).status, 409);
+  assert.equal((await postJson(app.api + '/relay/nope', { status: 200 }, { origin: 'https://evil.example' })).status, 403);
+  assert.equal((await start({ engine: 'mars', target: { type: 'subreddit', subreddit: 'test' } })).status, 400);
+});
+
+test('browser engine: with no MetaCode tab open the job fails with a clear message', async () => {
+  const lonely = await startScraperApp({ REDDIT_BASE_URL: base, SCRAPER_REQUEST_TIMEOUT_MS: '1500' });
+  try {
+    const r = await postJson(lonely.api + '/jobs', { engine: 'browser', target: { type: 'subreddit', subreddit: 'test' }, options: { includeMetadata: false } });
+    const job = await waitForJob(lonely.api, r.json.job.id, 15000);
+    assert.equal(job.status, 'failed');
+    assert.equal(job.error.type, 'browser_unavailable');
+    assert.match(job.error.message, /Keep MetaCode open/);
+  } finally {
+    await lonely.close();
+    configureWisp(app.config);
+  }
+});

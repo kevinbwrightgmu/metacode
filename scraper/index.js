@@ -24,6 +24,7 @@ const { createUpgradeHandler, WISP_PATH } = require('./network/wisp-server');
 const { EpoxyWispTransport, transportAvailable } = require('./network/epoxy-transport');
 const { HostRateLimiter } = require('./network/rate-limiter');
 const { RedditHttpClient } = require('./network/reddit-http');
+const { RelayHub } = require('./network/browser-relay');
 const { normalizeTarget, normalizeOptions } = require('./reddit/targets');
 const { runStandardScrape } = require('./reddit/standard-scraper');
 const { JobManager, FINISHED } = require('./jobs/job-manager');
@@ -83,6 +84,19 @@ function createScraper(opts) {
   const transport = opts.transport || new EpoxyWispTransport({ getWispUrl, userAgent: config.userAgent, maxResponseBytes: config.maxResponseBytes });
   const limiter = new HostRateLimiter({ maxConcurrent: config.maxConcurrentRequests });
   const http = new RedditHttpClient({ config, transport, limiter });
+
+  // "This browser (Scramjet)" engine: requests are fetched by an open MetaCode
+  // tab (see network/browser-relay.js). They are the user's own browser
+  // requests, sent with the browser's User-Agent and without API credentials,
+  // so the server-side robots.txt gate and OAuth don't apply; the shared rate
+  // limiter (public-mode minimum delay), retries, destination checks and caps do.
+  const relay = new RelayHub({ maxResponseBytes: config.maxResponseBytes });
+  const browserConfig = Object.assign({}, config, { oauth: null, respectRobotsTxt: false });
+  const browserHttpFor = jobId => {
+    const client = new RedditHttpClient({ config: browserConfig, transport: relay.transportFor(jobId), limiter });
+    client.label = 'your browser (Scramjet) — keep MetaCode open until the job finishes';
+    return client;
+  };
   const runCustom = createCustomRunner({ config });
   const jobs = new JobManager({
     config, http,
@@ -93,6 +107,10 @@ function createScraper(opts) {
     logToConsole: opts.logToConsole
   });
   const onUpgrade = createUpgradeHandler(config);
+  jobs.on('event', (job, type, payload) => {
+    if (type === 'status' && FINISHED.has(payload.status)) relay.cancelJob(job.id);
+  });
+  jobs.on('removed', job => relay.cancelJob(job.id));
 
   function status() {
     const sandbox = sandboxSupported();
@@ -120,6 +138,14 @@ function createScraper(opts) {
         languages: ['javascript', 'typescript']
       },
       browser: { enabled: config.enabled && config.browserEnabled },
+      // Where a job's Reddit requests are made: "browser" = an open MetaCode tab
+      // through Scramjet (no setup); "server" = this server (API credentials, or
+      // public pages subject to robots.txt).
+      engines: {
+        browser: { available: config.enabled && config.browserEnabled, minDelayMs: Math.max(config.minDelayMs, config.publicMinDelayMs), connectedTabs: relay.subscribers },
+        server: { available: config.enabled, mode: http.mode, minDelayMs: floor }
+      },
+      defaultEngine: config.oauth || !config.browserEnabled ? 'server' : 'browser',
       limits: {
         maxItems: config.maxItems,
         maxPages: config.maxPages,
@@ -155,10 +181,16 @@ function createScraper(opts) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ScraperError('invalid_request', 'The request body must be a JSON object.', { status: 400 });
     const mode = body.mode === 'custom' ? 'custom' : (body.mode === undefined || body.mode === 'standard' ? 'standard' : null);
     if (!mode) throw new ScraperError('invalid_request', 'mode must be "standard" or "custom".', { status: 400 });
-    const options = normalizeOptions(body.options, config);
+    const engine = body.engine === undefined || body.engine === 'server' ? 'server' : (body.engine === 'browser' ? 'browser' : null);
+    if (!engine) throw new ScraperError('invalid_request', 'engine must be "browser" or "server".', { status: 400 });
+    if (engine === 'browser' && !config.browserEnabled) {
+      throw new ScraperError('not_available', 'Browser mode needs the in-app browser, which is turned off (SCRAPER_BROWSER_ENABLED=false).', { status: 403 });
+    }
+    const options = normalizeOptions(body.options, engine === 'browser' ? browserConfig : config);
+    const engineSpec = engine === 'browser' ? { engine, httpFor: browserHttpFor } : { engine };
     if (mode === 'standard') {
       const target = normalizeTarget(body.target);
-      return { mode, target, options, capacity: capacityFor(target, options) };
+      return Object.assign({ mode, target, options, capacity: capacityFor(target, options) }, engineSpec);
     }
     if (!config.customCodeEnabled) throw new ScraperError('not_available', 'Custom code is turned off on this server (SCRAPER_CUSTOM_CODE_ENABLED=false).', { status: 403 });
     const support = sandboxSupported();
@@ -175,7 +207,7 @@ function createScraper(opts) {
       if (JSON.stringify(body.params).length > 32 * 1024) throw new ScraperError('invalid_request', 'Parameters are too large (32 KB at most).', { status: 400 });
       params = body.params;
     }
-    return { mode, target, options, code: body.code, language, params, label: target ? 'Custom: ' + target.label : 'Custom scraper' };
+    return Object.assign({ mode, target, options, code: body.code, language, params, label: target ? 'Custom: ' + target.label : 'Custom scraper' }, engineSpec);
   }
 
   const router = express.Router();
@@ -311,6 +343,49 @@ function createScraper(opts) {
     req.on('close', end);
   });
 
+  // ── Browser relay (see network/browser-relay.js) ──
+  // A MetaCode tab listens here and fetches browser-mode requests for any job.
+  router.get('/relay/events', (req, res) => {
+    res.status(200);
+    res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+    res.on('error', () => {});
+    const write = (event, data) => { if (!res.writableEnded && !res.destroyed) res.write('event: ' + event + '\ndata: ' + JSON.stringify(data) + '\n\n'); };
+    const onRequest = r => write('relay', r);
+    const onCancel = c => write('relay-cancel', c);
+    relay.subscribers++;
+    write('ready', { allowedHosts: config.apiHosts });
+    relay.unclaimed().forEach(onRequest);
+    relay.on('request', onRequest);
+    relay.on('cancel', onCancel);
+    const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
+    let closed = false;
+    req.on('close', () => {
+      if (closed) return;
+      closed = true;
+      relay.subscribers--;
+      clearInterval(heartbeat);
+      relay.off('request', onRequest);
+      relay.off('cancel', onCancel);
+    });
+  });
+
+  router.post('/relay/:rid/claim', (req, res) => {
+    const request = relay.claim(String(req.params.rid));
+    if (!request) return sendError(res, new ScraperError('invalid_state', 'Another tab is already handling this request, or it has ended.', { status: 409 }));
+    res.json({ request });
+  });
+
+  router.post('/relay/:rid', (req, res) => {
+    if (!relay.respond(String(req.params.rid), req.body)) {
+      return sendError(res, new ScraperError('invalid_state', 'This request has already ended.', { status: 409 }));
+    }
+    res.json({ ok: true });
+  });
+
   router.use((req, res) => sendError(res, new ScraperError('not_found', 'Unknown scraper endpoint.', { status: 404 })));
 
   // Scramjet + epoxy-transport browser files for the in-app Reddit browser.
@@ -325,7 +400,7 @@ function createScraper(opts) {
   });
 
   return {
-    config, http, jobs, router, scramjetRouter, onUpgrade, status,
+    config, http, jobs, relay, router, scramjetRouter, onUpgrade, status,
     setPort(p) { port = p; },
     shutdown() {
       jobs.shutdown();
