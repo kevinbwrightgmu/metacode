@@ -1184,7 +1184,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
   function showRecord(i) {
     const r = records[i];
     if (!r) return;
-    const link = safeHref(r.permalink) || safeHref(r.profile_url) || safeHref(r.url);
+    const link = recordLink(r);
     let body = '';
     if (r.record_type === 'post') {
       body += '<div class="sc-body-text" style="font-weight:600;font-size:15px;margin-bottom:8px">' + esc(r.title || '') + '</div>';
@@ -1201,8 +1201,10 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       body += '<div class="sc-body-text mb-4">' + esc(r.body || '') + '</div>';
     }
     body += '<div class="card-title mt-4">All fields</div>' + kv(r);
+    // The URL comes from scraped data, so it's looked up by record index —
+    // never embedded in the inline handler.
     const browse = link && status && status.browser.enabled
-      ? '<button class="btn btn-secondary" onclick="App.closeModal(); RedditScraper.browse(\'' + esc(encodeURIComponent(link)) + '\')">Open in Reddit browser</button>' : '';
+      ? '<button class="btn btn-secondary" onclick="App.closeModal(); RedditScraper.browseRecord(' + i + ')">Open in Reddit browser</button>' : '';
     App.openModal(cap(r.record_type || 'Record') + (r.author ? ' by ' + r.author : ''), body,
       browse + (link ? '<a class="btn btn-secondary" href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">Open on Reddit</a>' : '') +
       '<button class="btn btn-primary" onclick="App.closeModal()">Close</button>');
@@ -1394,15 +1396,23 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     });
   }
 
-  function browse(encoded) {
-    if (encoded) {
-      browserOpen = true;
-      const url = decodeURIComponent(encoded);
-      renderBrowser(url);
-      const el = $('sc-browser');
-      if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      return;
-    }
+  function recordLink(r) {
+    return r ? (safeHref(r.permalink) || safeHref(r.profile_url) || safeHref(r.url)) : null;
+  }
+
+  // Opens a result's Reddit page in the in-app browser.
+  function browseRecord(i) {
+    const link = recordLink(records[i]);
+    if (!link) return;
+    let url;
+    try { url = RedditBrowser.normalizeUrl(link); } catch (e) { App.notify(e.message, 'warning'); return; }
+    browserOpen = true;
+    renderBrowser(url);
+    const el = $('sc-browser');
+    if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  function browse() {
     try {
       const url = RedditBrowser.go($('sc-browser-url').value);
       $('sc-browser-url').value = url;
@@ -1428,7 +1438,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     render, setMode, onTargetType, onField, onOption, checkTarget, start, cancel,
     loadTemplate, setLanguage, onParams, showApi, setTab, onSearch, onType, onSort, showMore,
     showRecord, copyJson, exportAs, addToProject, confirmAdd, refreshJobs, openJob, deleteJob,
-    toggleBrowser, browse, useBrowserPage,
+    toggleBrowser, browse, browseRecord, useBrowserPage,
     // exposed for tests
     _buildReplyEdges: buildReplyEdges, _toPost: toPost
   };

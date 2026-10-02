@@ -11,6 +11,7 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 | Module | Description |
 |---|---|
 | **Import Data** | Upload CSVs for posts, engagement metrics, and social network data. The `text` column is optional — if no text-like column is found by name, AI reads the file's structure and maps it for you |
+| **Reddit Scraper** | Collect subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed JavaScript/TypeScript (custom code mode); live progress, results table/JSON, CSV/JSON export, and **Add to project** to code the posts. Networking runs through a Wisp proxy with epoxy-tls; an in-app Reddit browser uses Scramjet. See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
 | **Codebook Builder** | Define custom coding dimensions and codes; each code has an optional AI Fine-Tuning Notes field the model reads during Auto-Coding, separate from the Description shown to human coders; import/export as CSV |
 | **AI Auto-Coding** | The AI applies your codebook to posts and provides confidence scores + reasoning |
 | **Human Coding** | Efficient post-by-post manual coding interface with AI suggestions |
@@ -26,7 +27,7 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 ## Quick Start
 
 ### Prerequisites
-- **Node.js** v18 or higher → [nodejs.org](https://nodejs.org)
+- **Node.js** v18 or higher → [nodejs.org](https://nodejs.org) (**v22 or higher** for the Reddit Scraper)
 - **Python** 3.9 or higher (only needed for the "Analyze CSV" NetworkX feature) → [python.org](https://python.org)
 - An **EMIS API key** (`emis-…`). EMIS keys are issued manually by EMIS.
 
@@ -59,12 +60,22 @@ npm start
 
 Then open **http://localhost:3000** in your browser. The top bar and the "Analyze CSV" page both show a live status indicator so you always know whether the AI (EMIS) and Python/NetworkX are ready.
 
+**Optional: Reddit Scraper.** Set `SCRAPER_USER_AGENT` and (recommended) `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`
+in `.env` — see [Reddit Scraper](#reddit-scraper).
+
+### Tests
+```bash
+npm test          # all tests (browser tests need Chromium: set CHROMIUM_PATH, or they are skipped)
+npm run test:unit # without the server/browser tests
+```
+
 ---
 
 ## Recommended Workflow
 
 ```
 1. Import Data     → Upload your posts CSV (a "text" column helps but isn't required)
+                     — or Scraper → collect Reddit posts/comments → Add to project
 2. Codebook        → Define dimensions (Sentiment, Stance, Topic, etc.) and codes
 3. AI Coding       → Run batch AI coding — the model codes all posts automatically
 4. Human Coding    → Manually code a sample of posts for reliability testing
@@ -146,6 +157,46 @@ and approximate betweenness by sampling, so analysis stays fast.
 
 If NetworkX isn't installed, both the app's top status banner and the Analyze CSV page will tell you
 plainly — just run `pip install -r requirements.txt` and refresh.
+
+---
+
+## Reddit Scraper
+
+Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/reddit-scraper.md](docs/reddit-scraper.md)**
+(how it works, configuration, custom-code API, security model, rate limiting, troubleshooting, licenses).
+
+- **Standard scraper** — subreddit listings, search, a post with its comments, user profiles, any Reddit URL
+  (auto-detected), front page / domain listings, subreddit and user info. Limits for items, pages, delay,
+  timeout, concurrency and retries; optional comments for listing posts.
+- **Custom code** — `async function scrape(ctx)` in JavaScript or TypeScript with a Reddit SDK
+  (`ctx.reddit.pages/listing/post/json`, `ctx.fetch`, `ctx.emit`, `ctx.log`, `ctx.retry`, …). It runs in a
+  QuickJS (WebAssembly) sandbox inside a permission-restricted Node process with no files, secrets or
+  direct network access, and with time and memory limits.
+- **Jobs** run in the background (queued → running → completed / failed / cancelled) with live progress over
+  server-sent events. Results: table with search/filter/sort and record details, JSON, logs, metadata;
+  export CSV/JSON/NDJSON or a reply-network edge list for Analyze CSV; **Add to project** turns posts and
+  comments into project posts (score → likes).
+- **Networking**: every Reddit request goes through MetaCode's own Wisp endpoint (`/wisp/`, wisp-js), which
+  only connects to Reddit's hosts, using epoxy-tls (end-to-end TLS in WebAssembly). The **Browse Reddit**
+  panel is built on Scramjet with epoxy-transport over the same endpoint.
+- **Responsible use**: shared per-host rate limiter with a server-enforced minimum delay, Reddit rate-limit
+  headers and `Retry-After` honoured, robots.txt checked without API credentials, descriptive User-Agent, no
+  login/CAPTCHA/age-gate circumvention. Reddit API credentials are strongly recommended — Reddit's robots.txt
+  disallows most automated access to its public pages.
+- Results are kept in server memory for `SCRAPER_JOB_RETENTION_MINUTES` (default 120): export them or add them
+  to the project.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SCRAPER_USER_AGENT` | generic MetaCode UA | Identify your client: `nodejs:metacode-scraper:1.0 (by /u/you)` |
+| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Reddit Data API (OAuth app-only) — recommended |
+| `SCRAPER_RESPECT_ROBOTS_TXT` | `true` | Check robots.txt in public mode |
+| `SCRAPER_MIN_DELAY_MS` / `SCRAPER_PUBLIC_MIN_DELAY_MS` | `1000` / `6000` | Minimum delay between requests per host |
+| `SCRAPER_MAX_ITEMS` / `SCRAPER_MAX_PAGES` | `5000` / `50` | Hard per-job caps |
+| `SCRAPER_CUSTOM_CODE_ENABLED` / `SCRAPER_CUSTOM_TIMEOUT_MS` / `SCRAPER_CUSTOM_MEMORY_MB` | `true` / `120000` / `64` | Custom-code sandbox |
+
+All scraper variables (concurrency, retention, response size, browser on/off, test-only overrides) are listed in
+`.env.example` and the guide.
 
 ---
 
@@ -263,6 +314,11 @@ server except AI requests to EMIS (for coding, structure detection and assistant
 post text being coded) and your own machine's Python process (for NetworkX analysis — this never leaves your
 computer). The EMIS key stays in the server's `.env` file and is only sent to EMIS.
 
+The Reddit Scraper is the exception that reaches out on purpose: when you run a scrape (or open the in-app
+Reddit browser), MetaCode's server requests data from Reddit. Scrape results are kept in the server's memory
+until they expire or the server restarts; they only become part of your project (localStorage) when you
+click **Add to project**.
+
 To reset everything: Settings → Danger Zone → Reset All Data.
 
 ---
@@ -271,16 +327,28 @@ To reset everything: Settings → Danger Zone → Reset All Data.
 
 ```
 metacode/
-├── server.js                  Express server: AI requests to EMIS + Python/NetworkX bridge
+├── server.js                  Express server: AI requests to EMIS + Python/NetworkX bridge + scraper wiring
 ├── package.json
 ├── requirements.txt            Python dependency (networkx) for the NetworkX feature
 ├── .env.example                Copy to .env and add your EMIS key
 ├── emis-models.json            The EMIS models offered in Settings (OpenCode config format)
+├── scraper/                    Reddit scraper (server side) — see docs/reddit-scraper.md
+│   ├── index.js                /api/scraper routes, SSE, exports, Scramjet file serving
+│   ├── config.js               SCRAPER_* / REDDIT_* settings
+│   ├── errors.js               Error types and user-facing messages
+│   ├── export.js               CSV / JSON / NDJSON
+│   ├── network/                Wisp endpoint, epoxy-tls transport, rate limiter, robots.txt, Reddit HTTP client
+│   ├── reddit/                 Targets/URL parsing, record formatters, standard scraper
+│   ├── jobs/job-manager.js     Job queue, status, logs, results
+│   └── sandbox/                Custom code: QuickJS sandbox process, SDK prelude, runner
+├── docs/reddit-scraper.md      Scraper guide
+├── test/                       node:test suites (+ Playwright browser tests) and a mock Reddit
 ├── python/
 │   ├── network_analysis.py     Reads edges JSON on stdin, runs NetworkX, writes stats JSON on stdout
 │   └── check_env.py            Reports whether NetworkX is installed
 ├── public/
 │   ├── index.html                Landing page — explains MetaCode, links to app.html
+│   ├── scramjet-sw.js            Service worker for the Scraper's in-app Reddit browser (Scramjet)
 │   ├── app.html                  The actual application shell (dashboard, sidebar, etc.)
 │   ├── img/
 │   │   ├── metacode-mark.png     Logo mark (used as favicon + sidebar brand)
@@ -296,6 +364,8 @@ metacode/
 │       ├── csv-analyzer.js      AI edge detection + NetworkX analysis UI
 │       ├── network.js           D3.js network visualization
 │       ├── engagement.js        Chart.js charts for the Metrics section
+│       ├── scraper.js           Reddit Scraper page (forms, editor, job progress, results, export)
+│       ├── scraper-browser.js   In-app Reddit browser (Scramjet controller + epoxy-transport)
 │       ├── assistant.js         MetaCode Assistant panel (chat UI, prompt, app-state summary)
 │       └── assistant-knowledge.js  What the assistant knows about MetaCode — update when features change
 └── sample-data/
@@ -337,6 +407,9 @@ If the model is listed in `emis-models.json` but EMIS no longer serves it, updat
 
 **Network graph not rendering**
 → Check that your nodes CSV has an `id` column and edges CSV has `source` and `target` columns matching node IDs — or use "Analyze CSV" instead, which detects this automatically
+
+**Reddit Scraper errors** ("robots.txt doesn't allow…", TLS certificate, 403, 429, sandbox limits)
+→ See the troubleshooting table in [docs/reddit-scraper.md](docs/reddit-scraper.md#10-troubleshooting)
 
 **All data disappeared**
 → Check if you're in a private/incognito window (localStorage is cleared on close). Switch to a regular browser window.

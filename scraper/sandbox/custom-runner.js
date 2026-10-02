@@ -185,15 +185,19 @@ function createCustomRunner(opts) {
         }
       });
 
-      child.send({
-        type: 'start',
-        code: job.code,
-        language: job.language,
-        formatSource: FORMAT_SOURCE,
-        preludeSource: PRELUDE_SOURCE,
-        limits: { memoryBytes: memoryMb * 1024 * 1024, timeoutMs },
-        init: { target: job.target, options: job.options, params: job.params || {}, mode: ctx.http.mode }
-      });
+      try {
+        child.send({
+          type: 'start',
+          code: job.code,
+          language: job.language,
+          formatSource: FORMAT_SOURCE,
+          preludeSource: PRELUDE_SOURCE,
+          limits: { memoryBytes: memoryMb * 1024 * 1024, timeoutMs },
+          init: { target: job.target, options: job.options, params: job.params || {}, mode: ctx.http.mode }
+        });
+      } catch (err) {
+        settle(new ScraperError('sandbox_error', 'The sandbox process couldn\'t be started.', { status: 500, detail: String(err && err.message) }));
+      }
     });
   };
 }
