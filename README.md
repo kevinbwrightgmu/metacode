@@ -192,7 +192,7 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 | Variable | Default | What it does |
 |---|---|---|
 | `SCRAPER_USER_AGENT` | generic MetaCode UA | Identify your client: `nodejs:metacode-scraper:1.0 (by /u/you)` |
-| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Optional: run jobs on the server through Reddit's API |
+| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Optional: run jobs on the server through Reddit's API. Or paste them on the Scraper page (**Reddit API access**) — needed when Reddit blocks logged-out access from your network (HTTP 403) |
 | `SCRAPER_RESPECT_ROBOTS_TXT` | `true` | Check robots.txt in public mode |
 | `SCRAPER_MIN_DELAY_MS` / `SCRAPER_PUBLIC_MIN_DELAY_MS` | `1000` / `6000` | Minimum delay between requests per host |
 | `SCRAPER_MAX_ITEMS` / `SCRAPER_MAX_PAGES` | `5000` / `50` | Hard per-job caps |

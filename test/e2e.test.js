@@ -26,13 +26,15 @@ function findChromium() {
 const chromiumPath = findChromium();
 const skip = !chromiumPath && 'no Chromium found (set CHROMIUM_PATH)';
 
-let mock, server, baseUrl, browser;
+let mock, apiMock, server, baseUrl, browser;
 
 test.before(async () => {
   if (skip) return;
   mock = createMockReddit();
   const redditBase = await mock.listen();
-  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: redditBase, SCRAPER_DEFAULT_DELAY_MS: '100', EMIS_API_KEY: '' }));
+  apiMock = createMockReddit({ requireToken: true });     // stands in for oauth.reddit.com
+  const apiBase = await apiMock.listen();
+  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: redditBase, REDDIT_OAUTH_BASE_URL: apiBase, SCRAPER_DEFAULT_DELAY_MS: '100', EMIS_API_KEY: '' }));
   const { start } = require('../server');
   server = await start(0);
   baseUrl = 'http://localhost:' + server.address().port;
@@ -43,6 +45,7 @@ test.after(async () => {
   if (browser) await browser.close();
   if (server) await new Promise(resolve => server.close(resolve));
   if (mock) await mock.close();
+  if (apiMock) await apiMock.close();
 });
 
 async function openApp(hash) {
@@ -249,6 +252,50 @@ test('browser mode (default without API keys): the tab fetches Reddit through Sc
     assert.match(await page.textContent('.sc-job-head'), /Browser/);
   } finally {
     mock.state.robots = prev;
+    await context.close();
+  }
+});
+
+test('Reddit API access card: a blocked subreddit offers setup; keys are checked, saved and fix it', { skip }, async () => {
+  const { page, context } = await openApp('#scraper');
+  try {
+    await page.waitForFunction(() => /This browser/.test(document.querySelector('#sc-status').textContent));
+    await page.click('.sc-mode[data-mode="standard"]');
+    await page.selectOption('#sc-target-type', 'subreddit');
+    await page.fill('#sc-f-subreddit', 'netblock');
+    await page.selectOption('#sc-engine', 'server');
+    await page.click('#sc-start');
+    await page.waitForFunction(() => { const s = document.querySelector('#sc-job-status'); return s && s.textContent === 'Failed'; }, null, { timeout: 30000 });
+    assert.match(await page.textContent('.sc-error-box'), /without a Reddit login or API key/);
+
+    await page.click('.sc-error-box >> text=Set up Reddit API access');
+    await page.waitForSelector('#sc-api-id');
+    await page.fill('#sc-api-id', 'test-client-id');
+    await page.fill('#sc-api-secret', 'definitely-wrong');
+    await page.click('#sc-api-save');
+    await page.waitForFunction(() => /weren't saved/.test(document.querySelector('#sc-api-error').textContent), null, { timeout: 20000 });
+
+    await page.fill('#sc-api-secret', 'test-client-secret');
+    await page.fill('#sc-api-user', 'metacode_user');
+    await page.click('#sc-api-save');
+    await page.waitForFunction(() => /Connected/.test(document.querySelector('#sc-api').textContent), null, { timeout: 20000 });
+    assert.equal(await page.inputValue('#sc-engine'), 'server');
+    assert.ok(!(await page.content()).includes('test-client-secret'));
+
+    const failedJobId = await page.evaluate(() => JSON.parse(localStorage.getItem('metacode_scraper_form_v1')).lastJobId);
+    await page.click('#sc-start');
+    await page.waitForFunction(id => {
+      const f = JSON.parse(localStorage.getItem('metacode_scraper_form_v1'));
+      const s = document.querySelector('#sc-job-status');
+      return f.lastJobId !== id && s && /Completed|Failed/.test(s.textContent);
+    }, failedJobId, { timeout: 30000 });
+    assert.equal(await page.textContent('#sc-job-status'), 'Completed', await page.textContent('#sc-job'));
+    assert.ok(apiMock.state.requests.some(q => q.path.startsWith('/r/netblock/') && q.headers.authorization === 'bearer test-token-123'));
+
+    page.once('dialog', d => d.accept());
+    await page.click('#sc-api >> text=Disconnect');
+    await page.waitForFunction(() => /Set up/.test(document.querySelector('#sc-api').textContent));
+  } finally {
     await context.close();
   }
 });

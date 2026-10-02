@@ -25,6 +25,8 @@ const { EpoxyWispTransport, transportAvailable } = require('./network/epoxy-tran
 const { HostRateLimiter } = require('./network/rate-limiter');
 const { RedditHttpClient } = require('./network/reddit-http');
 const { RelayHub } = require('./network/browser-relay');
+const credentials = require('./credentials');
+const { DEFAULT_USER_AGENT } = require('./config');
 const { normalizeTarget, normalizeOptions } = require('./reddit/targets');
 const { runStandardScrape } = require('./reddit/standard-scraper');
 const { JobManager, FINISHED } = require('./jobs/job-manager');
@@ -78,6 +80,22 @@ function sameOriginOnly(req, res, next) {
 function createScraper(opts) {
   opts = opts || {};
   const config = opts.config || loadScraperConfig(process.env);
+
+  // Reddit API keys: .env wins; otherwise keys saved from the Scraper page.
+  const credFile = opts.credentialsFile || credentials.credentialsFile(process.env);
+  const uaFromEnv = !!String(process.env.SCRAPER_USER_AGENT || '').trim();
+  config.oauthSource = config.oauth ? 'env' : null;
+  config.oauthUsername = null;
+  function applySaved(saved) {
+    config.oauth = saved ? { clientId: saved.clientId, clientSecret: saved.clientSecret } : null;
+    config.oauthSource = saved ? 'saved' : null;
+    config.oauthUsername = saved ? saved.username : null;
+    if (!uaFromEnv) config.userAgent = saved ? credentials.userAgentFor(saved.username) : DEFAULT_USER_AGENT;
+  }
+  if (!config.oauth) {
+    const saved = credentials.loadSaved(credFile);
+    if (saved) applySaved(saved);
+  }
   let port = null;
   const getWispUrl = () => (port ? 'ws://127.0.0.1:' + port + WISP_PATH : null);
 
@@ -119,9 +137,16 @@ function createScraper(opts) {
       enabled: config.enabled,
       mode: http.mode,
       oauthConfigured: !!config.oauth,
+      // Never the secret: where the keys come from and a hint to recognise them.
+      credentials: {
+        configured: !!config.oauth,
+        source: config.oauthSource,
+        clientIdHint: config.oauth ? '…' + config.oauth.clientId.slice(-4) : null,
+        username: config.oauthUsername
+      },
       respectRobotsTxt: config.respectRobotsTxt,
       userAgent: config.userAgent,
-      userAgentIsDefault: !process.env.SCRAPER_USER_AGENT,
+      userAgentIsDefault: config.userAgent === DEFAULT_USER_AGENT,
       transport: {
         name: 'epoxy-tls over Wisp',
         available: transportAvailable(),
@@ -222,6 +247,49 @@ function createScraper(opts) {
   router.post('/resolve', (req, res) => {
     try {
       res.json({ target: normalizeTarget(req.body && req.body.target) });
+    } catch (err) { sendError(res, err); }
+  });
+
+  // ── Reddit API access (Scraper page form) ──
+  // Saves a Reddit app's ID/secret after checking them with Reddit (a token
+  // request through the normal epoxy-tls/Wisp path). Keys in .env can't be
+  // changed here.
+  router.post('/credentials', async (req, res) => {
+    try {
+      if (config.oauthSource === 'env') {
+        throw new ScraperError('invalid_state', 'Reddit API keys are set in the server\'s .env file; change them there.', { status: 409 });
+      }
+      let creds;
+      try { creds = credentials.validate(req.body); } catch (e) { throw new ScraperError('invalid_request', e.message, { status: 400 }); }
+      const probeConfig = Object.assign({}, config, { oauth: { clientId: creds.clientId, clientSecret: creds.clientSecret },
+        userAgent: uaFromEnv ? config.userAgent : credentials.userAgentFor(creds.username) });
+      const probe = new RedditHttpClient({ config: probeConfig, transport, limiter });
+      try {
+        await probe.getToken({ retries: 1 });
+      } catch (err) {
+        const e = isScraperError(err) ? err : new ScraperError('network', 'Couldn\'t reach Reddit to check the keys.', { status: 502 });
+        throw new ScraperError(e.type, 'The keys weren\'t saved: ' + e.message, { status: e.type === 'auth_error' ? 400 : 502 });
+      }
+      try {
+        credentials.save(credFile, creds);
+      } catch (err) {
+        throw new ScraperError('internal_error', 'The keys work, but MetaCode couldn\'t save them next to server.js (check folder permissions).', { status: 500, detail: err.message });
+      }
+      applySaved(creds);
+      http.token = probe.token;      // reuse the token just obtained
+      res.json(status());
+    } catch (err) { sendError(res, err); }
+  });
+
+  router.delete('/credentials', (req, res) => {
+    try {
+      if (config.oauthSource === 'env') {
+        throw new ScraperError('invalid_state', 'Reddit API keys are set in the server\'s .env file; remove them there.', { status: 409 });
+      }
+      credentials.remove(credFile);
+      applySaved(null);
+      http.token = null;
+      res.json(status());
     } catch (err) { sendError(res, err); }
   });
 

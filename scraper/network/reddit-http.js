@@ -113,8 +113,13 @@ class RedditHttpClient {
           body: 'grant_type=client_credentials',
           retries: 1
         }));
+        const blockPage = res.status === 403 && (/html/i.test(String(res.headers['content-type'] || '')) || /^\s*</.test(res.body || ''));
+        if (blockPage) {
+          throw new ScraperError('reddit_blocked', 'Reddit refused the API sign-in request with a block page (HTTP 403): it is blocking requests from this ' +
+            'network or IP address, so MetaCode can\'t reach the API from here.', { status: 502, httpStatus: 403 });
+        }
         if (res.status === 401 || res.status === 403) {
-          throw new ScraperError('auth_error', 'Reddit rejected REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET (HTTP ' + res.status + '). Check them in .env and restart MetaCode.', { status: 502 });
+          throw new ScraperError('auth_error', 'Reddit rejected the API client ID / secret (HTTP ' + res.status + '). Check them (Scraper page → Reddit API access, or .env) and that the Reddit app is of type "script".', { status: 502 });
         }
         if (res.status < 200 || res.status >= 300) throw httpError(res.status, 'Reddit\'s OAuth endpoint');
         let json = null;
@@ -248,7 +253,7 @@ class RedditHttpClient {
         await sleep(wait, signal);
         continue;
       }
-      if (res.status === 401 && headers.authorization && !authRefreshed) {
+      if (res.status === 401 && /^bearer /i.test(headers.authorization || '') && !authRefreshed) {
         authRefreshed = true;
         this.token = null;
         attempt--;                       // a refreshed token doesn't count as a retry
@@ -311,7 +316,7 @@ class RedditHttpClient {
     opts = opts || {};
     const url = this.buildApiUrl(pathOrUrl, opts.query);
     const res = await this.request(url, opts);
-    if (res.status < 200 || res.status >= 300) throw httpError(res.status, opts.context);
+    if (res.status < 200 || res.status >= 300) throw httpError(res.status, opts.context, res);
     const type = String(res.headers['content-type'] || '');
     let json;
     try {

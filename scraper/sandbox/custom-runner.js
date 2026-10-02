@@ -150,7 +150,7 @@ function createCustomRunner(opts) {
           if (msg.name === 'redditJson') {
             const url = ctx.http.buildApiUrl(String(args && args.path), args && args.query);
             const res = await ctx.http.request(url, ctx.requestOpts);
-            if (res.status < 200 || res.status >= 300) throw httpError(res.status);
+            if (res.status < 200 || res.status >= 300) throw httpError(res.status, null, res);
             return reply(msg.id, true, JSON.stringify({ url: res.url, body: res.body }));
           }
           throw new ScraperError('invalid_request', 'Unknown sandbox call.', { status: 400 });

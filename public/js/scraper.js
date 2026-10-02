@@ -258,6 +258,8 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
 
       <div class="card sc-banner" id="sc-status"><span class="text-muted">Checking the scraper…</span></div>
 
+      <div class="card" id="sc-api" style="margin-bottom:16px" hidden></div>
+
       <div class="card" id="sc-browser" style="margin-bottom:16px" hidden></div>
 
       <div class="sc-toolbar">
@@ -337,8 +339,91 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     if (!isActive()) return;
     renderEngine();
     renderStatus();
+    renderApiAccess();
     renderOptions();
     renderMode();
+  }
+
+  /* ── Reddit API access ─────────────────────── */
+  // Reddit refuses logged-out requests from many networks (HTTP 403 block).
+  // A free Reddit "script" app's ID and secret let the server use Reddit's
+  // official API instead; they're checked with Reddit and saved on the server
+  // (never shown again or sent back to the browser).
+  let apiOpen = false;
+
+  function renderApiAccess() {
+    const el = $('sc-api');
+    if (!el || !status || !status.enabled) return;
+    el.hidden = false;
+    const c = status.credentials || {};
+    if (c.configured) {
+      el.innerHTML = '<div class="card-title" style="display:flex;align-items:center;justify-content:space-between;margin:0">' +
+        '<span>Reddit API access <span class="badge badge-green" style="margin-left:8px">Connected</span></span>' +
+        (c.source === 'saved' ? '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.disconnectApi()">Disconnect</button>' : '') + '</div>' +
+        '<div class="form-hint mt-2">Reddit app ' + esc(c.clientIdHint || '') + (c.username ? ' · u/' + esc(c.username) : '') +
+        (c.source === 'env' ? ' · from the server\'s .env file' : '') +
+        '. Choose <strong>MetaCode server (Reddit API)</strong> under "Fetch Reddit through" to use it.</div>';
+      return;
+    }
+    el.innerHTML = '<div class="card-title" style="display:flex;align-items:center;justify-content:space-between;margin:0">' +
+      '<span>Reddit API access <span class="badge badge-gray" style="margin-left:8px">Optional</span></span>' +
+      '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.toggleApi()" aria-expanded="' + apiOpen + '">' + (apiOpen ? 'Hide' : 'Set up') + '</button></div>' +
+      '<div class="form-hint mt-2">Needed when Reddit answers "refused this request because it was made without a Reddit login or API key" (HTTP 403). Free, takes about 2 minutes.</div>' +
+      (apiOpen ? `
+      <ol style="font-size:13px;color:var(--tx-second);line-height:1.7;margin:12px 0 14px 18px">
+        <li>Signed in to Reddit, open <a href="https://www.reddit.com/prefs/apps" target="_blank" rel="noopener noreferrer" style="color:var(--blue)">reddit.com/prefs/apps</a> and click <strong>create another app…</strong></li>
+        <li>Name it (e.g. MetaCode), choose <strong>script</strong>, set the redirect uri to <span class="sc-code-inline">http://localhost:3000</span>, and create it.</li>
+        <li>Copy the ID shown under the app's name and the <strong>secret</strong> into the fields below.</li>
+      </ol>
+      <div class="sc-fields">
+        <div class="form-group"><label class="form-label" for="sc-api-id">Client ID</label>
+          <input class="form-input" id="sc-api-id" autocomplete="off" spellcheck="false" placeholder="e.g. p-jcoLKBynTLew"></div>
+        <div class="form-group"><label class="form-label" for="sc-api-secret">Secret</label>
+          <input class="form-input" id="sc-api-secret" type="password" autocomplete="off" spellcheck="false"></div>
+        <div class="form-group"><label class="form-label" for="sc-api-user">Your Reddit username <span>(optional — identifies your client to Reddit)</span></label>
+          <input class="form-input" id="sc-api-user" autocomplete="off" spellcheck="false" placeholder="without u/"></div>
+      </div>
+      <div class="flex gap-3 mt-3" style="align-items:center;flex-wrap:wrap">
+        <button class="btn btn-primary" id="sc-api-save" onclick="RedditScraper.connectApi()">Check &amp; save</button>
+        <span class="form-hint">Saved on the MetaCode server (reddit-credentials.json); the secret is never shown again. Reddit's API terms apply.</span>
+      </div>
+      <div class="form-error mt-2" id="sc-api-error" role="alert"></div>` : '');
+  }
+
+  function toggleApi(open) {
+    apiOpen = open === undefined ? !apiOpen : !!open;
+    renderApiAccess();
+    if (apiOpen) { const el = $('sc-api'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  }
+
+  async function connectApi() {
+    const btn = $('sc-api-save');
+    const errEl = $('sc-api-error');
+    if (errEl) errEl.textContent = '';
+    if (btn) { btn.disabled = true; btn.textContent = 'Checking with Reddit…'; }
+    try {
+      status = await api('/credentials', { method: 'POST', body: {
+        clientId: $('sc-api-id').value, clientSecret: $('sc-api-secret').value, username: $('sc-api-user').value } });
+      apiOpen = false;
+      form.engine = 'server';      // use the API for the next runs
+      saveForm();
+      renderEngine(); renderStatus(); renderApiAccess(); renderOptions();
+      App.notify('Reddit API connected — jobs now use Reddit\'s API', 'success', 4500);
+    } catch (e) {
+      if (errEl) errEl.textContent = e.message;
+    } finally {
+      if (btn && document.body.contains(btn)) { btn.disabled = false; btn.textContent = 'Check & save'; }
+    }
+  }
+
+  async function disconnectApi() {
+    if (!confirm('Remove the saved Reddit API keys from this MetaCode server?')) return;
+    try {
+      status = await api('/credentials', { method: 'DELETE' });
+      if (form.engine === 'server') { form.engine = null; saveForm(); }
+      renderEngine(); renderStatus(); renderApiAccess(); renderOptions();
+      App.notify('Reddit API keys removed', 'success');
+    } catch (e) { App.notify(e.message, 'error'); }
   }
 
   /* ── Engine: where Reddit requests are made ── */
@@ -365,6 +450,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
   function setEngine(value) {
     form.engine = value === 'server' ? 'server' : 'browser';
     saveForm();
+    renderEngine();
     renderStatus();
     renderOptions();
   }
@@ -1033,7 +1119,12 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
         style="width:100%;background:${job.status === 'failed' ? 'var(--error)' : job.status === 'cancelled' ? 'var(--warning)' : 'var(--success)'}"></div></div>
       <div class="sc-stats" id="sc-stats"></div>
       <div class="sc-message" id="sc-message"></div>
-      ${job.error ? '<div class="sc-error-box" role="alert">' + esc(job.error.message) + '</div>' : ''}
+      ${job.error ? '<div class="sc-error-box" role="alert">' + esc(job.error.message) +
+        (job.error.type === 'reddit_blocked' && status && !(status.credentials && status.credentials.configured)
+          ? '<div class="mt-3"><button class="btn btn-secondary btn-sm" onclick="RedditScraper.toggleApi(true)">Set up Reddit API access</button></div>' : '') +
+        (job.error.type === 'reddit_blocked' && status && status.credentials && status.credentials.configured && job.engine === 'browser'
+          ? '<div class="mt-3"><button class="btn btn-secondary btn-sm" onclick="RedditScraper.setEngine(\'server\'); RedditScraper.start()">Switch to the Reddit API and run again</button></div>' : '') +
+        '</div>' : ''}
       <div class="sc-tabs" role="tablist">
         ${[['table', 'Results'], ['json', 'JSON'], ['logs', 'Logs'], ['meta', 'Metadata']].map(([k, l]) =>
           '<button class="sc-tab' + (view.tab === k ? ' active' : '') + '" role="tab" data-tab="' + k + '" onclick="RedditScraper.setTab(\'' + k + '\')">' + l +
@@ -1570,7 +1661,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
   }, 0);
 
   return {
-    render, setMode, setEngine, onTargetType, onField, onOption, checkTarget, start, cancel,
+    render, setMode, setEngine, toggleApi, connectApi, disconnectApi, onTargetType, onField, onOption, checkTarget, start, cancel,
     loadTemplate, setLanguage, onParams, showApi, setTab, onSearch, onType, onSort, showMore,
     showRecord, copyJson, exportAs, addToProject, confirmAdd, refreshJobs, openJob, deleteJob,
     toggleBrowser, browse, browseRecord, useBrowserPage,

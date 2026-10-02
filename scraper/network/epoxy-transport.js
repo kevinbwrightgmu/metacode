@@ -13,8 +13,26 @@
 
 const { ScraperError, classifyTransportError } = require('../errors');
 
+// epoxy-tls turns request bodies into bytes with `new Request("", { body })`
+// (see its convert_body_inner helper). In a browser "" resolves against the
+// page URL; Node has no base URL and throws "Invalid URL", which epoxy reports
+// as "Invalid request body" — so every POST (e.g. Reddit's OAuth token request)
+// failed. Only that exact call shape (an empty URL, which can never succeed in
+// Node) is given a placeholder base; every other Request is untouched.
+function allowEmptyRequestUrl() {
+  const Native = globalThis.Request;
+  if (typeof Native !== 'function' || Native.__metacodeEmptyUrl) return;
+  try { new Native(''); return; } catch (e) { /* Node: needs the shim */ }
+  class EpoxyBodyRequest extends Native {
+    constructor(input, init) { super(input === '' ? 'http://epoxy-body.invalid/' : input, init); }
+  }
+  EpoxyBodyRequest.__metacodeEmptyUrl = true;
+  globalThis.Request = EpoxyBodyRequest;
+}
+
 let epoxyModulePromise = null;
 function loadEpoxy() {
+  allowEmptyRequestUrl();
   // epoxy-tls is an ES module (wasm-bindgen output with the WASM inlined).
   if (!epoxyModulePromise) {
     epoxyModulePromise = import('@mercuryworkshop/epoxy-tls').then(async mod => {
