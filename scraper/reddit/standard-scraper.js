@@ -81,7 +81,7 @@ async function addMetadata(ctx, key, path, normalize) {
 
 async function runStandardScrape(target, options, ctx) {
   ctx.log('info', 'Target: ' + target.label);
-  ctx.log('info', 'Mode: ' + (ctx.http.mode === 'oauth' ? 'Reddit Data API (OAuth)' : 'public Reddit pages') +
+  ctx.log('info', 'Mode: ' + (ctx.http.label || (ctx.http.mode === 'oauth' ? 'Reddit Data API (OAuth)' : 'public Reddit pages')) +
     '; at least ' + (ctx.requestOpts.delayMs / 1000) + ' s between requests.');
 
   switch (target.type) {

@@ -39,13 +39,16 @@ class JobManager extends EventEmitter {
     this.logToConsole = opts.logToConsole !== false;
   }
 
-  // spec: { mode, target, options, code, language, label } — already validated
+  // spec: { mode, engine, target, options, code, language, label, httpFor } —
+  // already validated. httpFor(jobId) gives the job its own HTTP client (the
+  // browser engine relays each job's requests to a MetaCode tab).
   create(spec) {
     this.prune();
     const id = crypto.randomUUID();
     const job = {
       id,
       mode: spec.mode,
+      engine: spec.engine || 'server',
       status: 'queued',
       target: spec.target,
       label: spec.label || (spec.target && spec.target.label) || (spec.mode === 'custom' ? 'Custom scraper' : 'Scrape'),
@@ -66,8 +69,10 @@ class JobManager extends EventEmitter {
       logsDropped: 0,
       meta: {},
       error: null,
-      controller: new AbortController()
+      controller: new AbortController(),
+      http: null
     };
+    job.http = typeof spec.httpFor === 'function' ? spec.httpFor(id) : null;
     this.jobs.set(id, job);
     this.log(job, 'info', 'Job created (' + (job.mode === 'custom' ? 'custom code' : 'standard scraper') + ').');
     this.queue.push(job);
@@ -156,7 +161,7 @@ class JobManager extends EventEmitter {
     const self = this;
     const o = job.options;
     const ctx = {
-      http: this.http,
+      http: job.http || this.http,
       signal: job.controller.signal,
       log: (level, message) => self.log(job, level, message),
       progress: patch => self.progress(job, patch),
@@ -269,6 +274,7 @@ class JobManager extends EventEmitter {
     return {
       id: job.id,
       mode: job.mode,
+      engine: job.engine,
       status: job.status,
       label: job.label,
       target: job.target,

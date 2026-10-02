@@ -65,6 +65,49 @@ const RedditBrowser = (() => {
     return null;
   }
 
+  // The Scramjet network transport (epoxy-transport: epoxy-tls in WASM over
+  // MetaCode's Wisp endpoint), shared by the in-app browser and by
+  // browser-mode scrape jobs. Needs no service worker.
+  let transportPromise = null;
+  function getTransport() {
+    if (!transportPromise) {
+      transportPromise = (async () => {
+        await loadScript(FILES.transport);
+        const mod = window.EpoxyTransport;
+        const Transport = mod && (mod.default || mod.EpoxyTransport || mod.EpoxyClient || mod);
+        if (typeof Transport !== 'function') throw new Error('epoxy-transport didn\'t load correctly.');
+        const wisp = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/wisp/';
+        const transport = new Transport({ wisp });
+        if (!transport.ready) await transport.init();
+        return transport;
+      })().catch(err => { transportPromise = null; throw err; });
+    }
+    return transportPromise;
+  }
+
+  // One GET/HEAD through the Scramjet transport → { status, statusText, headers, body }.
+  async function fetchThrough(url, method, headers, signal, maxBytes) {
+    const transport = await getTransport();
+    const res = await transport.request(new URL(url), method || 'GET', null, Object.entries(headers || {}), signal);
+    const out = {};
+    (res.headers || []).forEach(([k, v]) => { out[String(k).toLowerCase()] = String(v); });
+    let body = '';
+    if (res.body && method !== 'HEAD') {
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let total = 0;
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        total += value.byteLength;
+        if (maxBytes && total > maxBytes) { reader.cancel().catch(() => {}); throw new Error('Response too large'); }
+        body += decoder.decode(value, { stream: true });
+      }
+      body += decoder.decode();
+    }
+    return { status: res.status, statusText: res.statusText || '', headers: out, body };
+  }
+
   async function init(iframeEl) {
     iframe = iframeEl;
     if (frame && controller) {
@@ -78,13 +121,7 @@ const RedditBrowser = (() => {
         const sw = await registerServiceWorker();
         await loadScript(FILES.scramjet);
         await loadScript(FILES.controller);
-        await loadScript(FILES.transport);
-
-        const mod = window.EpoxyTransport;
-        const Transport = mod && (mod.default || mod.EpoxyTransport || mod.EpoxyClient || mod);
-        if (typeof Transport !== 'function') throw new Error('epoxy-transport didn\'t load correctly.');
-        const wisp = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/wisp/';
-        const transport = new Transport({ wisp });
+        const transport = await getTransport();
 
         const api = window.$scramjetController;
         if (!api || !api.Controller) throw new Error('The Scramjet controller didn\'t load correctly.');
@@ -161,5 +198,13 @@ const RedditBrowser = (() => {
   function forward() { if (frame) frame.forward(); }
   function reload()  { if (frame) frame.reload(); }
 
-  return { init, configure, go, currentUrl, asRedditUrl, back, forward, reload, normalizeUrl, supportProblem, isReady: () => !!frame };
+  // Is this URL one the Scraper may request (Reddit, or the server's configured hosts)?
+  function isAllowedUrl(href) {
+    let u;
+    try { u = new URL(href); } catch (e) { return false; }
+    if (REDDIT_HOST.test(u.hostname)) return u.protocol === 'https:';
+    return ['https:', 'http:'].includes(u.protocol) && extraHosts.includes(u.hostname.toLowerCase());
+  }
+
+  return { init, configure, go, currentUrl, asRedditUrl, getTransport, fetchThrough, isAllowedUrl, back, forward, reload, normalizeUrl, supportProblem, isReady: () => !!frame };
 })();

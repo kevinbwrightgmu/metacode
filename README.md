@@ -60,8 +60,8 @@ npm start
 
 Then open **http://localhost:3000** in your browser. The top bar and the "Analyze CSV" page both show a live status indicator so you always know whether the AI (EMIS) and Python/NetworkX are ready.
 
-**Optional: Reddit Scraper.** Set `SCRAPER_USER_AGENT` and (recommended) `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`
-in `.env` — see [Reddit Scraper](#reddit-scraper).
+**Reddit Scraper** works with no extra setup: by default your open MetaCode tab fetches Reddit through Scramjet.
+Reddit API credentials are optional — see [Reddit Scraper](#reddit-scraper).
 
 ### Tests
 ```bash
@@ -179,17 +179,20 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 - **Networking**: every Reddit request goes through MetaCode's own Wisp endpoint (`/wisp/`, wisp-js), which
   only connects to Reddit's hosts, using epoxy-tls (end-to-end TLS in WebAssembly). The **Browse Reddit**
   panel is built on Scramjet with epoxy-transport over the same endpoint.
+- **No setup by default — "This browser (Scramjet)"**: jobs run on the server, but your open MetaCode tab makes
+  the Reddit requests through the same Scramjet/epoxy connection as Browse Reddit, so no API keys or `.env`
+  changes are needed. Keep MetaCode open until a job finishes. With `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`
+  you can instead run jobs entirely on the server through Reddit's API.
 - **Responsible use**: shared per-host rate limiter with a server-enforced minimum delay, Reddit rate-limit
-  headers and `Retry-After` honoured, robots.txt checked without API credentials, descriptive User-Agent, no
-  login/CAPTCHA/age-gate circumvention. Reddit API credentials are strongly recommended — Reddit's robots.txt
-  disallows most automated access to its public pages.
+  headers and `Retry-After` honoured, caps on items/pages, no login/CAPTCHA/age-gate circumvention. The server
+  engine checks robots.txt when it reads public pages without credentials.
 - Results are kept in server memory for `SCRAPER_JOB_RETENTION_MINUTES` (default 120): export them or add them
   to the project.
 
 | Variable | Default | What it does |
 |---|---|---|
 | `SCRAPER_USER_AGENT` | generic MetaCode UA | Identify your client: `nodejs:metacode-scraper:1.0 (by /u/you)` |
-| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Reddit Data API (OAuth app-only) — recommended |
+| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Optional: run jobs on the server through Reddit's API |
 | `SCRAPER_RESPECT_ROBOTS_TXT` | `true` | Check robots.txt in public mode |
 | `SCRAPER_MIN_DELAY_MS` / `SCRAPER_PUBLIC_MIN_DELAY_MS` | `1000` / `6000` | Minimum delay between requests per host |
 | `SCRAPER_MAX_ITEMS` / `SCRAPER_MAX_PAGES` | `5000` / `50` | Hard per-job caps |

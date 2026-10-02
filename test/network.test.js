@@ -234,3 +234,43 @@ test('Wisp endpoint accepts only same-origin browsers or local processes', () =>
   assert.equal(originAllowed(req(null, 'metacode.lan:3000', '192.168.1.20')), false);
   assert.equal(originAllowed(req('null', 'localhost:3000', '127.0.0.1')), false);
 });
+
+test('browser relay: requests go to one claiming tab; answers are validated', async () => {
+  const { RelayHub } = require('../scraper/network/browser-relay');
+  const hub = new RelayHub({ maxResponseBytes: 1000 });
+  hub.subscribers = 1;
+  const seen = [];
+  hub.on('request', r => seen.push(r));
+  const p = hub.transportFor('job1').request({ url: 'https://www.reddit.com/r/a1.json', method: 'GET', headers: { 'user-agent': 'server-ua', accept: 'application/json', authorization: 'x' }, timeoutMs: 2000 });
+  assert.equal(seen.length, 1);
+  assert.deepEqual(seen[0].headers, { accept: 'application/json' }, 'no user-agent or credentials are relayed');
+  assert.equal(hub.unclaimed().length, 1);
+  assert.ok(hub.claim(seen[0].id));
+  assert.equal(hub.claim(seen[0].id), null, 'second tab cannot claim');
+  assert.equal(hub.unclaimed().length, 0);
+  assert.equal(hub.respond(seen[0].id, { status: 200, headers: { 'Content-Type': 'application/json' }, body: '{"ok":1}' }), true);
+  const res = await p;
+  assert.equal(res.status, 200);
+  assert.equal(res.headers['content-type'], 'application/json');
+  assert.equal(hub.respond(seen[0].id, { status: 200, body: '' }), false, 'late answers are ignored');
+
+  const bad = hub.transportFor('job1').request({ url: 'https://www.reddit.com/x', timeoutMs: 2000 });
+  hub.respond(seen[1].id, { status: 99999, body: '' });
+  await assert.rejects(bad, err => err.type === 'proxy_error');
+  const big = hub.transportFor('job1').request({ url: 'https://www.reddit.com/x', timeoutMs: 2000 });
+  hub.respond(seen[2].id, { status: 200, body: 'x'.repeat(2000) });
+  await assert.rejects(big, err => err.type === 'too_large');
+  const failed = hub.transportFor('job1').request({ url: 'https://www.reddit.com/x', timeoutMs: 2000 });
+  hub.respond(seen[3].id, { error: 'invalid peer certificate: UnknownIssuer' });
+  await assert.rejects(failed, err => err.type === 'tls');
+
+  const cancelled = [];
+  hub.on('cancel', c => cancelled.push(c.id));
+  const dropped = hub.transportFor('job2').request({ url: 'https://www.reddit.com/x', timeoutMs: 2000 });
+  hub.cancelJob('job2');
+  await assert.rejects(dropped, err => err.type === 'cancelled');
+  assert.equal(cancelled.length, 1);
+
+  hub.subscribers = 0;
+  await assert.rejects(hub.transportFor('job3').request({ url: 'https://www.reddit.com/x', timeoutMs: 50 }), err => err.type === 'browser_unavailable');
+});
