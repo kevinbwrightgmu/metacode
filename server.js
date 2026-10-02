@@ -5,12 +5,15 @@ const fs      = require('fs');
 const { spawn } = require('child_process');
 require('dotenv').config();
 
+const { createScraper } = require('./scraper');
+
 const app = express();
 
 // The AI routes spend the EMIS quota of the key(s) configured on this server,
-// so only MetaCode's own pages (same origin) may call them. The other routes
+// and the scraper routes make requests to Reddit on this server's behalf, so
+// only MetaCode's own pages (same origin) may call them. The other routes
 // keep the permissive CORS they always had.
-const AI_ROUTE   = /^\/api\/(ai|models|keys\/status)\/?$/i;
+const AI_ROUTE   = /^\/api\/(ai|models|keys\/status|scraper(\/.*)?)\/?$/i;
 const corsForAll = cors();
 app.use((req, res, next) => (AI_ROUTE.test(req.path) ? next() : corsForAll(req, res, next)));
 app.use(express.json({ limit: '10mb' }));
@@ -1371,6 +1374,15 @@ app.post('/api/network/analyze', async (req, res) => {
   res.json(result);
 });
 
+// ── Reddit scraper ────────────────────────────────────────────────────────────
+// Jobs, custom-code sandbox and the Wisp/epoxy-tls networking live in
+// scraper/ (see docs/reddit-scraper.md). /api/scraper/* is the API;
+// /scramjet/* serves the in-app Reddit browser's Scramjet files; the Wisp
+// WebSocket endpoint (/wisp/) is attached to the HTTP server in start().
+const scraper = createScraper();
+app.use('/api/scraper', scraper.router);
+app.use('/scramjet', scraper.scramjetRouter);
+
 // ── Health ────────────────────────────────────────────────────────────────────
 app.get('/api/health', (req, res) => {
   const ready = !notConfigured();
@@ -1406,8 +1418,25 @@ app.use((err, req, res, next) => {
 });
 
 // ── Start ─────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
+// start(port) is also used by the test suite (port 0 = any free port).
+function start(port) {
+  return new Promise((resolve, reject) => {
+    const server = app.listen(port, () => {
+      scraper.setPort(server.address().port);
+      resolve(server);
+    });
+    server.on('error', reject);
+    server.on('upgrade', scraper.onUpgrade);
+    const close = server.close.bind(server);
+    server.close = cb => {
+      scraper.shutdown();
+      scraper.onUpgrade.closeAll();
+      return close(cb);
+    };
+  });
+}
+
+function printBanner(PORT) {
   const fileModels = readModelsFile();        // reports problems with the model list file first
   console.log('\n  ╔══════════════════════════════════════════╗');
   console.log('  ║   MetaCode — Social Media Coding Platform ║');
@@ -1430,5 +1459,24 @@ app.listen(PORT, () => {
     if (process.env[name]) console.warn('  ⚠ ' + name + ' is set but no longer used: MetaCode now uses EMIS (EMIS_API_KEY).');
   });
   console.log('  Python     → child_process bridge ready (auto-detects python3/python)');
+  const sc = scraper.status();
+  console.log('  Scraper    → ' + (!sc.enabled ? 'off (SCRAPER_ENABLED=false)'
+    : (sc.mode === 'oauth' ? 'Reddit Data API (OAuth app credentials)' : 'public Reddit pages' + (sc.respectRobotsTxt ? ', robots.txt respected' : '')) +
+      ' via epoxy-tls over Wisp (' + sc.transport.wispPath + ')' + (sc.transport.available ? '' : ' — needs Node.js 22+')));
+  if (sc.enabled) {
+    console.log('  Sandbox    → ' + (sc.customCode.available ? 'custom code in QuickJS (' + sc.customCode.memoryMb + ' MB, ' +
+      Math.round(sc.customCode.timeoutMs / 1000) + ' s limit)' : 'custom code unavailable — ' + sc.customCode.reason));
+    scraper.config.warnings.forEach(w => console.warn('  ⚠ ' + w));
+  }
   console.log('\n  Open http://localhost:' + PORT + ' in your browser.\n');
-});
+}
+
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  start(PORT).then(server => printBanner(server.address().port), err => {
+    console.error('[server] Couldn\'t start: ' + redact(err && err.message));
+    process.exit(1);
+  });
+}
+
+module.exports = { app, start, scraper };

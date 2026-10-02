@@ -40,6 +40,7 @@ const App = (() => {
     'dashboard':    renderDashboard,
     'settings':     renderSettings,
     'import':       () => DataManager.render(),
+    'scraper':      () => RedditScraper.render(),
     'codebook':     () => Codebook.render(),
     'ai-coding':    () => AICoder.render(),
     'human-coding': () => HumanCoder.render(),
@@ -51,7 +52,7 @@ const App = (() => {
   };
 
   const TITLES = {
-    'dashboard':'Dashboard','settings':'Settings','import':'Import Data',
+    'dashboard':'Dashboard','settings':'Settings','import':'Import Data','scraper':'Reddit Scraper',
     'codebook':'Codebook','ai-coding':'AI Coding','human-coding':'Human Coding',
     'reliability':'Reliability Analysis','csv-analyzer':'Analyze CSV (NetworkX)',
     'network':'Network Graph',

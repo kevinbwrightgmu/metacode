@@ -40,6 +40,7 @@ const Assistant = (() => {
     'dashboard':    'What should I do first in MetaCode?',
     'settings':     'How does API key rotation work?',
     'import':       'What columns should my posts CSV have?',
+    'scraper':      'How do I scrape a subreddit and code the posts?',
     'codebook':     'How do I write codes the AI applies accurately?',
     'ai-coding':    'How does AI auto-coding work?',
     'human-coding': 'What are the keyboard shortcuts for human coding?',
