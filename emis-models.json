@@ -1,0 +1,471 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "emis": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "emis",
+      "options": {
+        "baseURL": "https://emis.zxs-is-very.cool/v1",
+        "apiKey": "{env:EMIS_API_KEY}"
+      },
+      "models": {
+        "gpt-6-astra": {
+          "name": "GPT-6 Astra",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "gpt-5-4": {
+          "name": "GPT-5.4",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "gpt-5-5": {
+          "name": "GPT-5.5",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "gpt-5-6": {
+          "name": "GPT-5.6 Sol",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "claude-sonnet-5-5": {
+          "name": "Claude Sonnet 5.5",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "claude-fable-5": {
+          "name": "Claude Fable 5",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "claude-fable-5-1": {
+          "name": "Claude Fable 5.1",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "grok-4-7": {
+          "name": "Grok 4.7",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "deepseek-v4-pro": {
+          "name": "DeepSeek V4 Pro",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "claude-opus-4-8": {
+          "name": "Claude Opus 4.8",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "claude-opus-5-5": {
+          "name": "Claude Opus 5.5",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "gemini-3-6-flash": {
+          "name": "Gemini 3.6 Flash",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "gemini-3-8-flash": {
+          "name": "Gemini 3.8 Flash",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "kimi-k2-6": {
+          "name": "Kimi K2.6",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "kimi-k3": {
+          "name": "Kimi K3",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "glm-5-2": {
+          "name": "GLM 5.2",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "claude-sonnet-5": {
+          "name": "Claude Sonnet 5",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": true
+        },
+        "gpt-5.6-sol": {
+          "name": "GPT-5.6 Sol",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": true
+        },
+        "claude-opus-5": {
+          "name": "Claude Opus 5",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": true
+        },
+        "nexum-router": {
+          "name": "Nexum Router",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.5-plus": {
+          "name": "Qwen 3.5 Plus",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.5-plus-thinking": {
+          "name": "Qwen 3.5 Plus Thinking",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.6-plus": {
+          "name": "Qwen 3.6 Plus",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.6-plus-thinking": {
+          "name": "Qwen 3.6 Plus Thinking",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.7-plus": {
+          "name": "Qwen 3.7 Plus",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.7-plus-thinking": {
+          "name": "Qwen 3.7 Plus Thinking",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.6-max-preview": {
+          "name": "Qwen 3.6 Max Preview",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.6-max-preview-thinking": {
+          "name": "Qwen 3.6 Max Preview Thinking",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.7-max": {
+          "name": "Qwen 3.7 Max",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.7-max-thinking": {
+          "name": "Qwen 3.7 Max Thinking",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.8-max": {
+          "name": "Qwen 3.8 Max",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.8-max-thinking": {
+          "name": "Qwen 3.8 Max Thinking",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen-3.5-omni-plus": {
+          "name": "Qwen 3.5 Omni Plus",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": true
+        },
+        "xiaomi-mimo-2.5": {
+          "name": "Xiaomi MiMo 2.5",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": true
+        },
+        "gpt-5.5": {
+          "name": "GPT-5.5",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": true
+        },
+        "claude-opus-4-6": {
+          "name": "Claude Opus 4.6",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": true
+        },
+        "claude-opus-4-7": {
+          "name": "Claude Opus 4.7",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": true
+        },
+        "gpt-5.6-terra": {
+          "name": "GPT-5.6 Terra",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": true
+        },
+        "glm-5.3": {
+          "name": "GLM 5.3",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": false
+        },
+        "glm-5.2": {
+          "name": "GLM 5.2",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": false
+        },
+        "deepseek-v4-flash": {
+          "name": "Deepseek V4 Flash",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": false
+        },
+        "deepseek-v4-1-flash": {
+          "name": "Deepseek V4 1 Flash",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": false
+        },
+        "kimi-k2.7-code": {
+          "name": "Kimi K2.7 Code",
+          "tool_call": true,
+          "reasoning": true,
+          "attachment": false
+        },
+        "qwen3.8-flash": {
+          "name": "Qwen3.8 Flash",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "deepseek-v4-flash-0731-turbo": {
+          "name": "DeepSeek V4 Flash (0731)",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "gpt-4.1": {
+          "name": "GPT-4.1",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": true
+        },
+        "gpt-4o": {
+          "name": "GPT-4o",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": true
+        },
+        "ling-3.0-flash-vl": {
+          "name": "Ling 3.0 Flash VL",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": true
+        },
+        "space-bunny-alpha": {
+          "name": "Space Bunny Alpha",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "gemma-4-26b": {
+          "name": "Gemma 4 26B",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": true
+        },
+        "qwen-3.8-27b": {
+          "name": "Qwen 3.8 27b",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "deepseek-v4.1-flash": {
+          "name": "Deepseek v4.1 Flash",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "openai": {
+          "name": "OpenAI",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "openai-fast": {
+          "name": "OpenAI Fast",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "gpt-oss": {
+          "name": "GPT OSS",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "codestral-latest": {
+          "name": "Codestral Latest",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "meta-llama-3_3-70b-instruct": {
+          "name": "Meta Llama 3 3 70b Instruct",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen3.5-397b-a17b": {
+          "name": "Qwen3.5 397b A17b",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "mistral-small-3.2-24b-instruct-2506": {
+          "name": "Mistral Small 3.2 24b Instruct 2506",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "mistral-nemo-instruct-2407": {
+          "name": "Mistral Nemo Instruct 2407",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen3.6-27b": {
+          "name": "Qwen3.6 27b",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen3.5-9b": {
+          "name": "Qwen3.5 9b",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen2.5-vl-72b-instruct": {
+          "name": "Qwen2.5 VL 72b Instruct",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": true
+        },
+        "mistral-7b-instruct-v0.3": {
+          "name": "Mistral 7b Instruct V0.3",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "gpt-oss-20b": {
+          "name": "GPT OSS 20b",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "qwen3-coder-30b-a3b-instruct": {
+          "name": "Qwen3 Coder 30b A3b Instruct",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "poolside-laguna-xs-2.1": {
+          "name": "Poolside Laguna XS 2.1",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "stepfun-step-3.7-flash": {
+          "name": "Stepfun Step 3.7 Flash",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "nvidia-nemotron-3-nano-omni-30b-a3b-reasoning": {
+          "name": "Nvidia Nemotron 3 Nano Omni 30b A3b Reasoning",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": true
+        },
+        "nvidia-nemotron-3-super-120b-a12b": {
+          "name": "Nvidia Nemotron 3 Super 120b A12b",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "nvidia-nemotron-3-ultra-550b-a55b": {
+          "name": "Nvidia Nemotron 3 Ultra 550b A55b",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "dots-studio-dots-3-note-preview": {
+          "name": "Dots Studio Dots 3 Note Preview",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "inclusionai-ling-3.0-flash-fin": {
+          "name": "Inclusionai Ling 3.0 Flash Fin",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "liquid-lfm-2.5-2.6b": {
+          "name": "Liquid Lfm 2.5 2.6b",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "nvidia-nemotron-3.5-lightning": {
+          "name": "Nvidia Nemotron 3.5 Lightning",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        },
+        "poolside-laguna-s-2.1": {
+          "name": "Poolside Laguna S 2.1",
+          "tool_call": true,
+          "reasoning": false,
+          "attachment": false
+        }
+      }
+    }
+  }
+}

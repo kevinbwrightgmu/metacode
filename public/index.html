@@ -1,0 +1,266 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MetaCode — AI-Assisted Social Media Research</title>
+<link rel="icon" type="image/png" href="img/metacode-mark.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --mc-border: rgba(255,255,255,.12);
+    --mc-card: rgba(255,255,255,.04);
+    --mc-text: #f2f2f2;
+    --mc-text-dim: #a3a3a3;
+    --f-display: 'Space Grotesk', system-ui, sans-serif;
+    --f-body: 'Inter', system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: #0a0a0a; color: var(--mc-text);
+    font-family: var(--f-body); line-height: 1.6;
+  }
+
+  /* ── Hero ── */
+  .hero {
+    position: relative; min-height: 100vh;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    text-align: center; overflow: hidden; padding: 24px;
+    /* Static fallback matching the actual asset gradient, shown until (or if) Vanta loads */
+    background: radial-gradient(ellipse 90% 70% at 75% 72%, #7a7a7a 0%, #3f3f3f 42%, #141414 76%, #000 100%);
+  }
+  .hero-content { position: relative; z-index: 2; max-width: 720px; }
+  .hero-badge {
+    display: inline-flex; align-items: center; gap: 8px;
+    font-size: 12.5px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--mc-text-dim); border: 1px solid var(--mc-border); border-radius: 99px;
+    padding: 7px 16px 7px 14px; margin-bottom: 30px; background: rgba(0,0,0,.25);
+    backdrop-filter: blur(6px);
+  }
+  .hero-badge .dot { width: 6px; height: 6px; border-radius: 50%; background: #fff; flex-shrink: 0; }
+  .hero img.wordmark { width: min(88vw, 600px); height: auto; display: block; margin: 0 auto 22px; }
+  .hero-tagline {
+    font-size: clamp(15px, 2vw, 18.5px); color: var(--mc-text-dim);
+    margin: 0 auto 38px; max-width: 560px; font-weight: 400;
+  }
+
+  .cta {
+    display: inline-flex; align-items: center; gap: 9px;
+    background: #ffffff; color: #0a0a0a; font-family: var(--f-display);
+    font-weight: 600; font-size: 15px; padding: 15px 28px; border-radius: 11px;
+    text-decoration: none; transition: transform .15s ease, box-shadow .15s ease;
+    box-shadow: 0 10px 34px rgba(255,255,255,.14);
+  }
+  .cta:hover { transform: translateY(-2px); box-shadow: 0 14px 40px rgba(255,255,255,.2); }
+  .cta svg { transition: transform .15s ease; }
+  .cta:hover svg { transform: translateX(3px); }
+  .cta-sub { margin-top: 16px; font-size: 12.5px; color: var(--mc-text-dim); }
+
+  .scroll-hint {
+    position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%);
+    z-index: 2; color: var(--mc-text-dim); font-size: 11.5px;
+    display: flex; flex-direction: column; align-items: center; gap: 7px;
+    animation: bob 2.4s ease-in-out infinite;
+  }
+  @keyframes bob { 0%, 100% { transform: translate(-50%,0); } 50% { transform: translate(-50%,7px); } }
+
+  /* ── Sections ── */
+  section { padding: 96px 24px 20px; max-width: 1080px; margin: 0 auto; }
+  .section-eyebrow {
+    font-size: 12px; font-weight: 700; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--mc-text-dim); margin-bottom: 14px;
+  }
+  h2 { font-family: var(--f-display); font-size: clamp(25px,3.2vw,36px); font-weight: 700; line-height: 1.22; margin-bottom: 18px; }
+  .lead { font-size: 16.5px; color: var(--mc-text-dim); max-width: 660px; margin-bottom: 14px; }
+
+  .feature-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 18px; margin-top: 46px; }
+  .feature-card {
+    background: var(--mc-card); border: 1px solid var(--mc-border); border-radius: 16px;
+    padding: 26px 22px; transition: border-color .2s ease, transform .2s ease;
+  }
+  .feature-card:hover { border-color: rgba(255,255,255,.3); transform: translateY(-3px); }
+  .feature-icon {
+    width: 40px; height: 40px; border-radius: 10px; background: rgba(255,255,255,.08);
+    display: flex; align-items: center; justify-content: center; margin-bottom: 15px;
+  }
+  .feature-icon svg { width: 20px; height: 20px; stroke: #fff; }
+  .feature-title { font-family: var(--f-display); font-weight: 600; font-size: 15.5px; margin-bottom: 7px; }
+  .feature-desc { font-size: 13.5px; color: var(--mc-text-dim); line-height: 1.55; }
+
+  .workflow { display: grid; grid-template-columns: repeat(4,1fr); gap: 18px; margin-top: 44px; }
+  .workflow-num { font-family: var(--f-display); font-size: 32px; font-weight: 700; color: rgba(255,255,255,.18); margin-bottom: 8px; }
+  .workflow-title { font-weight: 600; font-size: 14.5px; margin-bottom: 6px; }
+  .workflow-desc { font-size: 13px; color: var(--mc-text-dim); line-height: 1.55; }
+
+  .final-cta { text-align: center; padding: 104px 24px 40px; }
+  .final-cta .lead { margin-inline: auto; }
+
+  footer {
+    border-top: 1px solid var(--mc-border); margin-top: 60px; padding: 26px 24px;
+    display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+    max-width: 1080px; margin-inline: auto; font-size: 12.5px; color: var(--mc-text-dim);
+  }
+  footer .foot-brand { display: flex; align-items: center; gap: 10px; }
+  footer img { height: 22px; width: 22px; border-radius: 6px; }
+
+  @media (max-width: 840px) {
+    .feature-grid { grid-template-columns: 1fr 1fr; }
+    .workflow { grid-template-columns: 1fr 1fr; }
+  }
+  @media (max-width: 540px) {
+    .feature-grid { grid-template-columns: 1fr; }
+    .workflow { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<div id="vanta-hero" class="hero">
+  <div class="hero-content">
+    <div class="hero-badge"><span class="dot"></span> AI-Assisted Social Media Research</div>
+    <img class="wordmark" src="img/metacode-wordmark-transparent.png" alt="MetaCode">
+    <p class="hero-tagline">Code social media content with AI, check it against your own human coders, and map the network behind the conversation — one tool, built for researchers.</p>
+    <a class="cta" href="app.html">
+      Launch MetaCode
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+    </a>
+    <div class="cta-sub">Runs on your own machine · Free Groq tier supported · No account required</div>
+  </div>
+  <div class="scroll-hint">
+    <span>Scroll to learn more</span>
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+  </div>
+</div>
+
+<section id="about">
+  <div class="section-eyebrow">What it is</div>
+  <h2>An AI research assistant for social media content.</h2>
+  <p class="lead">MetaCode is built for coding social media discussion, comment threads, or discourse data for research — auto-coding posts with AI, validating that AI against your own human coders with real intercoder reliability statistics, and mapping the social network structure underneath it all.</p>
+  <p class="lead">It runs on your own machine. Bring a free Groq key or an Anthropic key, point it at your own CSV data, and MetaCode handles the coding pipeline, the reliability math, and the network analysis — so you can focus on what the data actually says.</p>
+</section>
+
+<section id="features">
+  <div class="section-eyebrow">Inside MetaCode</div>
+  <h2>Everything a coding pipeline needs, in one place.</h2>
+  <div class="feature-grid">
+
+    <div class="feature-card">
+      <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
+      <div class="feature-title">AI Auto-Coding</div>
+      <div class="feature-desc">Apply your codebook to thousands of posts automatically, with a confidence score and a written reason for every code the AI assigns.</div>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg></div>
+      <div class="feature-title">Human–AI Reliability</div>
+      <div class="feature-desc">Cohen's Kappa, Krippendorff's Alpha, percent agreement, and confusion matrices — computed automatically once you've dual-coded a sample.</div>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg></div>
+      <div class="feature-title">Custom Codebooks</div>
+      <div class="feature-desc">Define your own coding dimensions and codes, plus AI fine-tuning notes on any code that the model reads but human coders never see.</div>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/></svg></div>
+      <div class="feature-title">Social Network Analysis</div>
+      <div class="feature-desc">Real Python NetworkX under the hood — degree, betweenness, closeness and eigenvector centrality, community detection, not a JS approximation.</div>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg></div>
+      <div class="feature-title">Smart CSV Import</div>
+      <div class="feature-desc">Works with whatever columns your export already has. When the structure isn't obvious, AI reads the header and sample rows and maps it for you.</div>
+    </div>
+
+    <div class="feature-card">
+      <div class="feature-icon"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg></div>
+      <div class="feature-title">Multi-Provider & Key Rotation</div>
+      <div class="feature-desc">Free Groq tier or Anthropic — configure more than one key and requests automatically retry on the next one if a limit is hit.</div>
+    </div>
+
+  </div>
+</section>
+
+<section id="workflow">
+  <div class="section-eyebrow">How it works</div>
+  <h2>From raw CSV to validated results.</h2>
+  <div class="workflow">
+
+    <div class="workflow-step">
+      <div class="workflow-num">01</div>
+      <div class="workflow-title">Import your data</div>
+      <div class="workflow-desc">Posts, engagement metrics, or a relationship CSV — any column layout works.</div>
+    </div>
+
+    <div class="workflow-step">
+      <div class="workflow-num">02</div>
+      <div class="workflow-title">Build a codebook</div>
+      <div class="workflow-desc">Define your dimensions and codes, with optional notes the AI reads for accuracy.</div>
+    </div>
+
+    <div class="workflow-step">
+      <div class="workflow-num">03</div>
+      <div class="workflow-title">Code with AI & humans</div>
+      <div class="workflow-desc">Run AI auto-coding, then dual-code a sample yourself for comparison.</div>
+    </div>
+
+    <div class="workflow-step">
+      <div class="workflow-num">04</div>
+      <div class="workflow-title">Validate & explore</div>
+      <div class="workflow-desc">Check reliability statistics, then map the network structure in your data.</div>
+    </div>
+
+  </div>
+</section>
+
+<div class="final-cta">
+  <h2>Ready to start coding?</h2>
+  <p class="lead">No signup. No cloud dependency. Just your data, your codebook, and your choice of AI provider.</p>
+  <a class="cta" href="app.html" style="margin-top:10px">
+    Launch MetaCode
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+  </a>
+</div>
+
+<footer>
+  <div class="foot-brand">
+    <img src="img/metacode-mark.png" alt="MetaCode">
+    <span>MetaCode — a self-hosted research tool</span>
+  </div>
+  <span>Runs locally with Node.js + Python</span>
+</footer>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/vanta@latest/dist/vanta.fog.min.js"></script>
+<script>
+  if (window.VANTA && window.VANTA.FOG) {
+    try {
+      VANTA.FOG({
+        el: "#vanta-hero",
+        mouseControls: true,
+        touchControls: true,
+        gyroControls: false,
+        minHeight: 200.00,
+        minWidth: 200.00,
+        highlightColor: 0xffffff,
+        midtoneColor: 0x5f5f5f,
+        lowlightColor: 0x2f2f2f,
+        baseColor: 0x0,
+        blurFactor: 0.63,
+        speed: 5.00,
+        zoom: 0.50
+      });
+    } catch (e) {
+      // Three.js/Vanta failed to init (e.g. no WebGL, or the CDN was
+      // unreachable) — the CSS gradient on .hero already approximates the
+      // same look, so the page still looks intentional either way.
+      console.warn('Vanta fog background unavailable, using static fallback:', e);
+    }
+  }
+</script>
+</body>
+</html>

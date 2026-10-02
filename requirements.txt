@@ -1,0 +1,8 @@
+# Python dependencies for the NetworkX-powered "Analyze CSV" feature.
+# Install with:  pip install -r requirements.txt
+# (or: pip3 install -r requirements.txt, depending on your system)
+#
+# Node/Express handles everything else — this is the only Python
+# dependency the app needs.
+
+networkx>=3.0
