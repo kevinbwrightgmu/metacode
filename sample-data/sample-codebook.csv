@@ -1,0 +1,15 @@
+dimension_name,dimension_description,code_id,code_label,code_description
+Sentiment,The overall emotional valence of the post,pos,Positive,Expresses optimism or positive emotions about the topic
+Sentiment,The overall emotional valence of the post,neg,Negative,Expresses pessimism or negative emotions about the topic
+Sentiment,The overall emotional valence of the post,neutral,Neutral/Mixed,Factual or balanced tone with no clear emotional valence
+Policy Stance,The author's position toward the discussed policy,support,Support,Clearly favors the policy or advocates for action
+Policy Stance,The author's position toward the discussed policy,oppose,Oppose,Clearly opposes the policy or advocates against action
+Policy Stance,The author's position toward the discussed policy,neutral,Neutral,Does not clearly support or oppose; deliberative or informational
+Incivility,Presence of uncivil discourse elements,none,None,No incivility present; polite and constructive
+Incivility,Presence of uncivil discourse elements,mild,Mild,Some negativity toward others but not overtly hostile
+Incivility,Presence of uncivil discourse elements,high,High,Clearly hostile or derogatory language toward other users
+Primary Topic,The main subject matter of the post,policy,Policy Details,Discusses specific provisions or legislative details
+Primary Topic,The main subject matter of the post,econ,Economic Impact,Focuses on jobs costs or economic consequences
+Primary Topic,The main subject matter of the post,science,Science/Evidence,References scientific findings or expert opinion
+Primary Topic,The main subject matter of the post,social,Social/Human Impact,Focuses on communities workers or lived experiences
+Primary Topic,The main subject matter of the post,other,Other,Does not fit the categories above

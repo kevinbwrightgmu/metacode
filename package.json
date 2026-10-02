@@ -1,0 +1,29 @@
+{
+  "name": "metacode",
+  "version": "1.0.0",
+  "description": "AI-assisted social media content analysis and intercoder reliability platform for researchers",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "npx nodemon server.js",
+    "test": "node --test --test-force-exit \"test/**/*.test.js\"",
+    "test:unit": "node --test --test-force-exit test/targets.test.js test/format-export.test.js test/network.test.js test/jobs.test.js test/sandbox.test.js"
+  },
+  "dependencies": {
+    "@mercuryworkshop/epoxy-tls": "2.1.19-1",
+    "@mercuryworkshop/epoxy-transport": "3.0.1",
+    "@mercuryworkshop/scramjet": "2.0.67-alpha.2",
+    "@mercuryworkshop/scramjet-controller": "0.0.14",
+    "@mercuryworkshop/wisp-js": "0.5.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1",
+    "express": "^4.18.2",
+    "quickjs-emscripten": "^0.32.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.63.0"
+  }
+}

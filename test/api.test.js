@@ -1,0 +1,279 @@
+// Integration tests: HTTP API → job manager → Reddit HTTP client → epoxy-tls
+// → MetaCode's Wisp endpoint → (mock) Reddit, all real except Reddit itself.
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const { createMockReddit } = require('./helpers/mock-reddit');
+const { startScraperApp, postJson, getJson, readEvents, waitForJob } = require('./helpers/harness');
+const { sandboxSupported } = require('../scraper/sandbox/custom-runner');
+const { configureWisp } = require('../scraper/network/wisp-server');
+
+let mock, app, base;
+
+test.before(async () => {
+  mock = createMockReddit();
+  base = await mock.listen();
+  app = await startScraperApp({ REDDIT_BASE_URL: base });
+});
+test.after(async () => {
+  await app.close();
+  await mock.close();
+});
+
+const start = (body) => postJson(app.api + '/jobs', body);
+
+test('status endpoint reports mode, transport and limits without secrets', async () => {
+  const { status, json } = await getJson(app.api + '/status');
+  assert.equal(status, 200);
+  assert.equal(json.enabled, true);
+  assert.equal(json.mode, 'public');
+  assert.equal(json.transport.name, 'epoxy-tls over Wisp');
+  assert.equal(json.transport.wispPath, '/wisp/');
+  assert.ok(json.allowedHosts.includes('www.reddit.com'));
+  assert.ok(json.limits.maxItems > 0);
+  assert.ok(!JSON.stringify(json).includes('secret'));
+});
+
+test('target resolve endpoint validates Reddit URLs', async () => {
+  const ok = await postJson(app.api + '/resolve', { target: { type: 'url', url: 'https://www.reddit.com/r/science/comments/abc123/x/' } });
+  assert.equal(ok.status, 200);
+  assert.equal(ok.json.target.type, 'post');
+  const bad = await postJson(app.api + '/resolve', { target: { type: 'url', url: 'https://example.com/r/science' } });
+  assert.equal(bad.status, 400);
+  assert.equal(bad.json.error.type, 'invalid_target');
+});
+
+test('job creation validates input', async () => {
+  let r = await start({ target: { type: 'subreddit', subreddit: 'bad name' } });
+  assert.equal(r.status, 400);
+  assert.match(r.json.error.message, /valid subreddit name/);
+  r = await start({ mode: 'robot', target: {} });
+  assert.equal(r.status, 400);
+  r = await start({ mode: 'custom', code: '' });
+  assert.equal(r.status, sandboxSupported().ok ? 400 : 503);
+  r = await fetch(app.api + '/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{not json' });
+  assert.ok(r.status >= 400);
+  r = await getJson(app.api + '/jobs/does-not-exist');
+  assert.equal(r.status, 404);
+});
+
+test('successful scrape: 202, SSE progress, completed status, results and exports', async () => {
+  const r = await start({ target: { type: 'subreddit', subreddit: 'test', sort: 'new' }, options: { maxItems: 150, maxPages: 3 } });
+  assert.equal(r.status, 202);
+  const id = r.json.job.id;
+  assert.ok(['queued', 'running'].includes(r.json.job.status));
+
+  const events = await readEvents(app.api + '/jobs/' + id + '/events', 30000);
+  assert.equal(events[0].event, 'snapshot');
+  const statuses = events.filter(e => e.event === 'status').map(e => e.data.status);
+  assert.equal(statuses[statuses.length - 1], 'completed');
+  assert.ok(events.some(e => e.event === 'progress'), 'progress events');
+  assert.ok(events.some(e => e.event === 'records'), 'records events');
+  assert.ok(events.some(e => e.event === 'log'), 'log events');
+
+  const job = (await getJson(app.api + '/jobs/' + id)).json.job;
+  assert.equal(job.status, 'completed');
+  assert.equal(job.itemCount, 150);
+  assert.equal(job.progress.pagesFetched, 2);
+  assert.ok(job.progress.requests >= 3);
+  assert.equal(job.meta.subreddit.name, 'test');
+  assert.ok(job.durationMs >= 0);
+
+  const page = (await getJson(app.api + '/jobs/' + id + '/results?offset=100&limit=10')).json;
+  assert.equal(page.total, 150);
+  assert.equal(page.records.length, 10);
+  assert.equal(page.records[0].record_type, 'post');
+  assert.match(page.records[0].permalink, /^https:\/\/www\.reddit\.com\/r\/test\/comments\//);
+
+  // Reddit saw our User-Agent and polite query parameters.
+  const listingReq = mock.state.requests.find(q => q.path === '/r/test/new.json');
+  assert.equal(listingReq.headers['user-agent'], app.config.userAgent);
+  assert.equal(listingReq.query.raw_json, '1');
+
+  const csv = await fetch(app.api + '/jobs/' + id + '/export?format=csv');
+  assert.equal(csv.status, 200);
+  assert.match(csv.headers.get('content-type'), /text\/csv/);
+  assert.match(csv.headers.get('content-disposition'), /attachment; filename="reddit_test_[0-9a-f]{8}\.csv"/);
+  const text = await csv.text();
+  assert.equal(text.trim().split('\r\n').length, 151);
+  const jsonExport = await (await fetch(app.api + '/jobs/' + id + '/export?format=json')).json();
+  assert.equal(jsonExport.count, 150);
+  const nd = await (await fetch(app.api + '/jobs/' + id + '/export?format=ndjson')).text();
+  assert.equal(nd.trim().split('\n').length, 150);
+  const badFormat = await fetch(app.api + '/jobs/' + id + '/export?format=xml');
+  assert.equal(badFormat.status, 400);
+});
+
+test('post target: post plus flattened comments; nested JSON export', async () => {
+  const r = await start({ target: { type: 'post', postId: 'https://www.reddit.com/r/test/comments/abc123/title/' } });
+  const job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'completed');
+  const { records } = (await getJson(app.api + '/jobs/' + job.id + '/results')).json;
+  assert.deepEqual(records.map(x => x.record_type), ['post', 'comment', 'comment', 'comment']);
+  assert.equal(records[2].parent_type, 'comment');
+  assert.ok(job.logs.some(l => /7 more comment/.test(l.message)));
+  const nested = await (await fetch(app.api + '/jobs/' + job.id + '/export?format=json&nested=1')).json();
+  assert.equal(nested.records[0].comments.length, 3);
+});
+
+test('listing with comments for the first posts', async () => {
+  const r = await start({ target: { type: 'subreddit', subreddit: 'small' }, options: { includeComments: true, commentPosts: 2 } });
+  const job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'completed');
+  const { records } = (await getJson(app.api + '/jobs/' + job.id + '/results?type=comment')).json;
+  assert.ok(records.length >= 3);
+});
+
+test('empty results complete with a warning', async () => {
+  const r = await start({ target: { type: 'subreddit', subreddit: 'empty' } });
+  const job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'completed');
+  assert.equal(job.itemCount, 0);
+  assert.equal(job.meta.empty, true);
+  assert.ok(job.logs.some(l => l.level === 'warn' && /without results/.test(l.message)));
+});
+
+test('Reddit errors fail the job with understandable messages', async () => {
+  const cases = [
+    ['missing', 'not_found', /doesn't exist/],
+    ['private', 'forbidden', /private/],
+    ['htmlblock', 'parse_error', /web page instead of data/]
+  ];
+  for (const [sub, type, pattern] of cases) {
+    const r = await start({ target: { type: 'subreddit', subreddit: sub }, options: { includeMetadata: false } });
+    const job = await waitForJob(app.api, r.json.job.id);
+    assert.equal(job.status, 'failed', sub);
+    assert.equal(job.error.type, type, sub);
+    assert.match(job.error.message, pattern, sub);
+  }
+});
+
+test('rate limiting: Reddit 429 is waited out and retried', async () => {
+  mock.state.rateLimitRemaining['/r/ratelimited'] = 1;
+  const r = await start({ target: { type: 'subreddit', subreddit: 'ratelimited', sort: 'new' }, options: { maxItems: 5, includeMetadata: false } });
+  const job = await waitForJob(app.api, r.json.job.id, 20000);
+  assert.equal(job.status, 'completed', JSON.stringify(job.error));
+  assert.equal(job.itemCount, 5);
+  assert.ok(job.logs.some(l => /HTTP 429/.test(l.message)));
+  const hits = mock.state.requests.filter(q => q.path === '/r/ratelimited/new.json');
+  assert.equal(hits.length, 2);
+  assert.ok(hits[1].at - hits[0].at >= 900, 'waited for Retry-After: 1');
+});
+
+test('server-side delay between requests is enforced', async () => {
+  const r = await start({ target: { type: 'subreddit', subreddit: 'spaced', sort: 'new' }, options: { maxItems: 300, maxPages: 3, delayMs: 300, includeMetadata: false } });
+  const job = await waitForJob(app.api, r.json.job.id, 20000);
+  assert.equal(job.status, 'completed');
+  const hits = mock.state.requests.filter(q => q.path === '/r/spaced/new.json');
+  assert.equal(hits.length, 3);
+  for (let i = 1; i < hits.length; i++) assert.ok(hits[i].at - hits[i - 1].at >= 280, 'gap ' + (hits[i].at - hits[i - 1].at));
+});
+
+test('robots.txt disallow stops the job before any page is fetched', async () => {
+  const blocked = await startScraperApp({ REDDIT_BASE_URL: base });
+  const prev = mock.state.robots;
+  mock.state.robots = 'User-agent: *\nDisallow: /r/\n';
+  try {
+    const before = mock.state.requests.length;
+    const r = await postJson(blocked.api + '/jobs', { target: { type: 'subreddit', subreddit: 'test' }, options: { includeMetadata: false } });
+    const job = await waitForJob(blocked.api, r.json.job.id);
+    assert.equal(job.status, 'failed');
+    assert.equal(job.error.type, 'robots_disallowed');
+    const sent = mock.state.requests.slice(before).map(q => q.path);
+    assert.deepEqual(sent, ['/robots.txt']);
+  } finally {
+    mock.state.robots = prev;
+    await blocked.close();
+    configureWisp(app.config);     // wisp-js options are process-wide
+  }
+});
+
+test('network error: an unreachable Reddit fails the job after retries', async () => {
+  const dead = await startScraperApp({ REDDIT_BASE_URL: 'http://localhost:1', SCRAPER_RESPECT_ROBOTS_TXT: 'false', SCRAPER_REQUEST_TIMEOUT_MS: '3000' });
+  try {
+    const r = await postJson(dead.api + '/jobs', { target: { type: 'subreddit', subreddit: 'test' }, options: { retries: 0, includeMetadata: false } });
+    const job = await waitForJob(dead.api, r.json.job.id, 20000);
+    assert.equal(job.status, 'failed');
+    assert.ok(['network', 'proxy_blocked', 'timeout'].includes(job.error.type), job.error.type);
+    assert.ok(!/localhost:1/.test(job.error.message), 'no internal address in the message');
+  } finally {
+    await dead.close();
+    configureWisp(app.config);
+  }
+});
+
+test('cancellation of a running job keeps partial results', async () => {
+  const r = await start({ target: { type: 'subreddit', subreddit: 'slowsub', sort: 'new' }, options: { maxItems: 500, maxPages: 5, delayMs: 1500, includeMetadata: false } });
+  const id = r.json.job.id;
+  const deadline = Date.now() + 10000;
+  while ((await getJson(app.api + '/jobs/' + id)).json.job.itemCount === 0 && Date.now() < deadline) await new Promise(res => setTimeout(res, 50));
+  const c = await postJson(app.api + '/jobs/' + id + '/cancel', {});
+  assert.equal(c.status, 200);
+  const job = await waitForJob(app.api, id);
+  assert.equal(job.status, 'cancelled');
+  assert.ok(job.itemCount > 0 && job.itemCount < 500);
+  const again = await postJson(app.api + '/jobs/' + id + '/cancel', {});
+  assert.equal(again.status, 409);
+  const del = await fetch(app.api + '/jobs/' + id, { method: 'DELETE' });
+  assert.equal(del.status, 200);
+  assert.equal((await getJson(app.api + '/jobs/' + id)).status, 404);
+});
+
+test('custom code job runs in the sandbox through the API', { skip: !sandboxSupported().ok }, async () => {
+  const code = `
+    async function scrape(ctx) {
+      const { items } = await ctx.reddit.listing('/r/' + ctx.params.sub + '/new', { maxPages: 1, maxItems: 7 });
+      ctx.log.info('got ' + items.length);
+      return items.map(p => ({ id: p.post_id, title: p.title.toUpperCase() }));
+    }`;
+  const r = await start({ mode: 'custom', code, params: { sub: 'test' }, options: { maxItems: 50 } });
+  assert.equal(r.status, 202);
+  const job = await waitForJob(app.api, r.json.job.id, 30000);
+  assert.equal(job.status, 'completed', JSON.stringify(job.error));
+  assert.equal(job.itemCount, 7);
+  assert.ok(job.logs.some(l => l.message === '[code] got 7'));
+  const { records } = (await getJson(app.api + '/jobs/' + job.id + '/results')).json;
+  assert.equal(records[0].title, 'POST 0 IN TEST');
+
+  const fail = await start({ mode: 'custom', code: 'async function scrape(ctx) { await ctx.fetch("https://example.com/") }' });
+  const failed = await waitForJob(app.api, fail.json.job.id, 30000);
+  assert.equal(failed.status, 'failed');
+  assert.equal(failed.error.type, 'host_not_allowed');
+});
+
+test('same-origin protection for state-changing requests', async () => {
+  const r = await postJson(app.api + '/jobs', { target: { type: 'subreddit', subreddit: 'test' } }, { origin: 'https://evil.example' });
+  assert.equal(r.status, 403);
+  assert.equal(r.json.error.type, 'forbidden_origin');
+});
+
+test('Wisp endpoint: refuses foreign origins and wrong paths; blocks non-Reddit hosts', async () => {
+  const upgrade = (path, origin) => new Promise(resolve => {
+    const http = require('http');
+    const req = http.request({ host: '127.0.0.1', port: app.port, path, headers: Object.assign({
+      Connection: 'Upgrade', Upgrade: 'websocket', 'Sec-WebSocket-Version': '13', 'Sec-WebSocket-Key': 'dGhlIHNhbXBsZSBub25jZQ==' }, origin ? { Origin: origin } : {}) });
+    req.on('upgrade', res => { res.socket.destroy(); resolve(101); });
+    req.on('response', res => resolve(res.statusCode));
+    req.on('error', () => resolve('error'));
+    req.end();
+  });
+  assert.equal(await upgrade('/wisp/', 'https://evil.example'), 403);
+  assert.equal(await upgrade('/wisp/example.com:80', null), 404);
+  assert.equal(await upgrade('/wisp/?x=1', null), 404);
+  assert.equal(await upgrade('/wisp/', 'http://127.0.0.1:' + app.port), 101);
+
+  // A Wisp client may only open streams to allow-listed hosts.
+  const { EpoxyWispTransport } = require('../scraper/network/epoxy-transport');
+  const t = new EpoxyWispTransport({ getWispUrl: () => 'ws://127.0.0.1:' + app.port + '/wisp/', userAgent: 'test' });
+  await assert.rejects(t.request({ url: 'https://example.com/', timeoutMs: 8000 }), err => ['proxy_blocked', 'network', 'timeout'].includes(err.type));
+});
+
+test('Scramjet browser files are served with the right types', async () => {
+  for (const [file, type] of [['scramjet.js', /javascript/], ['scramjet.wasm', /application\/wasm/], ['controller.sw.js', /javascript/], ['epoxy-transport.js', /javascript/]]) {
+    const res = await fetch(app.url + '/scramjet/' + file);
+    assert.equal(res.status, 200, file);
+    assert.match(res.headers.get('content-type'), type, file);
+    await res.arrayBuffer();
+  }
+  assert.equal((await fetch(app.url + '/scramjet/package.json')).status, 404);
+  assert.equal((await fetch(app.url + '/scramjet/..%2f..%2fserver.js')).status, 404);
+});
