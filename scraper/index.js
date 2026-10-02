@@ -32,6 +32,7 @@ const { normalizeTarget, normalizeOptions } = require('./reddit/targets');
 const { runStandardScrape } = require('./reddit/standard-scraper');
 const { JobManager, FINISHED } = require('./jobs/job-manager');
 const { createCustomRunner, sandboxSupported, validateCode } = require('./sandbox/custom-runner');
+const PYODIDE_VERSION = (() => { try { return require('pyodide/package.json').version; } catch (e) { return 'not installed'; } })();
 const exporter = require('./export');
 
 const SCRAMJET_FILES = {
@@ -147,7 +148,8 @@ function createScraper(opts) {
   jobs.on('removed', job => relay.cancelJob(job.id));
 
   function status() {
-    const sandbox = sandboxSupported();
+    const sandbox = sandboxSupported('javascript');
+    const pySandbox = sandboxSupported('python');
     const floor = http.mode === 'oauth' ? config.minDelayMs : Math.max(config.minDelayMs, config.publicMinDelayMs);
     return {
       enabled: config.enabled,
@@ -172,11 +174,17 @@ function createScraper(opts) {
       allowedHosts: config.apiHosts,
       customCode: {
         enabled: config.customCodeEnabled,
-        available: config.customCodeEnabled && sandbox.ok,
+        available: config.customCodeEnabled && (sandbox.ok || pySandbox.ok),
         reason: !config.customCodeEnabled ? 'Custom code is turned off (SCRAPER_CUSTOM_CODE_ENABLED=false).' : (sandbox.ok ? null : sandbox.reason),
         timeoutMs: config.customTimeoutMs,
         memoryMb: config.customMemoryMb,
-        languages: ['javascript', 'typescript']
+        languages: (pySandbox.ok ? ['python'] : []).concat(sandbox.ok ? ['javascript', 'typescript'] : []),
+        python: {
+          available: config.customCodeEnabled && pySandbox.ok,
+          reason: pySandbox.ok ? null : pySandbox.reason,
+          memoryMb: config.customPythonMemoryMb,
+          runtime: 'Pyodide ' + PYODIDE_VERSION + ' (CPython in WebAssembly)'
+        }
       },
       browser: { enabled: config.enabled && config.browserEnabled },
       // Where a job's Reddit requests are made: "browser" = an open MetaCode tab
@@ -247,10 +255,10 @@ function createScraper(opts) {
       return Object.assign({ mode, target, options, capacity: capacityFor(target, options) }, engineSpec);
     }
     if (!config.customCodeEnabled) throw new ScraperError('not_available', 'Custom code is turned off on this server (SCRAPER_CUSTOM_CODE_ENABLED=false).', { status: 403 });
-    const support = sandboxSupported();
-    if (!support.ok) throw new ScraperError('not_available', support.reason, { status: 503 });
-    const language = body.language === 'typescript' ? 'typescript' : (body.language === undefined || body.language === 'javascript' ? 'javascript' : body.language);
+    const language = body.language === undefined || body.language === null || body.language === '' ? 'javascript' : body.language;
     validateCode(body.code, language);
+    const support = sandboxSupported(language);
+    if (!support.ok) throw new ScraperError('not_available', support.reason, { status: 503 });
     let target = null;
     const t = body.target;
     const hasTarget = t && typeof t === 'object' && Object.keys(t).some(k => k !== 'type' && t[k] !== '' && t[k] !== null && t[k] !== undefined);
