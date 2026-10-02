@@ -289,7 +289,8 @@ Configuration lives only in the server's `.env` file:
 | `EMIS_MODELS_FILE` | no | Model list file, default `emis-models.json` in the MetaCode folder |
 | `EMIS_TIMEOUT_MS` | no | How long to wait for EMIS (default 120000 ms) |
 
-Restart MetaCode (`npm start`) after changing `.env`.
+Restart MetaCode (`npm start`) after changing `.env`. The file must be named exactly `.env` and sit next to `server.js`; it is read from there even when the
+server is started from another folder, and the startup banner prints which file it loaded.
 
 - **Models.** The model list comes from `emis-models.json` — EMIS's models in OpenCode's config format
   (`provider.emis.models`: id → name, `tool_call`, `reasoning`, `attachment`). To update it, edit the file or

@@ -97,7 +97,8 @@ function loadScraperConfig(env) {
 
   // Optional third-party engine: redditapis.com (pay-per-call Reddit data API).
   c.redditApisBaseUrl = baseUrl(env, 'REDDITAPIS_BASE_URL', 'https://api.redditapis.com', warnings);
-  const rapiKey = String(env.REDDITAPIS_KEY || env.REDDIT_APIS_KEY || '').trim();
+  // Accept the key as copied from a curl example ("Bearer …") too.
+  const rapiKey = String(env.REDDITAPIS_KEY || env.REDDIT_APIS_KEY || '').trim().replace(/^bearer\s+/i, '').trim();
   c.redditApisKey = null;
   if (rapiKey) {
     if (/^[\x21-\x7E]{8,512}$/.test(rapiKey)) c.redditApisKey = rapiKey;
