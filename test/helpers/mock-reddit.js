@@ -114,7 +114,12 @@ function createMockReddit(opts) {
     if ((m = p.match(/^\/r\/([^/]+)\/(hot|new|top|rising|controversial)$/)) || (m = p.match(/^\/r\/([^/]+)\/search$/)) || p === '/search' || p === '/hot' || p === '/new') {
       const sub = m ? m[1] : 'all';
       if (sub === 'missing') return send(res, 302, '', { location: '/subreddits/search.json?q=missing' });
-      if (sub === 'private') return send(res, 403, { reason: 'private', error: 403 });
+      if (sub === 'private') return send(res, 403, { reason: 'private', message: 'Forbidden', error: 403 });
+      if (sub === 'quarantinedsub') return send(res, 403, { reason: 'quarantined', message: 'Forbidden', error: 403 });
+      if (sub === 'netblock' && !/^bearer /.test(String(req.headers.authorization || ''))) {
+        res.writeHead(403, { 'content-type': 'text/html; charset=utf-8' });
+        return res.end('<!doctype html><html><body>You\'ve been blocked by network security.</body></html>');
+      }
       if (sub === 'htmlblock') { res.writeHead(200, { 'content-type': 'text/html' }); return res.end('<html><body>whoa there, pardner!</body></html>'); }
       if (sub === 'empty') return send(res, 200, listing([], null));
       const total = sub === 'small' ? 3 : state.postsPerSub;

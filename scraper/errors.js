@@ -65,11 +65,42 @@ function classifyTransportError(err) {
   return new ScraperError('network', 'The request to Reddit failed.', { status: 502, retryable: true, detail });
 }
 
-// Reddit's HTTP answer → ScraperError (for non-2xx statuses).
-function httpError(status, context) {
+// Reddit's HTTP answer → ScraperError (for non-2xx statuses). `res` (optional)
+// is the response ({ headers, body }): Reddit explains many refusals in the
+// body — {"reason": "private" | "quarantined" | "gold_only" | "banned"} — while
+// a refusal of logged-out traffic as a whole comes back as an HTML block page.
+const NETWORK_BLOCK_MESSAGE = 'Reddit refused this request because it was made without a Reddit login or API key ' +
+  '(Reddit blocks logged-out access from many networks). This isn\'t about the subreddit itself. ' +
+  'Fix: on the Scraper page, open "Reddit API access", paste a free Reddit app\'s ID and secret, and run the job with ' +
+  '"Fetch Reddit through: MetaCode server (Reddit API)".';
+
+function redditReason(res) {
+  if (!res || typeof res.body !== 'string') return { reason: null, html: false };
+  const type = String((res.headers && res.headers['content-type']) || '');
+  const body = res.body;
+  if (/html/i.test(type) || /^\s*</.test(body)) return { reason: null, html: true };
+  try {
+    const json = JSON.parse(body);
+    if (json && typeof json.reason === 'string') return { reason: json.reason.toLowerCase(), html: false };
+  } catch (e) { /* not JSON */ }
+  return { reason: null, html: /blocked|network security/i.test(body) };
+}
+
+function httpError(status, context, res) {
   const what = context || 'Reddit';
-  if (status === 401) return new ScraperError('auth_error', what + ' requires authentication (HTTP 401). Check REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET in .env.', { status: 502, httpStatus: status });
-  if (status === 403) return new ScraperError('forbidden', what + ' refused access (HTTP 403). The subreddit or profile may be private, quarantined or banned — or Reddit is blocking unauthenticated access from this network (configure Reddit API credentials).', { status: 502, httpStatus: status });
+  const { reason, html } = redditReason(res);
+  const opts = { status: 502, httpStatus: status };
+  if (status === 401) return new ScraperError('auth_error', what + ' requires authentication (HTTP 401). Check the Reddit API keys (Scraper page → Reddit API access, or REDDIT_CLIENT_ID / REDDIT_CLIENT_SECRET in .env).', opts);
+  if (reason === 'private') return new ScraperError('forbidden_private', what + ' is private: only its approved members can read it, so it can\'t be scraped.', Object.assign(opts, { status: 403 }));
+  if (reason === 'quarantined') return new ScraperError('forbidden_quarantined', what + ' is quarantined: Reddit only shows it to logged-in accounts that have opted in, so it can\'t be scraped with API keys or logged out.', Object.assign(opts, { status: 403 }));
+  if (reason === 'gold_only') return new ScraperError('forbidden_premium', what + ' is only available to Reddit Premium members, so it can\'t be scraped.', Object.assign(opts, { status: 403 }));
+  if (reason === 'banned') return new ScraperError('not_found', what + ' has been banned by Reddit.', Object.assign(opts, { status: 404 }));
+  if (status === 403) {
+    // Reddit's refusal of logged-out traffic is an HTML block page.
+    if (html) return new ScraperError('reddit_blocked', NETWORK_BLOCK_MESSAGE, Object.assign(opts, { status: 403 }));
+    return new ScraperError('forbidden', what + ' refused access (HTTP 403' + (reason ? ', reason: ' + reason.slice(0, 40) : '') + '). ' +
+      'The subreddit or profile may be restricted, or Reddit may require a login or API key from this network (Scraper page → Reddit API access).', Object.assign(opts, { status: 403 }));
+  }
   if (status === 404) return new ScraperError('not_found', what + ' was not found (HTTP 404). Check the subreddit, user or post.', { status: 404, httpStatus: status });
   if (status === 429) return new ScraperError('rate_limited', 'Reddit is rate-limiting requests (HTTP 429). The scraper waited and retried, but the limit persisted — raise the delay between requests or try later.', { status: 429, httpStatus: status, retryable: true });
   if (status >= 500) return new ScraperError('http_error', 'Reddit had a server problem (HTTP ' + status + '). Try again later.', { status: 502, httpStatus: status, retryable: true });

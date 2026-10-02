@@ -221,7 +221,7 @@ async function run(start) {
 
 // Host errors the user's code didn't catch (e.g. robots.txt refusal, rate
 // limit, cancelled) keep their own type and message.
-const HOST_TYPES = /^(cancelled|timeout|network|tls|proxy_blocked|proxy_error|http_error|not_found|forbidden|rate_limited|robots_disallowed|robots_unavailable|auth_error|invalid_url|host_not_allowed|invalid_request|too_large|parse_error)$/;
+const HOST_TYPES = /^(cancelled|browser_unavailable|reddit_blocked|forbidden_private|forbidden_quarantined|forbidden_premium|timeout|network|tls|proxy_blocked|proxy_error|http_error|not_found|forbidden|rate_limited|robots_disallowed|robots_unavailable|auth_error|invalid_url|host_not_allowed|invalid_request|too_large|parse_error)$/;
 
 function classifyGuestError(e) {
   if (e.hostType && HOST_TYPES.test(e.hostType)) return { type: e.hostType, message: e.message, fromHost: true };

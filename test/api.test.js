@@ -135,7 +135,9 @@ test('empty results complete with a warning', async () => {
 test('Reddit errors fail the job with understandable messages', async () => {
   const cases = [
     ['missing', 'not_found', /doesn't exist/],
-    ['private', 'forbidden', /private/],
+    ['private', 'forbidden_private', /is private/],
+    ['quarantinedsub', 'forbidden_quarantined', /quarantined/],
+    ['netblock', 'reddit_blocked', /without a Reddit login or API key/],
     ['htmlblock', 'parse_error', /web page instead of data/]
   ];
   for (const [sub, type, pattern] of cases) {
@@ -367,6 +369,84 @@ test('browser engine: with no MetaCode tab open the job fails with a clear messa
     assert.match(job.error.message, /Keep MetaCode open/);
   } finally {
     await lonely.close();
+    configureWisp(app.config);
+  }
+});
+
+test('Reddit API access: keys are checked, saved (mode 600, never echoed) and fix the logged-out block', async () => {
+  const fs = require('fs');
+  const os = require('os');
+  const path = require('path');
+  const apiMock = createMockReddit({ requireToken: true });     // stands in for oauth.reddit.com
+  const apiBase = await apiMock.listen();
+  const file = path.join(os.tmpdir(), 'metacode-cred-test-' + process.pid + '-' + Date.now() + '.json');
+  const env = { REDDIT_BASE_URL: base, REDDIT_OAUTH_BASE_URL: apiBase };
+  let a = await startScraperApp(env, { credentialsFile: file });
+  try {
+    let st = (await getJson(a.api + '/status')).json;
+    assert.equal(st.credentials.configured, false);
+    assert.equal(st.defaultEngine, 'browser');
+
+    // Logged-out: Reddit's block page → a clear, specific error.
+    let r = await postJson(a.api + '/jobs', { engine: 'server', target: { type: 'subreddit', subreddit: 'netblock' }, options: { includeMetadata: false } });
+    let job = await waitForJob(a.api, r.json.job.id);
+    assert.equal(job.error.type, 'reddit_blocked');
+
+    const bad = await postJson(a.api + '/credentials', { clientId: 'test-client-id', clientSecret: 'wrong-secret-value' });
+    assert.equal(bad.status, 400);
+    assert.match(bad.json.error.message, /weren't saved/);
+    assert.equal(fs.existsSync(file), false);
+    assert.equal((await postJson(a.api + '/credentials', { clientId: 'x', clientSecret: '' })).status, 400);
+
+    const ok = await postJson(a.api + '/credentials', { clientId: 'test-client-id', clientSecret: 'test-client-secret', username: 'u/metacode_user' });
+    assert.equal(ok.status, 200, JSON.stringify(ok.json));
+    assert.equal(ok.json.credentials.configured, true);
+    assert.equal(ok.json.credentials.source, 'saved');
+    assert.equal(ok.json.credentials.clientIdHint, '…t-id');
+    assert.equal(ok.json.credentials.username, 'metacode_user');
+    assert.equal(ok.json.mode, 'oauth');
+    assert.equal(ok.json.defaultEngine, 'server');
+    assert.ok(!JSON.stringify(ok.json).includes('test-client-secret'), 'secret never returned');
+    assert.ok(!JSON.stringify((await getJson(a.api + '/status')).json).includes('test-client-secret'));
+    if (process.platform !== 'win32') assert.equal(fs.statSync(file).mode & 0o777, 0o600);
+    assert.equal(JSON.parse(fs.readFileSync(file, 'utf8')).clientSecret, 'test-client-secret');
+
+    // Same subreddit now works through the API.
+    r = await postJson(a.api + '/jobs', { engine: 'server', target: { type: 'subreddit', subreddit: 'netblock', sort: 'new' }, options: { maxItems: 5, includeMetadata: false } });
+    job = await waitForJob(a.api, r.json.job.id);
+    assert.equal(job.status, 'completed', JSON.stringify(job.error));
+    assert.equal(job.itemCount, 5);
+    const apiReq = apiMock.state.requests.find(q => q.path === '/r/netblock/new');
+    assert.equal(apiReq.headers.authorization, 'bearer test-token-123');
+    assert.equal(apiReq.headers['user-agent'], 'nodejs:metacode-reddit-scraper:1.0 (by /u/metacode_user)');
+
+    // Saved keys are loaded again after a restart.
+    await a.close();
+    a = await startScraperApp(env, { credentialsFile: file });
+    st = (await getJson(a.api + '/status')).json;
+    assert.equal(st.credentials.source, 'saved');
+
+    const del = await fetch(a.api + '/credentials', { method: 'DELETE' });
+    assert.equal(del.status, 200);
+    assert.equal((await del.json()).credentials.configured, false);
+    assert.equal(fs.existsSync(file), false);
+  } finally {
+    await a.close();
+    await apiMock.close();
+    try { require('fs').unlinkSync(file); } catch (e) { /* already removed */ }
+    configureWisp(app.config);
+  }
+});
+
+test('Reddit API access: keys from .env take precedence and can\'t be changed from the page', async () => {
+  const a = await startScraperApp({ REDDIT_BASE_URL: base, REDDIT_CLIENT_ID: 'env-client-id', REDDIT_CLIENT_SECRET: 'env-client-secret' });
+  try {
+    const st = (await getJson(a.api + '/status')).json;
+    assert.equal(st.credentials.source, 'env');
+    assert.equal((await postJson(a.api + '/credentials', { clientId: 'test-client-id', clientSecret: 'test-client-secret' })).status, 409);
+    assert.equal((await fetch(a.api + '/credentials', { method: 'DELETE' })).status, 409);
+  } finally {
+    await a.close();
     configureWisp(app.config);
   }
 });
