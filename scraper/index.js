@@ -22,6 +22,7 @@ const { loadScraperConfig } = require('./config');
 const { ScraperError, isScraperError, sanitize } = require('./errors');
 const { createUpgradeHandler, WISP_PATH } = require('./network/wisp-server');
 const { EpoxyWispTransport, transportAvailable } = require('./network/epoxy-transport');
+const { PythonTransport, AutoTransport } = require('./network/python-transport');
 const { HostRateLimiter } = require('./network/rate-limiter');
 const { RedditHttpClient } = require('./network/reddit-http');
 const { RelayHub } = require('./network/browser-relay');
@@ -111,7 +112,18 @@ function createScraper(opts) {
   let port = null;
   const getWispUrl = () => (port ? 'ws://127.0.0.1:' + port + WISP_PATH : null);
 
-  const transport = opts.transport || new EpoxyWispTransport({ getWispUrl, userAgent: config.userAgent, maxResponseBytes: config.maxResponseBytes });
+  // Server-side HTTPS: Python (python/reddit_fetch.py) when available, else
+  // epoxy-tls over Wisp — see network/python-transport.js.
+  const transport = opts.transport || new AutoTransport({
+    mode: config.serverTransport,
+    python: new PythonTransport({ config }),
+    epoxy: new EpoxyWispTransport({ getWispUrl, userAgent: config.userAgent, maxResponseBytes: config.maxResponseBytes }),
+    onChoose: (t, err) => {
+      if (opts.logToConsole === false) return;
+      if (t.kind === 'python') console.log('[scraper] Server engine: Python ' + t.info.python + ' (' + t.info.command + ')');
+      else if (err) console.warn('[scraper] Python engine unavailable (' + err.message + '); using epoxy-tls over Wisp.');
+    }
+  });
   const limiter = new HostRateLimiter({ maxConcurrent: config.maxConcurrentRequests });
   const http = new RedditHttpClient({ config, transport, limiter });
 
@@ -165,12 +177,13 @@ function createScraper(opts) {
       respectRobotsTxt: config.respectRobotsTxt,
       userAgent: config.userAgent,
       userAgentIsDefault: config.userAgent === DEFAULT_USER_AGENT,
-      transport: {
-        name: 'epoxy-tls over Wisp',
-        available: transportAvailable(),
+      transport: Object.assign({
+        name: transport.kind === 'python' ? 'Python' : 'epoxy-tls over Wisp',
+        kind: transport.kind,
+        available: transport.kind === 'python' || transportAvailable(),
         epoxyVersion: transport.info ? transport.info.version : null,
         wispPath: WISP_PATH
-      },
+      }, typeof transport.status === 'function' ? transport.status() : {}),
       allowedHosts: config.apiHosts,
       customCode: {
         enabled: config.customCodeEnabled,
@@ -547,7 +560,10 @@ function createScraper(opts) {
 
   return {
     config, http, jobs, relay, router, scramjetRouter, onUpgrade, status,
-    setPort(p) { port = p; },
+    setPort(p) {
+      port = p;
+      if (typeof transport.choose === 'function') transport.choose().catch(() => {});
+    },
     shutdown() {
       jobs.shutdown();
       if (typeof transport.close === 'function') transport.close();

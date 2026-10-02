@@ -225,8 +225,6 @@ async function run(start) {
     Object.freeze(filesystems);
   }
 
-
-
   const resultJson = await runner(start.code, JSON.stringify(start.init));
   runner.destroy();
   let result = null;

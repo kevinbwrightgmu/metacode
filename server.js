@@ -1479,10 +1479,14 @@ function printBanner(PORT) {
   console.log('  Scraper    → ' + (!sc.enabled ? 'off (SCRAPER_ENABLED=false)'
     : (sc.defaultEngine === 'browser' ? 'default: your browser via Scramjet (no setup); server: ' : 'server: ') +
       (sc.mode === 'oauth' ? 'Reddit Data API (OAuth app credentials)' : 'public Reddit pages' + (sc.respectRobotsTxt ? ', robots.txt respected' : '')) +
-      ' — epoxy-tls over Wisp (' + sc.transport.wispPath + ')' + (sc.transport.available ? '' : ' — needs Node.js 22+')));
+      ' — HTTPS via ' + (sc.transport.setting === 'epoxy' ? 'epoxy-tls over Wisp (' + sc.transport.wispPath + ')'
+        : 'Python (python/reddit_fetch.py' + (sc.transport.setting === 'auto' ? '; epoxy-tls over Wisp if Python is missing' : '') + ')')));
   if (sc.enabled) {
-    console.log('  Sandbox    → ' + (sc.customCode.available ? 'custom code in QuickJS (' + sc.customCode.memoryMb + ' MB, ' +
-      Math.round(sc.customCode.timeoutMs / 1000) + ' s limit)' : 'custom code unavailable — ' + sc.customCode.reason));
+    const cc = sc.customCode;
+    console.log('  Sandbox    → ' + (!cc.available ? 'custom code unavailable — ' + cc.reason
+      : (cc.python.available ? 'Python in ' + cc.python.runtime + ' (' + cc.python.memoryMb + ' MB)' : 'Python unavailable — ' + cc.python.reason) +
+        (cc.languages.includes('javascript') ? '; JavaScript/TypeScript in QuickJS (' + cc.memoryMb + ' MB)' : '') +
+        '; ' + Math.round(cc.timeoutMs / 1000) + ' s limit'));
     const viaEnv = [sc.credentials.source === 'env' && 'Reddit app (REDDIT_CLIENT_ID/SECRET)', sc.redditApis.source === 'env' && 'RedditAPIs.com (REDDITAPIS_KEY)'].filter(Boolean);
     if (viaEnv.length) console.log('  API keys   → from .env: ' + viaEnv.join(', '));
     scraper.config.warnings.forEach(w => console.warn('  ⚠ ' + w));

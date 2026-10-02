@@ -4,8 +4,8 @@
    Two modes:
      • Standard — pick a target (subreddit, search, post, profile, any Reddit
        URL…) and limits; the server scrapes and normalizes the data.
-     • Custom code — write scrape(ctx) in JavaScript/TypeScript; it runs on
-       the server in an isolated QuickJS sandbox with a small SDK.
+     • Custom code — write scrape(ctx) in Python, JavaScript or TypeScript; it runs on
+       the server in an isolated sandbox (Python in Pyodide, JavaScript/TypeScript in QuickJS) with a small SDK.
    Jobs run on the server (/api/scraper); this page starts them, follows
    their progress over server-sent events, shows and exports the results,
    and can add them to the project as posts for coding.
@@ -678,6 +678,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     if (engine === 'redditapis') {
       const bal = status.redditApis && status.redditApis.balance;
       parts.push('<span class="badge badge-green">RedditAPIs.com</span>');
+      parts.push('<span class="badge badge-gray">' + esc(transportLabel()) + '</span>');
       parts.push('<span class="text-second">Requests go to the third-party RedditAPIs.com service with your API key (billed per request by them' +
         (bal ? '; balance at last check: ' + esc(String(bal.value)) : '') + '). At least ' + (lim.minDelayMs / 1000) + ' s between requests · up to ' +
         fmtNum(lim.maxItems) + ' items per job. Supports subreddits, search, posts with comments, user posts/comments and info.</span>');
@@ -690,7 +691,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       parts.push(status.mode === 'oauth'
         ? '<span class="badge badge-green">Server · Reddit Data API (OAuth)</span>'
         : '<span class="badge badge-amber">Server · public pages (no API credentials)</span>');
-      parts.push('<span class="badge badge-gray">epoxy-tls over Wisp</span>');
+      parts.push('<span class="badge badge-gray">' + esc(transportLabel()) + '</span>');
       parts.push('<span class="text-second">At least ' + (lim.minDelayMs / 1000) + ' s between requests · up to ' + fmtNum(lim.maxItems) + ' items per job</span>');
       if (!status.transport.available) parts.push('<span class="text-error">&#10007; Server-side scraping needs Node.js 22+ (found ' + esc(status.node) + ').</span>');
       if (status.mode === 'public' && status.respectRobotsTxt) {
@@ -700,6 +701,14 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       if (status.userAgentIsDefault) parts.push('<span class="sc-banner-warn">Set SCRAPER_USER_AGENT in .env so Reddit can identify your client.</span>');
     }
     el.innerHTML = parts.join('');
+  }
+
+  // Which engine makes the server's HTTPS requests (python/reddit_fetch.py, or epoxy-tls).
+  function transportLabel() {
+    const t = status.transport || {};
+    if (t.kind === 'python' && t.python) return 'Python ' + t.python.version;
+    if (t.kind === 'epoxy') return 'epoxy-tls over Wisp' + (t.setting === 'auto' && t.pythonError ? ' (Python not found)' : '');
+    return t.setting === 'epoxy' ? 'epoxy-tls over Wisp' : 'Python engine';
   }
 
   /* ── Mode ─────────────────────────────────── */
@@ -722,7 +731,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const customBox = $('sc-custom');
     const startBtn = $('sc-start');
     if (form.mode === 'custom') {
-      if (hint) hint.textContent = 'Your JavaScript/TypeScript runs on the server in an isolated sandbox and can only reach Reddit.';
+      if (hint) hint.textContent = 'Your Python, JavaScript or TypeScript runs on the server in an isolated sandbox and can only reach Reddit.';
       if (startBtn) startBtn.textContent = 'Run custom scraper';
       if (customBox) { customBox.hidden = false; if (!customBox.dataset.ready) renderCustom(); }
       const title = $('sc-target-title'); if (title) title.textContent = 'Target (optional — passed to your code as ctx.target)';
@@ -1078,8 +1087,8 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const py = form.language === 'python';
     const mem = cc ? (py && cc.python ? cc.python.memoryMb : cc.memoryMb) : null;
     return (py
-      ? 'Define <span class="sc-code-inline">async def scrape(ctx)</span>. Python 3' + (cc && cc.python ? ' (' + esc(cc.python.runtime) + ')' : '') +
-        ' with the standard library (<span class="sc-code-inline">re</span>, <span class="sc-code-inline">json</span>, <span class="sc-code-inline">statistics</span>, <span class="sc-code-inline">collections</span>…). '
+      ? 'Define <span class="sc-code-inline">async def scrape(ctx)</span>. Runs in ' + (cc && cc.python ? esc(cc.python.runtime) : 'Pyodide') +
+        ', with the whole standard library (<span class="sc-code-inline">re</span>, <span class="sc-code-inline">json</span>, <span class="sc-code-inline">statistics</span>, <span class="sc-code-inline">collections</span>…). '
       : 'Define <span class="sc-code-inline">async function scrape(ctx)</span>. ') +
       'Records you <span class="sc-code-inline">ctx.emit()</span> or return become the results. Limits: ' +
       (cc ? Math.round(cc.timeoutMs / 1000) + ' s, ' + mem + ' MB' : 'time and memory capped') + '; network only to Reddit through the server\'s rate limiter.';
@@ -1174,8 +1183,8 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     App.openModal('Custom scraper API — Python', `
       <div class="sc-api">
         <h4>Execution model</h4>
-        <p>Your code defines <code>async def scrape(ctx)</code>. It runs on the MetaCode server in real CPython
-        (${cc && cc.python ? esc(cc.python.runtime) : 'Pyodide'}) compiled to WebAssembly, inside its own restricted process: the whole
+        <p>Your code defines <code>async def scrape(ctx)</code>. It runs on the MetaCode server in
+        ${cc && cc.python ? esc(cc.python.runtime) : 'Pyodide (CPython in WebAssembly)'}, inside its own restricted process: the whole
         Python standard library works (<code>re</code>, <code>json</code>, <code>statistics</code>, <code>collections</code>, <code>datetime</code>,
         <code>itertools</code>, <code>math</code>, <code>csv</code>, <code>html</code>…), but there are no third-party packages (no pip), no files on the server,
         no environment variables, no programs and no direct network access — only <code>ctx</code> reaches Reddit.
