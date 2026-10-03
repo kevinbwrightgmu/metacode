@@ -930,6 +930,69 @@ function textContent(content) {
   return '';
 }
 
+// Reads EMIS's reply whatever shape it comes in, as an OpenAI chat completion:
+//   • OpenAI chat JSON (choices[].message) — the normal case;
+//   • a server-sent-event stream ("data: {…}" chunks), which some gateways send
+//     even when no stream was asked for — the chunks are joined;
+//   • the Responses API (output[].content[].text / output_text), Anthropic
+//     Messages (content[].text), Ollama-style ({ message } / { response }),
+//     plain { text } / { content } / { output }, or any of these inside { data }.
+// → completion, or null.
+function readReply(r) {
+  let json = r.json;
+  const text = typeof r.text === 'string' ? r.text : '';
+  if (json === undefined && /(^|\n)\s*data:/.test(text)) return fromSse(text);
+  if (!json || typeof json !== 'object') return null;
+  if (json.data && typeof json.data === 'object' && !Array.isArray(json.data) && !json.choices) json = json.data;
+  const direct = normalizeCompletion(json);
+  if (direct) return direct;
+  const wrap = (content, extra) => ({ id: json.id || 'chatcmpl-' + Date.now().toString(36), object: 'chat.completion', model: json.model || null,
+    choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: (extra && extra.finish) || 'stop' }], usage: json.usage || undefined });
+  if (typeof json.output_text === 'string') return wrap(json.output_text);
+  if (Array.isArray(json.output)) {
+    const t = json.output.map(o => (o && Array.isArray(o.content) ? textContent(o.content.map(c => (c && (c.text || c.output_text)) || '')) : (o && typeof o.text === 'string' ? o.text : ''))).join('');
+    if (t || json.output.length) return wrap(t);
+  }
+  if (Array.isArray(json.content) && json.content.some(c => c && typeof c.text === 'string')) return wrap(textContent(json.content), { finish: json.stop_reason === 'max_tokens' ? 'length' : 'stop' });
+  if (json.message && typeof json.message === 'object' && json.message.content !== undefined) return wrap(textContent(json.message.content));
+  for (const k of ['response', 'text', 'content', 'output', 'answer', 'result', 'completion']) if (typeof json[k] === 'string') return wrap(json[k]);
+  return null;
+}
+function fromSse(text) {
+  let content = '', model = null, id = null, finish = null, usage;
+  let any = false;
+  text.split(/\r?\n/).forEach(line => {
+    const m = /^\s*data:\s?(.*)$/.exec(line);
+    if (!m || m[1].trim() === '[DONE]') return;
+    let j; try { j = JSON.parse(m[1]); } catch (e) { return; }
+    any = true;
+    model = model || j.model || null; id = id || j.id || null;
+    if (j.usage) usage = j.usage;
+    (Array.isArray(j.choices) ? j.choices : []).forEach(c => {
+      if (!c) return;
+      const piece = (c.delta && c.delta.content) || (c.message && c.message.content) || c.text || '';
+      content += textContent(piece);
+      if (c.finish_reason) finish = c.finish_reason;
+    });
+    if (typeof j.delta === 'object' && j.delta && typeof j.delta.text === 'string') content += j.delta.text;   // Anthropic stream
+  });
+  if (!any) return null;
+  return { id: id || 'chatcmpl-' + Date.now().toString(36), object: 'chat.completion', model, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: finish || 'stop' }], usage };
+}
+// What an unreadable reply looked like, for the error message (no secrets: redacted, short).
+function describeReply(r) {
+  const type = r.headers && r.headers.get ? String(r.headers.get('content-type') || '').split(';')[0] : '';
+  const text = typeof r.text === 'string' ? r.text : '';
+  if (!text.trim()) return 'an empty reply';
+  if (/^\s*</.test(text)) return 'a web page (' + (type || 'HTML') + ') instead of an API answer';
+  if (r.json && typeof r.json === 'object' && r.json.error) {
+    const e = r.json.error;
+    return 'an error: "' + redact(String(typeof e === 'string' ? e : (e.message || JSON.stringify(e))).slice(0, 200), 200) + '"';
+  }
+  if (r.json && typeof r.json === 'object') return 'JSON with ' + (Object.keys(r.json).slice(0, 8).join(', ') || 'no fields');
+  return (type || 'text') + ' starting "' + redact(text.replace(/\s+/g, ' ').slice(0, 80), 80) + '"';
+}
+
 // Checks EMIS's completion and makes every choice's message.content a string
 // (the frontend calls .trim() on it), keeping all other fields. null =
 // malformed.
@@ -977,7 +1040,7 @@ function noteEmptyAnswer(completion, model) {
 }
 
 // ── Chat completion (normal JSON response) ───────────────────────────────────
-async function completeChat(chatRequest, ctx, signal) {
+async function completeChat(chatRequest, ctx, signal, retriedLength) {
   const keys = keysForRequest(Date.now());
   if (!keys.length) return quotaFailure(Date.now());
   let rejection = null;
@@ -992,10 +1055,32 @@ async function completeChat(chatRequest, ctx, signal) {
     if (r.status === 429) { onQuotaExhausted(key, quota, r.headers, now); limited = true; continue; }
     if (r.status === 401 || r.status === 403) { markKeyRejected(key, r); rejection = describeFailure(r, ctx); continue; }
     if (!r.ok) return describeFailure(r, ctx);
-    const completion = normalizeCompletion(r.json);
+    let completion = readReply(r);
+    if (!completion && /web page/.test(describeReply(r)) && !/\/v1$/.test(EMIS.baseUrl)) {
+      // EMIS_BASE_URL is missing /v1, so the website answered instead of the API: try the API address
+      const fixed = EMIS.baseUrl + '/v1';
+      console.warn('[emis] ' + EMIS.baseUrl + ' answered with a web page; trying ' + fixed + ' (set EMIS_BASE_URL=' + fixed + ' in .env).');
+      const prev = EMIS.baseUrl;
+      EMIS.baseUrl = fixed;
+      const r2 = await emisRequest('POST', '/chat/completions', key, chatRequest, { timeoutMs: EMIS.timeoutMs, signal });
+      completion = r2.ok ? readReply(r2) : null;
+      if (!completion) EMIS.baseUrl = prev;
+      else EMIS.warnings.push('EMIS_BASE_URL should end in /v1; MetaCode is using ' + fixed + ' until you change .env.');
+    }
     if (!completion) {
-      return fail(502, 'malformed_response', 'EMIS sent a response MetaCode couldn\'t read.',
-        'HTTP ' + r.status + ' with ' + (r.json === undefined ? 'a body that is not JSON' : 'no usable choices'));
+      const what = describeReply(r);
+      console.error('[emis] Unreadable reply to chat/completions (model ' + chatRequest.model + ', HTTP ' + r.status + '): ' + what);
+      return fail(502, 'malformed_response', 'EMIS answered, but not with a chat reply MetaCode can read — it sent ' + what + '.' +
+        (/web page/.test(what) ? ' Check that EMIS_BASE_URL in .env is the API address ending in /v1 (default ' + EMIS_DEFAULT_BASE_URL + ').' : ''),
+        'HTTP ' + r.status + ': ' + what);
+    }
+    // A reasoning model can use its whole token budget thinking and return no
+    // text: ask once more with a bigger budget.
+    const c0 = completion.choices[0];
+    if (!String(c0.message.content || '').trim() && c0.finish_reason === 'length' && !retriedLength) {
+      const bigger = Math.min(8192, Math.max(1024, (Number(chatRequest.max_tokens) || 256) * 4));
+      console.warn('[emis] ' + chatRequest.model + ' used all ' + (chatRequest.max_tokens || '?') + ' tokens without answering; retrying with ' + bigger + '.');
+      return completeChat(Object.assign({}, chatRequest, { max_tokens: bigger }), ctx, signal, true);
     }
     markKeyUsed(key);
     noteEmptyAnswer(completion, chatRequest.model);
@@ -1294,7 +1379,7 @@ app.post('/api/ai', async (req, res) => {
       client.release();
     }
     if (result.aborted) return;                       // the browser left; nobody to answer
-    if (!result.ok && explicit && MODEL_FALLBACK_TYPES.has(result.type)) {
+    if (!result.ok && explicit && MODEL_FALLBACK_TYPES.has(result.type) && result.type !== 'malformed_response') {
       result = Object.assign({}, result, { message: result.message.replace(/\.?$/, '.') + ' This happened with the model "' + resolved.model +
         '" you picked — choose another one in Settings → AI models (or "Server default").' });
     }
