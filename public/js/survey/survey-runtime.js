@@ -430,7 +430,7 @@
         case 'back': back(); break;
         case 'submit': next(true); break;
         case 'goto': { const i = doc.pages.findIndex(p => p.id === a.target); if (i >= 0 && validatePage()) go(i, true); break; }
-        case 'url': openLink(a.target); break;
+        case 'url': openLink(a.target, a.where); break;
         default: break;
       }
     }
@@ -446,7 +446,7 @@
           case 'show': visOverride[e.target] = true; break;
           case 'hide': visOverride[e.target] = false; break;
           case 'message': message = e.text; showBanner(e.text); break;
-          case 'openUrl': openLink(e.text || e.value); break;
+          case 'openUrl': openLink(e.text || e.value, e.where); break;
           case 'goto': if (!nav) { const i = doc.pages.findIndex(p => p.id === e.target); if (i >= 0) { nav = true; go(i, true); } } break;
           case 'next': if (!nav) { nav = true; next(); } break;
           case 'back': if (!nav) { nav = true; back(); } break;
@@ -557,7 +557,7 @@
       for (const e of effects) {
         if (e.type === 'setVar') varState[e.name] = e.result;
         if (e.type === 'complete' || e.type === 'message') outcome = e.text || outcome;
-        if (e.type === 'openUrl') openLink(e.text || e.value);   // before any await, while the click still counts
+        if (e.type === 'openUrl') openLink(e.text || e.value, e.where);   // before any await, while the click still counts
       }
       recompute();
       busy = true;
@@ -581,7 +581,9 @@
           applyState();
         }
         showBanner((e && e.message ? e.message : 'The response couldn\'t be submitted.') + ' Your answers are still here — try again.', true);
+        pendingNav = null;         // stay, so the respondent can submit again
       }
+      flushNav();
     }
 
     function showComplete(outcome) {
@@ -608,19 +610,29 @@
     // Opens a link from an "open link" block or a link button. Browsers only allow
     // new tabs right after a click or key press; when one is blocked, the link is
     // shown in the banner for the respondent to open.
-    function openLink(raw) {
+    // where: 'new' (a new tab, the default) or 'same' (this tab — leaves the
+    // survey; in the editor's preview it opens a new tab instead). The link is
+    // always also shown in the message bar, so it can be clicked even if the
+    // browser (or an embedded browser) blocks or swallows the new tab.
+    function openLink(raw, where) {
       const link = Logic.linkOf(raw);   // also accepts "example.com"
       const u = link && link.indexOf('{{') === -1 ? Core.safeUrl(link, ['https', 'http', 'mailto']) : null;
       if (!u) { log('rule', 'Open link skipped — "' + String(raw || '') + '" isn\'t an http(s) or mailto link'); return; }
-      log('rule', 'Open link ' + u);
+      if (where === 'same' && opts.mode !== 'preview') {
+        log('rule', 'Open link in this tab ' + u);
+        pendingNav = u;            // after any submission in progress has been saved
+        setTimeout(flushNav, 0);
+        return;
+      }
+      log('rule', 'Open link ' + u + (where === 'same' ? ' (in this tab on the real survey; a new tab in preview)' : ''));
       let w = null;
       try { w = window.open(u, '_blank'); } catch (err) { w = null; }
-      if (w) { try { w.opener = null; } catch (err) { /* cross-origin */ } return; }
-      blockedLink = u;   // also offered on the completion screen if the survey ends now
+      if (w) { try { w.opener = null; } catch (err) { /* cross-origin */ } }
+      else blockedLink = u;   // also offered on the completion screen if the survey ends now
       banner.textContent = '';
-      banner.append('Open this link: ');
+      banner.append(w ? 'Opened in a new tab: ' : 'Open this link: ');
       const a = document.createElement('a');
-      a.href = u; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = u;
+      a.href = u; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = u.replace(/^mailto:/, '');
       banner.appendChild(a);
       banner.classList.add('is-shown'); banner.classList.remove('is-error');
     }
@@ -629,13 +641,22 @@
     // keystroke; it runs again only after its condition has been false in between.
     let firedOnce = new Set();
     let blockedLink = null;
+    let pendingNav = null;
+    // Leaves the survey for a "this tab" link — never while a response is
+    // being submitted, so the response is saved first.
+    function flushNav() {
+      if (!pendingNav || busy) return;
+      const u = pendingNav;
+      pendingNav = null;
+      try { window.location.assign(u); } catch (err) { /* ignore */ }
+    }
     function runOnce() {
       const now = new Set((state.once || []).map(o => o.key));
       firedOnce.forEach(k => { if (!now.has(k)) firedOnce.delete(k); });
       (state.once || []).forEach(o => {
         if (firedOnce.has(o.key)) return;
         firedOnce.add(o.key);
-        if (o.type === 'openUrl') openLink(o.text);
+        if (o.type === 'openUrl') openLink(o.text, o.where);
         if (o.type === 'message') { message = o.text; showBanner(o.text); }
       });
     }

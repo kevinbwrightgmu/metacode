@@ -3,22 +3,16 @@ const cors    = require('cors');
 const path    = require('path');
 const fs      = require('fs');
 const { spawn } = require('child_process');
-// Read .env from MetaCode's own folder, not the folder the server was started
-// from: `node path/to/server.js`, shortcuts and IDE run buttons often start it
-// elsewhere, and then none of the keys would load. Variables already set in
-// the real environment still win.
-const ENV_FILE = path.join(__dirname, '.env');
-const ENV_LOAD = (() => {
-  if (!fs.existsSync(ENV_FILE)) {
-    const misnamed = ['.env.txt', 'env', '.env.example.txt'].find(n => fs.existsSync(path.join(__dirname, n)));
-    return { loaded: false, misnamed };
-  }
-  const out = require('dotenv').config({ path: ENV_FILE });
-  return { loaded: !out.error, error: out.error ? out.error.message : null, count: out.parsed ? Object.keys(out.parsed).length : 0 };
-})();
+// Read the settings file (.env): next to server.js, the folder the server was
+// started from, or the folder above; UTF-16 files and ".env.txt" work too, and
+// its values win over stale system variables. See env-file.js.
+const { createEnvLoader } = require('./env-file');
+const envLoader = createEnvLoader(__dirname);
+envLoader.load();
 
 const { createScraper } = require('./scraper');
 const { createSurveys } = require('./surveys');
+const { createProjects } = require('./projects');
 
 const app = express();
 
@@ -26,17 +20,35 @@ const app = express();
 // and the scraper routes make requests to Reddit on this server's behalf, so
 // only MetaCode's own pages (same origin) may call them. The other routes
 // keep the permissive CORS they always had.
-const AI_ROUTE   = /^\/api\/(ai|models|keys\/status|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?)\/?$/i;
+const AI_ROUTE   = /^\/api\/(ai|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?)\/?$/i;
 const corsForAll = cors();
 app.use((req, res, next) => (AI_ROUTE.test(req.path) ? next() : corsForAll(req, res, next)));
+// …and state-changing requests to them must say they come from this site:
+// an Origin from another host, or a cross-site Sec-Fetch-Site, is refused
+// (a body-less POST such as "Reload .env" wouldn't otherwise need CORS).
+app.use((req, res, next) => {
+  if (!AI_ROUTE.test(req.path) || req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next();
+  let crossSite = false;
+  if (req.headers.origin) { try { crossSite = new URL(req.headers.origin).host !== req.headers.host; } catch (e) { crossSite = true; } }
+  if (req.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(req.headers['sec-fetch-site'])) crossSite = true;
+  if (crossSite) return res.status(403).json({ error: { type: 'forbidden_origin', message: 'Requests from other websites aren\'t allowed.' } });
+  next();
+});
 // Survey Studio (surveys/): mounted before the shared JSON parser because
 // survey documents (with embedded images) may be larger than its limit.
 const surveys = createSurveys();
 app.use('/api/surveys', surveys.router);
 app.use('/api/public/surveys', surveys.publicRouter);
 app.get('/s/:publicId', surveys.pageHandler);
+// Saved projects (Projects page) — also before the shared JSON parser (large projects)
+const projects = createProjects();
+app.use('/api/projects', projects.router);
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+// Pages, scripts and styles are revalidated on every load, so an updated
+// MetaCode is never run with yesterday's cached JavaScript.
+app.use(express.static(path.join(__dirname, 'public'), {
+  setHeaders(res, file) { if (/\.(html|js|css|mjs)$/i.test(file)) res.setHeader('Cache-Control', 'no-cache'); }
+}));
 
 // ── AI provider: EMIS ─────────────────────────────────────────────────────────
 // Every AI feature (AI Coding, the MetaCode Assistant, column detection in
@@ -67,7 +79,7 @@ function safeModelId(value) {
   return MODEL_ID_PATTERN.test(id) ? id : null;
 }
 
-const EMIS = loadEmisConfig(process.env);
+let EMIS = loadEmisConfig(process.env);   // replaced when .env is reloaded (see /api/settings/reload)
 
 // The model list file (see "Model list" below)
 const MODELS_FILE      = path.resolve(__dirname, String(process.env.EMIS_MODELS_FILE || '').trim() || 'emis-models.json');
@@ -387,7 +399,7 @@ function notConfigured() {
   if (EMIS.problem) return fail(500, 'not_configured', 'MetaCode\'s AI isn\'t set up correctly: ' + EMIS.problem);
   if (!EMIS.keys.length) {
     return fail(401, 'not_configured', 'MetaCode\'s AI isn\'t set up yet: add your EMIS key to the server\'s .env file ' +
-      '(EMIS_API_KEY=…) and restart MetaCode.');
+      '(EMIS_API_KEY=…), then click "Reload .env" in Settings (or restart MetaCode).');
   }
   return null;
 }
@@ -1403,6 +1415,49 @@ app.use('/api/scraper', scraper.router);
 app.use('/scramjet', scraper.scramjetRouter);
 
 // ── Health ────────────────────────────────────────────────────────────────────
+// ── Settings status (Settings page) ───────────────────────────────────────────
+// What MetaCode read from .env and whether AI is ready: file name and
+// location, encoding, the NAMES of the settings found (never their values),
+// warnings, and the EMIS setup. Same-origin only (AI_ROUTE).
+const STARTED_AT = new Date().toISOString();
+const VERSION = (() => {
+  try {
+    const head = fs.readFileSync(path.join(__dirname, '.git', 'HEAD'), 'utf8').trim();
+    const ref = head.startsWith('ref: ') ? head.slice(5) : null;
+    const sha = ref ? (fs.existsSync(path.join(__dirname, '.git', ref)) ? fs.readFileSync(path.join(__dirname, '.git', ref), 'utf8').trim() : null) : head;
+    return sha ? sha.slice(0, 7) : null;
+  } catch (e) { return null; }
+})();
+function settingsStatus() {
+  const env = envLoader.info || {};
+  const ready = !notConfigured();
+  return {
+    env: {
+      found: !!env.found, name: env.name || null, where: env.where || null, encoding: env.encoding || null,
+      error: env.error || null, keys: env.keys || [], overridden: env.overridden || [], warnings: env.warnings || [],
+      searched: env.searched || [], loadedAt: env.loadedAt || null
+    },
+    ai: {
+      provider: 'emis', ready, keyCount: EMIS.keys.length, problem: EMIS.problem || (EMIS.keys.length ? null : 'EMIS_API_KEY isn\'t set in .env.'),
+      warnings: EMIS.warnings, baseHost: (() => { try { return new URL(EMIS.baseUrl).host; } catch (e) { return null; } })(),
+      defaultModel: EMIS.model || null
+    },
+    server: { version: VERSION, startedAt: STARTED_AT, node: process.version }
+  };
+}
+app.get('/api/settings/status', (req, res) => { res.set('Cache-Control', 'no-store'); res.json(settingsStatus()); });
+// Re-reads .env without restarting: the AI (EMIS) settings apply at once;
+// scraper/port settings still need a restart.
+app.post('/api/settings/reload', (req, res) => {
+  envLoader.load();
+  EMIS = loadEmisConfig(process.env);
+  keyState.clear();
+  modelList.ids = null; modelList.fetchedAt = 0; modelList.failure = null; modelList.failedAt = 0;
+  const env = envLoader.info;
+  console.log('[settings] .env reloaded: ' + (env.found ? env.keys.length + ' value(s) from ' + env.file : 'no .env file found') + '; AI ' + (notConfigured() ? 'not ready' : 'ready (' + EMIS.keys.length + ' key(s))'));
+  res.json(settingsStatus());
+});
+
 app.get('/api/health', (req, res) => {
   const ready = !notConfigured();
   const keyCount = ready ? EMIS.keys.length : 0;
@@ -1461,10 +1516,12 @@ function printBanner(PORT) {
   console.log('  ║   MetaCode — Social Media Coding Platform ║');
   console.log('  ╚══════════════════════════════════════════╝\n');
   console.log('  Running at → http://localhost:' + PORT);
-  if (ENV_LOAD.loaded) console.log('  Settings   → ' + ENV_FILE + ' (' + ENV_LOAD.count + ' value' + (ENV_LOAD.count === 1 ? '' : 's') + ')');
-  else if (ENV_LOAD.misnamed) console.warn('  ⚠ No .env file found, but there is "' + ENV_LOAD.misnamed + '" in ' + __dirname + '. Rename it to exactly ".env" (no extension), then restart.');
-  else if (ENV_LOAD.error) console.warn('  ⚠ Couldn\'t read ' + ENV_FILE + ': ' + ENV_LOAD.error);
-  else console.log('  Settings   → no .env file in ' + __dirname + ' (copy .env.example to .env to add keys)');
+  const env = envLoader.info;
+  if (env.found && !env.error) console.log('  Settings   → ' + env.file + ' (' + env.keys.length + ' value' + (env.keys.length === 1 ? '' : 's') + (env.encoding && env.encoding !== 'UTF-8' ? ', ' + env.encoding : '') + ')');
+  else if (env.error) console.warn('  ⚠ ' + env.file + ': ' + env.error);
+  else if (!env.disabled) console.log('  Settings   → no .env file in ' + __dirname + ' (copy .env.example to .env to add keys)');
+  env.warnings.forEach(w => console.warn('  ⚠ ' + w));
+  if (env.overridden.length) console.warn('  ⚠ .env replaced system environment variables: ' + env.overridden.join(', '));
   const keyCount = EMIS.keys.length;
   console.log('  AI (EMIS)  → ' + (EMIS.problem ? 'NOT READY — ' + EMIS.problem
     : keyCount ? keyCount + ' key' + (keyCount === 1 ? '' : 's') + ' set via .env ✓'

@@ -1039,3 +1039,10 @@ svg { flex-shrink: 0; }
 @media (prefers-reduced-motion: reduce) {
   .progress-bar.sc-indeterminate { animation: none; width: 100% !important; opacity: .5; }
 }
+
+/* Settings → AI models: one row per feature */
+.s-feature-models { display: flex; flex-direction: column; gap: 8px; }
+.s-feature-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); gap: 10px; align-items: center; }
+.s-feature-row label { display: flex; flex-direction: column; font-size: 12.5px; color: var(--tx-primary); }
+.s-feature-row label span { font-size: 11.5px; color: var(--tx-muted); }
+@media (max-width: 640px) { .s-feature-row { grid-template-columns: 1fr; } }

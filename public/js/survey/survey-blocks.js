@@ -365,18 +365,23 @@
         case 'complete': row.append(label('end survey saying'), textField(a.value, set('value', 'Edit text'), { aria: 'Message', min: 80 })); break;
         case 'openUrl': {
           const inp = textField(a.value, set('value', 'Edit link'), { aria: 'Link', min: 80, placeholder: 'https://example.com' });
-          row.append(label('open link'), inp);
+          row.append(label('open link'), inp, label('in'),
+            select([{ value: 'new', label: 'a new tab' }, { value: 'same', label: 'this tab' }], a.where === 'same' ? 'same' : 'new', set('where')));
           if (interactive) {
-            // ↗ opens the address now, to check it. mousedown (not click) so it still works
-            // straight after typing: the field's change re-renders the block before a click lands.
-            const go = mk('button', 'bk-try', '↗');
-            go.type = 'button'; go.title = 'Open this link now to check it'; go.setAttribute('aria-label', 'Open this link now');
-            go.addEventListener('mousedown', e => {
-              e.preventDefault(); e.stopPropagation();
-              tryLink(inp.value);
-              if (inp.value !== String(a.value === undefined ? '' : a.value)) { a.value = inp.value; commit('Edit link'); }
+            // ↗ is a real link to the address (browsers never block a link the user
+            // clicks). mousedown is cancelled so the address field keeps focus: its
+            // change would otherwise re-render the block before the click lands.
+            const go = mk('a', 'bk-try', '↗');
+            go.target = '_blank'; go.rel = 'noopener noreferrer';
+            go.title = 'Open this link now to check it'; go.setAttribute('aria-label', 'Open this link now');
+            const sync = () => { const u = safeLink(inp.value); go.href = u || '#'; go.classList.toggle('is-off', !u); };
+            sync();
+            inp.addEventListener('input', sync);
+            go.addEventListener('mousedown', e => { e.preventDefault(); e.stopPropagation(); });
+            go.addEventListener('click', e => {
+              e.stopPropagation();
+              if (!safeLink(inp.value)) { e.preventDefault(); tryLink(inp.value); }
             });
-            go.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tryLink(inp.value); } });
             row.append(go);
           }
           break;
@@ -660,7 +665,7 @@
 
     app.addEventListener('pointerdown', e => {
       if (e.button !== 0 || drag) return;
-      if (e.target.closest('input, select, button, textarea, .bk-problems, .bk-zoom')) return;
+      if (e.target.closest('input, select, button, a, textarea, .bk-problems, .bk-zoom')) return;
       let el = e.target;
       let ref = null;
       while (el && el !== app) { ref = refs.get(el) || palRefs.get(el); if (ref && ref.drag) break; ref = null; el = el.parentElement; }
@@ -686,7 +691,7 @@
         document.removeEventListener('pointercancel', onUp);
         if (drag) endDrag(ev, ev.type === 'pointercancel');
         else if (ref.drag === 'palette') clickPalette(ref);
-        else if (ref.drag === 'stmt' || ref.drag === 'hat') tryBlocks(ref, el);
+        else if (ref.drag === 'stmt' || ref.drag === 'hat') pendingTry = { ref, el, at: Date.now() };   // runs on the click event
       };
       document.addEventListener('pointermove', onMove);
       document.addEventListener('pointerup', onUp);
@@ -694,8 +699,20 @@
     });
 
     /* ── Click to try (like clicking a block in Scratch) ── */
+    // Runs from the click event — the one every browser trusts to open a tab.
+    let pendingTry = null;
+    app.addEventListener('click', e => {
+      const p = pendingTry;
+      pendingTry = null;
+      if (!p || Date.now() - p.at > 1500 || e.target.closest('input, select, button, a, textarea')) return;
+      tryBlocks(p.ref, p.el);
+    });
     const notify = (msg, type, ms) => (opts.notify || (root.App && root.App.notify) || (() => {}))(msg, type, ms);
     // Opens a link block's address in a new tab. Runs inside the click, so browsers allow it.
+    function safeLink(raw) {
+      const link = Logic.linkOf(raw);
+      return link && link.indexOf('{{') === -1 ? Core.safeUrl(link, ['https', 'http', 'mailto']) : null;
+    }
     function tryLink(raw) {
       const link = Logic.linkOf(raw);
       const u = link && link.indexOf('{{') === -1 ? Core.safeUrl(link, ['https', 'http', 'mailto']) : null;

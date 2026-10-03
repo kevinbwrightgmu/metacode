@@ -16,6 +16,7 @@ const TEST_REDDITAPIS_KEY_FILE = path.join(os.tmpdir(), 'metacode-test-redditapi
 
 function testEnv(extra) {
   return Object.assign({
+    METACODE_ENV_FILE: 'none',          // never read a developer's own .env in tests
     SCRAPER_USER_AGENT: TEST_UA,
     SCRAPER_ALLOW_PRIVATE_NETWORK: 'true',
     SCRAPER_MIN_DELAY_MS: '0',

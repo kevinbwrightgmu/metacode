@@ -11,26 +11,31 @@ const App = (() => {
     codebook: [],   // [{id, name, description, codes:[{id,label,description}]}]
     network:  { nodes: [], edges: [] },
     networkAnalysis: null, // last NetworkX result from Analyze CSV (see csv-analyzer.js)
-    settings: { provider: 'groq', apiKeys: [], model: 'openai/gpt-oss-20b', delay: 500 }
+    settings: { model: '', models: {}, delay: 500 }   // AI models (Settings → AI models); keys live in the server's .env
   };
 
   const STORAGE_KEY = 'strata_v1'; // kept stable so existing users' saved data isn't orphaned by the rename
 
   function save() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch(e) {}
+    // Autosave to the linked saved project (Projects page), if any
+    if (typeof ProjectsView !== 'undefined') { try { ProjectsView.noteChange(); } catch (e) { /* never block saving */ } }
   }
   function load() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) state = { ...state, ...JSON.parse(raw) };
     } catch(e) {}
-    // Migrate the old single "apiKey" field (pre key-rotation) to the new
-    // "apiKeys" array, so existing users don't need to re-enter their key.
-    if (!state.settings) state.settings = { provider: 'groq', apiKeys: [], model: 'openai/gpt-oss-20b', delay: 500 };
-    if (!Array.isArray(state.settings.apiKeys)) state.settings.apiKeys = [];
-    if (!state.settings.apiKeys.length && state.settings.apiKey) {
-      state.settings.apiKeys = [state.settings.apiKey];
-    }
+    // AI runs through the server's EMIS key (.env). Keys once typed into the
+    // old Settings key box are no longer used, so they aren't kept; old
+    // default model ids (Groq/Anthropic) are cleared so the server's default
+    // model is used until one is picked in Settings → AI models.
+    if (!state.settings || typeof state.settings !== 'object') state.settings = {};
+    delete state.settings.apiKeys; delete state.settings.apiKey; delete state.settings.provider;
+    if (['openai/gpt-oss-20b', 'claude-sonnet-4-6'].includes(state.settings.model)) state.settings.model = '';
+    if (typeof state.settings.model !== 'string') state.settings.model = '';
+    if (!state.settings.models || typeof state.settings.models !== 'object') state.settings.models = {};
+    if (!Number.isFinite(Number(state.settings.delay))) state.settings.delay = 500;
   }
   function getState()  { return state; }
   function setState(patch) { Object.assign(state, patch); save(); }
@@ -38,6 +43,7 @@ const App = (() => {
   /* ── Routing ─────────────────────────────────*/
   const VIEWS = {
     'dashboard':    renderDashboard,
+    'projects':     () => ProjectsView.render(),
     'settings':     renderSettings,
     'import':       () => DataManager.render(),
     'scraper':      () => RedditScraper.render(),
@@ -54,7 +60,7 @@ const App = (() => {
   };
 
   const TITLES = {
-    'dashboard':'Dashboard','settings':'Settings','import':'Import Data','scraper':'Reddit Scraper',
+    'dashboard':'Dashboard','projects':'Projects','settings':'Settings','import':'Import Data','scraper':'Reddit Scraper',
     'codebook':'Codebook','ai-coding':'AI Coding','human-coding':'Human Coding',
     'reliability':'Reliability Analysis','csv-analyzer':'Analyze CSV (NetworkX)',
     'network':'Network Graph',
@@ -246,56 +252,55 @@ const App = (() => {
         </div>
 
         <div class="card">
-          <div class="card-title">AI Provider</div>
-          <div style="display:flex;flex-direction:column;gap:16px">
+          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+            AI connection (EMIS)
+            <span id="s-ai-badge"></span>
+          </div>
+          <div id="s-env-status" style="display:flex;flex-direction:column;gap:10px;font-size:13px">
+            <div class="text-muted">Checking the server's .env file…</div>
+          </div>
+          <div style="display:flex;gap:10px;margin-top:14px;flex-wrap:wrap">
+            <button class="btn btn-secondary" id="s-reload-env" onclick="App.reloadEnv()" title="Read the .env file again without restarting MetaCode">&#8635; Reload .env</button>
+            <button class="btn btn-secondary" onclick="App.testApi()">Test connection</button>
+          </div>
+          <div id="api-test-result" style="margin-top:10px;font-size:13px"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
+            AI models
+            <button class="btn btn-ghost btn-sm" onclick="App.fetchModels()" style="font-size:11.5px;padding:2px 8px">&#8635; Refresh list</button>
+          </div>
+          <div style="display:flex;flex-direction:column;gap:14px">
             <div class="form-group">
-              <label class="form-label">Provider</label>
-              <select class="form-select" id="s-provider" onchange="App.onProviderChange()">
-                <option value="groq"      ${settings.provider==='groq'||!settings.provider?'selected':''}>Groq (free — recommended)</option>
-                <option value="anthropic" ${settings.provider==='anthropic'?'selected':''}>Anthropic (Claude)</option>
-              </select>
+              <label class="form-label" for="s-model">Default model <span>(used by everything below set to "Same as default")</span></label>
+              <select class="form-select" id="s-model"><option value="">Loading models…</option></select>
+              <div class="form-hint" id="s-model-hint"></div>
             </div>
             <div class="form-group">
-              <label class="form-label">API Keys <span>(one per line — multiple keys enable automatic rotation)</span></label>
-              <textarea class="form-textarea" id="s-keys" style="min-height:90px;font-family:var(--f-mono);font-size:12.5px"
-                placeholder="${(settings.provider||'groq')==='groq'?'gsk_...':'sk-ant-...'}">${esc((settings.apiKeys||[]).join('\n'))}</textarea>
-              <div class="form-hint" id="s-key-hint">${getProviderHint(settings.provider||'groq')}</div>
+              <label class="form-label">Model for each feature</label>
+              <div class="s-feature-models" id="s-feature-models"></div>
             </div>
             <div class="form-group">
-              <label class="form-label" style="display:flex;align-items:center;justify-content:space-between">
-                Model
-                <button class="btn btn-ghost btn-sm" onclick="App.fetchModels()" style="font-size:11.5px;padding:2px 8px">&#8635; Fetch Models</button>
-              </label>
-              <select class="form-select" id="s-model">
-                <option value="">Save keys then click Fetch Models</option>
-              </select>
-              <div class="form-hint" id="s-model-hint">Click Fetch Models to load models available to your keys.</div>
-            </div>
-            <div class="form-group">
-              <label class="form-label">Delay between calls <span>(ms)</span></label>
+              <label class="form-label" for="s-delay">Delay between AI Coding calls <span>(ms)</span></label>
               <input class="form-input" id="s-delay" type="number" value="${settings.delay}" min="0" max="5000" step="100">
               <div class="form-hint">Increase if you hit rate limits (default: 500 ms)</div>
             </div>
-            <div style="display:flex;gap:10px">
-              <button class="btn btn-primary" onclick="App.saveSettings()">Save Settings</button>
-              <button class="btn btn-secondary" onclick="App.testApi()">Test Connection</button>
-            </div>
-            <div id="api-test-result"></div>
+            <div><button class="btn btn-primary" onclick="App.saveSettings()">Save model settings</button></div>
           </div>
         </div>
 
         <div class="card" style="grid-column:1/-1">
           <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-            Key Rotation Status
+            EMIS keys
             <button class="btn btn-ghost btn-sm" onclick="App.fetchKeyStatus()" style="font-size:11.5px;padding:2px 8px">&#8635; Refresh</button>
           </div>
           <div style="font-size:12.5px;color:var(--tx-second);margin-bottom:12px">
-            Requests automatically retry on the next key when one hits a rate limit or fails. Note: Groq and Anthropic both rate-limit
-            at the <em>account</em> level, so multiple keys from the same account share one limit — real benefit comes from keys on
-            separate accounts, or from configuring both providers.
+            Keys come only from <code>EMIS_API_KEY</code> in the server's .env file (several keys can be comma-separated; MetaCode rotates
+            between them and rests a key whose quota is used up). The keys never reach this page — only a masked form.
           </div>
           <div id="key-status-list" style="display:flex;flex-direction:column;gap:6px">
-            <div class="text-muted" style="font-size:12.5px">Save your keys, then click Refresh to see rotation status.</div>
+            <div class="text-muted" style="font-size:12.5px">Loading…</div>
           </div>
         </div>
 
@@ -309,7 +314,7 @@ const App = (() => {
         </div>
       </div>
     `;
-    setTimeout(() => { fetchModels(); fetchKeyStatus(); }, 0);
+    setTimeout(() => { renderEnvStatus(); fetchModels(); fetchKeyStatus(); }, 0);
   }
 
   function saveProject() {
@@ -320,62 +325,32 @@ const App = (() => {
     notify('Project saved', 'success');
   }
 
-  function saveSettings() {
-    const apiKeys  = parseKeysTextarea(document.getElementById('s-keys').value);
-    const provider = document.getElementById('s-provider').value;
-    const model    = document.getElementById('s-model').value;
-    const delay    = parseInt(document.getElementById('s-delay').value) || 500;
-    setState({ settings: { ...state.settings, provider, apiKeys, model, delay } });
-    updateApiStatus();
-    notify('Settings saved', 'success');
-  }
+  // AI features that can each use their own model (Settings → AI models).
+  const AI_FEATURES = [
+    ['coding', 'AI Coding', 'codes posts with your codebook'],
+    ['assistant', 'Ask MetaCode', 'the help assistant'],
+    ['import', 'Import Data', 'works out the columns of a CSV'],
+    ['csv', 'Analyze CSV', 'finds the source/target columns']
+  ];
 
-  // Splits a textarea's contents into a clean list of keys — one per line,
-  // stripped of whitespace and invisible zero-width characters that can
-  // sneak in from copy-paste and silently corrupt a key.
-  function parseKeysTextarea(raw) {
-    return String(raw || '').split('\n')
-      .map(k => k.replace(/[\s\u200B-\u200D\uFEFF]/g, ''))
-      .filter(Boolean);
+  function saveSettings() {
+    const model = document.getElementById('s-model').value;
+    const models = {};
+    document.querySelectorAll('#s-feature-models select[data-feature]').forEach(sel => { if (sel.value) models[sel.dataset.feature] = sel.value; });
+    const delay = parseInt(document.getElementById('s-delay').value, 10);
+    setState({ settings: { ...state.settings, model, models, delay: Number.isFinite(delay) ? Math.max(0, delay) : 500 } });
+    notify('Model settings saved', 'success');
   }
 
   async function testApi() {
     const el = document.getElementById('api-test-result');
     el.innerHTML = '<span style="color:var(--tx-muted)">Testing connection…</span>';
-
-    const keysEl   = document.getElementById('s-keys');
-    const keys     = keysEl ? parseKeysTextarea(keysEl.value) : (state.settings.apiKeys || []);
-    const keyHeader = keys.length ? keys.join(',') : '';
-    const provider = document.getElementById('s-provider') ? document.getElementById('s-provider').value : (state.settings.provider || 'groq');
-    const model    = document.getElementById('s-model')    ? document.getElementById('s-model').value    : state.settings.model;
-
     try {
-      let body;
-      if (provider === 'groq') {
-        body = { model: model || 'openai/gpt-oss-20b',
-                 messages: [{role:'user', content:'Reply with exactly one word: ok'}],
-                 max_tokens: 10, temperature: 0.1 };
-      } else {
-        body = { model: model || 'claude-sonnet-4-6',
-                 max_tokens: 10,
-                 messages: [{role:'user', content:'Reply with exactly one word: ok'}] };
-      }
-      const headers = { 'Content-Type': 'application/json', 'x-provider': provider };
-      if (keyHeader) headers['x-api-key'] = keyHeader;
-
-      const res  = await fetch('/api/ai', { method:'POST', headers, body: JSON.stringify(body) });
-      const data = await res.json();
-      if (!res.ok) throw new Error((data && data.error && data.error.message) || ('Error ' + res.status));
-
-      const text = provider === 'groq'
-        ? ((data.choices && data.choices[0] && data.choices[0].message) ? data.choices[0].message.content : '')
-        : ((data.content || []).map(b => b.text || '').join(''));
-
-
-      el.innerHTML = '<span style="color:var(--success)">✓ Connected! (' + keys.length + ' key' + (keys.length!==1?'s':'') + ' configured) Response: ' + esc(text.trim().slice(0,60)) + '</span>';
+      const text = await callClaude([{ role: 'user', content: 'Reply with exactly one word: ok' }], '', 10, { feature: null });
+      el.innerHTML = '<span style="color:var(--success)">✓ Connected — model ' + esc(lastModelUsed || 'default') + ' replied: ' + esc(String(text).trim().slice(0, 60)) + '</span>';
       updateApiStatus(true);
       fetchKeyStatus();
-    } catch(e) {
+    } catch (e) {
       el.innerHTML = '<span style="color:var(--error)">✗ ' + esc(e.message) + '</span>';
       updateApiStatus(false);
     }
@@ -542,172 +517,172 @@ const App = (() => {
     notify('Exported NetworkX analysis (2 files)', 'success');
   }
 
-  /* ── Provider helpers ───────────────────────*/
-  function getProviderHint(provider) {
-    if (provider === 'groq')
-      return 'Free keys from <a href="https://console.groq.com" target="_blank" style="color:var(--blue)">console.groq.com</a> (no credit card). Groq rate-limits by account, so multiple keys from the same account share one limit — use separate accounts for real rotation benefit.';
-    return 'Keys from <a href="https://console.anthropic.com" target="_blank" style="color:var(--blue)">console.anthropic.com</a>. Anthropic also rate-limits by account — multiple keys from the same account share one limit.';
+  /* ── AI settings (server .env status, models, keys) ─────*/
+  let serverStatus = null;      // /api/settings/status: what the server read from .env
+
+  // Shows what the server read from .env and whether AI is ready — names of
+  // settings only, never values.
+  function renderEnvStatus(statusOverride) {
+    const box = document.getElementById('s-env-status');
+    const badge = document.getElementById('s-ai-badge');
+    const st = statusOverride || serverStatus;
+    if (!box) return;
+    if (!st) { box.innerHTML = '<div style="color:var(--error)">Couldn\'t reach the MetaCode server to check its settings.</div>'; return; }
+    const env = st.env, ai = st.ai;
+    if (badge) badge.innerHTML = ai.ready ? '<span class="badge badge-green">Ready</span>' : '<span class="badge badge-red">Not set up</span>';
+    const rows = [];
+    if (env.found && !env.error) {
+      rows.push('<div>✓ Settings file <code>' + esc(env.name) + '</code> read from ' + esc(env.where) + (env.encoding && env.encoding !== 'UTF-8' ? ' (' + esc(env.encoding) + ')' : '') +
+        ' — ' + env.keys.length + ' setting' + (env.keys.length === 1 ? '' : 's') + (env.keys.length ? ': ' + env.keys.map(k => '<code>' + esc(k) + '</code>').join(' ') : '') + '</div>');
+    } else if (env.error) {
+      rows.push('<div style="color:var(--error)">✗ Found <code>' + esc(env.name) + '</code> in ' + esc(env.where) + ' but couldn\'t read it: ' + esc(env.error) + '</div>');
+    } else if (env.disabled) {
+      rows.push('<div class="text-muted">The .env file is switched off for this server (METACODE_ENV_FILE=none).</div>');
+    } else {
+      rows.push('<div style="color:var(--error)">✗ No <code>.env</code> file found (looked in ' + esc((env.searched || []).join(', ')) + ').</div>' +
+        '<div class="form-hint">Copy <code>.env.example</code> to a file named exactly <code>.env</code> next to <code>server.js</code>, put <code>EMIS_API_KEY=your-key</code> in it, save, then click <b>Reload .env</b>.</div>');
+    }
+    (env.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
+    if (env.overridden && env.overridden.length) rows.push('<div style="color:#B45309">⚠ .env replaced older values set in this computer\'s environment for: ' + env.overridden.map(k => '<code>' + esc(k) + '</code>').join(' ') + '</div>');
+    if (ai.ready) rows.push('<div>✓ AI is ready: ' + ai.keyCount + ' EMIS key' + (ai.keyCount === 1 ? '' : 's') + (ai.baseHost ? ' · ' + esc(ai.baseHost) : '') + (ai.defaultModel ? ' · EMIS_MODEL=' + esc(ai.defaultModel) : '') + '</div>');
+    else rows.push('<div style="color:var(--error)">✗ AI isn\'t ready: ' + esc(ai.problem || 'EMIS_API_KEY isn\'t set.') + '</div>');
+    (ai.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
+    rows.push('<div class="form-hint">Server ' + esc(st.server.version || '') + ' started ' + esc(new Date(st.server.startedAt).toLocaleString()) + (env.loadedAt ? ' · .env read ' + esc(new Date(env.loadedAt).toLocaleTimeString()) : '') + '</div>');
+    box.innerHTML = rows.join('');
   }
 
+  async function reloadEnv() {
+    const btn = document.getElementById('s-reload-env');
+    if (btn) btn.disabled = true;
+    try {
+      const res = await fetch('/api/settings/reload', { method: 'POST' });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      serverStatus = await res.json();
+      renderEnvStatus();
+      updateApiStatus();
+      fetchModels();
+      fetchKeyStatus();
+      notify(serverStatus.ai.ready ? '.env reloaded — AI is ready' : '.env reloaded — AI still isn\'t set up', serverStatus.ai.ready ? 'success' : 'warning');
+    } catch (e) {
+      notify('Couldn\'t reload .env: ' + e.message, 'error');
+    } finally { if (btn) btn.disabled = false; }
+  }
+
+  let modelCache = null;
   async function fetchModels() {
-    const provEl   = document.getElementById('s-provider');
     const modelSel = document.getElementById('s-model');
     const hintEl   = document.getElementById('s-model-hint');
+    const feats    = document.getElementById('s-feature-models');
     if (!modelSel) return;
-    const provider = provEl ? provEl.value : (state.settings.provider || 'groq');
-    const keysEl   = document.getElementById('s-keys');
-    const keys     = keysEl ? parseKeysTextarea(keysEl.value) : (state.settings.apiKeys || []);
-    const keyHeader = keys.length ? keys.join(',') : '';
-    modelSel.innerHTML = '<option value="">Loading models...</option>';
-    if (hintEl) hintEl.textContent = 'Contacting ' + provider + '...';
+    modelSel.innerHTML = '<option value="">Loading models…</option>';
     try {
-      const headers = { 'x-provider': provider };
-      if (keyHeader) headers['x-api-key'] = keyHeader;
-      const res  = await fetch('/api/models', { headers });
+      const res  = await fetch('/api/models');
       const data = await res.json();
-      const models  = data.models || [];
-      const current = state.settings.model || (provider === 'groq' ? 'openai/gpt-oss-20b' : 'claude-sonnet-4-6');
+      const models = data.models || [];
+      modelCache = models;
+      const opt = (m, cur) => '<option value="' + esc(m.id) + '"' + (m.id === cur ? ' selected' : '') + '>' + esc(m.name || m.id) + '</option>';
       if (!models.length) {
-        modelSel.innerHTML = '<option value="">No models found - check your API keys</option>';
-        if (hintEl) hintEl.textContent = 'No models returned. Verify your keys and try again.';
-        return;
+        modelSel.innerHTML = '<option value="">No models available</option>';
+        if (hintEl) hintEl.textContent = data.note || 'No models returned — check the AI connection above.';
+      } else {
+        const current = state.settings.model || '';
+        modelSel.innerHTML = '<option value="">Server default (' + esc(models[0].id) + ')</option>' + models.map(m => opt(m, current)).join('');
+        if (current && !models.find(m => m.id === current)) {
+          modelSel.insertAdjacentHTML('beforeend', '<option value="' + esc(current) + '" selected>' + esc(current) + ' (not in the list)</option>');
+        }
+        if (hintEl) hintEl.textContent = models.length + ' model' + (models.length !== 1 ? 's' : '') + ' available' + (data.source ? ' (from ' + data.source + ')' : '') + '.';
       }
-      modelSel.innerHTML = models.map(m =>
-        '<option value="' + m.id + '"' + (m.id === current ? ' selected' : '') + '>' + (m.name || m.id) + '</option>'
-      ).join('');
-      if (models.length && !models.find(m => m.id === current)) modelSel.value = models[0].id;
-      if (hintEl) hintEl.textContent = models.length + ' model' + (models.length !== 1 ? 's' : '') + ' available for your keys.';
+      if (feats) {
+        const per = state.settings.models || {};
+        feats.innerHTML = AI_FEATURES.map(([id, label, what]) => {
+          const cur = per[id] || '';
+          let options = '<option value="">Same as default</option>' + models.map(m => opt(m, cur)).join('');
+          if (cur && !models.find(m => m.id === cur)) options += '<option value="' + esc(cur) + '" selected>' + esc(cur) + ' (not in the list)</option>';
+          return '<div class="s-feature-row"><label for="s-fm-' + id + '"><b>' + esc(label) + '</b><span>' + esc(what) + '</span></label>' +
+            '<select class="form-select" id="s-fm-' + id + '" data-feature="' + id + '">' + options + '</select></div>';
+        }).join('');
+      }
     } catch (err) {
-      modelSel.innerHTML = '<option value="">Error fetching models</option>';
+      modelSel.innerHTML = '<option value="">Couldn\'t load models</option>';
       if (hintEl) hintEl.textContent = 'Error: ' + err.message;
     }
   }
 
-  // Populates the "Key Rotation Status" list on the Settings page: each
-  // configured key's masked value, whether it's available / cooling down /
-  // invalid, its request count, and whether it came from .env or Settings.
+  // Settings → EMIS keys: each configured key's masked form, availability,
+  // request count and quota.
   async function fetchKeyStatus() {
     const listEl = document.getElementById('key-status-list');
     if (!listEl) return;
-    const provEl   = document.getElementById('s-provider');
-    const provider = provEl ? provEl.value : (state.settings.provider || 'groq');
-    const keysEl   = document.getElementById('s-keys');
-    const keys     = keysEl ? parseKeysTextarea(keysEl.value) : (state.settings.apiKeys || []);
-
-    if (!keys.length) {
-      listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">No keys configured yet.</div>';
-      return;
-    }
-
     listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">Loading…</div>';
     try {
-      const headers = { 'x-provider': provider, 'x-api-key': keys.join(',') };
-      const res  = await fetch('/api/keys/status', { headers });
+      const res  = await fetch('/api/keys/status');
       const data = await res.json();
       const items = data.keys || [];
       if (!items.length) {
-        listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">No keys configured yet.</div>';
+        listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">No EMIS keys loaded — add <code>EMIS_API_KEY=…</code> to .env and click Reload .env above.</div>';
         return;
       }
       listEl.innerHTML = items.map(k => {
         const statusBadge = k.status === 'available'
           ? '<span class="badge badge-green">Available</span>'
           : k.status === 'cooling_down'
-            ? '<span class="badge badge-amber">Cooling down ' + k.cooldownSecondsLeft + 's</span>'
-            : '<span class="badge badge-red">Invalid</span>';
-        const sourceTag = k.source === 'env' ? '<span class="badge badge-gray" style="font-size:10px">.env</span>' : '';
+            ? '<span class="badge badge-amber">Resting ' + k.cooldownSecondsLeft + 's</span>'
+            : '<span class="badge badge-red">Rejected by EMIS</span>';
+        const quota = k.quota && k.quota.remainingPrompts !== null && k.quota.remainingPrompts !== undefined ? '<span style="color:var(--tx-muted)">' + k.quota.remainingPrompts + ' prompts left</span>' : '';
         return '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg-muted);border-radius:var(--r-sm);font-size:12.5px">' +
-          '<span class="font-mono">' + esc(k.masked) + '</span>' +
-          sourceTag +
-          '<span style="margin-left:auto;color:var(--tx-muted)">' + k.requestCount + ' req</span>' +
-          statusBadge +
-        '</div>';
+          '<span class="font-mono">' + esc(k.masked) + '</span><span class="badge badge-gray" style="font-size:10px">.env</span>' + quota +
+          '<span style="margin-left:auto;color:var(--tx-muted)">' + k.requestCount + ' req</span>' + statusBadge + '</div>';
       }).join('');
     } catch(e) {
       listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px;color:var(--error)">Could not load status: ' + esc(e.message) + '</div>';
     }
   }
 
-  function onProviderChange() {
-    const p     = document.getElementById('s-provider').value;
-    const hint  = document.getElementById('s-key-hint');
-    const keysEl = document.getElementById('s-keys');
-    if (hint)   hint.innerHTML     = getProviderHint(p);
-    if (keysEl) keysEl.placeholder = p === 'groq' ? 'gsk_...' : 'sk-ant-...';
-    fetchModels();
-    fetchKeyStatus();
-  }
-
   /* ── API helpers ─────────────────────────────*/
-  async function callClaude(messages, system='', max_tokens=1000, keyOverride=null) {
-    const provider = state.settings.provider || 'groq';
-    const keys     = keyOverride ? [keyOverride] : (state.settings.apiKeys || []);
-    const keyHeader = keys.map(k => String(k).replace(/[\s\u200B-\u200D\uFEFF]/g, '')).filter(Boolean).join(',');
-    const defModel = provider === 'groq' ? 'openai/gpt-oss-20b' : 'claude-sonnet-4-6';
-    const model    = state.settings.model || defModel;
+  // The model for an AI feature: its own choice in Settings → AI models, else
+  // the default model, else '' (the server picks its default).
+  function modelFor(feature) {
+    const per = state.settings.models || {};
+    return (feature && per[feature]) || state.settings.model || '';
+  }
+  let lastModelUsed = '';
 
-    let body;
-    if (provider === 'groq') {
-      // Groq uses OpenAI-compatible format; system message goes in the messages array
-      const allMsgs = system ? [{ role: 'system', content: system }, ...messages] : [...messages];
-      body = { model, messages: allMsgs, max_tokens, temperature: 0.1 };
-    } else {
-      // Anthropic format
-      body = { model, max_tokens, messages };
-      if (system) body.system = system;
-    }
-
-    const headers = { 'Content-Type': 'application/json', 'x-provider': provider };
-    if (keyHeader) headers['x-api-key'] = keyHeader;
-
-    const res  = await fetch('/api/ai', { method: 'POST', headers, body: JSON.stringify(body) });
-    const data = await res.json();
-
+  // Sends a chat request to MetaCode's server, which calls EMIS with the key
+  // from .env. opts.feature ('coding' | 'assistant' | 'import' | 'csv') picks
+  // that feature's model.
+  async function callClaude(messages, system='', max_tokens=1000, opts=null) {
+    const feature = opts && typeof opts === 'object' ? opts.feature : null;
+    const model = modelFor(feature);
+    const allMsgs = system ? [{ role: 'system', content: system }, ...messages] : [...messages];
+    const body = { messages: allMsgs, max_tokens, temperature: 0.1 };
+    if (model) body.model = model;
+    const res  = await fetch('/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-provider': 'openai' }, body: JSON.stringify(body) });
+    let data = null;
+    try { data = await res.json(); } catch (e) { data = null; }
     if (!res.ok) {
       const msg = (data && data.error && data.error.message) ? data.error.message : ('API error ' + res.status);
       throw new Error(msg);
     }
-
-    // Parse response based on provider format
-    let text;
-    if (provider === 'groq') {
-      text = (data.choices && data.choices[0] && data.choices[0].message)
-        ? data.choices[0].message.content : '';
-    } else {
-      text = (data.content || []).map(b => b.text || '').join('');
-    }
-    return text.trim();
+    lastModelUsed = (data && data.model) || model;
+    const text = (data && data.choices && data.choices[0] && data.choices[0].message) ? data.choices[0].message.content : '';
+    return String(text || '').trim();
   }
 
-  // How many keys the server has in its .env file, per provider. Only the
-  // count is reported (by /api/health) — the keys themselves never reach the
-  // browser. Stays at zero when the server can't be reached.
-  let serverEnvKeyCounts = { groq: 0, anthropic: 0 };
+  // Number of EMIS keys the server loaded from .env (0 when it can't be reached).
+  function getEnvKeyCount() { return serverStatus && serverStatus.ai ? serverStatus.ai.keyCount : 0; }
 
-  function getEnvKeyCount(provider) {
-    return serverEnvKeyCounts[provider || state.settings.provider || 'groq'] || 0;
-  }
-
-  // Single source of truth for "can AI features run?": a key saved in
-  // Settings, or one in the server's .env for the selected provider.
-  function hasApiKeys() {
-    const settingsKeys = Array.isArray(state.settings.apiKeys) ? state.settings.apiKeys.length : 0;
-    return settingsKeys > 0 || getEnvKeyCount() > 0;
-  }
+  // "Can AI features run?" — the server has a working EMIS setup from .env.
+  function hasApiKeys() { return !!(serverStatus && serverStatus.ai && serverStatus.ai.ready); }
 
   async function refreshServerKeyInfo() {
     try {
-      const res = await fetch('/api/health');
+      const res = await fetch('/api/settings/status');
       if (!res.ok) return;
-      const data = await res.json();
-      serverEnvKeyCounts = {
-        groq:      Number(data.groqEnvKeyCount)      || 0,
-        anthropic: Number(data.anthropicEnvKeyCount) || 0
-      };
+      serverStatus = await res.json();
       updateApiStatus();
+      renderEnvStatus();
     } catch (e) {
-      // Server unreachable (e.g. app.html opened directly as a file):
-      // fall back to Settings keys only.
+      // Server unreachable (e.g. app.html opened directly as a file)
     }
   }
 
@@ -716,7 +691,7 @@ const App = (() => {
     const dot   = document.getElementById('status-dot');
     const label = document.getElementById('status-label');
     if (dot)   dot.className   = 'status-dot' + (connected ? ' connected' : '');
-    if (label) label.textContent = connected ? 'API connected' : 'Not connected';
+    if (label) label.textContent = connected ? 'AI ready' : 'AI not set up';
   }
 
   /* ── Modal ───────────────────────────────────*/
@@ -821,10 +796,10 @@ const App = (() => {
   }
 
   return {
-    init, navigate: (v) => navigate(v), setViewCleanup, onProviderChange, fetchModels, fetchKeyStatus,
+    init, navigate: (v) => navigate(v), setViewCleanup, fetchModels, fetchKeyStatus, reloadEnv, modelFor, AI_FEATURES,
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
     getState, setState, save,
-    callClaude, updateApiStatus, hasApiKeys, getEnvKeyCount,
+    callClaude, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,
     saveProject, saveSettings, testApi, clearCodes, resetAll,

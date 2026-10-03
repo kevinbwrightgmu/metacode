@@ -223,7 +223,7 @@ const DataManager = (() => {
     const user = 'Header: ' + JSON.stringify(headers) + '\nSample rows:\n' +
       sampleRows.map((r, i) => (i + 1) + '. ' + JSON.stringify(r)).join('\n');
 
-    const raw    = await App.callClaude([{ role: 'user', content: user }], system, 400);
+    const raw    = await App.callClaude([{ role: 'user', content: user }], system, 400, { feature: 'import' });
     const parsed = App.extractJSON(raw);
 
     return {

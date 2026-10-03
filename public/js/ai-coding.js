@@ -251,7 +251,7 @@ const AICoder = (() => {
 
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
-        const raw = await App.callClaude([{ role: 'user', content: user }], system, 1000);
+        const raw = await App.callClaude([{ role: 'user', content: user }], system, 1000, { feature: 'coding' });
 
         // ── Robust JSON extraction ──────────────
         // Claude may add a sentence before/after, or wrap in ``` fences,
@@ -291,7 +291,7 @@ const AICoder = (() => {
     const toCode = filterPosts(posts).filter(p => !Object.keys(p.aiCodes || {}).length);
 
     if (!toCode.length) { App.notify('All visible posts are already coded', 'info'); return; }
-    if (!App.hasApiKeys()) { App.notify('Enter your API key in Settings first', 'error'); return; }
+    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add EMIS_API_KEY to the server\'s .env file (see Settings)', 'error'); return; }
 
     running = true; stopFlag = false;
     toggleRunButton(true);
@@ -339,7 +339,7 @@ const AICoder = (() => {
 
   /* ── Single-post coding ──────────────────────*/
   async function codeOne(postId) {
-    if (!App.hasApiKeys()) { App.notify('Enter your API key in Settings first', 'error'); return; }
+    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add EMIS_API_KEY to the server\'s .env file (see Settings)', 'error'); return; }
     const post = App.getState().posts.find(p => p.id === postId);
     if (!post) return;
 
