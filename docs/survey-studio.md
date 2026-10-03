@@ -236,6 +236,11 @@ that question's choices.
   representation). Right-click the workspace for *Clean up blocks*.
 - **Pan and zoom:** drag empty space to pan; use **+ / = / −** or Ctrl + wheel to zoom.
 - **Undo/redo** (Ctrl+Z / Ctrl+Shift+Z) covers every block change.
+- **Try a block:** click a block to run it, as in Scratch; click a hat to run its whole script. The script
+  glows. *Open link* opens its address in a new tab and *show message* / *end survey saying* show their
+  text. Blocks that change the survey (show, go to page…) are listed instead; try those with answers in
+  **Preview**. Conditions are checked as if nothing has been answered yet.
+- The **↗** button on an *open link* block opens the address straight away, to check it.
 
 Blocks that aren't under a hat never run. They are kept where you left them.
 
@@ -262,8 +267,10 @@ Every question can have an **answer key**, for example `age`; formulas refer to 
   **require** also start in the opposite state.
 - **Event** scripts (page opens, leaving a page, a click, submit) run once when the event happens, top to
   bottom. Navigation blocks (*go to page*, *end survey*…) belong in these.
-- **Open link** and **show message** blocks in a *when any answer changes* script run once, at the moment
-  their condition becomes true (not again while it stays true). Elsewhere they run when the event happens.
+- **Open link** and **show message** blocks in a *when any answer changes* script run when an answer changes
+  and the block is reached: with no *if*, on the first answer; inside an *if*, when its condition becomes
+  true. They don't run again on every keystroke, only after the condition has been false in between.
+  Under the other hats they run when the event happens (page opens, leaving a page, a click, submit).
 - **Open link** opens a new tab. `example.com` is read as `https://example.com`, and `{{…}}` fills in
   answers. Browsers only open tabs right after a click or key press; if one is blocked, the survey shows the
   link in its message bar, or on the completion screen if the survey has ended, for the respondent to click.

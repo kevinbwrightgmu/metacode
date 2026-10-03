@@ -363,7 +363,24 @@
         case 'showPage': row.append(label('include page'), select(pageOpts(), a.target, set('target'))); break;
         case 'submit': row.append(label('submit the survey')); break;
         case 'complete': row.append(label('end survey saying'), textField(a.value, set('value', 'Edit text'), { aria: 'Message', min: 80 })); break;
-        case 'openUrl': row.append(label('open link'), textField(a.value, set('value', 'Edit link'), { aria: 'Link', min: 80 })); break;
+        case 'openUrl': {
+          const inp = textField(a.value, set('value', 'Edit link'), { aria: 'Link', min: 80, placeholder: 'https://example.com' });
+          row.append(label('open link'), inp);
+          if (interactive) {
+            // ↗ opens the address now, to check it. mousedown (not click) so it still works
+            // straight after typing: the field's change re-renders the block before a click lands.
+            const go = mk('button', 'bk-try', '↗');
+            go.type = 'button'; go.title = 'Open this link now to check it'; go.setAttribute('aria-label', 'Open this link now');
+            go.addEventListener('mousedown', e => {
+              e.preventDefault(); e.stopPropagation();
+              tryLink(inp.value);
+              if (inp.value !== String(a.value === undefined ? '' : a.value)) { a.value = inp.value; commit('Edit link'); }
+            });
+            go.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); tryLink(inp.value); } });
+            row.append(go);
+          }
+          break;
+        }
         case 'setAnswer': row.append(label('set answer of'), elSel(questionOpts()), label('to'), textField(a.value, v => { a.value = numOrText(v); commit('Edit block'); }, { aria: 'Answer', min: 40 })); break;
         case 'setVar': case 'changeVar':
           if (!isObj(a.from)) a.from = lit(a.type === 'changeVar' ? 1 : 0);
@@ -669,11 +686,49 @@
         document.removeEventListener('pointercancel', onUp);
         if (drag) endDrag(ev, ev.type === 'pointercancel');
         else if (ref.drag === 'palette') clickPalette(ref);
+        else if (ref.drag === 'stmt' || ref.drag === 'hat') tryBlocks(ref, el);
       };
       document.addEventListener('pointermove', onMove);
       document.addEventListener('pointerup', onUp);
       document.addEventListener('pointercancel', onUp);
     });
+
+    /* ── Click to try (like clicking a block in Scratch) ── */
+    const notify = (msg, type, ms) => (opts.notify || (root.App && root.App.notify) || (() => {}))(msg, type, ms);
+    // Opens a link block's address in a new tab. Runs inside the click, so browsers allow it.
+    function tryLink(raw) {
+      const link = Logic.linkOf(raw);
+      const u = link && link.indexOf('{{') === -1 ? Core.safeUrl(link, ['https', 'http', 'mailto']) : null;
+      if (!u) {
+        notify(link ? 'This link uses {{…}}, which is filled in from answers — try it in Preview.' : 'Type a web address in the block first, like https://example.com.', link ? 'info' : 'error', 4200);
+        return false;
+      }
+      let w = null;
+      try { w = window.open(u, '_blank'); } catch (e) { w = null; }
+      if (w) { try { w.opener = null; } catch (e) { /* cross-origin */ } notify('Opened ' + u, 'success', 2200); }
+      else notify('Your browser blocked the new tab — allow pop-ups for this site, or try the link in Preview.', 'error', 5200);
+      return !!w;
+    }
+    // Clicking a hat runs its script; clicking a block runs that block. Conditions see a
+    // survey with no answers yet; open link and messages happen here, the rest is listed.
+    function tryBlocks(ref, el) {
+      const stmts = ref.drag === 'hat' ? ref.rule.then : [ref.arr[ref.index]];
+      if (!stmts || !stmts.length) { notify('Snap blocks under this hat, then click it to try the script.', 'info', 3200); return; }
+      const script = el.closest('.bk-script');
+      if (script) { script.classList.remove('is-running'); void script.offsetWidth; script.classList.add('is-running'); setTimeout(() => script.classList.remove('is-running'), 900); }
+      const trial = Object.assign({}, doc(), { rules: [{ id: '__try', name: 'Try', enabled: true, trigger: { type: 'click', element: '__try' }, when: { op: 'all', items: [] }, then: clone(stmts), else: [] }] });
+      let effects = [];
+      try { effects = Logic.runEvent(trial, { type: 'click', element: '__try' }, Logic.computeState(doc(), { answers: {} })); } catch (e) { effects = []; }
+      let opened = false;
+      const later = [];
+      effects.forEach(e => {
+        if (e.type === 'openUrl') { if (!opened) opened = tryLink(e.text || e.value) || true; }
+        else if (e.type === 'message' || e.type === 'complete') notify(e.text || '(empty message)', 'info', 4200);
+        else later.push((Logic.ACTIONS[e.type] || {}).label || e.type);
+      });
+      if (!effects.length) notify('Nothing ran: the if condition is false while there are no answers. Try it with answers in Preview.', 'info', 4800);
+      else if (later.length && !opened) notify('In the survey this will: ' + later.slice(0, 3).join(', ').toLowerCase() + (later.length > 3 ? '…' : '') + '. Try it in Preview.', 'info', 4200);
+    }
 
     // Clicking a palette block adds it to the workspace (keyboard-free shortcut)
     function clickPalette(ref) {

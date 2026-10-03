@@ -497,7 +497,7 @@ test('Logic blocks: variables, reporters in slots, undo, drag to the palette to 
   await context.close();
 });
 
-test('Open link blocks open the page — after an answer, on leaving a page, or as a link when the popup is blocked', { skip, timeout: 120000 }, async () => {
+test('Open link blocks: click to try in the Logic tab, and they open in the survey from every kind of script', { skip, timeout: 150000 }, async () => {
   const { page, context, errors } = await openApp('/studio.html');
   await page.waitForSelector('#ss-new');
   await page.click('#ss-new');
@@ -506,41 +506,61 @@ test('Open link blocks open the page — after an answer, on leaving a page, or 
   const qid = await studio.primary(page);
   const choices = optionsOf(await studio.doc(page), qid);
   const pageId = (await studio.doc(page)).pages[0].id;
-  // when any answer changes: if answer = first choice then open "example.com" (no https:// typed)
-  // when leaving page 1: open https://example.org/{{answer}}
-  await page.evaluate(([qid, v, pageId]) => SurveyStudio.current().store.tx('Add scripts', t => t.set('rules', [
-    { id: 'r_any', name: 'Any', enabled: true, trigger: { type: 'always' }, when: { op: 'all', items: [] }, else: [],
-      then: [{ type: 'if', when: { op: 'all', items: [{ left: { kind: 'answer', ref: qid }, cmp: 'eq', right: { kind: 'value', value: v } }] }, then: [{ type: 'openUrl', value: 'example.com' }], else: [] }] },
-    { id: 'r_exit', name: 'Exit', enabled: true, trigger: { type: 'pageExit', page: pageId }, when: { op: 'all', items: [] }, else: [],
-      then: [{ type: 'openUrl', value: 'https://example.org/done' }] }
-  ])), [qid, choices[0].props.value, pageId]);
-  // The problems bar flags a link block with no address
+  // when any answer changes → open "example.net"                (no condition)
+  // when any answer changes → if answer = first choice → open "example.com" (typed without https://)
+  // when leaving page 1 → open https://example.org/done
+  // when the survey is submitted → open https://example.org/submitted
+  const script = (id, trigger, then) => ({ id, name: id, enabled: true, trigger, when: { op: 'all', items: [] }, then, else: [] });
+  await page.evaluate(rules => SurveyStudio.current().store.tx('Add scripts', t => t.set('rules', rules)), [
+    script('r_plain', { type: 'always' }, [{ type: 'openUrl', value: 'example.net' }]),
+    script('r_any', { type: 'always' }, [{ type: 'if', when: { op: 'all', items: [{ left: { kind: 'answer', ref: qid }, cmp: 'eq', right: { kind: 'value', value: choices[0].props.value } }] }, then: [{ type: 'openUrl', value: 'example.com' }], else: [] }]),
+    script('r_exit', { type: 'pageExit', page: pageId }, [{ type: 'openUrl', value: 'https://example.org/done' }]),
+    script('r_submit', { type: 'submit' }, [{ type: 'openUrl', value: 'https://example.org/submitted' }])
+  ]);
+  const stubOpen = () => page.evaluate(() => { window.__opened = []; window.__block = false; window.open = u => { window.__opened.push(u); return window.__block ? null : {}; }; });
+  const opened = () => page.evaluate(() => window.__opened);
+
+  // Logic tab: clicking a block runs it, like Scratch — an open link block opens its address
   await page.click('.ss-mode[data-mode="logic"]');
   await page.waitForSelector('.bk-app');
   assert.match(await page.textContent('.bk-problems'), /no problems/);
-  await page.locator('.bk-script[data-rule="r_exit"] .bk-stack input.bk-text').fill('https://');
-  await page.locator('.bk-script[data-rule="r_exit"] .bk-stack input.bk-text').press('Enter');
+  await stubOpen();
+  await page.locator('.bk-script[data-rule="r_exit"] .bk-stack .bk-row').click({ position: { x: 8, y: 8 } });
+  assert.deepEqual(await opened(), ['https://example.org/done']);
+  await page.locator('.bk-script[data-rule="r_exit"] .bk-hat .bk-row').click({ position: { x: 8, y: 30 } });   // a hat runs its script
+  assert.deepEqual(await opened(), ['https://example.org/done', 'https://example.org/done']);
+  // ↗ opens the link right after typing a new address
+  const field = page.locator('.bk-script[data-rule="r_plain"] .bk-stack input.bk-text');
+  await field.fill('example.net/new');
+  await page.locator('.bk-script[data-rule="r_plain"] .bk-try').click();
+  assert.equal((await opened())[2], 'https://example.net/new');
+  assert.equal((await studio.doc(page)).rules.find(r => r.id === 'r_plain').then[0].value, 'example.net/new', 'the typed address is saved too');
+  // The problems bar flags a link block with no address
+  await field.fill('https://');
+  await field.press('Enter');
   assert.match(await page.textContent('.bk-problems'), /needs a web address/);
-  await page.keyboard.press('Control+z');
+  await page.locator('.bk-script[data-rule="r_plain"] .bk-stack input.bk-text').fill('example.net');
+  await page.locator('.bk-script[data-rule="r_plain"] .bk-stack input.bk-text').press('Enter');
   assert.match(await page.textContent('.bk-problems'), /no problems/);
 
+  // Preview: the survey opens links from every kind of script
   await page.click('.ss-mode[data-mode="preview"]');
   await page.waitForSelector('#ss-pv-host .sv-artboard');
-  await page.evaluate(() => { window.__opened = []; window.__block = false; window.open = (u) => { window.__opened.push(u); return window.__block ? null : {}; }; });
-  const opened = () => page.evaluate(() => window.__opened);
+  await stubOpen();
+  assert.deepEqual(await opened(), [], 'nothing opens before the first answer');
   await page.locator(`#ss-pv-host [data-svid="${choices[1].id}"]`).click({ force: true });
-  assert.deepEqual(await opened(), [], 'nothing opens while the condition is false');
+  assert.deepEqual(await opened(), ['https://example.net'], 'a script without a condition opens on the first answer');
   await page.locator(`#ss-pv-host [data-svid="${choices[0].id}"]`).click({ force: true });
-  assert.deepEqual(await opened(), ['https://example.com'], 'opens once when the condition becomes true');
+  assert.deepEqual(await opened(), ['https://example.net', 'https://example.com'], 'the if branch opens when its condition becomes true');
   await page.locator(`#ss-pv-host [data-svid="${choices[0].id}"]`).click({ force: true });
-  assert.equal((await opened()).length, 1, 'not again while it stays true');
-  // Leaving the page (Submit on a one-page survey) runs the exit script — popup blocked → link in the banner
+  assert.equal((await opened()).length, 2, 'not again while it stays true');
+  // Leaving the page (Submit on a one-page survey) and submitting both open their links;
+  // with the popup blocked, the link is offered on the completion screen
   await page.evaluate(() => { window.__block = true; });
   await page.locator('#ss-pv-host .sv-button', { hasText: 'Submit' }).click();
-  await page.waitForFunction(() => window.__opened.length === 2);
-  assert.equal((await opened())[1], 'https://example.org/done');
   await page.waitForSelector('#ss-pv-host .sv-complete');
-  assert.equal(await page.locator('#ss-pv-host .sv-complete a.sv-complete-link[href="https://example.org/done"]').count(), 1, 'a blocked popup leaves a link to click');
+  assert.deepEqual((await opened()).slice(2), ['https://example.org/done', 'https://example.org/submitted']);
+  assert.equal(await page.locator('#ss-pv-host .sv-complete a.sv-complete-link[href="https://example.org/submitted"]').count(), 1, 'a blocked popup leaves a link to click');
   assert.deepEqual(errors, []);
   await context.close();
 });

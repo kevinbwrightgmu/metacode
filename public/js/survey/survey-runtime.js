@@ -230,7 +230,7 @@
       if (Logic.isEmptyValue(v)) delete answers[qid]; else answers[qid] = v;
       touched.add(qid);
       const changed = recompute();
-      runOnce(true);
+      runOnce();
       if (errors[qid] !== undefined || attempted.has(page().id)) {
         const e = Logic.validateAnswer(doc, q, answers[qid], state, { patterns: true });
         if (e) errors[qid] = e; else delete errors[qid];
@@ -557,6 +557,7 @@
       for (const e of effects) {
         if (e.type === 'setVar') varState[e.name] = e.result;
         if (e.type === 'complete' || e.type === 'message') outcome = e.text || outcome;
+        if (e.type === 'openUrl') openLink(e.text || e.value);   // before any await, while the click still counts
       }
       recompute();
       busy = true;
@@ -623,18 +624,20 @@
       banner.appendChild(a);
       banner.classList.add('is-shown'); banner.classList.remove('is-error');
     }
-    // "When any answer changes" scripts: open-link / message blocks run once when they become active.
-    let activeOnce = new Set();
+    // "When any answer changes" scripts: an open-link / message block runs when an answer
+    // changes and it's reached (no condition, or its if is true) — once, not on every
+    // keystroke; it runs again only after its condition has been false in between.
+    let firedOnce = new Set();
     let blockedLink = null;
-    function runOnce(execute) {
-      const now = new Set();
+    function runOnce() {
+      const now = new Set((state.once || []).map(o => o.key));
+      firedOnce.forEach(k => { if (!now.has(k)) firedOnce.delete(k); });
       (state.once || []).forEach(o => {
-        now.add(o.key);
-        if (!execute || activeOnce.has(o.key)) return;
+        if (firedOnce.has(o.key)) return;
+        firedOnce.add(o.key);
         if (o.type === 'openUrl') openLink(o.text);
         if (o.type === 'message') { message = o.text; showBanner(o.text); }
       });
-      activeOnce = now;
     }
     function showBanner(text, isError) {
       banner.textContent = text || '';
@@ -662,7 +665,7 @@
       finished = false; busy = false; message = null; eventsLog = []; startedAt = new Date().toISOString();
       recompute();
       blockedLink = null;
-      runOnce(false);   // already-true conditions don't fire at the start
+      firedOnce = new Set();   // nothing runs until the first answer
       pageIndex = doc.pages.findIndex(p => !(p.props && p.props.ending) && state.pageVisible[p.id] !== false);
       if (pageIndex < 0) pageIndex = 0;
       showBanner('');
