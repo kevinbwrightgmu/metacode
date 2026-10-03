@@ -262,6 +262,11 @@ Every question can have an **answer key**, for example `age`; formulas refer to 
   **require** also start in the opposite state.
 - **Event** scripts (page opens, leaving a page, a click, submit) run once when the event happens, top to
   bottom. Navigation blocks (*go to page*, *end survey*…) belong in these.
+- **Open link** and **show message** blocks in a *when any answer changes* script run once, at the moment
+  their condition becomes true (not again while it stays true). Elsewhere they run when the event happens.
+- **Open link** opens a new tab. `example.com` is read as `https://example.com`, and `{{…}}` fills in
+  answers. Browsers only open tabs right after a click or key press; if one is blocked, the survey shows the
+  link in its message bar, or on the completion screen if the survey has ended, for the respondent to click.
 - An **if** with an empty condition slot never runs its blocks, like in Scratch. An empty slot in *and* or
   *or* counts as false.
 - Hidden questions are skipped by validation. Their answers are not stored unless **Keep answers to

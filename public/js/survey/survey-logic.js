@@ -558,7 +558,7 @@
       const envCtx = { answers, vars, score, keys, pageIndex: ctx.pageIndex || 0, isVisible: prevVisible };
       const env = makeEnv(doc, envCtx);
       doc.variables.forEach(v => { if (v.formula) vars[v.name] = tryEvaluate(v.formula, env, v.initial); });
-      const fired = [], errors = [];
+      const fired = [], errors = [], once = [];
       doc.rules.forEach(r => {
         if (!r.enabled || (r.trigger && r.trigger.type !== 'always')) return;
         let ok = false;
@@ -576,6 +576,8 @@
             case 'hidePage': pageVisible[a.target] = false; break;
             case 'setProp': if (a.target && typeof a.path === 'string' && /^(style|frame|props)\.[A-Za-z0-9_.]+$/.test(a.path)) { (props[a.target] = props[a.target] || {})[a.path] = a.value; } break;
             case 'setText': if (a.target) text[a.target] = interpolate(a.value, env); break;
+            // One-off actions: the runtime runs them when they become active after an answer
+            case 'openUrl': case 'message': once.push({ key: r.id + '|' + a.type + '|' + String(a.value), type: a.type, value: a.value, text: interpolate(a.value, env) }); break;
             default: break;   // setVar / changeVar are applied by runList
           }
         });
@@ -598,7 +600,7 @@
         if (disabled[id]) return true;
         return ancestors(doc, id).some(a => disabled[a]);
       };
-      state = { visible, disabled, required, props, text, pageVisible, vars, score, fired, errors, isVisible, isDisabled, keys };
+      state = { visible, disabled, required, props, text, pageVisible, vars, score, fired, errors, once, isVisible, isDisabled, keys };
       const sig = JSON.stringify([visible, pageVisible, score]);
       if (sig === prevSig) break;
       prevSig = sig;
@@ -628,7 +630,7 @@
       runList(doc, ok ? r.then : r.else || [], env, vars, a => {
         const e = Object.assign({ rule: r.id }, a);
         if (a.type === 'setVar' || a.type === 'changeVar') { e.type = 'setVar'; e.result = vars[a.name]; }
-        if (a.type === 'message' || a.type === 'complete' || a.type === 'setText') e.text = interpolate(a.value, env);
+        if (a.type === 'message' || a.type === 'complete' || a.type === 'setText' || a.type === 'openUrl') e.text = interpolate(a.value, env);
         effects.push(e);
       });
     });
@@ -723,6 +725,15 @@
     return { answers, byKey, errors, score: state.score, vars: state.vars };
   }
 
+  // A link an "open link" block can open: http(s) with a host, or mailto; "example.com" means https.
+  function linkOf(raw) {
+    let s = String(raw === undefined || raw === null ? '' : raw).trim();
+    if (s.indexOf('{{') !== -1) return s;   // filled in while answering
+    if (s && !/^[a-z][a-z0-9+.-]*:/i.test(s) && /^[\w-]+(\.[\w-]+)+([/?#].*)?$/.test(s)) s = 'https://' + s;
+    if (/^https?:\/\/[^\s/?#]+\.[^\s/?#]+/i.test(s) || /^https?:\/\/localhost(:\d+)?(\/|$)/i.test(s) || /^mailto:[^\s@]+@[^\s@]+$/i.test(s)) return s;
+    return null;
+  }
+
   /* ── Problems (editor + publish checks) ─────── */
   function ruleProblems(doc) {
     const out = [];
@@ -767,6 +778,7 @@
         else if (def.target && def.target !== 'page' && !elementExists(a.target)) out.push({ rule: r.id, message: r.name + ': "' + def.label + '" has no element selected.' });
         if (def.variable && !varExists(a.name)) out.push({ rule: r.id, message: r.name + ': "Set variable" refers to the missing variable "' + (a.name || '') + '".' });
         if (a.type === 'setVar' && !isObj(a.from)) exprCheck(r, a.expr, 'the variable formula');
+        if (a.type === 'openUrl' && !linkOf(a.value)) out.push({ rule: r.id, message: r.name + ': "Open a link" needs a web address like https://example.com.' });
         if (def.nav && r.trigger && r.trigger.type === 'always') out.push({ rule: r.id, level: 'warning', message: r.name + ': navigation actions only run on events (leaving a page, clicking a button) — change the trigger.' });
       });
     });
@@ -778,7 +790,7 @@
     ExprError, tokenize, parse, compile, evaluate, tryEvaluate, checkExpression, identifiersOf, FUNC_HELP,
     isEmptyValue, looseEq, truthy, textOf,
     valueKind, choicesOf, matrixOf, normalizeAnswer, scoreOf, keyMap, makeEnv,
-    CMP, CALC, ACTIONS, TRIGGERS, SETTABLE, evalGroup, evalCondition, interpolate, eachAction,
+    linkOf, CMP, CALC, ACTIONS, TRIGGERS, SETTABLE, evalGroup, evalCondition, interpolate, eachAction,
     computeState, runEvent, validateAnswer, validateSubmission, ruleProblems, FORMATS
   };
 });
