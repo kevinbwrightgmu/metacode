@@ -3,10 +3,9 @@
    questions about using MetaCode.
 
    Reuses the app's existing AI path (App.callClaude → /api/ai → the
-   server's provider proxy with key rotation), so it has no endpoint of its
-   own and handles API keys exactly like AI Coding: keys saved in Settings,
-   or kept server-side in .env. No key is stored in this file or put into
-   the prompt.
+   server, which calls EMIS with the key from its .env file), so it has no
+   endpoint of its own. Its model is Settings → AI models → Ask MetaCode.
+   No key is stored in this file or put into the prompt.
 
    Each request sends: the instructions below + the MetaCode reference
    (assistant-knowledge.js) + a snapshot of the app's state (counts,
@@ -38,7 +37,7 @@ const Assistant = (() => {
 
   const PAGE_SUGGESTIONS = {
     'dashboard':    'What should I do first in MetaCode?',
-    'settings':     'How does API key rotation work?',
+    'settings':     'Why does Settings say AI isn\'t set up?',
     'import':       'What columns should my posts CSV have?',
     'scraper':      'How do I scrape a subreddit and code the posts?',
     'codebook':     'How do I write codes the AI applies accurately?',
@@ -122,8 +121,7 @@ const Assistant = (() => {
   // Provider line, key notice and suggestions can change while the panel is
   // closed (Settings edits, navigation), so they're refreshed on every open.
   function refreshPanel() {
-    const settings = App.getState().settings || {};
-    els.sub.textContent = 'Using ' + providerLabel() + (settings.model ? ' · ' + settings.model : '');
+    els.sub.textContent = 'Using EMIS · ' + (App.modelFor('assistant') || 'default model');
     els.notice.hidden = App.hasApiKeys();
     renderSuggestions();
     updateEmptyState();
@@ -157,7 +155,7 @@ const Assistant = (() => {
       .map(m => ({ role: m.role, content: clip(m.content, HISTORY_CHAR_CAP) }))
       .concat([{ role: 'user', content: text }]);
     try {
-      const answer = await App.callClaude(messages, buildSystemPrompt(), MAX_ANSWER_TOKENS);
+      const answer = await App.callClaude(messages, buildSystemPrompt(), MAX_ANSWER_TOKENS, { feature: 'assistant' });
       if (myGeneration !== generation) return;
       if (!answer) { appendError(EMPTY_ANSWER, true, text); return; }
       chatHistory.push({ role: 'user', content: text }, { role: 'assistant', content: answer });
@@ -312,9 +310,7 @@ const Assistant = (() => {
   }
 
   /* ── Errors ──────────────────────────────────*/
-  function providerLabel() {
-    return (App.getState().settings || {}).provider === 'anthropic' ? 'Anthropic' : 'Groq';
-  }
+  function providerLabel() { return 'EMIS'; }
 
   // Turns the error App.callClaude threw into a message the user can act on.
   function describeError(err) {
@@ -325,14 +321,14 @@ const Assistant = (() => {
     if (err instanceof SyntaxError) {
       return { settings: false, text: 'The server sent an unexpected response. Make sure MetaCode is running with `npm start` and open at http://localhost:3000.' };
     }
-    if (/no api key/i.test(msg)) {
-      return { settings: true, text: 'No API key is set up for ' + providerLabel() + '. Add one in **Settings** (or in the server’s `.env` file), then try again.' };
+    if (/no api key|isn.t set up|not_configured/i.test(msg)) {
+      return { settings: true, text: 'MetaCode’s AI isn’t set up: add `EMIS_API_KEY=…` to the server’s `.env` file, then click **Reload .env** in **Settings**.' };
     }
     if (/rate.?limit|too many requests|\b429\b/i.test(msg)) {
-      return { settings: true, text: providerLabel() + ' is rate-limiting requests right now. Wait a few seconds and try again — or raise the delay or add a key from another account in **Settings**.' };
+      return { settings: true, text: providerLabel() + ' is rate-limiting requests right now. Wait a few seconds and try again — or add another EMIS key to `.env` (comma-separated).' };
     }
     if (/invalid.{0,12}(api.?key|x-api-key)|unauthori[sz]ed|authentication|\b401\b|\b403\b/i.test(msg)) {
-      return { settings: true, text: providerLabel() + ' rejected the API key. Check your keys in **Settings**.' };
+      return { settings: true, text: 'EMIS rejected the key. Check `EMIS_API_KEY` in the server’s `.env` file, then click **Reload .env** in **Settings**.' };
     }
     return { settings: false, text: 'The assistant couldn’t get an answer: ' + clean(msg, 300) };
   }
@@ -354,12 +350,11 @@ const Assistant = (() => {
     try {
       const s = App.getState();
       const settings = s.settings || {};
-      const providerId = settings.provider === 'anthropic' ? 'anthropic' : 'groq';
-      const settingsKeys = Array.isArray(settings.apiKeys) ? settings.apiKeys.length : 0;
       lines.push('- Page open: ' + (App.getCurrentView().title || 'Dashboard'));
       lines.push('- Project: "' + clean(s.project && s.project.name, 80) + '"');
-      lines.push('- AI: ' + providerLabel() + ', model ' + (clean(settings.model, 60) || 'not chosen') +
-        '; API keys configured: ' + settingsKeys + ' in Settings, ' + App.getEnvKeyCount(providerId) + ' in the server .env' +
+      const per = settings.models || {};
+      lines.push('- AI: EMIS via the server .env (' + (App.hasApiKeys() ? 'ready, ' + App.getEnvKeyCount() + ' key(s)' : 'NOT set up') + '); default model ' + (clean(settings.model, 60) || 'server default') +
+        (Object.keys(per).length ? '; per-feature models: ' + Object.keys(per).map(k => k + '=' + clean(per[k], 60)).join(', ') : '') +
         '; delay between calls ' + (Number(settings.delay) || 500) + ' ms');
       lines.push(describePosts(s.posts));
       lines.push(describeCodebook(s.codebook));

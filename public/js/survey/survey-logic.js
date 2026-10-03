@@ -577,7 +577,7 @@
             case 'setProp': if (a.target && typeof a.path === 'string' && /^(style|frame|props)\.[A-Za-z0-9_.]+$/.test(a.path)) { (props[a.target] = props[a.target] || {})[a.path] = a.value; } break;
             case 'setText': if (a.target) text[a.target] = interpolate(a.value, env); break;
             // One-off actions: the runtime runs them when they become active after an answer
-            case 'openUrl': case 'message': once.push({ key: r.id + '|' + a.type + '|' + String(a.value), type: a.type, value: a.value, text: interpolate(a.value, env) }); break;
+            case 'openUrl': case 'message': once.push({ key: r.id + '|' + a.type + '|' + String(a.value), type: a.type, value: a.value, where: a.where, text: interpolate(a.value, env) }); break;
             default: break;   // setVar / changeVar are applied by runList
           }
         });

@@ -240,7 +240,8 @@ that question's choices.
   glows. *Open link* opens its address in a new tab and *show message* / *end survey saying* show their
   text. Blocks that change the survey (show, go to page…) are listed instead; try those with answers in
   **Preview**. Conditions are checked as if nothing has been answered yet.
-- The **↗** button on an *open link* block opens the address straight away, to check it.
+- The **↗** button on an *open link* block is a real link to the address: click it to check the address
+  (browsers never block a link you click yourself).
 
 Blocks that aren't under a hat never run. They are kept where you left them.
 
@@ -271,7 +272,10 @@ Every question can have an **answer key**, for example `age`; formulas refer to 
   and the block is reached: with no *if*, on the first answer; inside an *if*, when its condition becomes
   true. They don't run again on every keystroke, only after the condition has been false in between.
   Under the other hats they run when the event happens (page opens, leaving a page, a click, submit).
-- **Open link** opens a new tab. `example.com` is read as `https://example.com`, and `{{…}}` fills in
+- **Open link … in [a new tab ▾ / this tab]**: *this tab* takes the respondent to the page (it can't be
+  blocked; on submit it waits until the response is saved). In Preview it opens a new tab instead, so you
+  don't leave the editor. *A new tab* opens a tab, and the survey's message bar also shows the link, so it can
+  be clicked if the browser blocks or swallows the tab. `example.com` is read as `https://example.com`, and `{{…}}` fills in
   answers. Browsers only open tabs right after a click or key press; if one is blocked, the survey shows the
   link in its message bar, or on the completion screen if the survey has ended, for the respondent to click.
 - An **if** with an empty condition slot never runs its blocks, like in Scratch. An empty slot in *and* or
@@ -318,7 +322,9 @@ Functions:
 
 The **Preview** tab runs the real respondent runtime:
 
-- **Devices:** Desktop, Tablet or Mobile.
+- **Devices:** Desktop (a browser window), Tablet (an iPad-size 820 × 1180 screen) or Mobile (an
+  iPhone-size 390 × 844 screen with status bar, camera cut-out, side buttons and home bar). The screen
+  scrolls inside the device, the device is scaled to fit, and **⟳ Portrait / Landscape** rotates it.
 - **Start on:** start on any page.
 - **Restart test:** clears all answers.
 

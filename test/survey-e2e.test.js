@@ -529,12 +529,20 @@ test('Open link blocks: click to try in the Logic tab, and they open in the surv
   assert.deepEqual(await opened(), ['https://example.org/done']);
   await page.locator('.bk-script[data-rule="r_exit"] .bk-hat .bk-row').click({ position: { x: 8, y: 30 } });   // a hat runs its script
   assert.deepEqual(await opened(), ['https://example.org/done', 'https://example.org/done']);
-  // ↗ opens the link right after typing a new address
+  // ↗ is a real link: it opens the address right after typing it (no popup blocker involved)
+  await context.route('https://example.net/**', r => r.fulfill({ body: 'ok', contentType: 'text/html' }));
   const field = page.locator('.bk-script[data-rule="r_plain"] .bk-stack input.bk-text');
   await field.fill('example.net/new');
+  const tab = context.waitForEvent('page');
   await page.locator('.bk-script[data-rule="r_plain"] .bk-try').click();
-  assert.equal((await opened())[2], 'https://example.net/new');
-  assert.equal((await studio.doc(page)).rules.find(r => r.id === 'r_plain').then[0].value, 'example.net/new', 'the typed address is saved too');
+  const newTab = await tab;
+  assert.equal(newTab.url(), 'https://example.net/new');
+  await newTab.close();
+  await field.press('Enter');
+  assert.equal((await studio.doc(page)).rules.find(r => r.id === 'r_plain').then[0].value, 'example.net/new', 'the typed address is saved');
+  // "in this tab" is stored on the block
+  await page.locator('.bk-script[data-rule="r_exit"] .bk-stack select.bk-dd').last().selectOption('same');
+  assert.equal((await studio.doc(page)).rules.find(r => r.id === 'r_exit').then[0].where, 'same');
   // The problems bar flags a link block with no address
   await field.fill('https://');
   await field.press('Enter');
@@ -561,6 +569,38 @@ test('Open link blocks: click to try in the Logic tab, and they open in the surv
   await page.waitForSelector('#ss-pv-host .sv-complete');
   assert.deepEqual((await opened()).slice(2), ['https://example.org/done', 'https://example.org/submitted']);
   assert.equal(await page.locator('#ss-pv-host .sv-complete a.sv-complete-link[href="https://example.org/submitted"]').count(), 1, 'a blocked popup leaves a link to click');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('Published survey: an "open link in this tab" block takes the respondent to the page', { skip, timeout: 120000 }, async () => {
+  const { page, context, errors } = await openApp('/studio.html');
+  await page.waitForSelector('#ss-new');
+  await page.click('#ss-new');
+  await page.waitForSelector('.ss-viewport .sv-artboard');
+  await page.click('.ss-pal-item[data-type="single"]');
+  await page.evaluate(() => SurveyStudio.current().store.tx('Add script', t => t.set('rules', [
+    { id: 'r_done', name: 'Done', enabled: true, trigger: { type: 'submit' }, when: { op: 'all', items: [] }, else: [], then: [{ type: 'openUrl', value: 'https://example.org/thanks', where: 'same' }] }
+  ])));
+  await page.click('#ss-publish');
+  await page.waitForSelector('#ss-pub-go');
+  await page.click('#ss-pub-go');
+  await page.waitForSelector('#ss-pub-url', { timeout: 10000 });
+  const url = await page.inputValue('#ss-pub-url');
+  const visitor = await browser.newContext();
+  const rp = await visitor.newPage();
+  await rp.route(/^https?:\/\/(?!localhost)/, route => route.request().url().startsWith('https://example.org/') ? route.fulfill({ body: '<h1>Thanks page</h1>', contentType: 'text/html' }) : route.abort());
+  await rp.goto(url);
+  await rp.waitForSelector('.sv-artboard [data-svid]');
+  await rp.locator('.sv-option').first().click();
+  await rp.locator('.sv-button', { hasText: 'Submit' }).click();
+  await rp.waitForURL('https://example.org/thanks');
+  assert.equal(await rp.textContent('h1'), 'Thanks page');
+  // …after the response was saved
+  const id = await page.evaluate(() => SurveyStudio.current().store.doc.id);
+  const stored = await page.evaluate(id => fetch('/api/surveys/' + id + '/responses').then(r => r.json()), id);
+  assert.equal(stored.responses.filter(r => r.status === 'complete').length, 1);
+  await visitor.close();
   assert.deepEqual(errors, []);
   await context.close();
 });

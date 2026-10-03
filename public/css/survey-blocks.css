@@ -131,4 +131,6 @@
 @keyframes bk-run { 0%, 70% { filter: drop-shadow(0 0 5px #FDE047) drop-shadow(0 0 2px #FACC15); } 100% { filter: none; } }
 .bk-try { width: 24px; height: 24px; border-radius: 50%; border: 1px solid rgba(0,0,0,.18); background: rgba(255,255,255,.22); color: #fff;
   font: 700 13px/1 'Inter', sans-serif; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+.bk-try { text-decoration: none; }
+.bk-try.is-off { opacity: .45; }
 .bk-try:hover, .bk-try:focus-visible { background: #fff; color: #1D4ED8; outline: none; }

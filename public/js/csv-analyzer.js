@@ -123,7 +123,7 @@ const CSVAnalyzer = (() => {
     }
 
     if (!App.hasApiKeys()) {
-      lastMapping = blankMapping('No API key set — pick the source/target columns manually below, or add a key in Settings for AI-assisted detection.');
+      lastMapping = blankMapping('AI isn\'t set up — pick the source/target columns manually below, or add EMIS_API_KEY to the server\'s .env file (see Settings) for AI-assisted detection.');
       renderMappingConfirm(lastMapping, 'manual');
       return;
     }
@@ -187,7 +187,7 @@ const CSVAnalyzer = (() => {
     const user = 'Header: ' + JSON.stringify(headers) + '\nSample rows:\n' +
       sample.map((r, i) => (i + 1) + '. ' + JSON.stringify(r)).join('\n');
 
-    const raw = await App.callClaude([{ role: 'user', content: user }], system, 500);
+    const raw = await App.callClaude([{ role: 'user', content: user }], system, 500, { feature: 'csv' });
     return App.extractJSON(raw);
   }
 

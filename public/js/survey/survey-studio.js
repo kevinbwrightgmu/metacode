@@ -697,23 +697,71 @@ const SurveyStudio = (() => {
     }
 
     /* ── Preview view ────────────────── */
-    let device = 'desktop', startPage = '';
+    let device = 'desktop', startPage = '', landscape = false;
     let lastPayload = null;
+    // Real device frames: a phone/tablet with its true screen size (CSS px),
+    // status bar, camera and home indicator, or a browser window for desktop;
+    // the screen scrolls inside and the whole device is scaled to fit.
+    const DEVICES = {
+      desktop: { w: 1280, h: 800, label: 'Desktop browser' },
+      tablet: { w: 820, h: 1180, label: 'iPad-size tablet (820 × 1180)' },
+      mobile: { w: 390, h: 844, label: 'iPhone-size phone (390 × 844)' }
+    };
+    const STATUS_ICONS = '<span class="ss-sb-icons" aria-hidden="true"><svg viewBox="0 0 18 12"><rect x="0" y="8" width="3" height="4" rx="1"/><rect x="5" y="5.5" width="3" height="6.5" rx="1"/><rect x="10" y="3" width="3" height="9" rx="1"/><rect x="15" y="0" width="3" height="12" rx="1"/></svg>' +
+      '<svg viewBox="0 0 16 12"><path d="M8 2.2c2.3 0 4.4.9 6 2.4l1.2-1.3C13.3 1.5 10.8.4 8 .4S2.7 1.5.8 3.3L2 4.6c1.6-1.5 3.7-2.4 6-2.4zm0 3.6c1.3 0 2.5.5 3.4 1.3l1.2-1.3C11.4 4.7 9.8 4 8 4s-3.4.7-4.6 1.8l1.2 1.3C5.5 6.3 6.7 5.8 8 5.8zm0 3.6c-.5 0-1 .2-1.3.5L8 11.4l1.3-1.5c-.3-.3-.8-.5-1.3-.5z"/></svg>' +
+      '<svg viewBox="0 0 27 12"><rect x=".5" y=".5" width="23" height="11" rx="3" fill="none" stroke="currentColor" opacity=".4"/><rect x="2" y="2" width="18" height="8" rx="1.8"/><rect x="24.5" y="4" width="1.8" height="4" rx=".9" opacity=".45"/></svg></span>';
+    function deviceHTML() {
+      const time = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }).replace(/\s?[AP]M$/i, '');
+      if (device === 'desktop') {
+        return '<div class="ss-hw ss-hw-desktop"><div class="ss-browser-bar"><span class="ss-dots"><i></i><i></i><i></i></span>' +
+          '<span class="ss-urlbar">🔒 ' + esc(location.host) + '/s/…</span></div><div class="ss-screen"><div class="ss-device-screen" id="ss-pv-host"></div></div></div>';
+      }
+      return '<div class="ss-hw ss-hw-' + device + (landscape ? ' is-landscape' : '') + '" aria-label="' + esc(DEVICES[device].label) + '">' +
+        '<span class="ss-btn ss-btn-power"></span><span class="ss-btn ss-btn-vol1"></span><span class="ss-btn ss-btn-vol2"></span>' + (device === 'mobile' ? '<span class="ss-btn ss-btn-mute"></span>' : '') +
+        '<div class="ss-screen"><div class="ss-statusbar"><span class="ss-sb-time">' + esc(time) + '</span>' + (device === 'mobile' ? '<span class="ss-island"></span>' : '<span class="ss-cam"></span>') + STATUS_ICONS + '</div>' +
+        '<div class="ss-device-screen" id="ss-pv-host"></div><span class="ss-home" aria-hidden="true"></span></div></div>';
+    }
+    // Scales the device so all of it fits in the preview area.
+    function fitDevice() {
+      const area = $('.ss-device');
+      const hw = area && area.querySelector('.ss-hw');
+      if (!hw) return;
+      const pad = 48;
+      const aw = Math.max(200, area.clientWidth - pad), ah = Math.max(200, area.clientHeight - pad);
+      if (device === 'desktop') {
+        const w = Math.min(DEVICES.desktop.w, aw);
+        hw.style.width = w + 'px'; hw.style.height = ah + 'px'; hw.style.transform = ''; hw.parentElement.style.width = ''; hw.parentElement.style.height = '';
+        return;
+      }
+      const ow = hw.offsetWidth, oh = hw.offsetHeight;
+      const s = Math.min(1, aw / ow, ah / oh);
+      hw.style.transform = s < 1 ? 'scale(' + s + ')' : '';
+      hw.parentElement.style.width = Math.ceil(ow * s) + 'px';
+      hw.parentElement.style.height = Math.ceil(oh * s) + 'px';
+    }
+    let deviceObserver = null;
     function renderPreview() {
       const box = $('.ss-view-preview');
       box.innerHTML = '<div class="ss-preview"><div class="ss-preview-bar">' +
         '<div class="ss-seg" role="radiogroup" aria-label="Device">' + [['desktop', 'Desktop'], ['tablet', 'Tablet'], ['mobile', 'Mobile']].map(([d, l]) => '<button type="button" class="ss-seg-btn' + (d === device ? ' is-on' : '') + '" data-device="' + d + '" role="radio" aria-checked="' + (d === device) + '">' + l + '</button>').join('') + '</div>' +
+        (device === 'desktop' ? '' : '<button type="button" class="btn btn-ghost btn-sm" id="ss-pv-rotate" title="Rotate the device" aria-pressed="' + landscape + '">⟳ ' + (landscape ? 'Landscape' : 'Portrait') + '</button>') +
         '<label class="ss-inline-label">Start on <select class="ss-select" id="ss-pv-start"><option value="">first page</option>' + doc().pages.map(p => '<option value="' + esc(p.id) + '"' + (p.id === startPage ? ' selected' : '') + '>' + esc(p.name) + '</option>').join('') + '</select></label>' +
         '<button type="button" class="btn btn-secondary btn-sm" id="ss-pv-reset">↺ Restart test</button>' +
         '<span class="ss-preview-note">Test mode — answers and submissions are not recorded.</span></div>' +
-        '<div class="ss-preview-body"><div class="ss-device ss-device-' + device + '"><div class="ss-device-screen" id="ss-pv-host"></div></div>' +
+        '<div class="ss-preview-body"><div class="ss-device ss-device-' + device + '"><div class="ss-hw-box">' + deviceHTML() + '</div></div>' +
         '<aside class="ss-testpanel" id="ss-testpanel" aria-label="Test panel"></aside></div></div>';
       box.onclick = e => {
         const d = e.target.closest('[data-device]');
         if (d) { device = d.dataset.device; renderPreview(); return; }
+        if (e.target.closest('#ss-pv-rotate')) { landscape = !landscape; renderPreview(); return; }
         if (e.target.id === 'ss-pv-reset') mountPreview();
       };
       $('#ss-pv-start').onchange = e => { startPage = e.target.value; mountPreview(); };
+      fitDevice();
+      if (deviceObserver) deviceObserver.disconnect();
+      else cleanup.push(() => { if (deviceObserver) deviceObserver.disconnect(); });
+      deviceObserver = new ResizeObserver(() => fitDevice());
+      deviceObserver.observe($('.ss-device'));
       mountPreview();
     }
     function mountPreview() {

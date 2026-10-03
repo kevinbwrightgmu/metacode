@@ -12,6 +12,7 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 |---|---|
 | **Import Data** | Upload CSVs for posts, engagement metrics, and social network data. The `text` column is optional — if no text-like column is found by name, AI reads the file's structure and maps it for you |
 | **Reddit Scraper** | Collect subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed Python, JavaScript or TypeScript (custom code mode); live progress, results table/JSON, CSV/JSON export, and **Add to project** to code the posts. Server requests go through a Python worker (or epoxy-tls over Wisp without Python); an in-app Reddit browser uses Scramjet. See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
+| **Projects** | Save the open project on the MetaCode server and keep as many as you like: reopen an earlier one, rename, duplicate, export/import as JSON, delete. A project that's open is saved automatically (Autosave) |
 | **Survey Studio** | Its own page, opened from the front page (**Open Survey Studio**). Build surveys on a freeform canvas where every part — down to a single answer choice — can be moved, resized, rotated, scaled, distorted and styled; 30+ element types, layers, groups, components, a theme with per-element overrides, Scratch-style block logic (show/hide, skip, branching, variables, formulas, scores, conditional styling), device preview, versioned publishing to a public link, and response collection with CSV/JSON export. Open-text answers can be added to the project for coding. See [docs/survey-studio.md](docs/survey-studio.md) |
 | **Codebook Builder** | Define custom coding dimensions and codes; each code has an optional AI Fine-Tuning Notes field the model reads during Auto-Coding, separate from the Description shown to human coders; import/export as CSV |
 | **AI Auto-Coding** | The AI applies your codebook to posts and provides confidence scores + reasoning |
@@ -51,8 +52,9 @@ cp .env.example .env
 # EMIS_API_KEY=emis-...
 ```
 The key is only read by MetaCode's server — it never reaches the browser. See [AI Provider (EMIS)](#ai-provider-emis)
-for the other settings. In the app, **Settings → Fetch Models** lists the models from `emis-models.json`; pick one
-and click **Save Settings** (optional — MetaCode uses the first listed model otherwise).
+for the other settings. **Settings → AI connection** shows which file was read and which settings it contained
+(names only); after editing `.env`, click **Reload .env** — no restart needed for the AI settings. In **Settings →
+AI models** pick a default model and, if you like, a different model for each AI feature.
 
 **4. Start the server**
 ```bash
@@ -326,8 +328,12 @@ Configuration lives only in the server's `.env` file:
 | `EMIS_MODELS_FILE` | no | Model list file, default `emis-models.json` in the MetaCode folder |
 | `EMIS_TIMEOUT_MS` | no | How long to wait for EMIS (default 120000 ms) |
 
-Restart MetaCode (`npm start`) after changing `.env`. The file must be named exactly `.env` and sit next to `server.js`; it is read from there even when the
-server is started from another folder, and the startup banner prints which file it loaded.
+After changing `.env`, click **Settings → Reload .env** (AI settings apply at once; scraper and port settings
+need a restart). MetaCode looks for `.env` next to `server.js`, then in the folder the server was started from,
+then in the folder above; `.env.txt` (Windows often adds `.txt`) is accepted, and files saved by Notepad as
+"Unicode" (UTF-16) are read correctly. Values in `.env` replace variables of the same name already set in your
+system environment (an old system variable is a common reason a new key seems not to load) — Settings and the
+startup banner say when that happens.
 
 - **Models.** The model list comes from `emis-models.json` — EMIS's models in OpenCode's config format
   (`provider.emis.models`: id → name, `tool_call`, `reasoning`, `attachment`). To update it, edit the file or
@@ -343,8 +349,11 @@ server is started from another folder, and the startup banner prints which file 
 - **Security.** The key is sent only to the EMIS address in `.env`: never to the browser, never logged,
   never returned by an endpoint or included in an error. The browser can't choose the EMIS address or key.
   Other websites open in your browser can't use MetaCode's AI endpoints (they're same-origin only).
-- **Settings page.** Fetch Models, the model choice and Test Connection work as before. The *Provider* and
-  *API Keys* fields are left over from the Groq/Anthropic version and are no longer used.
+- **Settings page.** *AI connection* shows the `.env` file that was read (name, location, encoding), the names
+  of the settings in it, warnings, whether AI is ready, and **Reload .env** / **Test connection**. *AI models*
+  has a default model plus one per feature — AI Coding, Ask MetaCode, Import Data (column detection) and
+  Analyze CSV (edge detection); "Same as default" follows the default. *EMIS keys* lists each key masked, with
+  its status and remaining quota.
 - **Streaming.** `POST /api/ai` also accepts `"stream": true` (OpenAI request format) and then relays EMIS's
   server-sent events (`chat.completion.chunk` …, then `data: [DONE]`); a failure mid-stream arrives as a
   final `data: {"error": {...}}` event. The current interface doesn't use streaming.
@@ -389,6 +398,8 @@ metacode/
 │   ├── reddit/                 Targets/URL parsing, record formatters, standard scraper
 │   ├── jobs/job-manager.js     Job queue, status, logs, results
 │   └── sandbox/                Custom code: Pyodide (Python) and QuickJS (JS/TS) sandbox processes, SDKs, runner
+├── env-file.js                 Reads .env (encodings, .env.txt, other folders, reload) — see AI Provider (EMIS)
+├── projects/                   Saved projects (Projects page): /api/projects, JSON files in project-data/
 ├── surveys/                    Survey Studio server side: API routes, publishing, responses, JSON-file store
 ├── docs/reddit-scraper.md      Scraper guide
 ├── docs/survey-studio.md       Survey Studio guide
@@ -409,7 +420,8 @@ metacode/
 │   ├── css/main.css              Design system + component styles
 │   ├── css/survey.css            Survey rendering; css/survey-studio.css + survey-blocks.css  Survey Studio editor
 │   └── js/
-│       ├── app.js               Router, state, modals, notifications, AI requests (via the server)
+│       ├── app.js               Router, state, modals, notifications, Settings, AI requests (via the server)
+│       ├── projects.js          Projects page: saved projects, autosave
 │       ├── data.js              CSV import for posts/engagement/network (AI-assisted structure detection)
 │       ├── codebook.js          Coding scheme management
 │       ├── ai-coding.js         Batch AI coding
@@ -442,16 +454,17 @@ If you use MetaCode in your research, please acknowledge:
 
 ## Troubleshooting
 
-**"Not connected" in the top bar**
-→ Set `EMIS_API_KEY` in the server's `.env` file and restart MetaCode, then use "Test Connection" in Settings.
-The server's console says at startup whether the EMIS key was found.
+**"AI not set up" in the top bar / the key in `.env` doesn't load**
+→ Open **Settings**: *AI connection* says which `.env` file was read and which setting names it found. Put
+`EMIS_API_KEY=your-key` in it (one setting per line), save, and click **Reload .env**. If it says no file was
+found, the file must be called `.env` (not `.env.example`) next to `server.js`.
 
 **"Your EMIS usage quota … is used up"**
 → The key's EMIS budget for the current day/week/month is spent; the message says when it resets. Wait until
 then, or add another EMIS key to `EMIS_API_KEY` (comma-separated).
 
 **"EMIS doesn't offer the model …"**
-→ Click "Fetch Models" in Settings, pick another model and click "Save Settings" (or set `EMIS_MODEL` in `.env`).
+→ In Settings → AI models, pick another model and click "Save model settings" (or set `EMIS_MODEL` in `.env`).
 If the model is listed in `emis-models.json` but EMIS no longer serves it, update that file.
 
 **"NetworkX not available" on the Analyze CSV page**
