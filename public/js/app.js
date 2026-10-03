@@ -544,7 +544,7 @@ const App = (() => {
     }
     (env.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
     if (env.overridden && env.overridden.length) rows.push('<div style="color:#B45309">⚠ .env replaced older values set in this computer\'s environment for: ' + env.overridden.map(k => '<code>' + esc(k) + '</code>').join(' ') + '</div>');
-    if (ai.ready) rows.push('<div>✓ AI is ready: ' + ai.keyCount + ' EMIS key' + (ai.keyCount === 1 ? '' : 's') + (ai.baseHost ? ' · ' + esc(ai.baseHost) : '') + (ai.defaultModel ? ' · EMIS_MODEL=' + esc(ai.defaultModel) : '') + (ai.proxy ? ' · via proxy ' + esc(ai.proxy) : '') + '</div>');
+    if (ai.ready) rows.push('<div>✓ AI is ready: ' + ai.keyCount + ' EMIS key' + (ai.keyCount === 1 ? '' : 's') + (ai.baseHost ? ' · ' + esc(ai.baseHost) : '') + (ai.defaultModel ? ' · EMIS_MODEL=' + esc(ai.defaultModel) : '') + (ai.proxy ? ' · via proxy ' + esc(ai.proxy) : '') + (ai.transport ? ' · requests sent by ' + esc(ai.transport) : '') + '</div>');
     else rows.push('<div style="color:var(--error)">✗ AI isn\'t ready: ' + esc(ai.problem || 'EMIS_API_KEY isn\'t set.') + '</div>');
     (ai.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
     rows.push('<div class="form-hint">Server ' + esc(st.server.version || '') + ' started ' + esc(new Date(st.server.startedAt).toLocaleString()) + (env.loadedAt ? ' · .env read ' + esc(new Date(env.loadedAt).toLocaleTimeString()) : '') + '</div>');

@@ -59,6 +59,7 @@ let emis, emisBase, server, base, browser;
 const seenModels = [];
 const emisFaults = { broken: new Set(), flaky: 0 };   // models that always fail; number of next requests that fail with 503
 let proxied = 0;
+let lastUserAgent = '';
 
 function findChromium() {
   const candidates = [];
@@ -79,9 +80,11 @@ test.before(async () => {
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       if (!req.url.startsWith('/v1/')) { res.setHeader('Content-Type', 'text/html'); return res.end('<!doctype html><html><body>EMIS website</body></html>'); }
-      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }] }));
+      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }] }));
       if (req.url === '/v1/chat/completions') {
         const j = JSON.parse(body || '{}');
+        lastUserAgent = String(req.headers['user-agent'] || '');
+        if (j.model === 'forbidden-model') { res.statusCode = 403; return res.end('{"error":{"message":"this key may not use forbidden-model"}}'); }
         seenModels.push(j.model);
         if (emisFaults.flaky > 0) { emisFaults.flaky--; res.statusCode = 503; return res.end('{"error":{"message":"busy"}}'); }
         if (emisFaults.broken.has(j.model)) { res.statusCode = 500; return res.end('{"error":{"message":"model crashed"}}'); }
@@ -202,9 +205,35 @@ test('an EMIS_BASE_URL without /v1 (the website answers) is corrected automatica
   }
 });
 
+test('requests go through Python when it is available; a 403 shows EMIS\'s reason and keeps the key', async () => {
+  const st = (await json('GET', '/api/settings/status')).json;
+  const python = /^Python/.test(st.ai.transport);
+  if (python) {
+    const r = await json('POST', '/api/ai', { model: 'model-b', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
+    assert.equal(r.status, 200);
+    let usingSdk = false;
+    try { require('child_process').execSync('python3 -c "import openai"', { stdio: 'ignore' }); usingSdk = true; } catch (e) { /* no SDK */ }
+    assert.match(lastUserAgent, usingSdk ? /^OpenAI\/Python/ : /Python/, 'sent from Python');
+  }
+  const bad = await json('POST', '/api/ai', { model: 'forbidden-model', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
+  assert.equal(bad.status, 403);
+  assert.match(bad.json.error.message, /this key may not use forbidden-model/);
+  const keys = (await json('GET', '/api/keys/status')).json.keys;
+  assert.equal(keys[0].status, 'available', 'a model-specific 403 doesn\'t disable the key');
+  const ok = await json('POST', '/api/ai', { model: 'model-b', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
+  assert.equal(ok.status, 200);
+});
+
 test('EMIS requests go through EMIS_PROXY when set (Node ignores HTTPS_PROXY by itself)', async () => {
   const net = require('net');
-  const proxy = http.createServer((req, res) => { res.statusCode = 405; res.end(); });
+  // Handles both CONNECT tunnels and plain forwarded requests (absolute URLs)
+  const proxy = http.createServer((req, res) => {
+    proxied++;
+    const target = new URL(req.url);
+    const up = http.request({ hostname: target.hostname, port: target.port, path: target.pathname + target.search, method: req.method, headers: req.headers }, ur => { res.writeHead(ur.statusCode, ur.headers); ur.pipe(res); });
+    up.on('error', () => { res.statusCode = 502; res.end(); });
+    req.pipe(up);
+  });
   proxy.on('connect', (req, socket, head) => {
     proxied++;
     const [host, port] = req.url.split(':');

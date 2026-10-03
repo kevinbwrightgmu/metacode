@@ -2,7 +2,9 @@
 # Install with:  pip install -r requirements.txt
 # (or: pip3 install -r requirements.txt, depending on your system)
 #
-# Node/Express handles everything else — this is the only Python
-# dependency the app needs.
-
 networkx>=3.0
+
+# AI (EMIS): MetaCode sends its EMIS requests from Python, with the official
+# OpenAI SDK when it's installed — the client EMIS documents. Without it,
+# Python's standard library is used, and without Python, Node.js.
+openai>=1.0

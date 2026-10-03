@@ -326,6 +326,8 @@ Configuration lives only in the server's `.env` file:
 | `EMIS_BASE_URL` | no | EMIS API address, default `https://emis.zxs-is-very.cool/v1` |
 | `EMIS_MODEL` | no | Default model. If empty: the first model in `emis-models.json` (without that file: `gpt-oss-120b` if EMIS lists it, otherwise the first model EMIS lists) |
 | `EMIS_MODELS_FILE` | no | Model list file, default `emis-models.json` in the MetaCode folder |
+| `EMIS_TRANSPORT` | no | What sends AI requests: `auto` (default — Python, with the `openai` package when installed, else Node.js), `python` or `node` |
+| `EMIS_PROXY` | no | Proxy for EMIS requests (`HTTPS_PROXY` / `NO_PROXY` are used too) |
 | `EMIS_TIMEOUT_MS` | no | How long to wait for EMIS (default 120000 ms) |
 
 After changing `.env`, click **Settings → Reload .env** (AI settings apply at once; scraper and port settings
@@ -465,6 +467,12 @@ failing, answers with another model. If it still fails: open **Settings → AI c
 to see the exact message. On networks that only allow the internet through a proxy, add
 `HTTPS_PROXY=http://proxy:port` (or `EMIS_PROXY`) to `.env` and click **Reload .env** — Node.js doesn't use
 the system proxy by itself. If a model you picked keeps failing, choose another one in Settings → AI models.
+
+**HTTP 403 / "EMIS's website check answered instead of the API"**
+→ MetaCode sends EMIS requests from Python (with the official `openai` package when installed), as EMIS's
+documentation does. Install Python 3, run `pip install -r requirements.txt` (adds `openai`), and restart.
+**Settings → AI connection** shows what sends the requests ("requests sent by Python … (openai …)"). A 403
+that names a model means your key can't use that model: pick another in Settings → AI models.
 
 **"Your EMIS usage quota … is used up"**
 → The key's EMIS budget for the current day/week/month is spent; the message says when it resets. Wait until
