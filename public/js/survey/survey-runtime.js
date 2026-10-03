@@ -230,6 +230,7 @@
       if (Logic.isEmptyValue(v)) delete answers[qid]; else answers[qid] = v;
       touched.add(qid);
       const changed = recompute();
+      runOnce(true);
       if (errors[qid] !== undefined || attempted.has(page().id)) {
         const e = Logic.validateAnswer(doc, q, answers[qid], state, { patterns: true });
         if (e) errors[qid] = e; else delete errors[qid];
@@ -429,7 +430,7 @@
         case 'back': back(); break;
         case 'submit': next(true); break;
         case 'goto': { const i = doc.pages.findIndex(p => p.id === a.target); if (i >= 0 && validatePage()) go(i, true); break; }
-        case 'url': { const u = Core.safeUrl(a.target, ['https', 'http', 'mailto']); if (u) window.open(u, '_blank', 'noopener,noreferrer'); break; }
+        case 'url': openLink(a.target); break;
         default: break;
       }
     }
@@ -445,7 +446,7 @@
           case 'show': visOverride[e.target] = true; break;
           case 'hide': visOverride[e.target] = false; break;
           case 'message': message = e.text; showBanner(e.text); break;
-          case 'openUrl': { const u = Core.safeUrl(e.value, ['https', 'http', 'mailto']); if (u && source === 'click') window.open(u, '_blank', 'noopener,noreferrer'); break; }
+          case 'openUrl': openLink(e.text || e.value); break;
           case 'goto': if (!nav) { const i = doc.pages.findIndex(p => p.id === e.target); if (i >= 0) { nav = true; go(i, true); } } break;
           case 'next': if (!nav) { nav = true; next(); } break;
           case 'back': if (!nav) { nav = true; back(); } break;
@@ -590,6 +591,12 @@
       box.innerHTML = '<div class="sv-complete-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><polyline points="20 6 9 17 4 12"/></svg></div><h2 class="sv-complete-title"></h2><p class="sv-complete-msg"></p>';
       box.querySelector('.sv-complete-title').textContent = Logic.interpolate(doc.settings.completionTitle || 'Thank you!', state.env);
       box.querySelector('.sv-complete-msg').textContent = outcome || Logic.interpolate(doc.settings.completionMessage || 'Your response has been recorded.', state.env);
+      if (blockedLink) {
+        const a = document.createElement('a');
+        a.className = 'sv-complete-link'; a.href = blockedLink; a.target = '_blank'; a.rel = 'noopener noreferrer';
+        a.textContent = 'Continue to ' + blockedLink.replace(/^mailto:/, '');
+        box.appendChild(a);
+      }
       renderer.artboard.appendChild(box);
       renderer.artboard.style.height = 'auto';
       fit();
@@ -597,6 +604,38 @@
       announce('Survey complete.');
     }
 
+    // Opens a link from an "open link" block or a link button. Browsers only allow
+    // new tabs right after a click or key press; when one is blocked, the link is
+    // shown in the banner for the respondent to open.
+    function openLink(raw) {
+      const link = Logic.linkOf(raw);   // also accepts "example.com"
+      const u = link && link.indexOf('{{') === -1 ? Core.safeUrl(link, ['https', 'http', 'mailto']) : null;
+      if (!u) { log('rule', 'Open link skipped — "' + String(raw || '') + '" isn\'t an http(s) or mailto link'); return; }
+      log('rule', 'Open link ' + u);
+      let w = null;
+      try { w = window.open(u, '_blank'); } catch (err) { w = null; }
+      if (w) { try { w.opener = null; } catch (err) { /* cross-origin */ } return; }
+      blockedLink = u;   // also offered on the completion screen if the survey ends now
+      banner.textContent = '';
+      banner.append('Open this link: ');
+      const a = document.createElement('a');
+      a.href = u; a.target = '_blank'; a.rel = 'noopener noreferrer'; a.textContent = u;
+      banner.appendChild(a);
+      banner.classList.add('is-shown'); banner.classList.remove('is-error');
+    }
+    // "When any answer changes" scripts: open-link / message blocks run once when they become active.
+    let activeOnce = new Set();
+    let blockedLink = null;
+    function runOnce(execute) {
+      const now = new Set();
+      (state.once || []).forEach(o => {
+        now.add(o.key);
+        if (!execute || activeOnce.has(o.key)) return;
+        if (o.type === 'openUrl') openLink(o.text);
+        if (o.type === 'message') { message = o.text; showBanner(o.text); }
+      });
+      activeOnce = now;
+    }
     function showBanner(text, isError) {
       banner.textContent = text || '';
       banner.classList.toggle('is-shown', !!text);
@@ -622,6 +661,8 @@
       answers = {}; varState = {}; visOverride = {}; touched = new Set(); errors = {}; attempted = new Set(); history = []; rankOrder = {}; tabs = {};
       finished = false; busy = false; message = null; eventsLog = []; startedAt = new Date().toISOString();
       recompute();
+      blockedLink = null;
+      runOnce(false);   // already-true conditions don't fire at the start
       pageIndex = doc.pages.findIndex(p => !(p.props && p.props.ending) && state.pageVisible[p.id] !== false);
       if (pageIndex < 0) pageIndex = 0;
       showBanner('');

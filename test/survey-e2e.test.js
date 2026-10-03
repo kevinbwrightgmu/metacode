@@ -497,6 +497,54 @@ test('Logic blocks: variables, reporters in slots, undo, drag to the palette to 
   await context.close();
 });
 
+test('Open link blocks open the page — after an answer, on leaving a page, or as a link when the popup is blocked', { skip, timeout: 120000 }, async () => {
+  const { page, context, errors } = await openApp('/studio.html');
+  await page.waitForSelector('#ss-new');
+  await page.click('#ss-new');
+  await page.waitForSelector('.ss-viewport .sv-artboard');
+  await page.click('.ss-pal-item[data-type="single"]');
+  const qid = await studio.primary(page);
+  const choices = optionsOf(await studio.doc(page), qid);
+  const pageId = (await studio.doc(page)).pages[0].id;
+  // when any answer changes: if answer = first choice then open "example.com" (no https:// typed)
+  // when leaving page 1: open https://example.org/{{answer}}
+  await page.evaluate(([qid, v, pageId]) => SurveyStudio.current().store.tx('Add scripts', t => t.set('rules', [
+    { id: 'r_any', name: 'Any', enabled: true, trigger: { type: 'always' }, when: { op: 'all', items: [] }, else: [],
+      then: [{ type: 'if', when: { op: 'all', items: [{ left: { kind: 'answer', ref: qid }, cmp: 'eq', right: { kind: 'value', value: v } }] }, then: [{ type: 'openUrl', value: 'example.com' }], else: [] }] },
+    { id: 'r_exit', name: 'Exit', enabled: true, trigger: { type: 'pageExit', page: pageId }, when: { op: 'all', items: [] }, else: [],
+      then: [{ type: 'openUrl', value: 'https://example.org/done' }] }
+  ])), [qid, choices[0].props.value, pageId]);
+  // The problems bar flags a link block with no address
+  await page.click('.ss-mode[data-mode="logic"]');
+  await page.waitForSelector('.bk-app');
+  assert.match(await page.textContent('.bk-problems'), /no problems/);
+  await page.locator('.bk-script[data-rule="r_exit"] .bk-stack input.bk-text').fill('https://');
+  await page.locator('.bk-script[data-rule="r_exit"] .bk-stack input.bk-text').press('Enter');
+  assert.match(await page.textContent('.bk-problems'), /needs a web address/);
+  await page.keyboard.press('Control+z');
+  assert.match(await page.textContent('.bk-problems'), /no problems/);
+
+  await page.click('.ss-mode[data-mode="preview"]');
+  await page.waitForSelector('#ss-pv-host .sv-artboard');
+  await page.evaluate(() => { window.__opened = []; window.__block = false; window.open = (u) => { window.__opened.push(u); return window.__block ? null : {}; }; });
+  const opened = () => page.evaluate(() => window.__opened);
+  await page.locator(`#ss-pv-host [data-svid="${choices[1].id}"]`).click({ force: true });
+  assert.deepEqual(await opened(), [], 'nothing opens while the condition is false');
+  await page.locator(`#ss-pv-host [data-svid="${choices[0].id}"]`).click({ force: true });
+  assert.deepEqual(await opened(), ['https://example.com'], 'opens once when the condition becomes true');
+  await page.locator(`#ss-pv-host [data-svid="${choices[0].id}"]`).click({ force: true });
+  assert.equal((await opened()).length, 1, 'not again while it stays true');
+  // Leaving the page (Submit on a one-page survey) runs the exit script — popup blocked → link in the banner
+  await page.evaluate(() => { window.__block = true; });
+  await page.locator('#ss-pv-host .sv-button', { hasText: 'Submit' }).click();
+  await page.waitForFunction(() => window.__opened.length === 2);
+  assert.equal((await opened())[1], 'https://example.org/done');
+  await page.waitForSelector('#ss-pv-host .sv-complete');
+  assert.equal(await page.locator('#ss-pv-host .sv-complete a.sv-complete-link[href="https://example.org/done"]').count(), 1, 'a blocked popup leaves a link to click');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
 test('the front page links to both apps and the coding app no longer embeds the studio', { skip, timeout: 60000 }, async () => {
   const { page, context, errors } = await openApp('/index.html');
   assert.equal(await page.locator('a[href="app.html"]').count() >= 1, true);
