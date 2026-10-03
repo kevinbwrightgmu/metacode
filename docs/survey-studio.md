@@ -1,9 +1,11 @@
 # Survey Studio
 
-Survey Studio is MetaCode's survey builder. Sidebar → **Create → Survey Studio**. You design a survey on a
-freeform canvas, add logic, preview it on different devices, publish it to a public link, and collect
-responses. It lives alongside the coding tools and does not change them; open-text answers can be sent to
-your project with **Add text answers to project**, so you can code them.
+Survey Studio is MetaCode's survey builder. It has its own page, `studio.html`: open it from the front page
+with **Open Survey Studio**. You design a survey on a freeform canvas, build its logic from Scratch-style
+blocks, preview it on different devices, publish it to a public link, and collect responses.
+
+It is separate from the coding app (`app.html`) and does not change it. Open-text answers can be sent to your
+MetaCode project in this browser with **Add text answers to project**, so you can code them there.
 
 The design goal is that **everything is editable**. A survey is a tree of elements. A single answer
 choice, its radio dot, its label, a matrix row and a navigation button are all separate elements. Each one
@@ -40,15 +42,16 @@ has its own:
 
 ## Quick tour
 
-1. Open **Survey Studio**. Pick **New survey** or one of the templates: Customer feedback, Research study,
-   Event registration or Scored quiz.
+1. On the front page, click **Open Survey Studio**. Pick **New survey** or one of the templates: Customer
+   feedback, Research study, Event registration or Scored quiz. The logo at the top left goes back to the
+   front page.
 2. Click an item in the **Add** palette on the left, for example **Single choice**. It appears on the page,
    already selected.
 3. Click the question to select it. **Double-click** to go inside it, for example to select one answer.
    Double-click a text to edit it in place.
 4. Change anything in the **inspector** on the right. *Basic* shows the common settings; *All* shows every
    setting.
-5. Open the **Logic** tab to show, hide, skip or calculate things.
+5. Open the **Logic** tab and snap blocks together to show, hide, skip or calculate things.
 6. Use **Preview** to answer the survey yourself (desktop, tablet or mobile) and watch the test panel.
 7. **Publish**. You get a link like `http://your-server:3000/s/AbC123…`. Responses appear under
    **Responses**.
@@ -187,46 +190,94 @@ The library is stored on the server, so it is shared by every survey.
 
 ## Logic
 
-The **Logic** tab has three areas: **variables**, **rules** and a **problems** list.
+The **Logic** tab is block coding, like Scratch. Drag blocks from the palette on the left onto the
+workspace and snap them together into **scripts**. For example:
+
+```
+when leaving page [1. Consent ▾]
+if < (answer to [Do you agree…? ▾]) = [No ▾] > then
+    end survey saying [Thank you for your time.]
+else
+    show [About you ▾]
+```
+
+### Block categories
+
+| Category | Colour | Blocks |
+|---|---|---|
+| Events | yellow | Hat blocks that start a script: *when any answer changes*, *when page … opens*, *when leaving page …*, *when … is clicked* (a button), *when the survey is submitted* |
+| Control | orange | *if ⟨ ⟩ then* and *if ⟨ ⟩ then … else*. They hold other blocks and can be nested |
+| Looks | purple | *show* / *hide* / *enable* / *disable* an element, *make … required* / *optional*, *set text of … to …*, *set [fill ▾] of … to …* (conditional styling), *show message* |
+| Pages | blue | *go to page*, *go to next page*, *go back a page*, *skip page*, *include page*, *submit the survey*, *end survey saying …*, *open link* |
+| Answers | teal | *(answer to …)*, ⟨*(answer to …) is answered*⟩, ⟨*(answer to …) = …*⟩, *(score)*, *(page number)*, *set answer of … to …* |
+| Operators | green | ⟨*( ) = ( )*⟩ and the other comparisons (≠ > ≥ < ≤ contains, is answered), ⟨*and*⟩, ⟨*or*⟩, ⟨*not*⟩, *( ) + ( )* (and − × ÷ mod min max), *join*, *round*, *(formula …)*, ⟨*formula …*⟩ |
+| Variables | pink | **Make a variable**, then a reporter for each variable, *set … to ( )* and *change … by ( )* |
+
+Block shapes show where they fit, as in Scratch:
+
+- **Hat blocks** start a script.
+- **Stack blocks** snap above and below each other.
+- **C-blocks** wrap a stack.
+- **Hexagonal** blocks are true/false conditions; they go in hexagonal slots.
+- **Round** blocks are values; they go in round slots.
+
+Any round slot also accepts a typed value. When the slot compares an answer to a choice question, it offers
+that question's choices.
+
+### Using the workspace
+
+- **Add a block:** drag it from the palette, or click it to drop it on the workspace.
+- **Move blocks:** drag a stack block to move it together with the blocks below it, or drag a hat to move
+  its whole script.
+- **Snap:** a grey bar shows where a stack will snap; a highlighted slot shows where a condition or value
+  will go. A block dropped onto a filled slot pops the old block out next to it.
+- **Delete:** drag blocks back onto the palette, or select a block and press **Delete**.
+- **Right-click** a block for *Duplicate*, *Delete* and *Edit script as JSON…* (the advanced
+  representation). Right-click the workspace for *Clean up blocks*.
+- **Pan and zoom:** drag empty space to pan; use **+ / = / −** or Ctrl + wheel to zoom.
+- **Undo/redo** (Ctrl+Z / Ctrl+Shift+Z) covers every block change.
+
+Blocks that aren't under a hat never run. They are kept where you left them.
+
+Surveys made before the block editor open with each old rule shown as a hat block holding an
+*if … then … else* block, so nothing needs converting by hand.
 
 ### Variables
 
-A variable has a name, a type and an initial value. It can also have a **formula**, which is recalculated
-continuously. Every question can have an **answer key**, for example `age`; formulas refer to answers by
-that key.
+**Make a variable** asks for:
 
-### Rules
+- a name;
+- a starting value;
+- optionally, a formula that recalculates it continuously.
 
-Each rule has four parts:
+Click ✎ next to a variable to rename it, change it or delete it. Renaming updates every block that uses it.
+Variables can be shown in any text with `{{name}}`.
 
-- **WHEN:** the trigger. One of: while answering (re-checked after every answer), when leaving a page, when
-  entering a page, when a button is clicked, or when the survey is submitted.
-- **IF:** conditions. These compare an answer, a variable, the score or a formula with a value. The
-  comparisons are equals, not equals, greater/less than, contains, is empty and is not empty.
-  - Group conditions with **all** or **any**.
-  - Groups can be nested.
-  - Any condition can be replaced by a formula.
-- **THEN:** actions. Show, hide, enable, disable, require, make optional, set a property (conditional
-  styling), set text, set a variable, set an answer, show or hide a page, go to a page, next, back, submit,
-  end the survey with a message, show a message, or open a link.
-- **OTHERWISE:** actions to run when the conditions are false.
+Every question can have an **answer key**, for example `age`; formulas refer to answers by that key.
 
-### Behaviour notes
+### How scripts run
 
-- An element that a *show* rule targets starts hidden. *Enable* and *require* targets start in the
-  opposite state too.
-- Hidden questions are skipped by validation. Their answers are not stored unless **Keep answers to questions
-  hidden by logic** is turned on in Theme → Survey settings.
+- **When any answer changes** scripts run again after every answer, so they describe how the survey should
+  look *now*. An element that such a script can **show** starts hidden; elements it can **enable** or
+  **require** also start in the opposite state.
+- **Event** scripts (page opens, leaving a page, a click, submit) run once when the event happens, top to
+  bottom. Navigation blocks (*go to page*, *end survey*…) belong in these.
+- An **if** with an empty condition slot never runs its blocks, like in Scratch. An empty slot in *and* or
+  *or* counts as false.
+- Hidden questions are skipped by validation. Their answers are not stored unless **Keep answers to
+  questions hidden by logic** is turned on in Theme → Survey settings.
 
-### Presets and problems
+### Problems
 
-Presets build common rules in one click: show a follow-up, skip to a page, style on an answer, score, or a
-blank rule.
+The bar at the bottom of the workspace checks the logic as you work. It flags:
 
-Each rule can also be edited as JSON, which is the advanced representation.
+- blocks that point to a deleted question, page, button or variable;
+- invalid formulas;
+- navigation blocks in a *when any answer changes* script;
+- empty *if* conditions.
 
-The **problems** list flags broken references and invalid formulas. Publishing is blocked until they are
-fixed.
+Click a problem to jump to its script. Publishing is blocked until the problems are fixed; notes don't block
+it.
 
 ### Formula language
 
@@ -358,7 +409,14 @@ A survey is one JSON document:
     behavior: { required, dataKey, validation, initiallyHidden, … },
     a11y, anim, responsive, locked, hidden } },
   variables: [{ id, name, type, initial, formula? }],
-  rules:     [{ id, name, enabled, trigger: { type, page?, element? }, when: { op: 'all' | 'any', items }, then: [action], else: [action] }],
+  rules:     [{ id, name, enabled, trigger: { type, page?, element? }, when, then: [statement], else: [statement], ui?: { x, y }, loose? }],
+  // a script: trigger = its hat block; then = the blocks under it; ui = where it sits on the workspace
+  // statement: an action ({ type: 'show', target } …) or a C-block
+  //            { type: 'if', when: { op: 'all', items: [condition] }, then, else, withElse }
+  // condition: { left: value, cmp, right: value } | { group: { op: 'all' | 'any' | 'not', items } } | { expr }
+  // value:     { kind: 'value', value } | { kind: 'answer', ref } | { kind: 'var', name } | { kind: 'score' }
+  //            | { kind: 'page' } | { kind: 'expr', expr } | { kind: 'calc', op, a, b }
+  // Blocks without a hat are kept as rules with trigger { type: 'none' }; a lone value or condition in rule.loose.
   styles:    [], meta: {}
 }
 ```
@@ -471,9 +529,11 @@ your own computer can answer.
 ```
 surveys/index.js                     Editor + public API routes, /s/:publicId page
 surveys/store.js                     JSON-file storage (atomic writes, versions, responses, trash)
+public/studio.html                   Survey Studio's own page (opened from the front page)
 public/survey.html                   Respondent page
 public/css/survey.css                Survey rendering (shared by editor, preview and respondent page)
 public/css/survey-studio.css         Editor UI
+public/css/survey-blocks.css         Logic blocks
 public/js/survey/
   survey-core.js                     Model: element types, normalise, styles → CSS, transforms, sanitising
   survey-logic.js                    Formula language, rules, scoring, validation (also used by the server)
@@ -485,7 +545,8 @@ public/js/survey/
   survey-canvas.js                   Canvas: viewport, selection, handles, snapping, drawing, inline text
   survey-inspector.js                Properties inspector
   survey-panels.js                   Palette, layers, library
-  survey-logic-ui.js                 Logic tab
+  survey-blocks.js                   Logic tab: Scratch-style blocks (palette, workspace, drag and drop)
+  studio-shell.js                    studio.html bootstrap: routing, dialogs, notifications, project access
   survey-templates.js                Built-in templates
   survey-studio.js                   Survey list, editor shell, theme, preview, publish, responses
 test/survey-core.test.js             Model + logic unit tests

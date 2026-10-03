@@ -41,7 +41,8 @@
 .sv-req { color: var(--sv-error, #EF4444); font-weight: 700; display: none; }
 .sv-t-qtitle.is-required .sv-req { display: inline; }
 .sv-t-qerror { min-height: 0; }
-.sv-design-sample { opacity: .55; }
+.sv-design-sample { opacity: .55; display: none !important; }
+.sv-design-sample.is-revealed { display: block !important; }
 .sv-fallback-error { color: var(--sv-error); font-size: 12.5px; font-weight: 500; margin-top: 6px; display: none; }
 .sv-fallback-error.is-shown { display: block; }
 
