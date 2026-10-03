@@ -18,6 +18,7 @@ const ENV_LOAD = (() => {
 })();
 
 const { createScraper } = require('./scraper');
+const { createSurveys } = require('./surveys');
 
 const app = express();
 
@@ -25,9 +26,15 @@ const app = express();
 // and the scraper routes make requests to Reddit on this server's behalf, so
 // only MetaCode's own pages (same origin) may call them. The other routes
 // keep the permissive CORS they always had.
-const AI_ROUTE   = /^\/api\/(ai|models|keys\/status|scraper(\/.*)?)\/?$/i;
+const AI_ROUTE   = /^\/api\/(ai|models|keys\/status|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?)\/?$/i;
 const corsForAll = cors();
 app.use((req, res, next) => (AI_ROUTE.test(req.path) ? next() : corsForAll(req, res, next)));
+// Survey Studio (surveys/): mounted before the shared JSON parser because
+// survey documents (with embedded images) may be larger than its limit.
+const surveys = createSurveys();
+app.use('/api/surveys', surveys.router);
+app.use('/api/public/surveys', surveys.publicRouter);
+app.get('/s/:publicId', surveys.pageHandler);
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static('public'));
 

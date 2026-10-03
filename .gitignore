@@ -6,3 +6,4 @@ redditapis-key.json
 redditapis-key.json.tmp
 __pycache__/
 *.pyc
+survey-data/
