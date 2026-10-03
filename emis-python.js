@@ -19,6 +19,9 @@ function candidates() {
   return out;
 }
 
+// JSON with every non-ASCII character escaped, so the bytes are the same in any encoding
+const asciiJson = v => JSON.stringify(v).replace(/[\u007f-\uffff]/g, ch => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'));
+
 function createEmisPython() {
   let child = null, ready = null, info = null, nextId = 1, failedAt = 0, failure = null;
   const pending = new Map();
@@ -40,7 +43,7 @@ function createEmisPython() {
     return new Promise((resolve, reject) => {
       let p;
       try {
-        p = spawn(c.cmd, c.args.concat(['-u', WORKER]), { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: process.env });
+        p = spawn(c.cmd, c.args.concat(['-u', WORKER]), { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: Object.assign({}, process.env, { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' }) });
       } catch (e) { reject(e); return; }
       let started = false, stderr = '';
       const timer = setTimeout(() => { if (!started) { try { p.kill(); } catch (e) { /* gone */ } reject(new Error(c.cmd + ' didn\'t start')); } }, 15000);
@@ -63,7 +66,7 @@ function createEmisPython() {
         pending.delete(msg.id);
         clearTimeout(entry.timer);
         if (msg.error) {
-          entry.resolve({ failed: msg.error.kind === 'timeout' ? 'timeout' : 'network', code: msg.error.code, message: msg.error.message });
+          entry.resolve({ failed: msg.error.kind === 'timeout' ? 'timeout' : msg.error.kind === 'client' ? 'client' : 'network', code: msg.error.code, message: msg.error.message });
           return;
         }
         entry.resolve({ status: msg.status, ok: msg.status >= 200 && msg.status < 300, headers: new Headers(Object.entries(msg.headers || {}).filter(([k]) => !/^(content-encoding|transfer-encoding|content-length)$/i.test(k))), text: msg.body || '' });
@@ -81,7 +84,7 @@ function createEmisPython() {
       const timer = setTimeout(() => { pending.delete(id); resolve({ failed: 'timeout', code: 'ETIMEDOUT' }); }, (opts.timeoutMs || 120000) + 5000);
       pending.set(id, { resolve, timer });
       if (opts.signal) opts.signal.addEventListener('abort', () => { if (pending.delete(id)) { clearTimeout(timer); resolve({ failed: 'aborted' }); } }, { once: true });
-      child.stdin.write(JSON.stringify({ id, method: opts.method, url: opts.url, key: opts.key, body: opts.body === undefined ? null : opts.body, timeoutMs: opts.timeoutMs, proxy: opts.proxy || '' }) + '\n');
+      child.stdin.write(asciiJson({ id, method: opts.method, url: opts.url, key: opts.key, body: opts.body === undefined ? null : opts.body, timeoutMs: opts.timeoutMs, proxy: opts.proxy || '' }) + '\n');
     });
   }
 

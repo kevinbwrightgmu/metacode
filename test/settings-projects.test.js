@@ -80,10 +80,11 @@ test.before(async () => {
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       if (!req.url.startsWith('/v1/')) { res.setHeader('Content-Type', 'text/html'); return res.end('<!doctype html><html><body>EMIS website</body></html>'); }
-      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }] }));
+      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }, { id: 'unicode-model' }] }));
       if (req.url === '/v1/chat/completions') {
         const j = JSON.parse(body || '{}');
         lastUserAgent = String(req.headers['user-agent'] || '');
+        if (j.model === 'unicode-model') return res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok → café … 你好 — ' + j.messages.map(m => m.content).join('|') }, finish_reason: 'stop' }] }));
         if (j.model === 'forbidden-model') { res.statusCode = 403; return res.end('{"error":{"message":"this key may not use forbidden-model"}}'); }
         seenModels.push(j.model);
         if (emisFaults.flaky > 0) { emisFaults.flaky--; res.statusCode = 503; return res.end('{"error":{"message":"busy"}}'); }
@@ -222,6 +223,12 @@ test('requests go through Python when it is available; a 403 shows EMIS\'s reaso
   assert.equal(keys[0].status, 'available', 'a model-specific 403 doesn\'t disable the key');
   const ok = await json('POST', '/api/ai', { model: 'model-b', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
   assert.equal(ok.status, 200);
+});
+
+test('non-ASCII text in prompts and answers survives the trip (Windows console encodings)', async () => {
+  const r = await json('POST', '/api/ai', { model: 'unicode-model', messages: [{ role: 'user', content: 'Grüße → “quotes” …' }] }, { 'x-provider': 'openai' });
+  assert.equal(r.status, 200);
+  assert.equal(r.json.choices[0].message.content, 'ok → café … 你好 — Grüße → “quotes” …');
 });
 
 test('EMIS requests go through EMIS_PROXY when set (Node ignores HTTPS_PROXY by itself)', async () => {

@@ -398,11 +398,14 @@ async function emisRequestOnce(method, pathname, key, body, opts) {
   const transport = emisTransport();
   if (transport !== 'node' && !(body && body.stream)) {
     const r = await emisPython.request({ method, url: EMIS.baseUrl + pathname, key, body, timeoutMs: opts.timeoutMs, signal: opts.signal, proxy: String(process.env.EMIS_PROXY || '').trim() });
-    if (r) {
-      if (r.failed) return { failed: r.failed, code: r.code };
-      return { status: r.status, ok: r.ok, headers: r.headers, text: r.text, json: parseJson(r.text), pathname, via: 'python' };
-    }
-    if (transport === 'python') return { failed: 'network', code: 'NO_PYTHON' };
+    if (r && !r.failed) return { status: r.status, ok: r.ok, headers: r.headers, text: r.text, json: parseJson(r.text), pathname, via: 'python' };
+    if (r && r.failed === 'aborted') return { failed: 'aborted' };
+    if (r) console.warn('[emis] Python request to ' + pathname + ' failed (' + r.failed + ' ' + (r.code || '') + '): ' + redact(String(r.message || ''), 300));
+    if (transport === 'python') return r ? { failed: r.failed === 'client' ? 'network' : r.failed, code: r.code, detail: r.message } : { failed: 'network', code: 'NO_PYTHON', detail: 'Python wasn\'t found' };
+    // auto: try the same request from Node.js before giving up
+    const n = await emisRequestNode(method, pathname, key, body, opts);
+    if (n.failed && r) n.detail = 'Python: ' + (r.message || r.code) + (n.code ? '; Node.js: ' + n.code : '');
+    return n;
   }
   return emisRequestNode(method, pathname, key, body, opts);
 }
@@ -483,7 +486,7 @@ function describeFailure(r, ctx) {
     return fail(504, 'timeout', 'EMIS didn\'t answer within ' + timeoutSeconds() + ' seconds. Try again; if this keeps ' +
       'happening, raise EMIS_TIMEOUT_MS in the server\'s .env file.');
   }
-  if (r.failed === 'network') return fail(502, 'network', networkMessage(r.code), 'network error ' + (r.code || '(no code)'));
+  if (r.failed === 'network') return fail(502, 'network', networkMessage(r.code) + (r.detail ? ' (details: ' + redact(String(r.detail), 300) + ')' : ''), 'network error ' + (r.code || '(no code)') + (r.detail ? ' — ' + r.detail : ''));
 
   const status = r.status;
   const detail = providerMessage(r);

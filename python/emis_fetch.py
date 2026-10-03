@@ -52,10 +52,12 @@ except Exception:  # pragma: no cover - depends on what is installed
 
 
 def emit(obj):
-    line = json.dumps(obj, ensure_ascii=False)
+    # Pure-ASCII JSON written as bytes: works whatever the console encoding is
+    # (Windows' default code page can't print "→" or "…" and used to crash here).
+    line = json.dumps(obj, ensure_ascii=True)
     with out_lock:
-        sys.stdout.write(line + "\n")
-        sys.stdout.flush()
+        sys.stdout.buffer.write((line + "\n").encode("ascii"))
+        sys.stdout.buffer.flush()
 
 
 def classify(exc):
@@ -93,7 +95,11 @@ def via_openai(req):
         if path == "/models":
             raw = client.models.with_raw_response.list()
         else:
-            raw = client.chat.completions.with_raw_response.create(**(req.get("body") or {}))
+            body = dict(req.get("body") or {})
+            model = body.pop("model", None)
+            messages = body.pop("messages", [])
+            # Everything else goes through as-is, so no SDK version can reject a field
+            raw = client.chat.completions.with_raw_response.create(model=model, messages=messages, extra_body=body or None)
         resp = raw.http_response
         return {"status": resp.status_code, "headers": dict(resp.headers), "body": resp.text}
     except openai.APIStatusError as e:
@@ -172,18 +178,26 @@ def handle(line):
         res["id"] = rid
         emit(res)
     except ValueError as e:
-        emit({"id": rid, "error": {"kind": "invalid", "code": "ERR_INVALID_URL", "message": str(e)}})
-    except Exception as e:  # network problems
-        kind, code = classify(e)
-        msg = str(e).replace(req.get("key") or "\0", "[redacted]")[:300]
-        emit({"id": rid, "error": {"kind": kind, "code": code, "message": msg}})
+        emit({"id": rid, "error": {"kind": "client", "code": "ERR_INVALID_URL", "message": str(e)}})
+    except Exception as e:
+        msg = (type(e).__name__ + ": " + str(e)).replace(req.get("key") or "\0", "[redacted]")[:400]
+        net = isinstance(e, (OSError, TimeoutError, ConnectionError)) or (httpx is not None and isinstance(e, httpx.TransportError)) \
+            or (openai is not None and isinstance(e, (openai.APIConnectionError,)))
+        if net:
+            kind, code = classify(e)
+        else:
+            kind, code = "client", "PYTHON_ERROR"   # a problem in this worker, not the network
+        try:
+            emit({"id": rid, "error": {"kind": kind, "code": code, "message": msg}})
+        except Exception:
+            pass
 
 
 def main():
     emit({"ready": True, "python": platform.python_version(), "client": CLIENT})
     pool = ThreadPoolExecutor(max_workers=8)
-    for line in sys.stdin:
-        line = line.strip()
+    for raw in sys.stdin.buffer:            # bytes: decoded as UTF-8 whatever the locale is
+        line = raw.decode("utf-8", "replace").strip()
         if line:
             pool.submit(handle, line)
 
