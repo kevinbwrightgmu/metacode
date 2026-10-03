@@ -346,7 +346,7 @@ const App = (() => {
     const el = document.getElementById('api-test-result');
     el.innerHTML = '<span style="color:var(--tx-muted)">Testing connection…</span>';
     try {
-      const text = await callClaude([{ role: 'user', content: 'Reply with exactly one word: ok' }], '', 10, { feature: null });
+      const text = await callClaude([{ role: 'user', content: 'Reply with exactly one word: ok' }], '', 256, { feature: null });
       el.innerHTML = '<span style="color:var(--success)">✓ Connected — model ' + esc(lastModelUsed || 'default') + ' replied: ' + esc(String(text).trim().slice(0, 60)) + '</span>';
       updateApiStatus(true);
       fetchKeyStatus();

@@ -78,12 +78,19 @@ test.before(async () => {
     req.on('data', c => { body += c; });
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
-      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }] }));
+      if (!req.url.startsWith('/v1/')) { res.setHeader('Content-Type', 'text/html'); return res.end('<!doctype html><html><body>EMIS website</body></html>'); }
+      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }] }));
       if (req.url === '/v1/chat/completions') {
         const j = JSON.parse(body || '{}');
         seenModels.push(j.model);
         if (emisFaults.flaky > 0) { emisFaults.flaky--; res.statusCode = 503; return res.end('{"error":{"message":"busy"}}'); }
         if (emisFaults.broken.has(j.model)) { res.statusCode = 500; return res.end('{"error":{"message":"model crashed"}}'); }
+        // Other reply shapes some gateways use
+        if (j.model === 'sse-model') { res.setHeader('Content-Type', 'text/event-stream'); return res.end('data: {"id":"s1","model":"sse-model","choices":[{"delta":{"content":"ok "}}]}\n\ndata: {"choices":[{"delta":{"content":"from sse"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'); }
+        if (j.model === 'responses-model') return res.end(JSON.stringify({ id: 'r1', model: j.model, output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok from responses' }] }] }));
+        if (j.model === 'wrapped-model') return res.end(JSON.stringify({ data: { choices: [{ message: { role: 'assistant', content: 'ok from wrapped' } }] } }));
+        if (j.model === 'error200-model') return res.end(JSON.stringify({ error: { message: 'quota for this model is disabled' } }));
+        if (j.model === 'think-model' && !(j.max_tokens >= 1024)) return res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: null, reasoning_content: 'thinking…' }, finish_reason: 'length' }] }));
         return res.end(JSON.stringify({ id: 'x', object: 'chat.completion', model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok from ' + j.model }, finish_reason: 'stop' }] }));
       }
       res.statusCode = 404; res.end('{}');
@@ -144,7 +151,7 @@ test('each request uses the model it asks for', async () => {
   assert.deepEqual(seenModels.slice(0, 2), ['model-b', 'model-c']);
   assert.ok(seenModels[2], 'without a model the server picks its default');
   const models = (await json('GET', '/api/models')).json.models.map(m => m.id);
-  assert.deepEqual(models.slice().sort(), ['model-a', 'model-b', 'model-c']);
+  assert.ok(['model-a', 'model-b', 'model-c'].every(m => models.includes(m)));
 });
 
 test('a temporary EMIS failure is retried; a failing default model falls back; a picked one says so', async () => {
@@ -167,6 +174,32 @@ test('a temporary EMIS failure is retried; a failing default model falls back; a
   assert.equal(r.status, 502, 'a model the user picked is not swapped');
   assert.match(r.json.error.message, /Settings → AI models/);
   emisFaults.broken = new Set();
+});
+
+test('replies in other shapes are read; an unreadable one says what EMIS sent', async () => {
+  const ask = model => json('POST', '/api/ai', { model, max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
+  for (const [model, text] of [['sse-model', 'ok from sse'], ['responses-model', 'ok from responses'], ['wrapped-model', 'ok from wrapped'], ['think-model', 'ok from think-model']]) {
+    const r = await ask(model);
+    assert.equal(r.status, 200, model);
+    assert.equal(r.json.choices[0].message.content, text, model);
+  }
+  const bad = await ask('error200-model');
+  assert.equal(bad.status, 502);
+  assert.match(bad.json.error.message, /quota for this model is disabled/);
+});
+
+test('an EMIS_BASE_URL without /v1 (the website answers) is corrected automatically', async () => {
+  fs.writeFileSync(envFile, 'EMIS_BASE_URL=' + emisBase.replace(/\/v1$/, '') + '\nEMIS_API_KEY=emis-test-key-123456\n');
+  try {
+    await json('POST', '/api/settings/reload', {});
+    const r = await json('POST', '/api/ai', { model: 'model-b', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
+    assert.equal(r.status, 200);
+    assert.equal(r.json.choices[0].message.content, 'ok from model-b');
+    assert.ok((await json('GET', '/api/settings/status')).json.ai.warnings.some(w => /\/v1/.test(w)));
+  } finally {
+    fs.writeFileSync(envFile, 'EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=emis-test-key-123456\n');
+    await json('POST', '/api/settings/reload', {});
+  }
 });
 
 test('EMIS requests go through EMIS_PROXY when set (Node ignores HTTPS_PROXY by itself)', async () => {
