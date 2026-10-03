@@ -191,3 +191,60 @@ test('every built-in template is a clean, normalised survey', () => {
     assert.deepEqual(Logic.ruleProblems(doc), [], t.id);
   }
 });
+
+test('block scripts: nested if/else, not, empty slots, calc reporters and variables', () => {
+  const doc = template('feedback');
+  const [rating, nps, why] = Core.questionsInOrder(doc);
+  doc.variables.push({ id: 'v1', name: 'total', type: 'number', initial: 0, formula: '' });
+  doc.rules = [{
+    id: 'r1', name: 'Script', enabled: true, trigger: { type: 'always' }, when: { op: 'all', items: [] }, else: [],
+    then: [
+      { type: 'setVar', name: 'total', from: { kind: 'calc', op: '+', a: { kind: 'answer', ref: rating.id }, b: { kind: 'answer', ref: nps.id } } },
+      { type: 'changeVar', name: 'total', from: { kind: 'value', value: '1' } },
+      { type: 'if', when: { op: 'all', items: [{ group: { op: 'not', items: [{ left: { kind: 'var', name: 'total' }, cmp: 'gt', right: { kind: 'value', value: 8 } }] } }] },
+        then: [{ type: 'show', target: why.id }], else: [{ type: 'hide', target: why.id }] },
+      { type: 'if', when: { op: 'all', items: [] }, then: [{ type: 'require', target: why.id }], else: [] }
+    ]
+  }];
+  assert.deepEqual(Core.normalizeDoc(Core.clone(doc)).doc.rules[0].then, doc.rules[0].then);
+  const low = Logic.computeState(doc, { answers: { [rating.id]: 2, [nps.id]: 3 } });
+  assert.equal(low.vars.total, 6);
+  assert.equal(low.isVisible(why.id), true, 'not (6 > 8) → show');
+  assert.equal(low.isRequired(why.id), false, 'an empty if condition is false');
+  const high = Logic.computeState(doc, { answers: { [rating.id]: 5, [nps.id]: 9 } });
+  assert.equal(high.vars.total, 15);
+  assert.equal(high.isVisible(why.id), false);
+  // and/or with an empty slot: the empty side is false
+  const and = { group: { op: 'all', items: [{ left: { kind: 'value', value: 1 }, cmp: 'eq', right: { kind: 'value', value: 1 } }, null] } };
+  const or = { group: { op: 'any', items: [{ left: { kind: 'value', value: 1 }, cmp: 'eq', right: { kind: 'value', value: 1 } }, null] } };
+  const env = Logic.makeEnv(doc, { answers: {} });
+  assert.equal(Logic.evalCondition(doc, and, env), false);
+  assert.equal(Logic.evalCondition(doc, or, env), true);
+  assert.equal(Logic.evalCondition(doc, { expr: '2 > 1' }, env), true);
+  assert.deepEqual(Logic.ruleProblems(doc).filter(p => p.level !== 'warning'), []);
+  assert.ok(Logic.ruleProblems(doc).some(p => /empty condition/.test(p.message)));
+});
+
+test('block scripts on events run in order and loose blocks never run', () => {
+  const doc = template('research');
+  const consent = Core.questionsInOrder(doc)[0];
+  doc.variables.push({ id: 'v1', name: 'n', type: 'number', initial: 0, formula: '' });
+  doc.rules = [
+    { id: 'e1', name: 'Exit', enabled: true, trigger: { type: 'pageExit', page: doc.pages[0].id }, when: { op: 'all', items: [] }, else: [],
+      then: [
+        { type: 'changeVar', name: 'n', from: { kind: 'value', value: 2 } },
+        { type: 'if', when: { op: 'all', items: [{ left: { kind: 'var', name: 'n' }, cmp: 'eq', right: { kind: 'value', value: '2' } }] },
+          then: [{ type: 'complete', value: 'n is {{n}}' }], else: [] }
+      ] },
+    { id: 'loose', name: 'Loose', enabled: true, trigger: { type: 'none' }, when: { op: 'all', items: [] }, then: [{ type: 'goto', target: 'nowhere' }], else: [], ui: { x: 10, y: 20 } }
+  ];
+  const normal = Core.normalizeDoc(Core.clone(doc)).doc;
+  assert.deepEqual(normal.rules[1].ui, { x: 10, y: 20 });
+  assert.equal(normal.rules[1].trigger.type, 'none');
+  const state = Logic.computeState(doc, { answers: { [consent.id]: 'yes' } });
+  const effects = Logic.runEvent(doc, { type: 'pageExit', page: doc.pages[0].id }, state);
+  assert.deepEqual(effects.map(e => e.type), ['setVar', 'complete']);
+  assert.equal(effects[0].result, 2);
+  assert.equal(effects[1].text, 'n is 2');
+  assert.deepEqual(Logic.ruleProblems(doc), [], 'loose blocks are not checked');
+});

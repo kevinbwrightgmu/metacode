@@ -1,14 +1,14 @@
 /* ══════════════════════════════════════════════
-   survey-studio.js — Survey Studio (#surveys)
+   survey-studio.js — Survey Studio (studio.html)
 
    The survey list and the editor application:
      Design     canvas + Add/Layers/Library panels + inspector
-     Logic      rules and variables (survey-logic-ui.js)
+     Logic      Scratch-style block scripts and variables (survey-blocks.js)
      Theme      tokens, element defaults, survey settings
      Preview    the real runtime on desktop/tablet/mobile, with a test panel
      Responses  collected responses, summaries, exports, "add to project"
    plus publishing, autosave status, shortcuts and the context menu.
-   Routes: #surveys (list) · #surveys/<id> · #surveys/<id>/<mode>
+   Routes (studio.html): # (list) · #<id> · #<id>/<mode>
    ══════════════════════════════════════════════ */
 const SurveyStudio = (() => {
   'use strict';
@@ -68,11 +68,18 @@ const SurveyStudio = (() => {
     try { library = (await api('/library', { method: 'PUT', body: { library } })).library; } catch (e) { App.notify('The library couldn\'t be saved: ' + e.message, 'error'); }
   }
 
+  // Browser tab title (and the main app's top bar, if the studio runs inside it)
+  function setDocTitle(t) {
+    document.title = (t ? t + ' · ' : '') + 'Survey Studio · MetaCode';
+    const el = document.getElementById('topbar-project');
+    if (el) el.textContent = t;
+  }
+
   /* ══ Router entry ════════════════════════════ */
   function render(param) {
     const parts = String(param || '').split('/').filter(Boolean);
     const container = document.getElementById('view-container');
-    if (!parts.length) { closeEditor(); renderList(container); return; }
+    if (!parts.length) { closeEditor(); setDocTitle(''); renderList(container); return; }
     const id = parts[0], mode = MODES.some(m => m[0] === parts[1]) ? parts[1] : 'design';
     if (current && current.id === id && document.body.contains(current.root)) { current.setMode(mode); return; }
     closeEditor();
@@ -113,9 +120,9 @@ const SurveyStudio = (() => {
         const p = s.publish;
         const status = !p ? '<span class="badge badge-gray">Draft</span>' : p.unpublished ? '<span class="badge badge-gray">Unpublished</span>' : p.open ? '<span class="badge badge-green">Live · v' + p.version + '</span>' : '<span class="badge badge-amber">Closed · v' + p.version + '</span>';
         const changed = p && !p.unpublished && s.revision > (p.publishedRevision || 0) ? ' <span class="badge badge-blue" title="Saved changes that aren\'t published yet">Edited</span>' : '';
-        return '<tr data-id="' + esc(s.id) + '"><td><a href="#surveys/' + esc(s.id) + '" class="ss-list-title">' + esc(s.title) + '</a><div class="ss-list-sub">' + s.pages + ' page' + (s.pages === 1 ? '' : 's') + '</div></td>' +
+        return '<tr data-id="' + esc(s.id) + '"><td><a href="#' + esc(s.id) + '" class="ss-list-title">' + esc(s.title) + '</a><div class="ss-list-sub">' + s.pages + ' page' + (s.pages === 1 ? '' : 's') + '</div></td>' +
           '<td>' + status + changed + '</td><td>' + s.completed + (s.responses > s.completed ? ' <span class="text-muted">(+' + (s.responses - s.completed) + ' in progress)</span>' : '') + '</td><td>' + s.questions + '</td><td title="' + esc(s.updatedAt) + '">' + rel(s.updatedAt) + '</td>' +
-          '<td class="ss-row-actions"><a class="btn btn-secondary btn-sm" href="#surveys/' + esc(s.id) + '">Edit</a>' +
+          '<td class="ss-row-actions"><a class="btn btn-secondary btn-sm" href="#' + esc(s.id) + '">Edit</a>' +
           (p && !p.unpublished ? '<a class="btn btn-ghost btn-sm" href="/s/' + esc(p.publicId) + '" target="_blank" rel="noopener">Open link</a>' : '') +
           '<button class="btn btn-ghost btn-sm" data-act="menu" aria-label="More actions for ' + esc(s.title) + '">⋯</button></td></tr>';
       }).join('') + '</tbody></table></div>';
@@ -125,8 +132,8 @@ const SurveyStudio = (() => {
       const id = b.closest('tr').dataset.id;
       const s = surveys.find(x => x.id === id);
       menuAt(b, [
-        ['Open in editor', () => { location.hash = '#surveys/' + id; }],
-        ['Responses', () => { location.hash = '#surveys/' + id + '/responses'; }],
+        ['Open in editor', () => { location.hash = '#' + id; }],
+        ['Responses', () => { location.hash = '#' + id + '/responses'; }],
         s.publish && !s.publish.unpublished ? ['Copy survey link', () => copyText(location.origin + '/s/' + s.publish.publicId, 'Link copied')] : null,
         ['Duplicate', async () => { try { await api('/' + id + '/duplicate', { method: 'POST', body: {} }); App.notify('Survey duplicated', 'success'); refreshList(); } catch (err) { App.notify(err.message, 'error'); } }],
         ['Export JSON', async () => { try { const r = await api('/' + id); download(Core.slug(r.survey.doc.title, 'survey') + '.survey.json', JSON.stringify(r.survey.doc, null, 2), 'application/json'); } catch (err) { App.notify(err.message, 'error'); } }],
@@ -147,7 +154,7 @@ const SurveyStudio = (() => {
     else { const t = (library.templates || []).find(x => x.id === tplId); if (!t) return; doc = Core.clone(t.doc); }
     try {
       const r = await api('', { method: 'POST', body: { doc } });
-      location.hash = '#surveys/' + r.survey.id;
+      location.hash = '#' + r.survey.id;
     } catch (e) { App.notify('The survey couldn\'t be created: ' + e.message, 'error'); }
   }
 
@@ -164,7 +171,7 @@ const SurveyStudio = (() => {
         const r = await api('', { method: 'POST', body: { doc } });
         App.closeModal();
         if (r.problems && r.problems.length) App.notify('Imported with ' + r.problems.length + ' repair(s): ' + r.problems[0], 'info', 6000);
-        location.hash = '#surveys/' + r.survey.id;
+        location.hash = '#' + r.survey.id;
       } catch (e) { err.textContent = e.message; }
     };
   }
@@ -176,11 +183,11 @@ const SurveyStudio = (() => {
     let rec;
     try { rec = (await api('/' + encodeURIComponent(id))).survey; } catch (e) {
       container.classList.remove('is-flush');
-      container.innerHTML = '<div class="empty-state"><div class="empty-title">' + (e.status === 404 ? 'Survey not found' : 'Couldn\'t open the survey') + '</div><div class="empty-sub">' + esc(e.message) + ' <a href="#surveys" class="text-ai fw-600">Back to surveys</a></div></div>';
+      container.innerHTML = '<div class="empty-state"><div class="empty-title">' + (e.status === 404 ? 'Survey not found' : 'Couldn\'t open the survey') + '</div><div class="empty-sub">' + esc(e.message) + ' <a href="#" class="text-ai fw-600">Back to surveys</a></div></div>';
       return;
     }
     await loadLibrary();
-    if (!document.body.contains(container) || (location.hash.indexOf('#surveys/' + id) !== 0)) return;
+    if (!document.body.contains(container) || (location.hash.indexOf('#' + id) !== 0)) return;
     current = Editor(container, rec, mode);
     App.setViewCleanup(closeEditor);
   }
@@ -204,7 +211,7 @@ const SurveyStudio = (() => {
     root.className = 'ss-app';
     root.innerHTML =
       '<header class="ss-bar">' +
-        '<div class="ss-bar-left"><a class="ss-icon-btn ss-back" href="#surveys" title="All surveys" aria-label="Back to all surveys">' + icon(I.back) + '</a>' +
+        '<div class="ss-bar-left"><a class="ss-brand-btn" href="index.html" title="MetaCode home" aria-label="MetaCode home"><img src="img/metacode-mark.png" alt=""></a><a class="ss-icon-btn ss-back" href="#" title="All surveys" aria-label="Back to all surveys">' + icon(I.back) + '</a>' +
         '<input class="ss-title" id="ss-title" aria-label="Survey title" maxlength="300">' +
         '<span class="ss-save" id="ss-save" role="status" aria-live="polite"></span></div>' +
         '<nav class="ss-modes" role="tablist" aria-label="Editor mode">' + MODES.map(([m, l]) => '<button type="button" role="tab" class="ss-mode" data-mode="' + m + '" aria-selected="false">' + l + '</button>').join('') + '</nav>' +
@@ -235,9 +242,9 @@ const SurveyStudio = (() => {
     /* ── Title, save status, undo ─────── */
     const titleInput = $('#ss-title');
     titleInput.value = doc().title;
-    titleInput.addEventListener('change', () => { const v = titleInput.value.trim().slice(0, 300) || 'Untitled survey'; store.tx('Rename survey', t => t.set('title', v)); document.getElementById('topbar-project').textContent = v; });
+    titleInput.addEventListener('change', () => { const v = titleInput.value.trim().slice(0, 300) || 'Untitled survey'; store.tx('Rename survey', t => t.set('title', v)); setDocTitle(v); });
     titleInput.addEventListener('keydown', e => { if (e.key === 'Enter') titleInput.blur(); });
-    document.getElementById('topbar-project').textContent = doc().title;
+    setDocTitle(doc().title);
 
     function renderSave() {
       const s = store.saveState;
@@ -300,10 +307,10 @@ const SurveyStudio = (() => {
       root.dataset.mode = m;
       root.querySelectorAll('.ss-mode').forEach(b => { const on = b.dataset.mode === m; b.classList.toggle('is-on', on); b.setAttribute('aria-selected', String(on)); });
       root.querySelectorAll('.ss-view').forEach(v => { v.hidden = v.dataset.view !== m; });
-      if (push !== false) history.replaceState(null, '', '#surveys/' + doc().id + (m === 'design' ? '' : '/' + m));
+      if (push !== false) history.replaceState(null, '', '#' + doc().id + (m === 'design' ? '' : '/' + m));
       if (previewRT && m !== 'preview') { previewRT.destroy(); previewRT = null; }
       if (m === 'design') ensureDesign();
-      if (m === 'logic') { if (!logicUI) logicUI = SurveyLogicUI.create($('.ss-view-logic'), store, { notify: App.notify, openColor: (a, v, cb) => inspector && inspector.openColor(a, v, cb) }); else logicUI.render(); }
+      if (m === 'logic') { if (!logicUI) logicUI = SurveyBlocks.create($('.ss-view-logic'), store, { notify: App.notify }); else logicUI.render(); }
       if (m === 'theme') renderTheme();
       if (m === 'preview') renderPreview();
       if (m === 'responses') renderResponses();
@@ -327,7 +334,7 @@ const SurveyStudio = (() => {
       layers = SurveyPanels.createLayers(root.querySelector('[data-left-body="layers"]'), store, cmds, { pageMenu: pageMenu, onSelect: id => canvas.reveal(id) });
       libPanel = SurveyPanels.createLibrary(root.querySelector('[data-left-body="library"]'), store, cmds, { library: () => library, saveLibrary: async () => { await saveLibrary(); palette.render(); libPanel.render(); }, insertComponent: cid => insertComponent(cid) });
       root.querySelector('.ss-left-tabs').addEventListener('click', e => { const b = e.target.closest('[data-left]'); if (b) setLeft(b.dataset.left); });
-      setLeft(doc().pages.length === 1 && Object.keys(doc().elements).length < 12 ? 'add' : 'layers');
+      setLeft('add');
       buildToolbar();
       renderPageBar();
       root.querySelector('.ss-drawer-left').addEventListener('click', () => root.classList.toggle('show-left'));
@@ -359,9 +366,11 @@ const SurveyStudio = (() => {
       const btn = (act, ic, label, extra) => '<button type="button" class="ss-tool" data-act="' + act + '" title="' + label + '" aria-label="' + label.replace(/\s*\(.*\)$/, '') + '"' + (extra || '') + '>' + icon(ic) + '</button>';
       tb.innerHTML =
         '<div class="ss-tool-group">' + tool('select', I.select, 'Select', 'V') + tool('hand', I.hand, 'Hand — pan the canvas', 'H') + tool('scale', I.scale, 'Scale — handles change scale, not size', 'K') +
-          tool('text', I.text, 'Text — click or drag to add', 'T') + tool('rect', I.rect, 'Shape — drag to draw', 'R') + tool('frame', I.frame, 'Container — drag to draw', 'F') + '</div>' +
+          tool('rect', I.rect, 'Shape — drag to draw', 'R') + tool('frame', I.frame, 'Container — drag to draw', 'F') + '</div>' +
         '<div class="ss-tool-group"><button type="button" class="ss-tool ss-tool-wide" data-act="add-question" title="Add a question (Q)" aria-haspopup="menu">' + icon(I.question) + '<span>Question</span></button>' +
-          btn('add-image', I.image, 'Add an image') + '</div>' +
+          '<button type="button" class="ss-tool ss-tool-wide" data-tool="text" title="Text — click or drag on the page (T)" aria-label="Text" aria-pressed="false">' + icon(I.text) + '<span>Text</span></button>' +
+          '<button type="button" class="ss-tool ss-tool-wide" data-act="add-image" title="Add an image" aria-label="Add an image">' + icon(I.image) + '<span>Image</span></button></div>' +
+        '<div class="ss-tool-hint" data-needs="none">Click to select · double-click to go inside</div>' +
         '<div class="ss-tool-group" data-needs="free">' + btn('align-left', I.alignL, 'Align left') + btn('align-center', I.alignC, 'Align centres') + btn('align-right', I.alignR, 'Align right') +
           btn('align-top', I.alignT, 'Align top') + btn('align-middle', I.alignM, 'Align middles') + btn('align-bottom', I.alignB, 'Align bottom') +
           btn('dist-h', I.distH, 'Distribute horizontally') + btn('dist-v', I.distV, 'Distribute vertically') + '</div>' +
@@ -401,8 +410,11 @@ const SurveyStudio = (() => {
       tb.querySelectorAll('[data-tool]').forEach(b => { const on = b.dataset.tool === canvas.tool; b.classList.toggle('is-on', on); b.setAttribute('aria-pressed', String(on)); });
       const sel = store.selection;
       const anyFree = sel.length && sel.every(id => doc().elements[id] && cmds.isFreeIn(id));
-      tb.querySelectorAll('[data-needs="free"] button').forEach(b => { b.disabled = !anyFree || (b.dataset.act.startsWith('dist') && sel.length < 3); });
-      tb.querySelectorAll('[data-needs="sel"] button').forEach(b => { b.disabled = !sel.length; });
+      // Arrange tools appear only when they apply, so the bar stays short and calm
+      tb.querySelectorAll('[data-needs="free"]').forEach(g => { g.hidden = !anyFree; });
+      tb.querySelectorAll('[data-needs="free"] [data-act^="dist"]').forEach(b => { b.hidden = sel.length < 3; });
+      tb.querySelectorAll('[data-needs="sel"]').forEach(g => { g.hidden = !sel.length; });
+      tb.querySelectorAll('[data-needs="none"]').forEach(g => { g.hidden = !!sel.length || canvas.tool !== 'select'; });
     }
 
     // Stacks the page's free elements top to bottom without overlaps.
@@ -643,7 +655,7 @@ const SurveyStudio = (() => {
           if (path === 'settings.width') v = Math.max(240, Math.min(4000, Number(v) || 760));
           if (path === 'title' || path === 'description') store.tx('Edit survey', tx => tx.set(path, String(v).slice(0, 300)));
           else store.tx('Survey settings', tx => { const st = tx.part('settings'); Core.setPath(st, path.slice(9), v); });
-          if (path === 'title') { titleInput.value = doc().title; document.getElementById('topbar-project').textContent = doc().title; }
+          if (path === 'title') { titleInput.value = doc().title; setDocTitle(doc().title); }
         }
       };
     }

@@ -745,7 +745,10 @@
       trigger: isObj(r.trigger) && typeof r.trigger.type === 'string' ? r.trigger : { type: 'always' },
       when: isObj(r.when) ? normalizeGroup(r.when) : { op: 'all', items: [] },
       then: Array.isArray(r.then) ? r.then.filter(isObj) : [],
-      else: Array.isArray(r.else) ? r.else.filter(isObj) : []
+      else: Array.isArray(r.else) ? r.else.filter(isObj) : [],
+      // block editor: where the script sits on the workspace; a loose reporter/boolean block
+      ...(isObj(r.ui) ? { ui: { x: clamp(num(r.ui.x, 0), -5000, 50000), y: clamp(num(r.ui.y, 0), -5000, 50000) } } : {}),
+      ...(isObj(r.loose) ? { loose: r.loose } : {})
     }));
     doc.styles = doc.styles.map(s => ({ id: typeof s.id === 'string' ? s.id : uid('sty'), name: str(s.name, 'Style').slice(0, 120), style: isObj(s.style) ? s.style : {} }));
 
@@ -762,7 +765,8 @@
     return { doc, problems };
   }
   function normalizeGroup(g) {
-    return { op: g.op === 'any' ? 'any' : 'all', items: Array.isArray(g.items) ? g.items.filter(isObj).map(it => (isObj(it.group) ? Object.assign({}, it, { group: normalizeGroup(it.group) }) : it)) : [] };
+    // null items are empty boolean slots in and/or/not blocks
+    return { op: ['any', 'not'].includes(g.op) ? g.op : 'all', items: Array.isArray(g.items) ? g.items.filter(it => it === null || isObj(it)).map(it => (it && isObj(it.group) ? Object.assign({}, it, { group: normalizeGroup(it.group) }) : it)) : [] };
   }
 
   /* ── Styles ────────────────────────────────── */

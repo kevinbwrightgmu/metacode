@@ -2,13 +2,14 @@
 // against the full MetaCode server, with survey data in a temporary folder.
 //
 //   1. The complete authoring → publishing → response flow, step by step:
-//      open site → Survey Studio → create → add question → add choice → select
+//      open the front page → Survey Studio (its own page) → create → add question → add choice → select
 //      one answer → width/height/scale/rotation/colour/typography → move →
-//      duplicate → reorder → second question → logic → preview → test logic →
+//      duplicate → reorder → second question → logic blocks → preview → test logic →
 //      save → reload → intact → publish → respondent page → submit → stored.
 //   2. Canvas editing: draw, resize and rotate with handles, undo/redo,
 //      copy/paste, marquee, group, layers, inline text, theme, pages, mobile.
-//   3. The rest of MetaCode keeps working around the new view.
+//   3. Logic blocks: snapping, slots, variables, undo, delete by dragging to the palette.
+//   4. The front page links to both apps; the coding app no longer embeds the studio.
 // Skipped when no Chromium is available (set CHROMIUM_PATH to point at one).
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -51,14 +52,14 @@ test.after(async () => {
   if (dataDir) fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
-async function openApp(hash, viewport) {
+async function openApp(path, viewport) {
   const context = await browser.newContext({ viewport: viewport || { width: 1440, height: 900 } });
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
   // No internet in CI: CDN assets (fonts, Chart.js…) fail fast.
   await page.route(/^https?:\/\/(?!localhost)/, route => route.abort());
-  await page.goto(baseUrl + '/app.html' + (hash || ''));
+  await page.goto(baseUrl + path);
   return { page, context, errors };
 }
 
@@ -72,6 +73,22 @@ const studio = {
 };
 const optionsOf = (doc, q) => Core.questionParts(doc, q, 'option');
 
+// Drag-and-drop helpers for the Logic tab's blocks
+async function paletteBlock(page, cat, i) {
+  const loc = page.locator(`.bk-pal-item[data-cat="${cat}"][data-i="${i}"] > :not(button)`).first();
+  await loc.evaluate(n => n.scrollIntoView({ block: 'center' }));
+  return loc.boundingBox();
+}
+// Drags so the block's top-left corner (offset gx, gy from the grab point) lands at x, y
+async function dragBlock(page, box, x, y, gx = 8, gy = 8) {
+  await page.mouse.move(box.x + gx, box.y + gy);
+  await page.mouse.down();
+  await page.mouse.move(box.x + gx + 20, box.y + gy + 10, { steps: 3 });
+  await page.mouse.move(x + gx, y + gy, { steps: 12 });
+  await page.mouse.up();
+}
+const scriptSel = id => `.bk-script[data-rule="${id}"]`;
+
 // Set a numeric/text property in the inspector by its label.
 async function setField(page, label, value) {
   const row = page.locator('.ss-right .ss-field').filter({ has: page.locator('.ss-field-label', { hasText: new RegExp('^' + label + '$') }) }).first();
@@ -82,21 +99,21 @@ async function setField(page, label, value) {
 }
 
 test('Survey Studio: create → style one answer → logic → preview → save/reload → publish → respond → stored', { skip, timeout: 180000 }, async () => {
-  const { page, context, errors } = await openApp('');
+  const { page, context, errors } = await openApp('/index.html');
 
-  // 1–2. Open the site and enter the platform from the sidebar
-  const nav = page.locator('.nav-item[data-view="surveys"]');
-  await nav.waitFor();
-  assert.equal((await nav.textContent()).trim(), 'Survey Studio');
-  await nav.click();
+  // 1–2. Open the site and enter the platform from the front page — it has its own page
+  const open = page.locator('.hero a[href="studio.html"]');
+  assert.match(await open.textContent(), /Open Survey Studio/);
+  await open.click();
   await page.waitForSelector('#ss-new');
-  assert.equal(new URL(page.url()).hash, '#surveys');
-  assert.equal(await page.textContent('#topbar-title'), 'Survey Studio');
+  assert.equal(new URL(page.url()).pathname, '/studio.html');
+  assert.equal(await page.locator('.sidebar, .nav-item').count(), 0, 'no coding-app sidebar on the studio page');
+  assert.match(await page.textContent('.st-brand'), /Survey Studio/);
 
   // 3. Create a survey
   await page.click('#ss-new');
   await page.waitForSelector('.ss-viewport .sv-artboard');
-  assert.match(new URL(page.url()).hash, /^#surveys\/sv_/);
+  assert.match(new URL(page.url()).hash, /^#sv_/);
 
   // 4. Add a question
   await page.click('.ss-pal-item[data-type="single"]');
@@ -178,17 +195,35 @@ test('Survey Studio: create → style one answer → logic → preview → save/
   const q2 = await studio.primary(page);
   assert.equal((await studio.doc(page)).elements[q2].type, 'shorttext');
 
-  // 17. Logic: "show the follow-up when an answer is chosen" preset
+  // 17. Logic with blocks: when any answer changes → if <answer to Q1 = choice> then show Q2
   await page.click('.ss-mode[data-mode="logic"]');
-  await page.waitForSelector('.ss-logic');
-  await page.click('[data-preset="show"]');
-  await page.waitForSelector('.ss-rule');
+  await page.waitForSelector('.bk-app');
+  const ws = await page.locator('.bk-ws').boundingBox();
+  await dragBlock(page, await paletteBlock(page, 'events', 0), ws.x + 200, ws.y + 120);
   doc = await studio.doc(page);
-  const rule = doc.rules[0];
-  assert.equal(rule.when.items[0].left.ref, qid);
-  assert.deepEqual(rule.then, [{ type: 'show', target: q2 }]);
-  const trigger = optionsOf(doc, qid).find(o => String(o.props.value) === String(rule.when.items[0].right.value));
+  assert.equal(doc.rules.length, 1);
+  const ruleId = doc.rules[0].id;
+  assert.equal(doc.rules[0].trigger.type, 'always');
+  const hatBox = await page.locator(scriptSel(ruleId) + ' .bk-hat').boundingBox();
+  await dragBlock(page, await paletteBlock(page, 'control', 0), hatBox.x, hatBox.y + hatBox.height);
+  const slot = await page.locator(scriptSel(ruleId) + ' .bk-c .bk-bslot').first().boundingBox();
+  await dragBlock(page, await paletteBlock(page, 'answers', 2), slot.x, slot.y, 4, 6);
+  const mouth = await page.locator(scriptSel(ruleId) + ' .bk-mouth').first().boundingBox();
+  await dragBlock(page, await paletteBlock(page, 'looks', 0), mouth.x, mouth.y);
+  // choose the answer and the element to show from the blocks' dropdowns
+  const firstChoice = optionsOf(await studio.doc(page), qid)[0];
+  await page.locator(scriptSel(ruleId) + ' .bk-c .bk-bool select.bk-dd-lit').selectOption(String(firstChoice.props.value));
+  await page.locator(scriptSel(ruleId) + ' .bk-mouth .bk-stack select.bk-dd').selectOption(q2);
+  doc = await studio.doc(page);
+  assert.equal(doc.rules.length, 1, 'every block snapped into the one script');
+  const ifBlock = doc.rules[0].then[0];
+  assert.equal(ifBlock.type, 'if');
+  assert.deepEqual(ifBlock.when.items[0].left, { kind: 'answer', ref: qid });
+  assert.equal(ifBlock.when.items[0].cmp, 'eq');
+  assert.deepEqual(ifBlock.then, [{ type: 'show', target: q2 }]);
+  const trigger = optionsOf(doc, qid).find(o => String(o.props.value) === String(ifBlock.when.items[0].right.value));
   assert.ok(trigger, 'the condition compares against a real option value');
+  assert.match(await page.textContent('.bk-problems'), /no problems/);
 
   // 18–19. Preview and test the logic
   await page.click('.ss-mode[data-mode="preview"]');
@@ -262,7 +297,7 @@ test('Survey Studio: create → style one answer → logic → preview → save/
 });
 
 test('Survey Studio canvas: draw, handles, undo/redo, clipboard, marquee, groups, layers, text, theme, pages, mobile', { skip, timeout: 180000 }, async () => {
-  const { page, context, errors } = await openApp('#surveys');
+  const { page, context, errors } = await openApp('/studio.html');
   await page.waitForSelector('#ss-new');
   await page.click('#ss-new');
   await page.waitForSelector('.ss-viewport .sv-artboard');
@@ -411,17 +446,77 @@ test('Survey Studio canvas: draw, handles, undo/redo, clipboard, marquee, groups
   await context.close();
 });
 
-test('the rest of MetaCode keeps working around Survey Studio', { skip, timeout: 60000 }, async () => {
-  const { page, context, errors } = await openApp('#surveys');
+test('Logic blocks: variables, reporters in slots, undo, drag to the palette to delete', { skip, timeout: 120000 }, async () => {
+  const { page, context, errors } = await openApp('/studio.html');
   await page.waitForSelector('#ss-new');
+  await page.click('[data-tpl="feedback"]');
+  await page.waitForSelector('.ss-viewport .sv-artboard');
+  await page.click('.ss-mode[data-mode="logic"]');
+  await page.waitForSelector('.bk-app');
+  // The template's rule opens as blocks: hat + if-block holding show / make required
+  {
+    const d = await studio.doc(page);
+    assert.equal(await page.locator(scriptSel(d.rules[0].id) + ' .bk-hat').count(), 1);
+    assert.equal(await page.locator(scriptSel(d.rules[0].id) + ' .bk-c .bk-mouth .bk-stack').count(), 2);
+  }
+  // Make a variable
+  await page.click('.bk-make-var');
+  await page.fill('#bk-v-name', 'points');
+  await page.fill('#bk-v-init', '0');
+  await page.click('#bk-v-ok');
+  let d = await studio.doc(page);
+  assert.deepEqual(d.variables.map(v => v.name), ['points']);
+  // "when any answer changes" + "set points to ( )" + drop (score) into its value slot
+  const ws = await page.locator('.bk-ws').boundingBox();
+  await dragBlock(page, await paletteBlock(page, 'events', 0), ws.x + 520, ws.y + 360);
+  d = await studio.doc(page);
+  const rid = d.rules[d.rules.length - 1].id;
+  const hat = await page.locator(scriptSel(rid) + ' .bk-hat').boundingBox();
+  const setVarIndex = await page.locator('.bk-pal-item[data-cat="variables"]').count() - 2;
+  await dragBlock(page, await paletteBlock(page, 'variables', setVarIndex), hat.x, hat.y + hat.height);
+  const vslot = await page.locator(scriptSel(rid) + ' .bk-stack .bk-vslot').first().boundingBox();
+  await dragBlock(page, await paletteBlock(page, 'answers', 3), vslot.x, vslot.y, 4, 6);
+  d = await studio.doc(page);
+  let script = d.rules.find(r => r.id === rid);
+  assert.deepEqual(script.then, [{ type: 'setVar', name: 'points', from: { kind: 'score' } }]);
+  // The preview's engine runs it: the variable follows the score
+  const rating = Core.questionsInOrder(d)[0];
+  const state = await page.evaluate(([qid]) => SurveyLogic.computeState(SurveyStudio.current().store.doc, { answers: { [qid]: 4 } }).vars, [rating.id]);
+  assert.equal(state.points, 4);
+  // Undo / redo
+  await page.keyboard.press('Control+z');
+  assert.deepEqual((await studio.doc(page)).rules.find(r => r.id === rid).then[0].from, { kind: 'value', value: 0 });
+  await page.keyboard.press('Control+Shift+z');
+  assert.deepEqual((await studio.doc(page)).rules.find(r => r.id === rid).then[0].from, { kind: 'score' });
+  // Drag the whole script onto the palette to delete it
+  const pal = await page.locator('.bk-palette').boundingBox();
+  const hat2 = await page.locator(scriptSel(rid) + ' .bk-hat').boundingBox();
+  await dragBlock(page, hat2, pal.x + 120, pal.y + 300);
+  assert.equal((await studio.doc(page)).rules.some(r => r.id === rid), false);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('the front page links to both apps and the coding app no longer embeds the studio', { skip, timeout: 60000 }, async () => {
+  const { page, context, errors } = await openApp('/index.html');
+  assert.equal(await page.locator('a[href="app.html"]').count() >= 1, true);
+  assert.equal(await page.locator('a[href="studio.html"]').count() >= 2, true);
+  await page.click('.hero a[href="app.html"]');
+  await page.waitForSelector('.nav-item[data-view="dashboard"]');
+  assert.equal(await page.locator('.nav-item[data-view="surveys"]').count(), 0, 'no Survey Studio item in the coding app');
+  assert.equal(await page.locator('script[src*="js/survey/"]').count(), 0, 'the coding app doesn\'t load the studio');
   for (const view of ['dashboard', 'scraper', 'settings']) {
     await page.click(`.nav-item[data-view="${view}"]`);
     await page.waitForFunction(v => location.hash === '#' + v, view);
-    assert.equal(await page.locator('.ss-app').count(), 0, 'the editor is torn down when leaving');
     assert.ok(await page.locator(`.nav-item[data-view="${view}"]`).evaluate(n => n.classList.contains('active')));
   }
-  await page.click('.nav-item[data-view="surveys"]');
+  // Old bookmarks to the embedded studio go to the new page
+  await page.goto(baseUrl + '/app.html#surveys');
+  await page.waitForURL(/\/studio\.html/);
   await page.waitForSelector('#ss-new');
-  assert.deepEqual(errors.filter(e => !/is not defined/.test(e)), []);
+  // …and the studio's logo goes back to the front page
+  await page.click('.st-brand');
+  await page.waitForURL(/\/index\.html$/);
+  assert.deepEqual(errors.filter(e => !/is not defined|VANTA|THREE/.test(e)), []);
   await context.close();
 });

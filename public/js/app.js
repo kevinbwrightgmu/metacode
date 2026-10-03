@@ -49,7 +49,8 @@ const App = (() => {
     'network':      () => NetworkViz.render(),
     'metrics':      () => EngagementViz.render(),
     'export':       renderExport,
-    'surveys':      param => SurveyStudio.render(param)
+    // Survey Studio has its own page now; old #surveys links go there.
+    'surveys':      param => { location.replace('studio.html' + (param ? '#' + param : '')); }
   };
 
   const TITLES = {
@@ -67,11 +68,11 @@ const App = (() => {
   let currentView = '';
   let viewCleanup = null;
   // A view can register a function to run when the user leaves it
-  // (Survey Studio flushes its autosave and removes its listeners).
+  // (e.g. to stop timers or remove document-level listeners).
   function setViewCleanup(fn) { viewCleanup = fn; }
 
   function navigate(view) {
-    // Sub-routes: "#surveys/<id>/<mode>" → view "surveys", param "<id>/<mode>"
+    // Sub-routes: "#view/<param>" → view "view", param "<param>"
     const slash = String(view || '').indexOf('/');
     const param = slash === -1 ? '' : String(view).slice(slash + 1);
     if (slash !== -1) view = String(view).slice(0, slash);

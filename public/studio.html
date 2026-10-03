@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Survey Studio · MetaCode</title>
+  <link rel="icon" type="image/png" href="img/metacode-mark.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="css/main.css">
+  <link rel="stylesheet" href="css/survey.css">
+  <link rel="stylesheet" href="css/survey-studio.css">
+  <link rel="stylesheet" href="css/survey-blocks.css">
+</head>
+<body class="studio-page">
+
+<header class="st-top">
+  <a class="st-brand" href="index.html" title="MetaCode home">
+    <img src="img/metacode-mark.png" alt="" width="28" height="28">
+    <span class="st-brand-name">MetaCode</span>
+    <span class="st-brand-sep">/</span>
+    <span class="st-brand-app">Survey Studio</span>
+  </a>
+  <nav class="st-nav" aria-label="MetaCode">
+    <a href="index.html">Home</a>
+    <a href="app.html">Coding app</a>
+  </nav>
+</header>
+
+<main class="view-container" id="view-container" aria-live="polite"></main>
+
+<!-- Modal -->
+<div class="modal-backdrop" id="modal-backdrop">
+  <div class="modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-head">
+      <h3 class="modal-title" id="modal-title"></h3>
+      <button class="modal-x" id="modal-close" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-foot" id="modal-foot"></div>
+  </div>
+</div>
+
+<!-- Notifications -->
+<div class="notif-stack" id="notif-stack"></div>
+
+<script src="js/survey/studio-shell.js"></script>
+<script src="js/survey/survey-core.js"></script>
+<script src="js/survey/survey-logic.js"></script>
+<script src="js/survey/survey-render.js"></script>
+<script src="js/survey/survey-runtime.js"></script>
+<script src="js/survey/survey-store.js"></script>
+<script src="js/survey/survey-commands.js"></script>
+<script src="js/survey/survey-canvas.js"></script>
+<script src="js/survey/survey-inspector.js"></script>
+<script src="js/survey/survey-panels.js"></script>
+<script src="js/survey/survey-blocks.js"></script>
+<script src="js/survey/survey-templates.js"></script>
+<script src="js/survey/survey-studio.js"></script>
+</body>
+</html>

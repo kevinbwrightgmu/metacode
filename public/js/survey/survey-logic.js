@@ -389,8 +389,22 @@
       case 'page': return env.lookup('page');
       case 'expr': return tryEvaluate(op.expr, env);
       case 'value': return op.value;
+      case 'calc': return calcValue(op.op, operandValue(doc, op.a, env), operandValue(doc, op.b, env));
       default: return null;
     }
+  }
+  // Operator reporter blocks: ( a + b ), ( join a b ) …
+  const CALC = {
+    '+': (a, b) => toNum(a) + toNum(b), '-': (a, b) => toNum(a) - toNum(b), '*': (a, b) => toNum(a) * toNum(b),
+    '/': (a, b) => toNum(a) / toNum(b), '%': (a, b) => { const m = toNum(a) % toNum(b); return m; },
+    join: (a, b) => textOf(a) + textOf(b),
+    round: a => Math.round(toNum(a)), min: (a, b) => Math.min(toNum(a), toNum(b)), max: (a, b) => Math.max(toNum(a), toNum(b))
+  };
+  function calcValue(op, a, b) {
+    const f = CALC[op];
+    if (!f) return null;
+    const v = f(a, b);
+    return typeof v === 'number' && !Number.isFinite(v) ? null : v;
   }
   const CMP = {
     eq: { label: 'is', fn: (a, b) => looseEq(a, b) },
@@ -405,14 +419,16 @@
     notEmpty: { label: 'is answered', unary: true, fn: a => !isEmptyValue(a) }
   };
   function evalCondition(doc, c, env) {
-    if (!isObj(c)) return false;
+    if (!isObj(c)) return false;   // an empty slot is false, as in Scratch
     if (isObj(c.group)) return evalGroup(doc, c.group, env);
+    if (typeof c.expr === 'string') return truthy(tryEvaluate(c.expr, env, false));
     const cmp = CMP[c.cmp] || CMP.eq;
     const a = operandValue(doc, c.left, env);
     return cmp.unary ? cmp.fn(a) : cmp.fn(a, operandValue(doc, c.right, env));
   }
   function evalGroup(doc, g, env) {
     const items = isObj(g) && Array.isArray(g.items) ? g.items : [];
+    if (g && g.op === 'not') return !evalCondition(doc, items[0], env);
     if (!items.length) return true;
     return g.op === 'any' ? items.some(c => evalCondition(doc, c, env)) : items.every(c => evalCondition(doc, c, env));
   }
@@ -436,14 +452,18 @@
     submit:    { label: 'Submit the survey', nav: true },
     complete:  { label: 'End the survey with message', value: true, nav: true },
     message:   { label: 'Show a message', value: true },
-    openUrl:   { label: 'Open a link', value: true }
+    openUrl:   { label: 'Open a link', value: true },
+    // Control and variable blocks (block editor)
+    if:        { label: 'If', control: true },
+    changeVar: { label: 'Change variable', variable: true, state: true }
   };
   const TRIGGERS = {
     always:    { label: 'While answering', hint: 'Re-checked after every answer' },
     pageExit:  { label: 'When leaving page', page: true },
     pageEnter: { label: 'When entering page', page: true },
     click:     { label: 'When button is clicked', element: true },
-    submit:    { label: 'When the survey is submitted' }
+    submit:    { label: 'When the survey is submitted' },
+    none:      { label: 'Not attached to an event', hidden: true }   // loose blocks lying on the workspace
   };
   // Property paths a rule may change (conditional styling, etc.).
   const SETTABLE = [
@@ -463,12 +483,43 @@
     });
   }
 
+  // Visits every action in a list, including those inside if blocks.
+  function eachAction(list, fn) {
+    (Array.isArray(list) ? list : []).forEach(a => {
+      if (!isObj(a)) return;
+      fn(a);
+      if (a.type === 'if') { eachAction(a.then, fn); eachAction(a.else, fn); }
+    });
+  }
+  // An if block's condition: its slot holds one boolean (empty = false).
+  function ifCondition(doc, a, env) {
+    const items = isObj(a.when) && Array.isArray(a.when.items) ? a.when.items : [];
+    if (!items.length) return false;
+    return evalGroup(doc, a.when, env);
+  }
+  // Value of set/change variable: a block in the value slot, or the older expr/value fields.
+  function assignedValue(doc, a, env) {
+    if (isObj(a.from)) return operandValue(doc, a.from, env);
+    return a.expr !== undefined && a.expr !== '' ? tryEvaluate(a.expr, env, null) : a.value;
+  }
+  // Runs a list of statements against env; leaf actions go to fn. Returns
+  // whether any branch ran (for the preview's "rules active now").
+  function runList(doc, list, env, vars, fn) {
+    (Array.isArray(list) ? list : []).forEach(a => {
+      if (!isObj(a)) return;
+      if (a.type === 'if') { runList(doc, ifCondition(doc, a, env) ? a.then : a.else, env, vars, fn); return; }
+      if (a.type === 'setVar' && a.name) { vars[a.name] = assignedValue(doc, a, env); }
+      if (a.type === 'changeVar' && a.name) { vars[a.name] = (toNum(vars[a.name]) || 0) + (toNum(assignedValue(doc, a, env)) || 0); }
+      fn(a);
+    });
+  }
+
   // Elements whose default is the opposite of a state action on them.
   function defaultsFromRules(doc) {
     const startHidden = new Set(), startDisabled = new Set(), startOptional = new Set(), pagesHidden = new Set();
     doc.rules.forEach(r => {
       if (!r.enabled || (r.trigger && r.trigger.type !== 'always')) return;
-      (r.then || []).forEach(a => {
+      eachAction(r.then, a => {
         if (a.type === 'show') startHidden.add(a.target);
         if (a.type === 'enable') startDisabled.add(a.target);
         if (a.type === 'require') startOptional.add(a.target);
@@ -513,8 +564,7 @@
         let ok = false;
         try { ok = evalGroup(doc, r.when, env); } catch (e) { errors.push({ rule: r.id, message: e.message }); }
         if (ok) fired.push(r.id);
-        (ok ? r.then : r.else || []).forEach(a => {
-          if (!isObj(a)) return;
+        runList(doc, ok ? r.then : r.else || [], env, vars, a => {
           switch (a.type) {
             case 'show': visible[a.target] = true; break;
             case 'hide': visible[a.target] = false; break;
@@ -526,8 +576,7 @@
             case 'hidePage': pageVisible[a.target] = false; break;
             case 'setProp': if (a.target && typeof a.path === 'string' && /^(style|frame|props)\.[A-Za-z0-9_.]+$/.test(a.path)) { (props[a.target] = props[a.target] || {})[a.path] = a.value; } break;
             case 'setText': if (a.target) text[a.target] = interpolate(a.value, env); break;
-            case 'setVar': if (a.name) vars[a.name] = a.expr !== undefined && a.expr !== '' ? tryEvaluate(a.expr, env, null) : a.value; break;
-            default: break;
+            default: break;   // setVar / changeVar are applied by runList
           }
         });
       });
@@ -573,11 +622,13 @@
       if (trigger.type === 'click' && r.trigger.element !== trigger.element) return;
       let ok = false;
       try { ok = evalGroup(doc, r.when, state.env); } catch (e) { ok = false; }
-      (ok ? r.then : r.else || []).forEach(a => {
-        if (!isObj(a)) return;
+      // Variables set earlier in a script are visible to later blocks in it.
+      const vars = Object.assign({}, state.vars);
+      const env = Object.assign({}, state.env, { lookup: name => (Object.prototype.hasOwnProperty.call(vars, name) ? vars[name] : state.env.lookup(name)) });
+      runList(doc, ok ? r.then : r.else || [], env, vars, a => {
         const e = Object.assign({ rule: r.id }, a);
-        if (a.type === 'setVar') e.result = a.expr !== undefined && a.expr !== '' ? tryEvaluate(a.expr, state.env, null) : a.value;
-        if (a.type === 'message' || a.type === 'complete' || a.type === 'setText') e.text = interpolate(a.value, state.env);
+        if (a.type === 'setVar' || a.type === 'changeVar') { e.type = 'setVar'; e.result = vars[a.name]; }
+        if (a.type === 'message' || a.type === 'complete' || a.type === 'setText') e.text = interpolate(a.value, env);
         effects.push(e);
       });
     });
@@ -686,27 +737,36 @@
       if (err) out.push({ rule: rule && rule.id, message: (rule ? rule.name + ': ' : '') + where + ' — ' + err });
       else identifiersOf(expr).forEach(n => { if (!known(n)) out.push({ rule: rule && rule.id, level: 'warning', message: (rule ? rule.name + ': ' : '') + where + ' uses "' + n + '", which isn\'t a variable or answer key.' }); });
     };
-    const walkCond = (rule, g) => (g.items || []).forEach(c => {
+    const walkOperand = (rule, op) => {
+      if (!isObj(op)) return;
+      if (op.kind === 'answer' && !elementExists(op.ref)) out.push({ rule: rule.id, message: rule.name + ': a block refers to a question that no longer exists.' });
+      if (op.kind === 'var' && !varExists(op.name)) out.push({ rule: rule.id, message: rule.name + ': a block refers to the missing variable "' + op.name + '".' });
+      if (op.kind === 'expr') exprCheck(rule, op.expr, 'a formula');
+      if (op.kind === 'calc') { walkOperand(rule, op.a); walkOperand(rule, op.b); }
+    };
+    const walkCond = (rule, g) => ((g && g.items) || []).forEach(c => {
+      if (!isObj(c)) return;
       if (isObj(c.group)) return walkCond(rule, c.group);
-      [c.left, c.right].forEach(op => {
-        if (!isObj(op)) return;
-        if (op.kind === 'answer' && !elementExists(op.ref)) out.push({ rule: rule.id, message: rule.name + ': a condition refers to a question that no longer exists.' });
-        if (op.kind === 'var' && !varExists(op.name)) out.push({ rule: rule.id, message: rule.name + ': a condition refers to the missing variable "' + op.name + '".' });
-        if (op.kind === 'expr') exprCheck(rule, op.expr, 'a condition formula');
-      });
+      if (typeof c.expr === 'string') return exprCheck(rule, c.expr, 'a condition formula');
+      walkOperand(rule, c.left);
+      if (!(CMP[c.cmp] && CMP[c.cmp].unary)) walkOperand(rule, c.right);
     });
     doc.rules.forEach(r => {
-      if (!r.enabled) return;
+      if (!r.enabled || (r.trigger && r.trigger.type === 'none')) return;
       walkCond(r, r.when || {});
       if (r.trigger && (r.trigger.type === 'pageExit' || r.trigger.type === 'pageEnter') && r.trigger.page && r.trigger.page !== 'any' && !pageExists(r.trigger.page)) out.push({ rule: r.id, message: r.name + ': its trigger page no longer exists.' });
       if (r.trigger && r.trigger.type === 'click' && !elementExists(r.trigger.element)) out.push({ rule: r.id, message: r.name + ': its button no longer exists.' });
-      [].concat(r.then || [], r.else || []).forEach(a => {
+      const acts = [];
+      eachAction([].concat(r.then || [], r.else || []), a => acts.push(a));
+      acts.forEach(a => {
         const def = ACTIONS[a.type];
+        if (a.type === 'if') { walkCond(r, a.when || {}); if (!(a.when && a.when.items && a.when.items.some(isObj))) out.push({ rule: r.id, level: 'warning', message: r.name + ': an "if" block has an empty condition, so it never runs.' }); return; }
+        if (a.type === 'setVar' || a.type === 'changeVar') walkOperand(r, a.from);
         if (!def) { out.push({ rule: r.id, message: r.name + ': unknown action "' + a.type + '".' }); return; }
         if (def.target === 'page' && !pageExists(a.target)) out.push({ rule: r.id, message: r.name + ': "' + def.label + '" has no page selected.' });
         else if (def.target && def.target !== 'page' && !elementExists(a.target)) out.push({ rule: r.id, message: r.name + ': "' + def.label + '" has no element selected.' });
         if (def.variable && !varExists(a.name)) out.push({ rule: r.id, message: r.name + ': "Set variable" refers to the missing variable "' + (a.name || '') + '".' });
-        if (a.type === 'setVar') exprCheck(r, a.expr, 'the variable formula');
+        if (a.type === 'setVar' && !isObj(a.from)) exprCheck(r, a.expr, 'the variable formula');
         if (def.nav && r.trigger && r.trigger.type === 'always') out.push({ rule: r.id, level: 'warning', message: r.name + ': navigation actions only run on events (leaving a page, clicking a button) — change the trigger.' });
       });
     });
@@ -718,7 +778,7 @@
     ExprError, tokenize, parse, compile, evaluate, tryEvaluate, checkExpression, identifiersOf, FUNC_HELP,
     isEmptyValue, looseEq, truthy, textOf,
     valueKind, choicesOf, matrixOf, normalizeAnswer, scoreOf, keyMap, makeEnv,
-    CMP, ACTIONS, TRIGGERS, SETTABLE, evalGroup, evalCondition, interpolate,
+    CMP, CALC, ACTIONS, TRIGGERS, SETTABLE, evalGroup, evalCondition, interpolate, eachAction,
     computeState, runEvent, validateAnswer, validateSubmission, ruleProblems, FORMATS
   };
 });

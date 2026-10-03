@@ -12,7 +12,7 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 |---|---|
 | **Import Data** | Upload CSVs for posts, engagement metrics, and social network data. The `text` column is optional — if no text-like column is found by name, AI reads the file's structure and maps it for you |
 | **Reddit Scraper** | Collect subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed Python, JavaScript or TypeScript (custom code mode); live progress, results table/JSON, CSV/JSON export, and **Add to project** to code the posts. Server requests go through a Python worker (or epoxy-tls over Wisp without Python); an in-app Reddit browser uses Scramjet. See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
-| **Survey Studio** | Build surveys on a freeform canvas where every part — down to a single answer choice — can be moved, resized, rotated, scaled, distorted and styled; 30+ element types, layers, groups, components, a theme with per-element overrides, visual logic (show/hide, skip, branching, variables, formulas, scores, conditional styling), device preview, versioned publishing to a public link, and response collection with CSV/JSON export. Open-text answers can be added to the project for coding. See [docs/survey-studio.md](docs/survey-studio.md) |
+| **Survey Studio** | Its own page, opened from the front page (**Open Survey Studio**). Build surveys on a freeform canvas where every part — down to a single answer choice — can be moved, resized, rotated, scaled, distorted and styled; 30+ element types, layers, groups, components, a theme with per-element overrides, Scratch-style block logic (show/hide, skip, branching, variables, formulas, scores, conditional styling), device preview, versioned publishing to a public link, and response collection with CSV/JSON export. Open-text answers can be added to the project for coding. See [docs/survey-studio.md](docs/survey-studio.md) |
 | **Codebook Builder** | Define custom coding dimensions and codes; each code has an optional AI Fine-Tuning Notes field the model reads during Auto-Coding, separate from the Description shown to human coders; import/export as CSV |
 | **AI Auto-Coding** | The AI applies your codebook to posts and provides confidence scores + reasoning |
 | **Human Coding** | Efficient post-by-post manual coding interface with AI suggestions |
@@ -219,7 +219,8 @@ All scraper variables (concurrency, retention, response size, browser on/off, te
 
 ## Survey Studio
 
-Sidebar → **Create → Survey Studio** builds and runs surveys. Full guide: **[docs/survey-studio.md](docs/survey-studio.md)**.
+Survey Studio builds and runs surveys on its own page, `studio.html`. Open it from the front page with
+**Open Survey Studio**. Full guide: **[docs/survey-studio.md](docs/survey-studio.md)**.
 
 - **Design:** start from a template or a blank page. Add questions, text, media and layout elements from the
   palette.
@@ -227,8 +228,9 @@ Sidebar → **Create → Survey Studio** builds and runs surveys. Full guide: **
     typography, states, behaviour, validation, accessibility and animation.
   - The canvas has handles, snapping, grid, zoom/pan, align/distribute, groups, layers, lock/hide,
     copy/paste and undo/redo.
-- **Logic:** rules with triggers, nested conditions and actions, plus variables, formulas, scores and an
-  answer-key system. Problems are listed, and publishing is blocked until they are fixed.
+- **Logic:** block coding like Scratch. Drag *when …* hat blocks, *if/else* blocks, show/hide, page and
+  variable blocks, and condition/value blocks onto a workspace and snap them together. Variables, formulas
+  and scores are included. Problems are listed, and publishing is blocked until they are fixed.
 - **Preview:** Desktop, Tablet or Mobile, with a live test panel showing answers, variables, active rules
   and an event log.
 - **Publish:** creates an immutable version and a public link, `/s/<id>`. Re-publishing keeps the link.
@@ -399,12 +401,13 @@ metacode/
 │   ├── index.html                Landing page — explains MetaCode, links to app.html
 │   ├── scramjet-sw.js            Service worker for the Scraper's in-app Reddit browser (Scramjet)
 │   ├── app.html                  The actual application shell (dashboard, sidebar, etc.)
+│   ├── studio.html               Survey Studio (its own page, linked from the front page)
 │   ├── survey.html               Respondent page for published surveys (/s/<id>)
 │   ├── img/
 │   │   ├── metacode-mark.png     Logo mark (used as favicon + sidebar brand)
 │   │   └── metacode-wordmark.png Full "METACODE" wordmark (used on the landing page)
 │   ├── css/main.css              Design system + component styles
-│   ├── css/survey.css            Survey rendering; css/survey-studio.css  Survey Studio editor
+│   ├── css/survey.css            Survey rendering; css/survey-studio.css + survey-blocks.css  Survey Studio editor
 │   └── js/
 │       ├── app.js               Router, state, modals, notifications, AI requests (via the server)
 │       ├── data.js              CSV import for posts/engagement/network (AI-assisted structure detection)

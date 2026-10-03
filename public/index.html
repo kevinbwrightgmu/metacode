@@ -56,6 +56,9 @@
   .cta:hover { transform: translateY(-2px); box-shadow: 0 14px 40px rgba(255,255,255,.2); }
   .cta svg { transition: transform .15s ease; }
   .cta:hover svg { transform: translateX(3px); }
+  .cta-row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
+  .cta.cta-ghost { background: rgba(255,255,255,.06); color: #fff; border: 1px solid rgba(255,255,255,.35); box-shadow: none; backdrop-filter: blur(6px); }
+  .cta.cta-ghost:hover { background: rgba(255,255,255,.12); box-shadow: 0 10px 30px rgba(0,0,0,.25); }
   .cta-sub { margin-top: 16px; font-size: 12.5px; color: var(--mc-text-dim); }
 
   .scroll-hint {
@@ -94,6 +97,27 @@
   .workflow-title { font-weight: 600; font-size: 14.5px; margin-bottom: 6px; }
   .workflow-desc { font-size: 13px; color: var(--mc-text-dim); line-height: 1.55; }
 
+  /* Survey Studio */
+  .studio { display: grid; grid-template-columns: 1.05fr 1fr; gap: 48px; align-items: center; }
+  .studio-list { list-style: none; display: flex; flex-direction: column; gap: 12px; margin: 22px 0 30px; }
+  .studio-list li { display: flex; gap: 12px; font-size: 14.5px; color: var(--mc-text-dim); line-height: 1.5; }
+  .studio-list b { color: var(--mc-text); font-weight: 600; }
+  .studio-list li::before { content: ''; flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; background: #fff; margin-top: 8px; }
+  .blocks-demo { background: #F8FAFC; background-image: radial-gradient(#CBD5E1 1px, transparent 1px); background-size: 20px 20px;
+    border-radius: 18px; padding: 28px 24px; border: 1px solid var(--mc-border); display: flex; flex-direction: column; align-items: flex-start;
+    font: 600 13px/1 var(--f-body); color: #fff; box-shadow: 0 30px 60px rgba(0,0,0,.4); }
+  .bd { padding: 11px 14px; border-radius: 6px; display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; }
+  .bd-hat { background: #E0A100; border-radius: 18px 18px 6px 6px; padding-top: 16px; }
+  .bd-if { background: #EA7317; display: flex; flex-direction: column; align-items: flex-start; padding: 0; }
+  .bd-if > .bd { padding: 11px 14px; }
+  .bd-mouth { margin-left: 16px; display: flex; flex-direction: column; align-items: flex-start; }
+  .bd-foot { height: 16px; width: 100%; }
+  .bd-looks { background: #7C3AED; }
+  .bd-pages { background: #2563EB; }
+  .bd-bool { background: #0891B2; clip-path: polygon(12px 0, calc(100% - 12px) 0, 100% 50%, calc(100% - 12px) 100%, 12px 100%, 0 50%); padding: 7px 18px; }
+  .bd-pill { background: rgba(0,0,0,.18); border-radius: 99px; padding: 4px 10px; font-weight: 600; }
+  .bd-lit { background: #fff; color: #1E293B; border-radius: 99px; padding: 4px 10px; font-weight: 500; }
+
   .final-cta { text-align: center; padding: 104px 24px 40px; }
   .final-cta .lead { margin-inline: auto; }
 
@@ -106,6 +130,7 @@
   footer img { height: 22px; width: 22px; border-radius: 6px; }
 
   @media (max-width: 840px) {
+    .studio { grid-template-columns: 1fr; gap: 32px; }
     .feature-grid { grid-template-columns: 1fr 1fr; }
     .workflow { grid-template-columns: 1fr 1fr; }
   }
@@ -122,10 +147,16 @@
     <div class="hero-badge"><span class="dot"></span> AI-Assisted Social Media Research</div>
     <img class="wordmark" src="img/metacode-wordmark-transparent.png" alt="MetaCode">
     <p class="hero-tagline">Code social media content with AI, check it against your own human coders, and map the network behind the conversation — one tool, built for researchers.</p>
-    <a class="cta" href="app.html">
-      Launch MetaCode
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-    </a>
+    <div class="cta-row">
+      <a class="cta" href="app.html">
+        Launch MetaCode
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+      </a>
+      <a class="cta cta-ghost" href="studio.html">
+        Open Survey Studio
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+      </a>
+    </div>
     <div class="cta-sub">Runs on your own machine · Free Groq tier supported · No account required</div>
   </div>
   <div class="scroll-hint">
@@ -185,6 +216,39 @@
   </div>
 </section>
 
+<section id="survey-studio">
+  <div class="studio">
+    <div>
+      <div class="section-eyebrow">Survey Studio</div>
+      <h2>Collect your own data with surveys you design.</h2>
+      <p class="lead">A separate workspace for building surveys, publishing them as a link and collecting responses. Open-text answers can then go into MetaCode to be coded.</p>
+      <ul class="studio-list">
+        <li><span><b>Design anything.</b> A freeform canvas where every part, down to a single answer choice, can be moved, resized, rotated and restyled.</span></li>
+        <li><span><b>Logic with blocks.</b> Snap together Scratch-style blocks: <i>when leaving page → if answer is “no” → skip page</i>. Variables, scores and formulas included.</span></li>
+        <li><span><b>Publish and collect.</b> Preview on phone, tablet or desktop, share a link, and export responses as CSV or JSON.</span></li>
+      </ul>
+      <a class="cta" href="studio.html">
+        Open Survey Studio
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+      </a>
+    </div>
+    <div class="blocks-demo" aria-hidden="true">
+      <div class="bd bd-hat">when leaving page <span class="bd-pill">1. Consent ▾</span></div>
+      <div class="bd-if">
+        <div class="bd">if <span class="bd bd-bool">answer to <span class="bd-pill">consent ▾</span> = <span class="bd-lit">no</span></span> then</div>
+        <div class="bd-mouth">
+          <div class="bd bd-pages">end survey saying <span class="bd-lit">Thanks for your time</span></div>
+        </div>
+        <div class="bd">else</div>
+        <div class="bd-mouth">
+          <div class="bd bd-looks">show <span class="bd-pill">About you ▾</span></div>
+        </div>
+        <div class="bd-foot"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
 <section id="workflow">
   <div class="section-eyebrow">How it works</div>
   <h2>From raw CSV to validated results.</h2>
@@ -220,10 +284,16 @@
 <div class="final-cta">
   <h2>Ready to start coding?</h2>
   <p class="lead">No signup. No cloud dependency. Just your data, your codebook, and your choice of AI provider.</p>
-  <a class="cta" href="app.html" style="margin-top:10px">
-    Launch MetaCode
-    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-  </a>
+  <div class="cta-row" style="margin-top:10px">
+    <a class="cta" href="app.html">
+      Launch MetaCode
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+    </a>
+    <a class="cta cta-ghost" href="studio.html">
+      Open Survey Studio
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
+    </a>
+  </div>
 </div>
 
 <footer>

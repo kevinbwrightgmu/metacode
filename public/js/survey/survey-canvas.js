@@ -274,6 +274,7 @@
       computeGhosts();
       renderer.renderPage(store.pageId);
       if (forced) renderer.setForcedState(forced.id, forced.state);
+      revealErrors();
       positionGrid();
       scheduleOverlay();
     }
@@ -293,8 +294,23 @@
         if (frameOnly.length) renderer.reframe(frameOnly);
         scheduleOverlay();
       } else if (type === 'page') renderPage();
-      else if (type === 'select') { hoverId = null; scheduleOverlay(); }
+      else if (type === 'select') { hoverId = null; revealErrors(); scheduleOverlay(); }
     });
+    // Sample error messages ("This question is required.") only show for the
+    // selected question, so the page isn't covered in red while designing.
+    function revealErrors() {
+      const want = new Set();
+      store.selection.forEach(id => {
+        const q = store.doc.elements[id] && Core.isQuestionType(store.doc.elements[id].type) ? store.doc.elements[id] : Core.questionOf(store.doc, id);
+        if (q) Core.questionParts(store.doc, q.id, 'qerror').forEach(e => want.add(e.id));
+      });
+      let changed = false;
+      container.querySelectorAll('.sv-design-sample').forEach(n => {
+        const on = want.has(n.getAttribute('data-svid'));
+        if (n.classList.contains('is-revealed') !== on) { n.classList.toggle('is-revealed', on); changed = true; }
+      });
+      if (changed) renderer.layout();
+    }
 
     /* ── Hit testing & selection ────────────── */
     function chainAt(target) {
