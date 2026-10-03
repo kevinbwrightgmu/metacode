@@ -346,11 +346,50 @@ function transportFailure(err, signal) {
 // resolves to { status, ok, headers, text, json } or { failed: 'timeout' |
 // 'network' | 'aborted' }. Redirects are not followed, so the key is only
 // ever sent to the configured EMIS address.
+// Outbound proxy: Node's built-in fetch ignores HTTPS_PROXY, so on networks
+// that only allow traffic through a proxy (many school and office networks)
+// every EMIS request failed with a network error (HTTP 502). EMIS_PROXY, or
+// else HTTPS_PROXY / HTTP_PROXY (with NO_PROXY), is used when set.
+let proxyAgent = null;
+function proxyUrl() {
+  return String(process.env.EMIS_PROXY || process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '').trim();
+}
+function emisFetch(url, init) {
+  if (!proxyUrl()) return fetch(url, init);
+  const undici = require('undici');
+  if (!proxyAgent) proxyAgent = process.env.EMIS_PROXY ? new undici.ProxyAgent(process.env.EMIS_PROXY.trim()) : new undici.EnvHttpProxyAgent();
+  return undici.fetch(url, Object.assign({}, init, { dispatcher: proxyAgent }));
+}
+
+// Retries an EMIS call that failed for a temporary reason (connection reset,
+// EMIS/gateway error 500/502/503/504, timeout status 408, unreadable body):
+// up to 2 more tries, 0.6 s then 1.8 s apart. Configuration problems (bad
+// address, wrong key, unknown model) aren't retried.
+const RETRY_STATUS = new Set([408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
+const PERMANENT_NETWORK = /^(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ERR_INVALID_URL)$|CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/i;
+function isTransient(r) {
+  if (r.failed === 'network') return !PERMANENT_NETWORK.test(String(r.code || ''));
+  if (r.failed) return false;
+  if (RETRY_STATUS.has(r.status)) return true;
+  return r.ok && r.json === undefined && /chat\/completions/.test(String(r.pathname || ''));
+}
 async function emisRequest(method, pathname, key, body, opts) {
+  const delays = opts.retry === false ? [] : [600, 1800];
+  let r = await emisRequestOnce(method, pathname, key, body, opts);
+  for (const ms of delays) {
+    if (!isTransient(r) || (opts.signal && opts.signal.aborted)) break;
+    console.warn('[emis] ' + method + ' ' + pathname + ' failed (' + (r.failed ? r.failed + ' ' + (r.code || '') : 'HTTP ' + r.status) + '); retrying in ' + (ms / 1000) + ' s');
+    await new Promise(resolve => setTimeout(resolve, ms));
+    if (opts.signal && opts.signal.aborted) break;
+    r = await emisRequestOnce(method, pathname, key, body, opts);
+  }
+  return r;
+}
+async function emisRequestOnce(method, pathname, key, body, opts) {
   const { controller, unlink } = linkedAbort(opts.signal);
   const timer = setTimeout(() => controller.abort(TIMED_OUT), opts.timeoutMs);
   try {
-    const response = await fetch(EMIS.baseUrl + pathname, {
+    const response = await emisFetch(EMIS.baseUrl + pathname, {
       method,
       headers: emisHeaders(key, 'application/json', !!body),
       body: body ? JSON.stringify(body) : undefined,
@@ -358,7 +397,7 @@ async function emisRequest(method, pathname, key, body, opts) {
       signal: controller.signal
     });
     const text = await response.text();
-    return { status: response.status, ok: response.ok, headers: response.headers, text, json: parseJson(text) };
+    return { status: response.status, ok: response.ok, headers: response.headers, text, json: parseJson(text), pathname };
   } catch (err) {
     return transportFailure(err, controller.signal);
   } finally {
@@ -410,7 +449,7 @@ function networkMessage(code) {
   if (/CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/i.test(code)) return 'Couldn\'t make a secure connection to EMIS (certificate problem).';
   if (/^(ECONNRESET|EPIPE|UND_ERR_SOCKET)$/.test(code)) return 'The connection to EMIS dropped before it answered. Try again.';
   if (/TIMEOUT|ETIMEDOUT/.test(code)) return 'Couldn\'t connect to EMIS in time. Check your internet connection and try again.';
-  return 'Couldn\'t reach EMIS. Check your internet connection and try again.';
+  return 'Couldn\'t reach EMIS. Check your internet connection and try again. If your network only allows the internet through a proxy, add HTTPS_PROXY=http://proxy:port (or EMIS_PROXY) to .env and click Reload .env in Settings.';
 }
 
 const MODEL_MISSING = /model[^.]{0,80}(not\s+found|does\s*n[o']?t\s+exist|unknown|is\s+not\s+available|no\s+such)|(unknown|invalid|no\s+such)\s+model/i;
@@ -897,8 +936,15 @@ function textContent(content) {
 function normalizeCompletion(json) {
   if (!json || typeof json !== 'object' || !Array.isArray(json.choices) || !json.choices.length) return null;
   const choices = [];
-  for (const choice of json.choices) {
-    if (!choice || typeof choice !== 'object' || !choice.message || typeof choice.message !== 'object') return null;
+  for (const raw of json.choices) {
+    if (!raw || typeof raw !== 'object') return null;
+    // Some gateways answer in the older "text" shape, or put the message in "delta"
+    let choice = raw;
+    if (!choice.message || typeof choice.message !== 'object') {
+      if (typeof raw.text === 'string') choice = Object.assign({}, raw, { message: { role: 'assistant', content: raw.text } });
+      else if (raw.delta && typeof raw.delta === 'object') choice = Object.assign({}, raw, { message: Object.assign({ role: 'assistant' }, raw.delta) });
+      else return null;
+    }
     choices.push(Object.assign({}, choice, { message: Object.assign({}, choice.message, { content: textContent(choice.message.content) }) }));
   }
   return Object.assign({}, json, { choices });
@@ -1040,7 +1086,7 @@ async function openStream(key, chatRequest, clientSignal) {
     finish() { clearTimeout(timer); unlink(); }
   };
   try {
-    attempt.response = await fetch(EMIS.baseUrl + '/chat/completions', {
+    attempt.response = await emisFetch(EMIS.baseUrl + '/chat/completions', {
       method: 'POST',
       headers: emisHeaders(key, 'text/event-stream', true),
       body: JSON.stringify(Object.assign({}, chatRequest, { stream: true })),
@@ -1224,13 +1270,34 @@ app.post('/api/ai', async (req, res) => {
     if (chatRequest.stream) return await streamChat(res, chatRequest, ctx);
 
     const client = watchClient(res);
+    const askedFor = safeModelId(req.body && req.body.model);
+    const explicit = !!askedFor && askedFor === resolved.model;   // picked in Settings, not the server default
     let result;
     try {
       result = await completeChat(chatRequest, ctx, client.signal);
+      // The server's default model is failing at EMIS right now: try other models
+      // instead of failing the request (a model the user picked isn't swapped).
+      if (!result.ok && !result.aborted && !explicit && MODEL_FALLBACK_TYPES.has(result.type)) {
+        for (const alt of await fallbackModels(resolved.model)) {
+          const altCtx = Object.assign({}, ctx, { model: alt, verified: true });
+          const retry = await completeChat(Object.assign({}, chatRequest, { model: alt }), altCtx, client.signal);
+          if (retry.aborted) { result = retry; break; }
+          if (retry.ok) {
+            console.warn('[emis] The default model "' + resolved.model + '" failed (' + result.type + '); answered with "' + alt + '" instead.');
+            res.set('X-MetaCode-Model-Fallback', alt);
+            result = retry;
+            break;
+          }
+        }
+      }
     } finally {
       client.release();
     }
     if (result.aborted) return;                       // the browser left; nobody to answer
+    if (!result.ok && explicit && MODEL_FALLBACK_TYPES.has(result.type)) {
+      result = Object.assign({}, result, { message: result.message.replace(/\.?$/, '.') + ' This happened with the model "' + resolved.model +
+        '" you picked — choose another one in Settings → AI models (or "Server default").' });
+    }
     if (!result.ok) return sendFailure(res, result);
     res.json(format === 'anthropic' ? toAnthropicResponse(result.completion) : result.completion);
   } catch (err) {
@@ -1239,6 +1306,14 @@ app.post('/api/ai', async (req, res) => {
     else if (!res.writableEnded) res.end();
   }
 });
+
+// Failures that a different model may not have (EMIS can't run one model right now).
+const MODEL_FALLBACK_TYPES = new Set(['upstream_error', 'malformed_response', 'model_not_found', 'not_found']);
+async function fallbackModels(failed) {
+  const list = await getModelList(false);
+  if (!list.ok) return [];
+  return list.ids.filter(id => id !== failed && !NOT_A_CHAT_MODEL.test(id)).slice(0, 2);
+}
 
 // GET /api/models — the model list for the Settings dropdown (from
 // emis-models.json, or EMIS's live list), default model first: the frontend
@@ -1440,7 +1515,8 @@ function settingsStatus() {
     ai: {
       provider: 'emis', ready, keyCount: EMIS.keys.length, problem: EMIS.problem || (EMIS.keys.length ? null : 'EMIS_API_KEY isn\'t set in .env.'),
       warnings: EMIS.warnings, baseHost: (() => { try { return new URL(EMIS.baseUrl).host; } catch (e) { return null; } })(),
-      defaultModel: EMIS.model || null
+      defaultModel: EMIS.model || null,
+      proxy: (() => { const u = proxyUrl(); if (!u) return null; try { return new URL(u).host; } catch (e) { return 'set'; } })()
     },
     server: { version: VERSION, startedAt: STARTED_AT, node: process.version }
   };
@@ -1452,6 +1528,7 @@ app.post('/api/settings/reload', (req, res) => {
   envLoader.load();
   EMIS = loadEmisConfig(process.env);
   keyState.clear();
+  proxyAgent = null;
   modelList.ids = null; modelList.fetchedAt = 0; modelList.failure = null; modelList.failedAt = 0;
   const env = envLoader.info;
   console.log('[settings] .env reloaded: ' + (env.found ? env.keys.length + ' value(s) from ' + env.file : 'no .env file found') + '; AI ' + (notConfigured() ? 'not ready' : 'ready (' + EMIS.keys.length + ' key(s))'));
