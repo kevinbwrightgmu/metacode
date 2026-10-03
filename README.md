@@ -459,6 +459,13 @@ If you use MetaCode in your research, please acknowledge:
 `EMIS_API_KEY=your-key` in it (one setting per line), save, and click **Reload .env**. If it says no file was
 found, the file must be called `.env` (not `.env.example`) next to `server.js`.
 
+**HTTP 502 / "Couldn't reach EMIS" / "EMIS had a temporary server problem"**
+→ MetaCode already retries temporary EMIS failures twice and, when the server's default model is the one
+failing, answers with another model. If it still fails: open **Settings → AI connection → Test connection**
+to see the exact message. On networks that only allow the internet through a proxy, add
+`HTTPS_PROXY=http://proxy:port` (or `EMIS_PROXY`) to `.env` and click **Reload .env** — Node.js doesn't use
+the system proxy by itself. If a model you picked keeps failing, choose another one in Settings → AI models.
+
 **"Your EMIS usage quota … is used up"**
 → The key's EMIS budget for the current day/week/month is spent; the message says when it resets. Wait until
 then, or add another EMIS key to `EMIS_API_KEY` (comma-separated).

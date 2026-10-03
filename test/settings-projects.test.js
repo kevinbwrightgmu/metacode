@@ -57,6 +57,8 @@ test('the loader finds .env.txt, wins over stale system values, reports names on
 /* ── Server: settings status, reload, models, projects ─── */
 let emis, emisBase, server, base, browser;
 const seenModels = [];
+const emisFaults = { broken: new Set(), flaky: 0 };   // models that always fail; number of next requests that fail with 503
+let proxied = 0;
 
 function findChromium() {
   const candidates = [];
@@ -80,6 +82,8 @@ test.before(async () => {
       if (req.url === '/v1/chat/completions') {
         const j = JSON.parse(body || '{}');
         seenModels.push(j.model);
+        if (emisFaults.flaky > 0) { emisFaults.flaky--; res.statusCode = 503; return res.end('{"error":{"message":"busy"}}'); }
+        if (emisFaults.broken.has(j.model)) { res.statusCode = 500; return res.end('{"error":{"message":"model crashed"}}'); }
         return res.end(JSON.stringify({ id: 'x', object: 'chat.completion', model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok from ' + j.model }, finish_reason: 'stop' }] }));
       }
       res.statusCode = 404; res.end('{}');
@@ -141,6 +145,51 @@ test('each request uses the model it asks for', async () => {
   assert.ok(seenModels[2], 'without a model the server picks its default');
   const models = (await json('GET', '/api/models')).json.models.map(m => m.id);
   assert.deepEqual(models.slice().sort(), ['model-a', 'model-b', 'model-c']);
+});
+
+test('a temporary EMIS failure is retried; a failing default model falls back; a picked one says so', async () => {
+  const ask = model => json('POST', '/api/ai', Object.assign({ messages: [{ role: 'user', content: 'hi' }] }, model ? { model } : {}), { 'x-provider': 'openai' });
+  emisFaults.flaky = 1;
+  let r = await ask('model-b');
+  assert.equal(r.status, 200, 'a 503 is retried');
+  assert.equal(r.json.choices[0].message.content, 'ok from model-b');
+
+  const def = (await json('GET', '/api/models')).json.models[0].id;     // the server default
+  emisFaults.broken = new Set([def]);
+  seenModels.length = 0;
+  const res = await fetch(base + '/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }) });
+  const body = await res.json();
+  assert.equal(res.status, 200, 'answered by another model');
+  assert.notEqual(body.model, def);
+  assert.equal(res.headers.get('x-metacode-model-fallback'), body.model);
+
+  r = await ask(def);
+  assert.equal(r.status, 502, 'a model the user picked is not swapped');
+  assert.match(r.json.error.message, /Settings → AI models/);
+  emisFaults.broken = new Set();
+});
+
+test('EMIS requests go through EMIS_PROXY when set (Node ignores HTTPS_PROXY by itself)', async () => {
+  const net = require('net');
+  const proxy = http.createServer((req, res) => { res.statusCode = 405; res.end(); });
+  proxy.on('connect', (req, socket, head) => {
+    proxied++;
+    const [host, port] = req.url.split(':');
+    const up = net.connect(Number(port), host, () => { socket.write('HTTP/1.1 200 Connection Established\r\n\r\n'); if (head && head.length) up.write(head); up.pipe(socket); socket.pipe(up); });
+    up.on('error', () => socket.destroy()); socket.on('error', () => up.destroy());
+  });
+  await new Promise(r => proxy.listen(0, '127.0.0.1', r));
+  fs.writeFileSync(envFile, 'EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=emis-test-key-123456\nEMIS_PROXY=http://127.0.0.1:' + proxy.address().port + '\n');
+  try {
+    await json('POST', '/api/settings/reload', {});
+    const r = await json('POST', '/api/ai', { model: 'model-b', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
+    assert.equal(r.status, 200);
+    assert.ok(proxied >= 1, 'the request went through the proxy');
+  } finally {
+    fs.writeFileSync(envFile, 'EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=emis-test-key-123456\n');
+    await json('POST', '/api/settings/reload', {});
+    proxy.closeAllConnections(); await new Promise(r => proxy.close(r));
+  }
 });
 
 test('projects API: save, list, open, update, duplicate, delete; guarded and validated', async () => {
