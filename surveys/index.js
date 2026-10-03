@@ -314,6 +314,12 @@ function createSurveys(opts) {
     res.json({ responseId: req.params.rid, status: out });
   }));
 
+  // Body-parser failures (bad JSON, too large) and anything else thrown outside
+  // a handler get the same safe JSON errors instead of Express's stack page.
+  const errorHandler = (err, req, res, next) => sendError(res, err); // eslint-disable-line no-unused-vars
+  router.use(errorHandler);
+  publicRouter.use(errorHandler);
+
   const pageHandler = (req, res, next) => {
     if (!/^[A-Za-z0-9]{4,40}$/.test(req.params.publicId)) return next();
     res.set('Cache-Control', 'no-store');

@@ -275,7 +275,7 @@
         case 'matrixgrid': {
           n = h('div', base + ' sv-matrix', { 'data-svid': el.id, role: live ? 'table' : undefined });
           const cols = Array.isArray(el.props.columns) ? el.props.columns : [];
-          n.style.setProperty('--sv-mx-cols', num(el.props.rowLabelWidth, 200) + 'px repeat(' + Math.max(1, cols.length) + ', minmax(0, 1fr))');
+          n.style.setProperty('--sv-mx-cols', 'min(' + num(el.props.rowLabelWidth, 200) + 'px, 38%) repeat(' + Math.max(1, cols.length) + ', minmax(44px, 1fr))');
           const head = h('div', 'sv-matrix-head', { role: live ? 'row' : undefined });
           head.appendChild(h('span', 'sv-matrix-corner', { role: live ? 'columnheader' : undefined }));
           cols.forEach(c => { const s = h('span', 'sv-matrix-col', { role: live ? 'columnheader' : undefined }); s.textContent = String(c.label || ''); head.appendChild(s); });

@@ -48,7 +48,8 @@ const App = (() => {
     'csv-analyzer': () => CSVAnalyzer.render(),
     'network':      () => NetworkViz.render(),
     'metrics':      () => EngagementViz.render(),
-    'export':       renderExport
+    'export':       renderExport,
+    'surveys':      param => SurveyStudio.render(param)
   };
 
   const TITLES = {
@@ -56,7 +57,7 @@ const App = (() => {
     'codebook':'Codebook','ai-coding':'AI Coding','human-coding':'Human Coding',
     'reliability':'Reliability Analysis','csv-analyzer':'Analyze CSV (NetworkX)',
     'network':'Network Graph',
-    'metrics':'Metrics','export':'Export Data'
+    'metrics':'Metrics','export':'Export Data','surveys':'Survey Studio'
   };
 
   // Former route ids that must keep working (bookmarks, browser history).
@@ -64,8 +65,17 @@ const App = (() => {
   const ROUTE_ALIASES = { 'engagement': 'metrics' };
 
   let currentView = '';
+  let viewCleanup = null;
+  // A view can register a function to run when the user leaves it
+  // (Survey Studio flushes its autosave and removes its listeners).
+  function setViewCleanup(fn) { viewCleanup = fn; }
 
   function navigate(view) {
+    // Sub-routes: "#surveys/<id>/<mode>" → view "surveys", param "<id>/<mode>"
+    const slash = String(view || '').indexOf('/');
+    const param = slash === -1 ? '' : String(view).slice(slash + 1);
+    if (slash !== -1) view = String(view).slice(0, slash);
+    if (viewCleanup) { const fn = viewCleanup; viewCleanup = null; try { fn(); } catch (e) { console.error(e); } }
     if (ROUTE_ALIASES[view]) {
       const oldId = view;
       view = ROUTE_ALIASES[view];
@@ -86,8 +96,9 @@ const App = (() => {
 
     // Render
     const container = document.getElementById('view-container');
+    container.className = 'view-container';
     container.innerHTML = '';
-    VIEWS[view]();
+    VIEWS[view](param);
 
     // Update sidebar stats
     updateSidebarStats();
@@ -809,7 +820,7 @@ const App = (() => {
   }
 
   return {
-    init, navigate: (v) => navigate(v), onProviderChange, fetchModels, fetchKeyStatus,
+    init, navigate: (v) => navigate(v), setViewCleanup, onProviderChange, fetchModels, fetchKeyStatus,
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
     getState, setState, save,
     callClaude, updateApiStatus, hasApiKeys, getEnvKeyCount,

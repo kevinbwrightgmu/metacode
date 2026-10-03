@@ -36,7 +36,7 @@ app.use('/api/surveys', surveys.router);
 app.use('/api/public/surveys', surveys.publicRouter);
 app.get('/s/:publicId', surveys.pageHandler);
 app.use(express.json({ limit: '10mb' }));
-app.use(express.static('public'));
+app.use(express.static(path.join(__dirname, 'public')));
 
 // ── AI provider: EMIS ─────────────────────────────────────────────────────────
 // Every AI feature (AI Coding, the MetaCode Assistant, column detection in

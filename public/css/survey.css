@@ -99,8 +99,8 @@ textarea.sv-input { line-height: 1.5; }
 /* Matrix */
 .sv-matrix-head, .sv-matrixrow { display: grid; grid-template-columns: var(--sv-mx-cols); align-items: center; }
 .sv-matrix-head { font-size: .9em; font-weight: 600; color: var(--sv-text2); padding: 0 8px 8px; }
-.sv-matrix-col { text-align: center; padding: 0 4px; }
-.sv-matrix-rowlabel { padding-right: 8px; }
+.sv-matrix-col { text-align: center; padding: 0 4px; overflow-wrap: anywhere; hyphens: auto; line-height: 1.25; }
+.sv-matrix-rowlabel { padding-right: 8px; overflow-wrap: anywhere; }
 .sv-matrix-cell { display: flex; justify-content: center; align-items: center; cursor: pointer; padding: 6px 0; position: relative; }
 .sv-matrix-dot { width: 20px; height: 20px; border-radius: 50%; border: 2px solid var(--sv-text3); background: var(--sv-surface); transition: border-color .15s, background .15s, box-shadow .15s; }
 .sv-matrix-cell:hover .sv-matrix-dot { border-color: var(--sv-mark); }
@@ -158,6 +158,10 @@ audio.sv-media { height: auto; }
   margin: 0 20px !important; max-width: calc(100% - 40px) !important; }
 .sv-reflow .sv-artboard > .sv-el[style*="width: max-content"] { max-width: calc(100% - 40px) !important; }
 .sv-reflow .sv-matrix { overflow-x: auto; }
+.sv-reflow .sv-matrix-head { font-size: .8em; }
+/* Reflow stacks elements in reading order, so a rotated or skewed shape would overlap its neighbours:
+   flatten decorative transforms when stacking. */
+.sv-reflow .sv-artboard > .sv-el { transform: none !important; }
 
 /* Runtime frame */
 .sv-run { width: 100%; }
