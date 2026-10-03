@@ -385,7 +385,31 @@ async function emisRequest(method, pathname, key, body, opts) {
   }
   return r;
 }
+// EMIS's documentation is written for Python's OpenAI SDK, and Node's own HTTP
+// client can be treated differently by the gateway's checks (HTTP 403 or a
+// web page instead of an answer). So requests go through a Python worker
+// (python/emis_fetch.py: the openai package if installed, else httpx/urllib)
+// when Python is available. EMIS_TRANSPORT: auto (default) | python | node.
+const { createEmisPython } = require('./emis-python');
+const emisPython = createEmisPython();
+function emisTransport() { const t = String(process.env.EMIS_TRANSPORT || 'auto').trim().toLowerCase(); return ['python', 'node'].includes(t) ? t : 'auto'; }
+
 async function emisRequestOnce(method, pathname, key, body, opts) {
+  const transport = emisTransport();
+  if (transport !== 'node' && !(body && body.stream)) {
+    const r = await emisPython.request({ method, url: EMIS.baseUrl + pathname, key, body, timeoutMs: opts.timeoutMs, signal: opts.signal, proxy: String(process.env.EMIS_PROXY || '').trim() });
+    if (r && !r.failed) return { status: r.status, ok: r.ok, headers: r.headers, text: r.text, json: parseJson(r.text), pathname, via: 'python' };
+    if (r && r.failed === 'aborted') return { failed: 'aborted' };
+    if (r) console.warn('[emis] Python request to ' + pathname + ' failed (' + r.failed + ' ' + (r.code || '') + '): ' + redact(String(r.message || ''), 300));
+    if (transport === 'python') return r ? { failed: r.failed === 'client' ? 'network' : r.failed, code: r.code, detail: r.message } : { failed: 'network', code: 'NO_PYTHON', detail: 'Python wasn\'t found' };
+    // auto: try the same request from Node.js before giving up
+    const n = await emisRequestNode(method, pathname, key, body, opts);
+    if (n.failed && r) n.detail = 'Python: ' + (r.message || r.code) + (n.code ? '; Node.js: ' + n.code : '');
+    return n;
+  }
+  return emisRequestNode(method, pathname, key, body, opts);
+}
+async function emisRequestNode(method, pathname, key, body, opts) {
   const { controller, unlink } = linkedAbort(opts.signal);
   const timer = setTimeout(() => controller.abort(TIMED_OUT), opts.timeoutMs);
   try {
@@ -462,7 +486,7 @@ function describeFailure(r, ctx) {
     return fail(504, 'timeout', 'EMIS didn\'t answer within ' + timeoutSeconds() + ' seconds. Try again; if this keeps ' +
       'happening, raise EMIS_TIMEOUT_MS in the server\'s .env file.');
   }
-  if (r.failed === 'network') return fail(502, 'network', networkMessage(r.code), 'network error ' + (r.code || '(no code)'));
+  if (r.failed === 'network') return fail(502, 'network', networkMessage(r.code) + (r.detail ? ' (details: ' + redact(String(r.detail), 300) + ')' : ''), 'network error ' + (r.code || '(no code)') + (r.detail ? ' — ' + r.detail : ''));
 
   const status = r.status;
   const detail = providerMessage(r);
@@ -471,11 +495,16 @@ function describeFailure(r, ctx) {
     return fail(502, 'bad_base_url', 'EMIS answered with a redirect instead of a result. Check EMIS_BASE_URL in the server\'s .env file.', log);
   }
   if (status === 401) {
-    return fail(401, 'authentication_error', 'EMIS didn\'t accept the configured key. Check EMIS_API_KEY in the server\'s .env file, then restart MetaCode.', log);
+    return fail(401, 'authentication_error', 'EMIS didn\'t accept the configured key' + (detail ? ' ("' + detail + '")' : '') + '. Check EMIS_API_KEY in the server\'s .env file, then click Reload .env in Settings.', log);
   }
   if (status === 403) {
-    return fail(403, 'permission_error', 'EMIS refused this request for the configured key (it may not have access to this model). ' +
-      'Check EMIS_API_KEY in the server\'s .env file, or pick another model.', log);
+    if (/^\s*</.test(r.text || '')) {
+      return fail(403, 'blocked', 'EMIS\'s website check answered instead of the API (a web page with HTTP 403). MetaCode sends EMIS requests ' +
+        'through Python to avoid this — make sure Python 3 is installed (and ideally run "pip install openai"), then restart MetaCode. ' +
+        'Also check that EMIS_BASE_URL is ' + EMIS_DEFAULT_BASE_URL + '.', log);
+    }
+    return fail(403, 'permission_error', 'EMIS refused this request' + (detail ? ': "' + detail + '"' : ' for the configured key') +
+      (ctx.model ? ' (model "' + ctx.model + '")' : '') + '. Check EMIS_API_KEY in the server\'s .env file, or pick another model in Settings → AI models.', log);
   }
   if (ctx.model && (status === 404 || ((status === 400 || status === 422) && MODEL_MISSING.test(detail)))) {
     modelList.fetchedAt = 0;                       // EMIS's list may have changed: fetch it again next time
@@ -1053,7 +1082,8 @@ async function completeChat(chatRequest, ctx, signal, retriedLength) {
     const quota = readQuotaHeaders(r.headers);
     recordQuota(key, quota, now);
     if (r.status === 429) { onQuotaExhausted(key, quota, r.headers, now); limited = true; continue; }
-    if (r.status === 401 || r.status === 403) { markKeyRejected(key, r); rejection = describeFailure(r, ctx); continue; }
+    if (r.status === 401 || (r.status === 403 && !/^\s*</.test(r.text || '') && !/model/i.test(providerMessage(r)))) { markKeyRejected(key, r); rejection = describeFailure(r, ctx); continue; }
+    if (r.status === 403) return describeFailure(r, ctx);   // a website check or a model this key can't use: not the key's fault
     if (!r.ok) return describeFailure(r, ctx);
     let completion = readReply(r);
     if (!completion && /web page/.test(describeReply(r)) && !/\/v1$/.test(EMIS.baseUrl)) {
@@ -1393,7 +1423,7 @@ app.post('/api/ai', async (req, res) => {
 });
 
 // Failures that a different model may not have (EMIS can't run one model right now).
-const MODEL_FALLBACK_TYPES = new Set(['upstream_error', 'malformed_response', 'model_not_found', 'not_found']);
+const MODEL_FALLBACK_TYPES = new Set(['upstream_error', 'malformed_response', 'model_not_found', 'not_found', 'permission_error']);
 async function fallbackModels(failed) {
   const list = await getModelList(false);
   if (!list.ok) return [];
@@ -1601,6 +1631,7 @@ function settingsStatus() {
       provider: 'emis', ready, keyCount: EMIS.keys.length, problem: EMIS.problem || (EMIS.keys.length ? null : 'EMIS_API_KEY isn\'t set in .env.'),
       warnings: EMIS.warnings, baseHost: (() => { try { return new URL(EMIS.baseUrl).host; } catch (e) { return null; } })(),
       defaultModel: EMIS.model || null,
+      transport: emisTransport() === 'node' ? 'Node.js' : (emisPython.status().ok ? 'Python ' + emisPython.status().python + ' (' + emisPython.status().client + ')' : (emisTransport() === 'python' ? 'Python — not available: ' + (emisPython.status().problem || 'not started') : 'Node.js (Python not found)')),
       proxy: (() => { const u = proxyUrl(); if (!u) return null; try { return new URL(u).host; } catch (e) { return 'set'; } })()
     },
     server: { version: VERSION, startedAt: STARTED_AT, node: process.version }
@@ -1659,6 +1690,7 @@ function start(port) {
   return new Promise((resolve, reject) => {
     const server = app.listen(port, () => {
       scraper.setPort(server.address().port);
+      if (emisTransport() !== 'node') emisPython.warm();   // start the Python EMIS worker early
       resolve(server);
     });
     server.on('error', reject);
@@ -1667,6 +1699,7 @@ function start(port) {
     server.close = cb => {
       scraper.shutdown();
       scraper.onUpgrade.closeAll();
+      emisPython.stop();
       return close(cb);
     };
   });
@@ -1688,7 +1721,7 @@ function printBanner(PORT) {
   console.log('  AI (EMIS)  → ' + (EMIS.problem ? 'NOT READY — ' + EMIS.problem
     : keyCount ? keyCount + ' key' + (keyCount === 1 ? '' : 's') + ' set via .env ✓'
     : 'Not set — add EMIS_API_KEY to .env to turn on AI features'));
-  if (EMIS.baseUrl) console.log('  EMIS API   → ' + EMIS.baseUrl);
+  if (EMIS.baseUrl) console.log('  EMIS API   → ' + EMIS.baseUrl + (emisTransport() === 'node' ? ' (via Node.js)' : ' (via Python when available; EMIS_TRANSPORT=' + emisTransport() + ')'));
   if (fileModels.ok) {
     const choice = chooseDefaultModel(fileModels.ids, 'file');
     console.log('  Models     → ' + fileModels.models.length + ' from ' + MODELS_FILE_NAME + '; default: ' +
