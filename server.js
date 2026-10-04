@@ -370,8 +370,7 @@ const PERMANENT_NETWORK = /^(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ERR_INVALID_URL)$|
 function isTransient(r) {
   if (r.failed === 'network') return !PERMANENT_NETWORK.test(String(r.code || ''));
   if (r.failed) return false;
-  if (RETRY_STATUS.has(r.status)) return true;
-  return r.ok && !String(r.text || '').trim() && /chat\/completions/.test(String(r.pathname || ''));   // an empty 200 only
+  return RETRY_STATUS.has(r.status);   // a 200 is an answer: an empty or odd one is handled by switching to streaming, not by retrying
 }
 async function emisRequest(method, pathname, key, body, opts) {
   const delays = opts.retry === false ? [] : [600, 1800];
@@ -415,7 +414,7 @@ async function emisRequestNode(method, pathname, key, body, opts) {
   try {
     const response = await emisFetch(EMIS.baseUrl + pathname, {
       method,
-      headers: emisHeaders(key, 'application/json', !!body),
+      headers: emisHeaders(key, body && body.stream ? 'text/event-stream' : 'application/json', !!body),
       body: body ? JSON.stringify(body) : undefined,
       redirect: 'manual',
       signal: controller.signal
@@ -1016,6 +1015,19 @@ function fromSse(text) {
   if (!content && finalText) content = finalText;
   return { id: id || 'chatcmpl-' + Date.now().toString(36), object: 'chat.completion', model, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: finish || 'stop' }], usage };
 }
+// Per model: does EMIS answer it properly when streamed, or plainly? Learned from replies.
+const streamPref = new Map();
+function streamPreferred(model) { return streamPref.has(model) ? streamPref.get(model) : !!streamPref.get('*'); }
+function setStreamPreferred(model, v) {
+  if (streamPref.get(model) !== v) console.log('[emis] ' + model + ': using ' + (v ? 'streamed' : 'plain') + ' replies from now on.');
+  streamPref.set(model, v);
+  if (v) streamPref.set('*', true);   // new models start with what worked
+}
+function replyHeaders(r) {
+  if (!r || !r.headers || !r.headers.get) return '';
+  const h = ['content-type', 'content-length', 'transfer-encoding', 'content-encoding'].map(k => r.headers.get(k) ? k + '=' + r.headers.get(k) : '').filter(Boolean).join(', ');
+  return h ? '; headers: ' + h : '';
+}
 // What an unreadable reply looked like, for the error message (no secrets: redacted, short).
 function describeReply(r) {
   const type = r.headers && r.headers.get ? String(r.headers.get('content-type') || '').split(';')[0] : '';
@@ -1083,7 +1095,8 @@ async function completeChat(chatRequest, ctx, signal, retriedLength) {
   let rejection = null;
   let limited = false;
   for (const key of keys) {
-    const r = await emisRequest('POST', '/chat/completions', key, chatRequest, { timeoutMs: EMIS.timeoutMs, signal });
+    const streamFirst = streamPreferred(chatRequest.model);
+    const r = await emisRequest('POST', '/chat/completions', key, streamFirst ? Object.assign({}, chatRequest, { stream: true }) : chatRequest, { timeoutMs: EMIS.timeoutMs, signal, buffered: streamFirst });
     if (r.failed === 'aborted') return { aborted: true };
     if (r.failed) return describeFailure(r, ctx);                 // network/timeout: another key won't help
     const now = Date.now();
@@ -1105,15 +1118,22 @@ async function completeChat(chatRequest, ctx, signal, retriedLength) {
       if (!completion) EMIS.baseUrl = prev;
       else EMIS.warnings.push('EMIS_BASE_URL should end in /v1; MetaCode is using ' + fixed + ' until you change .env.');
     }
+    let other = null;
     if (!completion) {
-      // Ask the way EMIS's own example does — "stream": true — and join the streamed pieces
-      console.warn('[emis] Non-streamed reply to chat/completions unreadable (' + describeReply(r) + '); asking again with stream: true.');
-      const rs = await emisRequest('POST', '/chat/completions', key, Object.assign({}, chatRequest, { stream: true }), { timeoutMs: EMIS.timeoutMs, signal, buffered: true, retry: false });
-      if (rs.ok) completion = readReply(rs);
-      if (completion) completion = Object.assign({}, completion, { model: completion.model || chatRequest.model });
-    }
+      // Empty or unreadable: ask the other way — streamed (as in EMIS's own example) or plain —
+      // straight away, and remember what works for this model.
+      const asStream = !streamFirst;
+      console.warn('[emis] ' + (streamFirst ? 'Streamed' : 'Non-streamed') + ' reply from ' + chatRequest.model + ' unreadable (' + describeReply(r) + replyHeaders(r) + '); asking again ' + (asStream ? 'with stream: true' : 'without streaming') + '.');
+      other = await emisRequest('POST', '/chat/completions', key, Object.assign({}, chatRequest, { stream: asStream }), { timeoutMs: EMIS.timeoutMs, signal, buffered: asStream, retry: false });
+      if (other.ok) completion = readReply(other);
+      if (completion) {
+        completion = Object.assign({}, completion, { model: completion.model || chatRequest.model });
+        setStreamPreferred(chatRequest.model, asStream);
+      }
+    } else if (streamFirst === false && streamPref.get(chatRequest.model) === undefined) setStreamPreferred(chatRequest.model, false);
     if (!completion) {
-      const what = describeReply(r);
+      const what = describeReply(r) + (other ? '; asked ' + (streamFirst ? 'without streaming' : 'with stream: true') + ', it sent ' + (other.failed ? 'nothing (' + other.failed + ' ' + (other.code || '') + ')' : (other.ok ? describeReply(other) : 'HTTP ' + other.status)) : '');
+      console.error('[emis] Details: ' + (r.via || 'node') + replyHeaders(r));
       console.error('[emis] Unreadable reply to chat/completions (model ' + chatRequest.model + ', HTTP ' + r.status + '): ' + what);
       return fail(502, 'malformed_response', 'EMIS answered, but not with a chat reply MetaCode can read — it sent ' + what + '.' +
         (/web page/.test(what) ? ' Check that EMIS_BASE_URL in .env is the API address ending in /v1 (default ' + EMIS_DEFAULT_BASE_URL + ').' : ''),
@@ -1659,6 +1679,7 @@ app.post('/api/settings/reload', (req, res) => {
   envLoader.load();
   EMIS = loadEmisConfig(process.env);
   keyState.clear();
+  streamPref.clear();
   proxyAgent = null;
   modelList.ids = null; modelList.fetchedAt = 0; modelList.failure = null; modelList.failedAt = 0;
   const env = envLoader.info;
