@@ -114,7 +114,8 @@ def via_openai(req):
 
 
 def headers_for(req):
-    h = {"Authorization": "Bearer " + req["key"], "Accept": "application/json", "User-Agent": USER_AGENT}
+    streaming = isinstance(req.get("body"), dict) and bool(req["body"].get("stream"))
+    h = {"Authorization": "Bearer " + req["key"], "Accept": "text/event-stream" if streaming else "application/json", "User-Agent": USER_AGENT}
     if req.get("body") is not None:
         h["Content-Type"] = "application/json"
     return h

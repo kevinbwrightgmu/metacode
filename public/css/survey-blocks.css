@@ -134,3 +134,8 @@
 .bk-try { text-decoration: none; }
 .bk-try.is-off { opacity: .45; }
 .bk-try:hover, .bk-try:focus-visible { background: #fff; color: #1D4ED8; outline: none; }
+
+/* Small + / × buttons inside blocks (assign conditions) */
+.bk-mini { width: 20px; height: 20px; border-radius: 50%; border: 1px solid rgba(0,0,0,.2); background: rgba(255,255,255,.22); color: #fff;
+  font: 700 13px/1 'Inter', sans-serif; cursor: pointer; padding: 0; display: inline-flex; align-items: center; justify-content: center; }
+.bk-mini:hover, .bk-mini:focus-visible { background: #fff; color: #3730A3; outline: none; }

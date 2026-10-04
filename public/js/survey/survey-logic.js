@@ -32,7 +32,7 @@
 })(typeof globalThis !== 'undefined' ? globalThis : this, function (Core) {
   'use strict';
 
-  const { isObj, num, str, isQuestionType, questionParts, descendants, ancestors, pageIdOfRef, plainText } = Core;
+  const { isObj, num, str, clamp, isQuestionType, questionParts, descendants, ancestors, pageIdOfRef, plainText } = Core;
 
   /* ── Expression language ───────────────────── */
   class ExprError extends Error {}
@@ -365,6 +365,9 @@
     const answerByKey = k => { const id = keys[k] || (doc.elements[k] ? k : null); return id ? answerOf(id) : null; };
     const env = {
       answerOf, answerByKey,
+      seed: String((ctx.varState && ctx.varState.__seed) || ctx.seed || ''),   // per-participant random seed
+      balance: ctx.balance || {},                                         // balanced assignment counts (from the server)
+      varState: ctx.varState || {},
       score: () => ctx.score || 0,
       scoreOf: k => { const id = keys[k] || k; const q = doc.elements[id]; return q ? scoreOf(doc, q, answerOf(id)) : 0; },
       lookup: name => {
@@ -390,6 +393,12 @@
       case 'expr': return tryEvaluate(op.expr, env);
       case 'value': return op.value;
       case 'calc': return calcValue(op.op, operandValue(doc, op.a, env), operandValue(doc, op.b, env));
+      case 'random': {   // random whole number from a to b — fixed for each participant (seeded)
+        let lo = Math.round(toNum(operandValue(doc, op.a, env))), hi = Math.round(toNum(operandValue(doc, op.b, env)));
+        if (!Number.isFinite(lo)) lo = 1; if (!Number.isFinite(hi)) hi = lo;
+        if (hi < lo) { const t = lo; lo = hi; hi = t; }
+        return lo + Math.floor(rand01(env.seed, 'num:' + (op.id || '')) * (hi - lo + 1));
+      }
       default: return null;
     }
   }
@@ -418,10 +427,47 @@
     empty: { label: 'is not answered', unary: true, fn: a => isEmptyValue(a) },
     notEmpty: { label: 'is answered', unary: true, fn: a => !isEmptyValue(a) }
   };
+  /* ── Randomization ─────────────────────────── */
+  // Deterministic random numbers in [0, 1) from the participant's seed and a key
+  // (the block's id or variable name), so a participant always gets the same
+  // assignment — on every page, after a reload, and when the server checks the response.
+  function hash53(str) {
+    let h1 = 0xdeadbeef, h2 = 0x41c6ce57;
+    for (let i = 0; i < str.length; i++) { const ch = str.charCodeAt(i); h1 = Math.imul(h1 ^ ch, 2654435761); h2 = Math.imul(h2 ^ ch, 1597334677); }
+    h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507) ^ Math.imul(h2 ^ (h2 >>> 13), 3266489909);
+    h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507) ^ Math.imul(h1 ^ (h1 >>> 13), 3266489909);
+    return 4294967296 * (2097151 & h2) + (h1 >>> 0);
+  }
+  function rand01(seed, key) { return hash53(String(seed) + '|' + String(key)) / 9007199254740992; }
+  function newSeed() {
+    try { const a = new Uint32Array(2); (globalThis.crypto || require('crypto').webcrypto).getRandomValues(a); return a[0].toString(36) + a[1].toString(36); }
+    catch (e) { return Math.random().toString(36).slice(2) + Date.now().toString(36); }
+  }
+  const assignOptions = a => (Array.isArray(a.options) ? a.options : []).map(o => String(o === null || o === undefined ? '' : o).trim()).filter(Boolean);
+  // assign … at random / balanced: keeps an existing assignment, otherwise picks one.
+  function assignValue(a, env, current) {
+    const opts = assignOptions(a);
+    if (!opts.length) return current;
+    const kept = env.varState && Object.prototype.hasOwnProperty.call(env.varState, a.name) ? env.varState[a.name] : current;
+    if (kept !== undefined && kept !== null && opts.includes(String(kept))) return String(kept);
+    let pool = opts;
+    if (a.method === 'balanced' && env.balance && isObj(env.balance[a.name])) {
+      const counts = env.balance[a.name];
+      const least = Math.min(...opts.map(o => Number(counts[o]) || 0));
+      pool = opts.filter(o => (Number(counts[o]) || 0) === least);
+    }
+    return pool[Math.floor(rand01(env.seed, 'assign:' + a.name) * pool.length)];
+  }
+  function branchIndex(a, env) {
+    const n = Array.isArray(a.branches) ? a.branches.length : 0;
+    return n ? Math.floor(rand01(env.seed, 'branch:' + (a.id || '')) * n) : -1;
+  }
+
   function evalCondition(doc, c, env) {
     if (!isObj(c)) return false;   // an empty slot is false, as in Scratch
     if (isObj(c.group)) return evalGroup(doc, c.group, env);
     if (typeof c.expr === 'string') return truthy(tryEvaluate(c.expr, env, false));
+    if (c.chance !== undefined) return rand01(env.seed, 'chance:' + (c.id || '')) * 100 < clamp(toNum(c.chance) || 0, 0, 100);
     const cmp = CMP[c.cmp] || CMP.eq;
     const a = operandValue(doc, c.left, env);
     return cmp.unary ? cmp.fn(a) : cmp.fn(a, operandValue(doc, c.right, env));
@@ -455,10 +501,14 @@
     openUrl:   { label: 'Open a link', value: true },
     // Control and variable blocks (block editor)
     if:        { label: 'If', control: true },
+    assign:    { label: 'Assign a condition at random', variable: true, state: true },
+    randomBranch: { label: 'Pick one at random', control: true },
+    shuffle:   { label: 'Shuffle the choices of', target: 'question', state: true },
     changeVar: { label: 'Change variable', variable: true, state: true }
   };
   const TRIGGERS = {
     always:    { label: 'While answering', hint: 'Re-checked after every answer' },
+    start:     { label: 'When the survey starts', hint: 'Runs once, when a participant begins' },
     pageExit:  { label: 'When leaving page', page: true },
     pageEnter: { label: 'When entering page', page: true },
     click:     { label: 'When button is clicked', element: true },
@@ -489,6 +539,7 @@
       if (!isObj(a)) return;
       fn(a);
       if (a.type === 'if') { eachAction(a.then, fn); eachAction(a.else, fn); }
+      if (a.type === 'randomBranch') (Array.isArray(a.branches) ? a.branches : []).forEach(b => eachAction(b, fn));
     });
   }
   // An if block's condition: its slot holds one boolean (empty = false).
@@ -508,6 +559,14 @@
     (Array.isArray(list) ? list : []).forEach(a => {
       if (!isObj(a)) return;
       if (a.type === 'if') { runList(doc, ifCondition(doc, a, env) ? a.then : a.else, env, vars, fn); return; }
+      if (a.type === 'randomBranch') {
+        const i = branchIndex(a, env);
+        if (a.name) vars[a.name] = i + 1;     // which one this participant got (1, 2, …), if recorded
+        if (i >= 0) runList(doc, a.branches[i], env, vars, fn);
+        if (a.name) fn({ type: 'assign', name: a.name, __branch: true });
+        return;
+      }
+      if (a.type === 'assign' && a.name) vars[a.name] = assignValue(a, env, vars[a.name]);
       if (a.type === 'setVar' && a.name) { vars[a.name] = assignedValue(doc, a, env); }
       if (a.type === 'changeVar' && a.name) { vars[a.name] = (toNum(vars[a.name]) || 0) + (toNum(assignedValue(doc, a, env)) || 0); }
       fn(a);
@@ -555,10 +614,10 @@
       const isVisPrev = prevVisible || (() => true);
       let score = 0;
       allQuestions(doc).forEach(q => { if (isVisPrev(q.id)) score += scoreOf(doc, q, answers[q.id]); });
-      const envCtx = { answers, vars, score, keys, pageIndex: ctx.pageIndex || 0, isVisible: prevVisible };
+      const envCtx = { answers, vars, score, keys, pageIndex: ctx.pageIndex || 0, isVisible: prevVisible, varState: ctx.varState, balance: ctx.balance };
       const env = makeEnv(doc, envCtx);
       doc.variables.forEach(v => { if (v.formula) vars[v.name] = tryEvaluate(v.formula, env, v.initial); });
-      const fired = [], errors = [], once = [];
+      const fired = [], errors = [], once = [], assigned = [], shuffle = {};
       doc.rules.forEach(r => {
         if (!r.enabled || (r.trigger && r.trigger.type !== 'always')) return;
         let ok = false;
@@ -577,6 +636,8 @@
             case 'setProp': if (a.target && typeof a.path === 'string' && /^(style|frame|props)\.[A-Za-z0-9_.]+$/.test(a.path)) { (props[a.target] = props[a.target] || {})[a.path] = a.value; } break;
             case 'setText': if (a.target) text[a.target] = interpolate(a.value, env); break;
             // One-off actions: the runtime runs them when they become active after an answer
+            case 'assign': if (a.name && !assigned.includes(a.name)) assigned.push(a.name); break;
+            case 'shuffle': if (a.target) shuffle[a.target] = true; break;
             case 'openUrl': case 'message': once.push({ key: r.id + '|' + a.type + '|' + String(a.value), type: a.type, value: a.value, where: a.where, text: interpolate(a.value, env) }); break;
             default: break;   // setVar / changeVar are applied by runList
           }
@@ -600,7 +661,7 @@
         if (disabled[id]) return true;
         return ancestors(doc, id).some(a => disabled[a]);
       };
-      state = { visible, disabled, required, props, text, pageVisible, vars, score, fired, errors, once, isVisible, isDisabled, keys };
+      state = { visible, disabled, required, props, text, pageVisible, vars, score, fired, errors, once, assigned, shuffle, isVisible, isDisabled, keys };
       const sig = JSON.stringify([visible, pageVisible, score]);
       if (sig === prevSig) break;
       prevSig = sig;
@@ -610,7 +671,7 @@
     allQuestions(doc).forEach(q => { if (state.isVisible(q.id)) score += scoreOf(doc, q, answers[q.id]); });
     state.score = score;
     state.isRequired = id => !!state.required[id] && state.isVisible(id) && !state.isDisabled(id);
-    state.env = makeEnv(doc, { answers, vars: state.vars, score, keys, pageIndex: ctx.pageIndex || 0, isVisible: state.isVisible });
+    state.env = makeEnv(doc, { answers, vars: state.vars, score, keys, pageIndex: ctx.pageIndex || 0, isVisible: state.isVisible, varState: ctx.varState, balance: ctx.balance });
     return state;
   }
 
@@ -629,7 +690,7 @@
       const env = Object.assign({}, state.env, { lookup: name => (Object.prototype.hasOwnProperty.call(vars, name) ? vars[name] : state.env.lookup(name)) });
       runList(doc, ok ? r.then : r.else || [], env, vars, a => {
         const e = Object.assign({ rule: r.id }, a);
-        if (a.type === 'setVar' || a.type === 'changeVar') { e.type = 'setVar'; e.result = vars[a.name]; }
+        if (a.type === 'setVar' || a.type === 'changeVar' || a.type === 'assign') { e.type = 'setVar'; e.result = vars[a.name]; }
         if (a.type === 'message' || a.type === 'complete' || a.type === 'setText' || a.type === 'openUrl') e.text = interpolate(a.value, env);
         effects.push(e);
       });
@@ -753,12 +814,13 @@
       if (op.kind === 'answer' && !elementExists(op.ref)) out.push({ rule: rule.id, message: rule.name + ': a block refers to a question that no longer exists.' });
       if (op.kind === 'var' && !varExists(op.name)) out.push({ rule: rule.id, message: rule.name + ': a block refers to the missing variable "' + op.name + '".' });
       if (op.kind === 'expr') exprCheck(rule, op.expr, 'a formula');
-      if (op.kind === 'calc') { walkOperand(rule, op.a); walkOperand(rule, op.b); }
+      if (op.kind === 'calc' || op.kind === 'random') { walkOperand(rule, op.a); walkOperand(rule, op.b); }
     };
     const walkCond = (rule, g) => ((g && g.items) || []).forEach(c => {
       if (!isObj(c)) return;
       if (isObj(c.group)) return walkCond(rule, c.group);
       if (typeof c.expr === 'string') return exprCheck(rule, c.expr, 'a condition formula');
+      if (c.chance !== undefined) { const p = toNum(c.chance); if (!Number.isFinite(p) || p < 0 || p > 100) out.push({ rule: rule.id, message: rule.name + ': a "chance" block needs a percentage from 0 to 100.' }); return; }
       walkOperand(rule, c.left);
       if (!(CMP[c.cmp] && CMP[c.cmp].unary)) walkOperand(rule, c.right);
     });
@@ -776,8 +838,23 @@
         if (!def) { out.push({ rule: r.id, message: r.name + ': unknown action "' + a.type + '".' }); return; }
         if (def.target === 'page' && !pageExists(a.target)) out.push({ rule: r.id, message: r.name + ': "' + def.label + '" has no page selected.' });
         else if (def.target && def.target !== 'page' && !elementExists(a.target)) out.push({ rule: r.id, message: r.name + ': "' + def.label + '" has no element selected.' });
-        if (def.variable && !varExists(a.name)) out.push({ rule: r.id, message: r.name + ': "Set variable" refers to the missing variable "' + (a.name || '') + '".' });
+        if (def.variable && a.type !== 'assign' && !varExists(a.name)) out.push({ rule: r.id, message: r.name + ': "Set variable" refers to the missing variable "' + (a.name || '') + '".' });
         if (a.type === 'setVar' && !isObj(a.from)) exprCheck(r, a.expr, 'the variable formula');
+        if (a.type === 'assign') {
+          const n = assignOptions(a).length;
+          if (!a.name) out.push({ rule: r.id, message: r.name + ': an "assign" block has no variable to store the condition in.' });
+          else if (!varExists(a.name)) out.push({ rule: r.id, message: r.name + ': "assign" refers to the missing variable "' + a.name + '".' });
+          if (n === 0) out.push({ rule: r.id, message: r.name + ': an "assign" block has no conditions to choose from.' });
+          else if (n === 1) out.push({ rule: r.id, level: 'warning', message: r.name + ': an "assign" block has only one condition, so everyone gets "' + assignOptions(a)[0] + '".' });
+          return;
+        }
+        if (a.type === 'randomBranch') {
+          const n = Array.isArray(a.branches) ? a.branches.length : 0;
+          if (n < 2) out.push({ rule: r.id, level: 'warning', message: r.name + ': "pick one at random" has fewer than two options.' });
+          if (a.name && !varExists(a.name)) out.push({ rule: r.id, message: r.name + ': "pick one at random" records into the missing variable "' + a.name + '".' });
+          return;
+        }
+        if (a.type === 'shuffle' && doc.elements[a.target] && !['choice', 'multi'].includes(valueKind(doc.elements[a.target]))) out.push({ rule: r.id, level: 'warning', message: r.name + ': "shuffle the choices" only affects choice questions.' });
         if (a.type === 'openUrl' && !linkOf(a.value)) out.push({ rule: r.id, message: r.name + ': "Open a link" needs a web address like https://example.com.' });
         if (def.nav && r.trigger && r.trigger.type === 'always') out.push({ rule: r.id, level: 'warning', message: r.name + ': navigation actions only run on events (leaving a page, clicking a button) — change the trigger.' });
       });
@@ -790,7 +867,7 @@
     ExprError, tokenize, parse, compile, evaluate, tryEvaluate, checkExpression, identifiersOf, FUNC_HELP,
     isEmptyValue, looseEq, truthy, textOf,
     valueKind, choicesOf, matrixOf, normalizeAnswer, scoreOf, keyMap, makeEnv,
-    linkOf, CMP, CALC, ACTIONS, TRIGGERS, SETTABLE, evalGroup, evalCondition, interpolate, eachAction,
+    linkOf, rand01, newSeed, assignOptions, CMP, CALC, ACTIONS, TRIGGERS, SETTABLE, evalGroup, evalCondition, interpolate, eachAction,
     computeState, runEvent, validateAnswer, validateSubmission, ruleProblems, FORMATS
   };
 });

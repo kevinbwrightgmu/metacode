@@ -248,3 +248,112 @@ test('block scripts on events run in order and loose blocks never run', () => {
   assert.equal(effects[1].text, 'n is 2');
   assert.deepEqual(Logic.ruleProblems(doc), [], 'loose blocks are not checked');
 });
+
+/* ── Randomization blocks ───────────────────── */
+function randomDoc() {
+  const doc = template('feedback');
+  const [rating, nps, why] = Core.questionsInOrder(doc);
+  doc.variables.push({ id: 'v_c', name: 'condition', type: 'text', initial: '', formula: '' });
+  doc.variables.push({ id: 'v_m', name: 'message', type: 'number', initial: 0, formula: '' });
+  doc.rules = [{
+    id: 'r_rand', name: 'Randomize', enabled: true, trigger: { type: 'always' }, when: { op: 'all', items: [] }, else: [],
+    then: [
+      { type: 'assign', name: 'condition', method: 'random', options: ['A', 'B', 'C'] },
+      { type: 'randomBranch', id: 'rb1', name: 'message', branches: [[{ type: 'show', target: why.id }], [{ type: 'hide', target: why.id }]] },
+      { type: 'shuffle', target: rating.id }
+    ]
+  }];
+  return { doc, rating, nps, why };
+}
+
+test('randomization: assignments are fixed per participant seed and spread across conditions', () => {
+  const { doc, why } = randomDoc();
+  assert.deepEqual(Core.normalizeDoc(Core.clone(doc)).doc.rules[0].then, doc.rules[0].then);
+  assert.deepEqual(Logic.ruleProblems(doc).filter(p => p.level !== 'warning'), []);
+  const a = Logic.computeState(doc, { answers: {}, varState: { __seed: 'seed-1' } });
+  const b = Logic.computeState(doc, { answers: {}, varState: { __seed: 'seed-1' } });
+  assert.equal(a.vars.condition, b.vars.condition, 'same seed → same condition');
+  assert.ok(['A', 'B', 'C'].includes(a.vars.condition));
+  assert.ok([1, 2].includes(a.vars.message));
+  assert.equal(a.isVisible(why.id), a.vars.message === 1, 'the picked branch runs');
+  assert.deepEqual(a.assigned.sort(), ['condition', 'message']);
+  assert.equal(a.shuffle[Core.questionsInOrder(doc)[0].id], true);
+  // Many participants: every condition and branch is used, roughly evenly
+  const counts = { A: 0, B: 0, C: 0 }, branches = { 1: 0, 2: 0 };
+  for (let i = 0; i < 600; i++) {
+    const s = Logic.computeState(doc, { answers: {}, varState: { __seed: 'p' + i } });
+    counts[s.vars.condition]++; branches[s.vars.message]++;
+  }
+  Object.values(counts).forEach(n => assert.ok(n > 140 && n < 260, JSON.stringify(counts)));
+  Object.values(branches).forEach(n => assert.ok(n > 230 && n < 370, JSON.stringify(branches)));
+});
+
+test('randomization: a stored assignment is kept; balanced picks the least-used condition', () => {
+  const { doc } = randomDoc();
+  const kept = Logic.computeState(doc, { answers: {}, varState: { __seed: 'x', condition: 'C' } });
+  assert.equal(kept.vars.condition, 'C');
+  // a stored value that is no longer an option is replaced
+  const stale = Logic.computeState(doc, { answers: {}, varState: { __seed: 'x', condition: 'Z' } });
+  assert.ok(['A', 'B', 'C'].includes(stale.vars.condition));
+  doc.rules[0].then[0].method = 'balanced';
+  for (let i = 0; i < 30; i++) {
+    const s = Logic.computeState(doc, { answers: {}, varState: { __seed: 'b' + i }, balance: { condition: { A: 5, B: 2, C: 5 } } });
+    assert.equal(s.vars.condition, 'B');
+  }
+  const tie = new Set();
+  for (let i = 0; i < 40; i++) tie.add(Logic.computeState(doc, { answers: {}, varState: { __seed: 't' + i }, balance: { condition: { A: 3, B: 1, C: 1 } } }).vars.condition);
+  assert.deepEqual([...tie].sort(), ['B', 'C']);
+});
+
+test('randomization: chance condition, random number reporter and the start trigger', () => {
+  const doc = template('feedback');
+  const env = seed => Logic.makeEnv(doc, { answers: {}, varState: { __seed: seed } });
+  let hits = 0;
+  for (let i = 0; i < 400; i++) if (Logic.evalCondition(doc, { id: 'c1', chance: 25 }, env('s' + i))) hits++;
+  assert.ok(hits > 60 && hits < 140, 'about 25% of participants: ' + hits);
+  assert.equal(Logic.evalCondition(doc, { id: 'c1', chance: 0 }, env('s')), false);
+  assert.equal(Logic.evalCondition(doc, { id: 'c1', chance: 100 }, env('s')), true);
+  const seen = new Set();
+  for (let i = 0; i < 300; i++) {
+    const n = Logic.evalCondition(doc, { left: { kind: 'random', id: 'n1', a: { kind: 'value', value: 1 }, b: { kind: 'value', value: 4 } }, cmp: 'gte', right: { kind: 'value', value: 1 } }, env('r' + i));
+    assert.equal(n, true);
+  }
+  const e = env('fixed');
+  const val = () => Logic.evalCondition(doc, { left: { kind: 'random', id: 'n1', a: { kind: 'value', value: 1 }, b: { kind: 'value', value: 4 } }, cmp: 'eq', right: { kind: 'value', value: 3 } }, e);
+  assert.equal(val(), val(), 'the same participant gets the same number');
+  for (let i = 0; i < 200; i++) {
+    for (let k = 1; k <= 4; k++) if (Logic.evalCondition(doc, { left: { kind: 'random', id: 'n1', a: { kind: 'value', value: 4 }, b: { kind: 'value', value: 1 } }, cmp: 'eq', right: { kind: 'value', value: k } }, env('q' + i))) seen.add(k);
+  }
+  assert.deepEqual([...seen].sort(), [1, 2, 3, 4]);
+
+  doc.variables.push({ id: 'v_g', name: 'group', type: 'text', initial: '', formula: '' });
+  doc.rules = [{ id: 'r_s', name: 'Start', enabled: true, trigger: { type: 'start' }, when: { op: 'all', items: [] }, else: [],
+    then: [{ type: 'assign', name: 'group', method: 'random', options: ['control', 'treatment'] }] }];
+  const state = Logic.computeState(doc, { answers: {}, varState: { __seed: 'start-seed' } });
+  assert.equal(state.vars.group, '', 'start scripts do not run on every recompute');
+  const fx = Logic.runEvent(doc, { type: 'start' }, state);
+  assert.equal(fx.length, 1);
+  assert.equal(fx[0].type, 'setVar');
+  assert.ok(['control', 'treatment'].includes(fx[0].result));
+  assert.equal(Logic.runEvent(doc, { type: 'start' }, state)[0].result, fx[0].result);
+});
+
+test('randomization: the server recomputes the same assignment from the submitted seed', () => {
+  const { doc } = randomDoc();
+  const client = Logic.computeState(doc, { answers: {}, varState: { __seed: 'srv' } });
+  const out = Logic.validateSubmission(doc, { answers: {}, varState: { __seed: 'srv', condition: client.vars.condition, message: client.vars.message }, complete: false });
+  assert.equal(out.vars.condition, client.vars.condition);
+  assert.equal(out.vars.message, client.vars.message);
+  assert.equal(out.vars.__seed, undefined, 'the seed is not stored as a variable');
+  // a tampered condition that isn't one of the options is not accepted
+  const bad = Logic.validateSubmission(doc, { answers: {}, varState: { __seed: 'srv', condition: '<script>' } });
+  assert.ok(['A', 'B', 'C'].includes(bad.vars.condition));
+});
+
+test('randomization: ruleProblems flags empty assign / random-branch blocks', () => {
+  const doc = template('feedback');
+  doc.rules = [{ id: 'r', name: 'R', enabled: true, trigger: { type: 'always' }, when: { op: 'all', items: [] }, else: [],
+    then: [{ type: 'assign', name: 'nope', options: [] }, { type: 'randomBranch', id: 'x', branches: [[]] }] }];
+  const msgs = Logic.ruleProblems(doc).map(p => p.message).join('\n');
+  assert.ok(msgs.length > 0, msgs);
+});

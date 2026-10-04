@@ -605,6 +605,115 @@ test('Published survey: an "open link in this tab" block takes the respondent to
   await context.close();
 });
 
+test('Random blocks: assign conditions, pick one message at random, preview and store the condition', { skip, timeout: 150000 }, async () => {
+  const { page, context, errors } = await openApp('/studio.html');
+  await page.waitForSelector('#ss-new');
+  await page.click('#ss-new');
+  await page.waitForSelector('.ss-viewport .sv-artboard');
+  await page.click('.ss-pal-item[data-type="single"]');
+  await page.click('.ss-mode[data-mode="logic"]');
+  await page.waitForSelector('.bk-app');
+  assert.ok(await page.locator('.bk-pal-item[data-cat="random"]').count() >= 8, 'the Random category has its blocks');
+  // "when the survey starts" + "assign condition at random to one of A B"
+  const ws = await page.locator('.bk-ws').boundingBox();
+  await dragBlock(page, await paletteBlock(page, 'random', 0), ws.x + 480, ws.y + 300);
+  let d = await studio.doc(page);
+  const rid = d.rules[d.rules.length - 1].id;
+  assert.equal(d.rules[d.rules.length - 1].trigger.type, 'start');
+  const hat = await page.locator(scriptSel(rid) + ' .bk-hat').boundingBox();
+  await dragBlock(page, await paletteBlock(page, 'random', 1), hat.x, hat.y + hat.height);
+  d = await studio.doc(page);
+  assert.deepEqual(d.rules.find(r => r.id === rid).then, [{ type: 'assign', name: 'condition', method: 'random', options: ['A', 'B'] }]);
+  assert.ok(d.variables.some(v => v.name === 'condition'), 'the variable is created');
+  // + adds a condition, × removes one, the method can be balanced
+  await page.locator(scriptSel(rid) + ' .bk-mini[aria-label="Add a condition"]').click();
+  await page.locator(scriptSel(rid) + ' .bk-mini[aria-label="Remove condition 1"]').click();
+  await page.locator(scriptSel(rid) + ' .bk-stack select.bk-dd').nth(1).selectOption('balanced');
+  d = await studio.doc(page);
+  assert.deepEqual(d.rules.find(r => r.id === rid).then[0], { type: 'assign', name: 'condition', method: 'balanced', options: ['B', 'C'] });
+  // "pick one of 2 at random" is a C-block with a mouth per option
+  await dragBlock(page, await paletteBlock(page, 'events', 0), ws.x + 480, ws.y + 40);
+  d = await studio.doc(page);
+  const rid2 = d.rules[d.rules.length - 1].id;
+  const hat2 = await page.locator(scriptSel(rid2) + ' .bk-hat').boundingBox();
+  await dragBlock(page, await paletteBlock(page, 'random', 3), hat2.x, hat2.y + hat2.height);
+  assert.equal(await page.locator(scriptSel(rid2) + ' .bk-c .bk-mouth').count(), 2);
+  await page.locator(scriptSel(rid2) + ' .bk-c select.bk-dd').first().selectOption('3');
+  assert.equal(await page.locator(scriptSel(rid2) + ' .bk-c .bk-mouth').count(), 3);
+  d = await studio.doc(page);
+  const rb = d.rules.find(r => r.id === rid2).then[0];
+  assert.equal(rb.type, 'randomBranch');
+  assert.equal(rb.branches.length, 3);
+  // record which one in a new variable, made from the block's menu
+  await page.locator(scriptSel(rid2) + ' .bk-c select.bk-dd').nth(1).selectOption('__new');
+  await page.fill('#bk-v-name', 'message');
+  await page.click('#bk-v-ok');
+  d = await studio.doc(page);
+  assert.equal(d.rules.find(r => r.id === rid2).then[0].name, 'message');
+  assert.ok(d.variables.some(v => v.name === 'message'));
+  assert.deepEqual(errors, []);
+
+  // Preview: each participant sees exactly one of three messages; Restart may draw another
+  const qid = Core.questionsInOrder(d)[0].id;
+  const choices = optionsOf(d, qid);
+  await page.evaluate(([rid2, qid]) => SurveyStudio.current().store.tx('Messages', t => {
+    const rules = JSON.parse(JSON.stringify(t.part('rules')));
+    const r = rules.find(x => x.id === rid2);
+    r.then[0].branches = [[{ type: 'setText', target: qid, value: 'Message one' }], [{ type: 'setText', target: qid, value: 'Message two' }], [{ type: 'setText', target: qid, value: 'Message three' }]];
+    t.set('rules', rules);
+  }), [rid2, qid]);
+  d = await studio.doc(page);
+  assert.ok(d.variables.some(v => v.name === 'message'));
+  assert.deepEqual(await page.evaluate(() => SurveyLogic.ruleProblems(SurveyStudio.current().store.doc).filter(p => p.level !== 'warning')), []);
+  await page.click('.ss-mode[data-mode="preview"]');
+  await page.waitForSelector('#ss-pv-host .sv-artboard');
+  const shown = () => page.evaluate(() => (document.querySelector('#ss-pv-host').textContent.match(/Message (one|two|three)/g) || []));
+  assert.equal((await shown()).length, 1, 'exactly one message is shown');
+
+  // Publish, then two participants: each gets a stored condition; a reload keeps it
+  await page.click('#ss-publish');
+  await page.waitForSelector('#ss-pub-go');
+  await page.click('#ss-pub-go');
+  await page.waitForSelector('#ss-pub-url', { timeout: 10000 });
+  const url = await page.inputValue('#ss-pub-url');
+  const respond = async () => {
+    const visitor = await browser.newContext();
+    const rp = await visitor.newPage();
+    const perr = [];
+    rp.on('pageerror', e => perr.push(e.message));
+    await rp.route(/^https?:\/\/(?!localhost)/, route => route.abort());
+    await rp.goto(url);
+    await rp.waitForSelector('.sv-artboard [data-svid]');
+    const first = await rp.evaluate(() => document.body.textContent.match(/Message (one|two|three)/g));
+    await rp.reload();
+    await rp.waitForSelector('.sv-artboard [data-svid]');
+    assert.deepEqual(await rp.evaluate(() => document.body.textContent.match(/Message (one|two|three)/g)), first, 'the same message after a reload');
+    await rp.locator(`[data-svid="${choices[0].id}"]`).click({ force: true });
+    await rp.locator('.sv-button', { hasText: 'Submit' }).click();
+    await rp.waitForSelector('.sv-complete');
+    assert.deepEqual(perr, []);
+    await visitor.close();
+    return first[0];
+  };
+  const m1 = await respond(), m2 = await respond();
+  const id = d.id;
+  const stored = (await page.evaluate(id => fetch('/api/surveys/' + id + '/responses').then(r => r.json()), id)).responses;
+  assert.equal(stored.length, 2);
+  const names = { 'Message one': 1, 'Message two': 2, 'Message three': 3 };
+  assert.deepEqual(stored.map(r => r.vars.message), [names[m1], names[m2]], 'the recorded branch matches what was shown');
+  // balanced: two participants get both conditions
+  assert.deepEqual(stored.map(r => r.vars.condition).sort(), ['B', 'C']);
+  // The Responses tab shows the conditions
+  await page.keyboard.press('Escape');
+  await page.waitForSelector('#modal-backdrop.is-open', { state: 'detached' }).catch(() => page.waitForSelector('#modal-backdrop:not(.is-open)'));
+  await page.click('.ss-mode[data-mode="responses"]');
+  await page.waitForSelector('.ss-resp-table');
+  const heads = await page.locator('.ss-resp-table th').allTextContents();
+  assert.ok(heads.includes('condition') && heads.includes('message'), heads.join(','));
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
 test('the front page links to both apps and the coding app no longer embeds the studio', { skip, timeout: 60000 }, async () => {
   const { page, context, errors } = await openApp('/index.html');
   assert.equal(await page.locator('a[href="app.html"]').count() >= 1, true);

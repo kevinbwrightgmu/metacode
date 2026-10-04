@@ -251,8 +251,29 @@ function createSurveys(opts) {
     const v = await store.version(rec.id, rec.publish.version);
     if (!v) throw new ApiError(404, 'not_found', 'This survey isn\'t available.');
     res.set('Cache-Control', 'no-store');
-    res.json({ survey: { publicId: rec.publish.publicId, version: v.version, open: !!rec.publish.open, doc: v.doc } });
+    res.json({ survey: { publicId: rec.publish.publicId, version: v.version, open: !!rec.publish.open, doc: v.doc, balance: await balanceCounts(rec.id, v.doc) } });
   }));
+
+  // For "assign … balanced" blocks: how many responses so far got each condition,
+  // so a new participant is given one of the least-used conditions.
+  async function balanceCounts(id, doc) {
+    const names = new Set();
+    const walk = list => (Array.isArray(list) ? list : []).forEach(a => {
+      if (!a || typeof a !== 'object') return;
+      if (a.type === 'assign' && a.method === 'balanced' && a.name) names.add(a.name);
+      if (a.type === 'if') { walk(a.then); walk(a.else); }
+      if (a.type === 'randomBranch') (a.branches || []).forEach(walk);
+    });
+    (doc.rules || []).forEach(r => { walk(r.then); walk(r.else); });
+    if (!names.size) return {};
+    const out = {};
+    names.forEach(n => { out[n] = {}; });
+    (await store.responses(id)).forEach(r => names.forEach(n => {
+      const v = r.vars && r.vars[n];
+      if (v !== undefined && v !== null && v !== '') out[n][String(v)] = (out[n][String(v)] || 0) + 1;
+    }));
+    return out;
+  }
 
   async function versionDoc(rec, version) {
     const n = Number(version) || rec.publish.version;

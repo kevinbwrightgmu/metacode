@@ -60,6 +60,7 @@ const seenModels = [];
 const emisFaults = { broken: new Set(), flaky: 0 };   // models that always fail; number of next requests that fail with 503
 let proxied = 0;
 let lastUserAgent = '';
+let emptyHits = 0;
 
 function findChromium() {
   const candidates = [];
@@ -80,10 +81,25 @@ test.before(async () => {
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       if (!req.url.startsWith('/v1/')) { res.setHeader('Content-Type', 'text/html'); return res.end('<!doctype html><html><body>EMIS website</body></html>'); }
-      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }, { id: 'unicode-model' }] }));
+      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }, { id: 'unicode-model' }, { id: 'streams-unless-told' }, { id: 'stream-only-model' }, { id: 'responses-sse-model' }, { id: 'empty-unless-stream' }] }));
       if (req.url === '/v1/chat/completions') {
         const j = JSON.parse(body || '{}');
         lastUserAgent = String(req.headers['user-agent'] || '');
+        // like EMIS's example: answers as a stream
+        if (j.model === 'streams-unless-told' && j.stream !== false) { res.setHeader('Content-Type', 'text/event-stream'); return res.end('data: {"choices":[{"delta":{"content":"streamed by default"}}]}\n\ndata: [DONE]\n\n'); }
+        if (j.model === 'stream-only-model') {
+          if (j.stream !== true) { res.setHeader('Content-Type', 'text/plain'); return res.end('not supported, use stream'); }
+          res.setHeader('Content-Type', 'text/event-stream');
+          return res.end('data: {"choices":[{"delta":{"content":"ok "}}]}\n\ndata: {"choices":[{"delta":{"content":"via stream"}}]}\n\ndata: [DONE]\n\n');
+        }
+        if (j.model === 'responses-sse-model') { res.setHeader('Content-Type', 'text/event-stream'); return res.end('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"ok from "}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"responses sse"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"output_text":"ok from responses sse"}}\n\n'); }
+        // Like the user's EMIS: 200 with an empty body unless the reply is streamed
+        if (j.model === 'empty-unless-stream') {
+          emptyHits++;
+          if (j.stream !== true || !/event-stream/.test(String(req.headers.accept || ''))) { res.statusCode = 200; return res.end(); }
+          res.setHeader('Content-Type', 'text/event-stream');
+          return res.end('data: {"choices":[{"delta":{"content":"ok streamed"}}]}\n\ndata: [DONE]\n\n');
+        }
         if (j.model === 'unicode-model') return res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok → café … 你好 — ' + j.messages.map(m => m.content).join('|') }, finish_reason: 'stop' }] }));
         if (j.model === 'forbidden-model') { res.statusCode = 403; return res.end('{"error":{"message":"this key may not use forbidden-model"}}'); }
         seenModels.push(j.model);
@@ -229,6 +245,28 @@ test('non-ASCII text in prompts and answers survives the trip (Windows console e
   const r = await json('POST', '/api/ai', { model: 'unicode-model', messages: [{ role: 'user', content: 'Grüße → “quotes” …' }] }, { 'x-provider': 'openai' });
   assert.equal(r.status, 200);
   assert.equal(r.json.choices[0].message.content, 'ok → café … 你好 — Grüße → “quotes” …');
+});
+
+test('streamed answers: asked for non-streamed explicitly, read when streamed anyway, re-asked with stream: true when needed', async () => {
+  for (const [model, text] of [['streams-unless-told', 'ok from streams-unless-told'], ['stream-only-model', 'ok via stream'], ['responses-sse-model', 'ok from responses sse']]) {
+    const r = await json('POST', '/api/ai', { model, messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
+    assert.equal(r.status, 200, model + ': ' + JSON.stringify(r.json));
+    assert.equal(r.json.choices[0].message.content, text, model);
+  }
+});
+
+test('an empty 200 reply switches to streaming at once (no retry delays) and is remembered', async () => {
+  emptyHits = 0;
+  const t0 = Date.now();
+  let r = await json('POST', '/api/ai', { model: 'empty-unless-stream', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.equal(r.json.choices[0].message.content, 'ok streamed');
+  assert.ok(emptyHits <= 2, 'at most one plain try, then streamed (fewer once streaming is known to work)');
+  const first = emptyHits;
+  assert.ok(Date.now() - t0 < 500, 'no retry delays');
+  r = await json('POST', '/api/ai', { model: 'empty-unless-stream', messages: [{ role: 'user', content: 'again' }] }, { 'x-provider': 'openai' });
+  assert.equal(r.status, 200);
+  assert.equal(emptyHits, first + 1, 'the next request goes straight to streaming');
 });
 
 test('EMIS requests go through EMIS_PROXY when set (Node ignores HTTPS_PROXY by itself)', async () => {

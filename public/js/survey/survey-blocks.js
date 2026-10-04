@@ -30,6 +30,7 @@
   const CATS = [
     { id: 'events', label: 'Events', color: '#E0A100', dark: '#B07D00' },
     { id: 'control', label: 'Control', color: '#EA7317', dark: '#BF5A0E' },
+    { id: 'random', label: 'Random', color: '#4F46E5', dark: '#3730A3' },
     { id: 'looks', label: 'Looks', color: '#7C3AED', dark: '#5B21B6' },
     { id: 'pages', label: 'Pages', color: '#2563EB', dark: '#1D4ED8' },
     { id: 'answers', label: 'Answers', color: '#0891B2', dark: '#0E7490' },
@@ -42,9 +43,10 @@
   const ACTION_CAT = {
     show: 'looks', hide: 'looks', enable: 'looks', disable: 'looks', require: 'looks', optional: 'looks', setProp: 'looks', setText: 'looks', message: 'looks',
     goto: 'pages', next: 'pages', back: 'pages', showPage: 'pages', hidePage: 'pages', submit: 'pages', complete: 'pages', openUrl: 'pages',
-    setAnswer: 'answers', setVar: 'variables', changeVar: 'variables', if: 'control'
+    setAnswer: 'answers', setVar: 'variables', changeVar: 'variables', if: 'control',
+    assign: 'random', randomBranch: 'random', shuffle: 'random'
   };
-  const VALUE_CAT = { answer: 'answers', score: 'answers', page: 'answers', var: 'variables', calc: 'operators', expr: 'operators' };
+  const VALUE_CAT = { answer: 'answers', score: 'answers', page: 'answers', var: 'variables', calc: 'operators', expr: 'operators', random: 'random' };
   const CALC_LABEL = { '+': '+', '-': '−', '*': '×', '/': '÷', '%': 'mod' };
   const SNAP = 30;          // px (unscaled) within which a stack snaps to a connection
 
@@ -89,7 +91,18 @@
       try {
         store.tx(label, t => {
           t.set('rules', clone(W));
-          if (fnVars) fnVars(t.part('variables'));
+          const vars = t.part('variables');
+          if (fnVars) fnVars(vars);
+          // Variables named in assign / pick-one blocks are created if they don't exist yet
+          const need = new Set();
+          const walk = list => (list || []).forEach(a => {
+            if (!isObj(a)) return;
+            if ((a.type === 'assign' || a.type === 'randomBranch') && a.name) need.add(a.name);
+            if (a.type === 'if') { walk(a.then); walk(a.else); }
+            if (a.type === 'randomBranch') (a.branches || []).forEach(walk);
+          });
+          W.forEach(r => walk(r.then));
+          need.forEach(n => { if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(n) && !vars.some(v => v.name === n)) vars.push({ id: Core.uid('var'), name: n, type: 'text', initial: '', formula: '' }); });
         });
       } finally { selfEdit = false; }
       render();
@@ -116,6 +129,11 @@
           const when = isObj(a.when) ? a.when : { op: 'all', items: [] };
           const f = (when.items || []).length ? foldBool({ group: when }) : null;
           return Object.assign({}, a, { when: { op: 'all', items: [f] }, then: canonList(a.then), else: canonList(a.else), withElse: !!(a.withElse || (a.else && a.else.length)) });
+        }
+        if (a.type === 'randomBranch') {
+          const branches = (Array.isArray(a.branches) ? a.branches : []).map(canonList);
+          while (branches.length < 2) branches.push([]);
+          return Object.assign({}, a, { id: a.id || Core.uid('rnd'), branches });
         }
         if ((a.type === 'setVar' || a.type === 'changeVar') && !isObj(a.from)) {
           const b = Object.assign({}, a, { from: a.expr !== undefined && a.expr !== '' ? { kind: 'expr', expr: a.expr } : lit(a.value === undefined ? (a.type === 'changeVar' ? 1 : 0) : a.value) });
@@ -157,6 +175,7 @@
     const firstQuestion = () => { const q = Core.questionsInOrder(doc())[0]; return q ? q.id : ''; };
     const firstElement = () => { const q = firstQuestion(); if (q) return q; const p = doc().pages[0]; const ids = p ? Core.descendants(doc(), 'page:' + p.id) : []; return ids[0] || ''; };
     const firstOf = groups => { const g = groups.find(x => x.items && x.items.length); return g ? g.items[0].value : ''; };
+    const firstChoiceQuestion = () => { const q = Core.questionsInOrder(doc()).find(x => ['choice', 'multi'].includes(Logic.valueKind(x))); return q ? q.id : firstQuestion(); };
     const firstVar = () => (doc().variables[0] ? doc().variables[0].name : '');
 
     /* ── Block definitions (palette) ──────────── */
@@ -170,6 +189,14 @@
       return {
         events: [hat('always'), hat('pageEnter'), hat('pageExit'), hat('click'), hat('submit')],
         control: [stmt(() => ({ type: 'if', when: emptyWhen(), then: [], else: [], withElse: false })), stmt(() => ({ type: 'if', when: emptyWhen(), then: [], else: [], withElse: true }))],
+        random: [hat('start'),
+          stmt(() => ({ type: 'assign', name: firstVar() || 'condition', method: 'random', options: ['A', 'B'] })),
+          stmt(() => ({ type: 'assign', name: firstVar() || 'condition', method: 'balanced', options: ['control', 'treatment'] })),
+          stmt(() => ({ type: 'randomBranch', id: Core.uid('rnd'), name: '', branches: [[], []] })),
+          bool(() => ({ chance: 50, id: Core.uid('rnd') })),
+          bool(() => ({ left: { kind: 'var', name: firstVar() || 'condition' }, cmp: 'eq', right: lit('A') })),
+          val(() => ({ kind: 'random', id: Core.uid('rnd'), a: lit(1), b: lit(10) })),
+          stmt(() => ({ type: 'shuffle', target: firstChoiceQuestion() }))],
         looks: [stmt({ type: 'show', target: el }), stmt({ type: 'hide', target: el }), stmt({ type: 'require', target: q }), stmt({ type: 'optional', target: q }),
           stmt({ type: 'enable', target: el }), stmt({ type: 'disable', target: el }), stmt({ type: 'setText', target: firstOf(textOpts()), value: 'Hello!' }),
           stmt({ type: 'setProp', target: el, path: 'style.fill', value: '#FDE68A' }), stmt({ type: 'message', value: 'Thanks!' })],
@@ -286,6 +313,10 @@
           row.append(select(varOpts(), node.name, v => { node.name = v; commit('Edit block'); }, 'bk-dd-var'));
           break;
         case 'score': row.append(label('score')); break;
+        case 'random':
+          node.a = node.a || lit(1); node.b = node.b || lit(10);
+          row.append(label('random number from'), valueSlot(node, 'a', rule), label('to'), valueSlot(node, 'b', rule));
+          break;
         case 'page': row.append(label('page number')); break;
         case 'expr':
           row.append(label('formula'), textField(node.expr, v => { node.expr = v; commit('Edit formula'); }, { mono: true, aria: 'Formula', min: 60, max: 280 }));
@@ -310,6 +341,9 @@
         const g = node.group;
         if (g.op === 'not') { g.items = [g.items[0] === undefined ? null : g.items[0]]; n.append(label('not'), boolSlot(g.items, 0, rule)); }
         else { while (g.items.length < 2) g.items.push(null); n.append(boolSlot(g.items, 0, rule), label(g.op === 'any' ? 'or' : 'and'), boolSlot(g.items, 1, rule)); }
+      } else if (node.chance !== undefined) {
+        cat = 'random';
+        n.append(label('chance'), textField(node.chance, v => { node.chance = Math.max(0, Math.min(100, Number(v) || 0)); commit('Edit block'); }, { cls: 'is-lit', aria: 'Percent', min: 30, max: 60 }), label('%'));
       } else if (typeof node.expr === 'string') {
         n.append(label('formula'), textField(node.expr, v => { node.expr = v; commit('Edit formula'); }, { mono: true, aria: 'Formula', min: 80, max: 280 }));
       } else {
@@ -328,9 +362,9 @@
     function renderStmt(a, arr, index, rule) {
       const def = Logic.ACTIONS[a.type] || {};
       const cat = ACTION_CAT[a.type] || 'looks';
-      const isC = a.type === 'if';
+      const isC = a.type === 'if' || a.type === 'randomBranch';
       const b = mk('div', 'bk-block ' + (isC ? 'bk-c' : 'bk-stack'));
-      b.dataset.shape = isC ? (a.withElse ? 'ce' : 'c') : 'stack';
+      b.dataset.shape = isC ? (a.withElse || a.type === 'randomBranch' ? 'ce' : 'c') : 'stack';
       colorize(b, cat);
       const row = mk('div', 'bk-row');
       const set = (k, label2) => v => { a[k] = v; commit(label2 || 'Edit block'); };
@@ -346,6 +380,58 @@
           b.append(mk('div', 'bk-foot'));
           break;
         }
+        case 'randomBranch': {
+          // One of the mouths runs for each participant, picked at random (fixed per participant)
+          if (!Array.isArray(a.branches)) a.branches = [[], []];
+          const count = select([2, 3, 4, 5, 6, 7, 8].map(n => ({ value: String(n), label: String(n) })), String(a.branches.length), v => {
+            const n = Number(v);
+            while (a.branches.length < n) a.branches.push([]);
+            if (a.branches.length > n) a.branches.length = n;
+            commit('Edit block');
+          });
+          const rec = select([{ value: '', label: 'don\'t record it' }].concat(varOpts().map(o => ({ value: o.value, label: 'record it in ' + o.label }))).concat(a.name && !varOpts().some(o => o.value === a.name) ? [{ value: a.name, label: 'record it in ' + a.name }] : []).concat([{ value: '__new', label: 'record it in a new variable…' }]), a.name || '', v => {
+            if (v === '__new') { rec.value = a.name || ''; variableDialog(null, nm => { a.name = nm; }); return; }
+            a.name = v; commit('Edit block');
+          });
+          row.append(label('pick one of'), count, label('at random ·'), rec);
+          b.append(row);
+          a.branches.forEach((br, i) => {
+            if (i > 0) { const r2 = mk('div', 'bk-row bk-else'); r2.append(label('or (option ' + (i + 1) + ')')); b.append(r2); }
+            b.append(renderList(br, rule, 'bk-mouth'));
+          });
+          b.append(mk('div', 'bk-foot'));
+          break;
+        }
+        case 'assign': {
+          if (!Array.isArray(a.options)) a.options = ['A', 'B'];
+          const vo = varOpts();
+          const varChoices = vo.concat(a.name && !vo.some(o => o.value === a.name) ? [{ value: a.name, label: a.name }] : []).concat([{ value: '__new', label: 'New variable…' }]);
+          const varSel = select(varChoices, a.name, v => {
+            if (v === '__new') { varSel.value = a.name; variableDialog(null, nm => { a.name = nm; }); return; }
+            a.name = v; commit('Edit block');
+          }, 'bk-dd-var');
+          row.append(label('assign'), varSel,
+            select([{ value: 'random', label: 'at random' }, { value: 'balanced', label: 'balanced' }], a.method === 'balanced' ? 'balanced' : 'random', set('method')),
+            label('to one of'));
+          a.options.forEach((o, i) => {
+            row.append(textField(o, v => { a.options[i] = String(v).trim(); commit('Edit block'); }, { cls: 'is-lit', aria: 'Condition ' + (i + 1), min: 28, max: 160 }));
+            if (interactive && a.options.length > 1) {
+              const x = mk('button', 'bk-mini', '×');
+              x.type = 'button'; x.title = 'Remove this condition'; x.setAttribute('aria-label', 'Remove condition ' + (i + 1));
+              x.addEventListener('click', () => { a.options.splice(i, 1); commit('Edit block'); });
+              row.append(x);
+            }
+          });
+          if (interactive) {
+            const plus = mk('button', 'bk-mini', '+');
+            plus.type = 'button'; plus.title = 'Add a condition'; plus.setAttribute('aria-label', 'Add a condition');
+            plus.addEventListener('click', () => { a.options.push(String.fromCharCode(65 + Math.min(25, a.options.length))); commit('Edit block'); });
+            row.append(plus);
+          }
+          break;
+        }
+        case 'shuffle':
+          row.append(label('shuffle the choices of'), elSel(elementOpts(e => Core.isQuestionType(e.type) && ['choice', 'multi'].includes(Logic.valueKind(e))))); break;
         case 'show': case 'hide': case 'enable': case 'disable':
           row.append(label(a.type), elSel(elementOpts())); break;
         case 'require': row.append(label('make'), elSel(questionOpts()), label('required')); break;
@@ -411,6 +497,7 @@
       const setT = (k) => v => { const before = autoName(trig); trig[k] = v; const r = W.find(x => x.trigger === trig); if (r && (r.name === before || !r.name)) r.name = autoName(trig); commit('Edit block'); };
       switch (trig.type) {
         case 'always': row.append(label('when any answer changes')); break;
+        case 'start': row.append(label('when the survey starts')); break;
         case 'pageEnter': row.append(label('when page'), select(pageOpts(true), trig.page || 'any', setT('page')), label('opens')); break;
         case 'pageExit': row.append(label('when leaving page'), select(pageOpts(true), trig.page || 'any', setT('page'))); break;
         case 'click': {
@@ -593,7 +680,7 @@
     });
 
     /* ── Variables ────────────────────────────── */
-    function variableDialog(name) {
+    function variableDialog(name, onCreated) {
       const v = name ? doc().variables.find(x => x.name === name) : null;
       const App = root.App;
       App.openModal(v ? 'Variable "' + v.name + '"' : 'New variable',
@@ -616,6 +703,7 @@
         const initial = numOrText(initRaw);
         const oldName = v ? v.name : null;
         if (oldName && oldName !== nm) renameVarInRules(oldName, nm);
+        if (!v && onCreated) onCreated(nm);
         commit(v ? 'Edit variable' : 'Make a variable', vars => {
           if (v) { const x = vars.find(y => y.name === oldName); Object.assign(x, { name: nm, initial, type: typeof initial === 'number' ? 'number' : 'text', formula }); }
           else vars.push({ id: Core.uid('var'), name: nm, type: typeof initial === 'number' ? 'number' : 'text', initial, formula });
@@ -654,6 +742,7 @@
       const pg = id => { const i = doc().pages.findIndex(p => p.id === id); return i >= 0 ? doc().pages[i].name : 'any page'; };
       switch (t.type) {
         case 'always': return 'When any answer changes';
+        case 'start': return 'When the survey starts';
         case 'pageEnter': return 'When ' + pg(t.page) + ' opens';
         case 'pageExit': return 'When leaving ' + pg(t.page);
         case 'click': return 'When ' + (doc().elements[t.element] ? Core.displayName(doc(), doc().elements[t.element]) : 'a button') + ' is clicked';
@@ -735,7 +824,8 @@
       if (script) { script.classList.remove('is-running'); void script.offsetWidth; script.classList.add('is-running'); setTimeout(() => script.classList.remove('is-running'), 900); }
       const trial = Object.assign({}, doc(), { rules: [{ id: '__try', name: 'Try', enabled: true, trigger: { type: 'click', element: '__try' }, when: { op: 'all', items: [] }, then: clone(stmts), else: [] }] });
       let effects = [];
-      try { effects = Logic.runEvent(trial, { type: 'click', element: '__try' }, Logic.computeState(doc(), { answers: {} })); } catch (e) { effects = []; }
+      // a fresh random seed each click, so random blocks can come out differently
+      try { effects = Logic.runEvent(trial, { type: 'click', element: '__try' }, Logic.computeState(doc(), { answers: {}, varState: { __seed: Logic.newSeed() } })); } catch (e) { effects = []; }
       let opened = false;
       const later = [];
       effects.forEach(e => {
@@ -974,15 +1064,23 @@
       else return;
       commit('Delete block');
     }
+    // Copies get their own random ids, so a duplicated random block draws independently
+    function freshIds(node) {
+      if (Array.isArray(node)) { node.forEach(freshIds); return node; }
+      if (!isObj(node)) return node;
+      if (typeof node.id === 'string' && /^rnd/.test(node.id)) node.id = Core.uid('rnd');
+      Object.keys(node).forEach(k => { if (typeof node[k] === 'object') freshIds(node[k]); });
+      return node;
+    }
     function duplicateBlock(el) {
       const ref = blockRef(el);
       if (!ref) return;
       const r = rel(el.closest('.bk-script') || el);
       const at = { x: Math.round(r.x + 30), y: Math.round(r.y + r.h + 20) };
-      if (ref.drag === 'hat') { const c = clone(ref.rule); c.id = Core.uid('rule'); c.ui = at; W.push(c); }
-      else if (ref.drag === 'stmt') W.push(newRule(null, clone(ref.arr.slice(ref.index)), at));
-      else if (ref.loose) { const c = clone(ref.rule); c.id = Core.uid('rule'); c.ui = at; W.push(c); }
-      else W.push(newRule(null, [], at, clone(ref.holder[ref.key])));
+      if (ref.drag === 'hat') { const c = freshIds(clone(ref.rule)); c.id = Core.uid('rule'); c.ui = at; W.push(c); }
+      else if (ref.drag === 'stmt') W.push(newRule(null, freshIds(clone(ref.arr.slice(ref.index))), at));
+      else if (ref.loose) { const c = freshIds(clone(ref.rule)); c.id = Core.uid('rule'); c.ui = at; W.push(c); }
+      else W.push(newRule(null, [], at, freshIds(clone(ref.holder[ref.key]))));
       commit('Duplicate blocks');
     }
     function cleanUp() {
