@@ -61,6 +61,8 @@ const emisFaults = { broken: new Set(), flaky: 0 };   // models that always fail
 let proxied = 0;
 let lastUserAgent = '';
 let emptyHits = 0;
+// Parallel AI Coding: how many slow requests EMIS is working on at once
+const load = { now: 0, max: 0, total: 0, garbled: new Set() };
 
 function findChromium() {
   const candidates = [];
@@ -81,7 +83,7 @@ test.before(async () => {
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       if (!req.url.startsWith('/v1/')) { res.setHeader('Content-Type', 'text/html'); return res.end('<!doctype html><html><body>EMIS website</body></html>'); }
-      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }, { id: 'unicode-model' }, { id: 'streams-unless-told' }, { id: 'stream-only-model' }, { id: 'responses-sse-model' }, { id: 'empty-unless-stream' }] }));
+      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }, { id: 'unicode-model' }, { id: 'streams-unless-told' }, { id: 'stream-only-model' }, { id: 'responses-sse-model' }, { id: 'empty-unless-stream' }, { id: 'slow-model' }, { id: 'coder-model' }] }));
       if (req.url === '/v1/chat/completions') {
         const j = JSON.parse(body || '{}');
         lastUserAgent = String(req.headers['user-agent'] || '');
@@ -102,6 +104,22 @@ test.before(async () => {
         }
         if (j.model === 'unicode-model') return res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok → café … 你好 — ' + j.messages.map(m => m.content).join('|') }, finish_reason: 'stop' }] }));
         if (j.model === 'forbidden-model') { res.statusCode = 403; return res.end('{"error":{"message":"this key may not use forbidden-model"}}'); }
+        // Takes a while, like a real model; answers AI Coding prompts with codings JSON
+        if (j.model === 'slow-model' || j.model === 'coder-model') {
+          load.now++; load.total++; load.max = Math.max(load.max, load.now);
+          const user = String((j.messages.find(m => m.role === 'user') || {}).content || '');
+          setTimeout(() => {
+            load.now--;
+            let content = 'ok from ' + j.model + ': ' + user;
+            if (j.model === 'coder-model') {
+              // a post marked GARBLE gets an unreadable answer the first time
+              if (/GARBLE/.test(user) && !load.garbled.has(user)) { load.garbled.add(user); content = 'Sorry, I cannot do JSON today.'; }
+              else content = 'Here you go: {"codings":{"d1":{"code":"' + (/happy/.test(user) ? 'pos' : 'neg') + '","confidence":0.8,"reasoning":"Because."}}}';
+            }
+            if (!res.writableEnded && !res.destroyed) res.end(JSON.stringify({ id: 'x', object: 'chat.completion', model: j.model, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }] }));
+          }, 250);
+          return;
+        }
         seenModels.push(j.model);
         if (emisFaults.flaky > 0) { emisFaults.flaky--; res.statusCode = 503; return res.end('{"error":{"message":"busy"}}'); }
         if (emisFaults.broken.has(j.model)) { res.statusCode = 500; return res.end('{"error":{"message":"model crashed"}}'); }
@@ -299,6 +317,71 @@ test('EMIS requests go through EMIS_PROXY when set (Node ignores HTTPS_PROXY by 
   }
 });
 
+/* ── Parallel AI Coding (POST /api/ai/batch) ─── */
+async function batch(body, signal) {
+  const res = await fetch(base + '/api/ai/batch', { method: 'POST', signal, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  const text = await res.text();
+  return { status: res.status, lines: text.split('\n').filter(Boolean).map(l => JSON.parse(l)), headers: res.headers };
+}
+const chatBody = (model, content) => ({ model, max_tokens: 50, messages: [{ role: 'user', content }] });
+
+test('AI batch: several copies of the same model answer at once, each answer streamed back with its id', async () => {
+  Object.assign(load, { now: 0, max: 0, total: 0 });
+  const t0 = Date.now();
+  const r = await batch({ parallel: 4, requests: Array.from({ length: 12 }, (_, i) => ({ id: 'p' + i, body: chatBody('slow-model', 'post ' + i) })) });
+  const took = Date.now() - t0;
+  assert.equal(r.status, 200);
+  assert.match(r.headers.get('content-type'), /ndjson/);
+  const answers = r.lines.filter(l => !l.done);
+  assert.equal(answers.length, 12);
+  assert.deepEqual(answers.map(a => a.id).sort(), Array.from({ length: 12 }, (_, i) => 'p' + i).sort());
+  answers.forEach(a => { assert.equal(a.ok, true); assert.equal(a.data.choices[0].message.content, 'ok from slow-model: post ' + a.id.slice(1)); });
+  assert.deepEqual(r.lines[r.lines.length - 1], { done: true, parallel: 4 });
+  assert.equal(load.max, 4, 'four requests ran side by side');
+  assert.ok(took < 12 * 250 * 0.6, 'faster than one at a time (' + took + ' ms)');
+
+  // One at a time when parallel is 1
+  Object.assign(load, { now: 0, max: 0 });
+  await batch({ parallel: 1, requests: [1, 2, 3].map(i => ({ id: i, body: chatBody('slow-model', 'x') })) });
+  assert.equal(load.max, 1);
+
+  // A failing request doesn't stop the others
+  const mixed = await batch({ parallel: 3, requests: [{ id: 'a', body: chatBody('slow-model', 'a') }, { id: 'b', body: chatBody('forbidden-model', 'b') }, { id: 'c', body: chatBody('slow-model', 'c') }] });
+  const byId = Object.fromEntries(mixed.lines.filter(l => !l.done).map(l => [l.id, l]));
+  assert.equal(byId.a.ok, true);
+  assert.equal(byId.c.ok, true);
+  assert.equal(byId.b.ok, false);
+  assert.equal(byId.b.status, 403);
+  assert.match(byId.b.error.message, /forbidden-model/);
+});
+
+test('AI batch: capped by AI_MAX_PARALLEL, validated, same-origin only, and stops when the browser leaves', async () => {
+  process.env.AI_MAX_PARALLEL = '3';
+  try {
+    assert.equal((await json('GET', '/api/settings/status')).json.ai.maxParallel, 3);
+    Object.assign(load, { now: 0, max: 0 });
+    const r = await batch({ parallel: 50, requests: Array.from({ length: 7 }, (_, i) => ({ id: i, body: chatBody('slow-model', 'x') })) });
+    assert.equal(load.max, 3);
+    assert.equal(r.lines[r.lines.length - 1].parallel, 3);
+  } finally { delete process.env.AI_MAX_PARALLEL; }
+  assert.equal((await json('GET', '/api/settings/status')).json.ai.maxParallel, 16, 'default cap');
+
+  assert.equal((await json('POST', '/api/ai/batch', { requests: [] })).status, 400);
+  assert.equal((await json('POST', '/api/ai/batch', { requests: [{ id: 1, body: Object.assign(chatBody('slow-model', 'x'), { stream: true }) }] })).status, 400);
+  assert.equal((await json('POST', '/api/ai/batch', { requests: [{ id: 1 }] })).status, 400);
+  assert.equal((await json('POST', '/api/ai/batch', { requests: [{ id: 1, body: chatBody('slow-model', 'x') }] }, { Origin: 'https://evil.example' })).status, 403);
+
+  // Stop: closing the connection stops the batch
+  Object.assign(load, { now: 0, max: 0, total: 0 });
+  const ctl = new AbortController();
+  const pending = batch({ parallel: 2, requests: Array.from({ length: 20 }, (_, i) => ({ id: i, body: chatBody('slow-model', 'x') })) }, ctl.signal).catch(e => e);
+  await new Promise(r => setTimeout(r, 400));
+  ctl.abort();
+  assert.equal((await pending).name, 'AbortError');
+  await new Promise(r => setTimeout(r, 700));
+  assert.ok(load.total <= 6, 'no new requests after Stop (sent ' + load.total + ')');
+});
+
 test('projects API: save, list, open, update, duplicate, delete; guarded and validated', async () => {
   const data = { project: { name: 'Study A', description: 'd' }, posts: [{ id: 'p1', text: 'hello', aiCodes: { s: 'pos' }, humanCodes: {} }, { id: 'p2', text: 'x' }], codebook: [{ id: 'dim', codes: [] }], network: { nodes: [], edges: [] }, settings: { secret: 'no' } };
   const created = await json('POST', '/api/projects', { name: 'Study A', data });
@@ -387,6 +470,40 @@ test('Projects page: save, autosave, new project, reopen a saved one', { skip: n
   await page.waitForFunction(() => App.getState().posts.length === 2);
   assert.equal(await page.evaluate(() => App.getState().project.name), 'Climate study');
   assert.equal(await page.evaluate(() => ProjectsView.link().id), saved.id);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('AI Coding page: posts are coded by several copies of the model at once; the number is configurable', { skip: noBrowser, timeout: 90000 }, async () => {
+  const { page, context, errors } = await openApp('#dashboard');
+  await page.waitForFunction(() => App.hasApiKeys());
+  const posts = Array.from({ length: 10 }, (_, i) => ({ id: 'post' + i, text: (i % 2 ? 'I am happy ' : 'I am sad ') + i + (i === 3 ? ' GARBLE' : ''), aiCodes: {}, humanCodes: {} }));
+  await page.evaluate(posts => {
+    App.setState({ posts, codebook: [{ id: 'd1', name: 'Mood', codes: [{ id: 'pos', label: 'Positive' }, { id: 'neg', label: 'Negative' }] }],
+      settings: Object.assign({}, App.getState().settings, { model: 'coder-model', models: {}, delay: 0 }) });
+  }, posts);
+  await page.evaluate(() => App.navigate('ai-coding'));
+  await page.waitForSelector('#ai-parallel');
+  assert.equal(await page.inputValue('#ai-parallel'), '4', 'four at once by default');
+  await page.fill('#ai-parallel', '5');
+  await page.dispatchEvent('#ai-parallel', 'change');
+  assert.equal(await page.evaluate(() => App.getState().settings.parallel), 5, 'saved with the settings');
+  Object.assign(load, { now: 0, max: 0, total: 0 });
+  load.garbled.clear();
+  await page.click('#run-btn');
+  await page.waitForFunction(() => /Done/.test(document.getElementById('status-msg').textContent), null, { timeout: 30000 });
+  const coded = await page.evaluate(() => App.getState().posts.map(p => p.aiCodes.d1 && p.aiCodes.d1.code));
+  assert.deepEqual(coded, posts.map((p, i) => (i % 2 ? 'pos' : 'neg')), 'every post coded, the unreadable answer retried');
+  assert.equal(load.max, 5, 'five copies worked at once');
+  assert.equal(load.total, 11, '10 posts + 1 retry');
+  assert.match(await page.textContent('#status-msg'), /10 posts coded/);
+  // The Settings page has the same number
+  await page.evaluate(() => App.navigate('settings'));
+  await page.waitForSelector('#s-parallel');
+  assert.equal(await page.inputValue('#s-parallel'), '5');
+  await page.fill('#s-parallel', '99');
+  await page.click('text=Save model settings');
+  assert.equal(await page.evaluate(() => App.getState().settings.parallel), 16, 'clamped to the server\'s limit');
   assert.deepEqual(errors, []);
   await context.close();
 });

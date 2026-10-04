@@ -16,6 +16,7 @@ const { sleep } = require('../network/rate-limiter');
 
 const CHILD = path.join(__dirname, 'sandbox-child.js');
 const PY_CHILD = path.join(__dirname, 'python-child.js');
+const PY_BOOT_ALLOWANCE_MS = 60000;   // time Pyodide may take to start before a Python scraper's own limit begins
 const PRELUDE_SOURCE = fs.readFileSync(path.join(__dirname, 'guest-prelude.js'), 'utf8');
 const PY_PRELUDE_SOURCE = fs.readFileSync(path.join(__dirname, 'python-prelude.py'), 'utf8');
 const FORMAT_PATH = path.join(__dirname, '..', 'reddit', 'format.js');
@@ -131,10 +132,15 @@ function createCustomRunner(opts) {
         if (err) reject(err); else resolve(value);
       };
 
-      const timer = setTimeout(() => {
+      const onTimeout = () => {
         settle(new ScraperError('custom_code_timeout', 'Your scraper ran longer than the ' + Math.round(timeoutMs / 1000) +
           '-second limit (SCRAPER_CUSTOM_TIMEOUT_MS) and was stopped. Records emitted before that are kept.', { status: 504 }));
-      }, timeoutMs + 2000);   // the sandbox's own interrupt fires first; this is the hard backstop
+      };
+      // JavaScript: the sandbox's own interrupt fires first; this is the hard backstop.
+      // Python: starting Pyodide can take several seconds on a busy machine, so
+      // until the child says the code has started it gets extra time to boot;
+      // the limit then counts from that moment ('started' below).
+      let timer = setTimeout(onTimeout, timeoutMs + 2000 + (python ? PY_BOOT_ALLOWANCE_MS : 0));
 
       const onAbort = () => settle(signal.reason || cancelledError());
       if (signal) {
@@ -196,6 +202,9 @@ function createCustomRunner(opts) {
       child.on('message', msg => {
         if (settled || !msg || typeof msg !== 'object') return;
         switch (msg.type) {
+          case 'started':
+            if (python) { clearTimeout(timer); timer = setTimeout(onTimeout, timeoutMs); }
+            break;
           case 'call': handleCall(msg); break;
           case 'emit': ctx.emit(Array.isArray(msg.records) ? msg.records : []); break;
           case 'log': ctx.log(msg.level, '[code] ' + String(msg.message || '')); break;

@@ -11,7 +11,7 @@ const App = (() => {
     codebook: [],   // [{id, name, description, codes:[{id,label,description}]}]
     network:  { nodes: [], edges: [] },
     networkAnalysis: null, // last NetworkX result from Analyze CSV (see csv-analyzer.js)
-    settings: { model: '', models: {}, delay: 500 }   // AI models (Settings → AI models); keys live in the server's .env
+    settings: { model: '', models: {}, delay: 500, parallel: 4 }   // AI models (Settings → AI models); keys live in the server's .env
   };
 
   const STORAGE_KEY = 'strata_v1'; // kept stable so existing users' saved data isn't orphaned by the rename
@@ -36,6 +36,7 @@ const App = (() => {
     if (typeof state.settings.model !== 'string') state.settings.model = '';
     if (!state.settings.models || typeof state.settings.models !== 'object') state.settings.models = {};
     if (!Number.isFinite(Number(state.settings.delay))) state.settings.delay = 500;
+    if (!Number.isFinite(Number(state.settings.parallel)) || Number(state.settings.parallel) < 1) state.settings.parallel = 4;
   }
   function getState()  { return state; }
   function setState(patch) { Object.assign(state, patch); save(); }
@@ -282,7 +283,12 @@ const App = (() => {
               <div class="s-feature-models" id="s-feature-models"></div>
             </div>
             <div class="form-group">
-              <label class="form-label" for="s-delay">Delay between AI Coding calls <span>(ms)</span></label>
+              <label class="form-label" for="s-parallel">AI Coding: copies of the model working at once</label>
+              <input class="form-input" id="s-parallel" type="number" value="${getParallel()}" min="1" max="${maxParallel()}" step="1">
+              <div class="form-hint">Posts are split between this many simultaneous requests to the same model, so coding finishes up to that many times faster. 1 codes one post at a time. Lower it if EMIS rate-limits you (MetaCode also slows down by itself when that happens). Up to ${maxParallel()} (the server's AI_MAX_PARALLEL).</div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="s-delay">Pause between each copy's requests <span>(ms)</span></label>
               <input class="form-input" id="s-delay" type="number" value="${settings.delay}" min="0" max="5000" step="100">
               <div class="form-hint">Increase if you hit rate limits (default: 500 ms)</div>
             </div>
@@ -338,7 +344,8 @@ const App = (() => {
     const models = {};
     document.querySelectorAll('#s-feature-models select[data-feature]').forEach(sel => { if (sel.value) models[sel.dataset.feature] = sel.value; });
     const delay = parseInt(document.getElementById('s-delay').value, 10);
-    setState({ settings: { ...state.settings, model, models, delay: Number.isFinite(delay) ? Math.max(0, delay) : 500 } });
+    const parallel = clampParallel(document.getElementById('s-parallel').value);
+    setState({ settings: { ...state.settings, model, models, delay: Number.isFinite(delay) ? Math.max(0, delay) : 500, parallel } });
     notify('Model settings saved', 'success');
   }
 
@@ -668,6 +675,62 @@ const App = (() => {
     return String(text || '').trim();
   }
 
+  // How many copies of the model AI Coding runs at once (Settings / AI Coding page).
+  function maxParallel() { return (serverStatus && serverStatus.ai && serverStatus.ai.maxParallel) || 16; }
+  function clampParallel(v) { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.max(1, Math.min(maxParallel(), n)) : 4; }
+  function getParallel() { return clampParallel(state.settings.parallel); }
+  function setParallel(v) { const parallel = clampParallel(v); setState({ settings: { ...state.settings, parallel } }); return parallel; }
+
+  // Many chat requests at once: the server runs up to `parallel` of them side by
+  // side with the same model and streams each answer back as it finishes.
+  //   items: [{ id, messages, system, max_tokens }]
+  //   opts:  { feature, parallel, delay, signal, onResult({ id, ok, text, error, status }) }
+  // Resolves to { parallel } (how many ran at the end; the server lowers it when rate-limited).
+  async function callClaudeBatch(items, opts) {
+    opts = opts || {};
+    const model = modelFor(opts.feature);
+    const requests = items.map(it => {
+      const body = { messages: it.system ? [{ role: 'system', content: it.system }].concat(it.messages) : it.messages.slice(), max_tokens: it.max_tokens || 1000, temperature: 0.1 };
+      if (model) body.model = model;
+      return { id: it.id, body };
+    });
+    const res = await fetch('/api/ai/batch', { method: 'POST', signal: opts.signal, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests, parallel: clampParallel(opts.parallel || getParallel()), delayMs: opts.delay || 0 }) });
+    if (!res.ok) {
+      let data = null;
+      try { data = await res.json(); } catch (e) { data = null; }
+      const err = new Error((data && data.error && data.error.message) || ('API error ' + res.status));
+      err.status = res.status;
+      throw err;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', finished = null;
+    const handle = line => {
+      if (!line.trim()) return;
+      let msg;
+      try { msg = JSON.parse(line); } catch (e) { return; }
+      if (msg.done) { finished = msg; return; }
+      if (msg.ok) {
+        lastModelUsed = (msg.data && msg.data.model) || model;
+        const c = msg.data && msg.data.choices && msg.data.choices[0];
+        opts.onResult && opts.onResult({ id: msg.id, ok: true, text: String((c && c.message && c.message.content) || '').trim() });
+      } else {
+        opts.onResult && opts.onResult({ id: msg.id, ok: false, status: msg.status, error: (msg.error && msg.error.message) || 'AI request failed', type: msg.error && msg.error.type });
+      }
+    };
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) { handle(buf.slice(0, i)); buf = buf.slice(i + 1); }
+    }
+    handle(buf + decoder.decode());
+    if (!finished) throw new Error('The connection to MetaCode\'s server closed before the batch finished.');
+    return { parallel: finished.parallel };
+  }
+
   // Number of EMIS keys the server loaded from .env (0 when it can't be reached).
   function getEnvKeyCount() { return serverStatus && serverStatus.ai ? serverStatus.ai.keyCount : 0; }
 
@@ -799,7 +862,7 @@ const App = (() => {
     init, navigate: (v) => navigate(v), setViewCleanup, fetchModels, fetchKeyStatus, reloadEnv, modelFor, AI_FEATURES,
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
     getState, setState, save,
-    callClaude, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
+    callClaude, callClaudeBatch, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,
     saveProject, saveSettings, testApi, clearCodes, resetAll,

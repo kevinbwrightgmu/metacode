@@ -72,7 +72,11 @@ const AICoder = (() => {
             '<button class="btn btn-secondary btn-sm" onclick="AICoder.setFilter(\'uncoded\')">Uncoded (' + uncodedCount + ')</button>' +
             '<button class="btn btn-secondary btn-sm" onclick="AICoder.setFilter(\'coded\')">Coded (' + aiCoded + ')</button>' +
           '</div>' +
-          '<div style="display:flex;gap:8px">' +
+          '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+            '<label class="ai-parallel" for="ai-parallel" title="How many copies of the model code posts at the same time">' +
+              '<input class="form-input" id="ai-parallel" type="number" min="1" max="' + App.maxParallel() + '" step="1" value="' + App.getParallel() + '" onchange="AICoder.setParallel(this.value)">' +
+              '<span>at once</span>' +
+            '</label>' +
             '<button class="btn btn-violet" id="run-btn" onclick="AICoder.run()">' +
               '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>' +
               ' Run AI Coding' +
@@ -245,6 +249,34 @@ const AICoder = (() => {
   }
 
   /* ── Core coding function ────────────────────*/
+  // The model's answer → { dimensionId: { code, confidence, reasoning } }; throws when unusable.
+  function parseCodings(raw) {
+    // ── Robust JSON extraction ──────────────
+    // Claude may add a sentence before/after, or wrap in ``` fences,
+    // even when told not to. We find the first { and last } and parse that.
+    let src = String(raw || '').trim();
+
+    // Strip markdown code fences if present
+    src = src.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
+
+    // Find outermost JSON object boundaries
+    const start = src.indexOf('{');
+    const end   = src.lastIndexOf('}');
+
+    if (start === -1 || end === -1 || end <= start) {
+      throw new Error('No JSON object found in model response. Got: "' + String(raw || '').slice(0, 120) + '"');
+    }
+
+    const jsonStr = src.slice(start, end + 1);
+    const parsed  = JSON.parse(jsonStr);
+
+    if (!parsed.codings || typeof parsed.codings !== 'object') {
+      throw new Error('JSON is missing the required "codings" key. Got: ' + jsonStr.slice(0, 120));
+    }
+
+    return parsed.codings;
+  }
+
   async function codePost(post) {
     const system = buildSystemPrompt();
     const user   = buildUserMessage(post);
@@ -252,32 +284,7 @@ const AICoder = (() => {
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const raw = await App.callClaude([{ role: 'user', content: user }], system, 1000, { feature: 'coding' });
-
-        // ── Robust JSON extraction ──────────────
-        // Claude may add a sentence before/after, or wrap in ``` fences,
-        // even when told not to. We find the first { and last } and parse that.
-        let src = raw.trim();
-
-        // Strip markdown code fences if present
-        src = src.replace(/^```(?:json)?/i, '').replace(/```$/, '').trim();
-
-        // Find outermost JSON object boundaries
-        const start = src.indexOf('{');
-        const end   = src.lastIndexOf('}');
-
-        if (start === -1 || end === -1 || end <= start) {
-          throw new Error('No JSON object found in model response. Got: "' + raw.slice(0, 120) + '"');
-        }
-
-        const jsonStr = src.slice(start, end + 1);
-        const parsed  = JSON.parse(jsonStr);
-
-        if (!parsed.codings || typeof parsed.codings !== 'object') {
-          throw new Error('JSON is missing the required "codings" key. Got: ' + jsonStr.slice(0, 120));
-        }
-
-        return parsed.codings;
-
+        return parseCodings(raw);
       } catch (err) {
         if (attempt === 2) throw err;   // rethrow after final attempt
         await delay(1000);              // wait longer between retries
@@ -286,6 +293,10 @@ const AICoder = (() => {
   }
 
   /* ── Batch run ───────────────────────────────*/
+  // Several copies of the same model code posts side by side (Settings → AI
+  // models, or the "at once" box on this page). Posts whose answer can't be
+  // used are tried again, up to 3 times in all.
+  let abort = null;
   async function run() {
     const { posts } = App.getState();
     const toCode = filterPosts(posts).filter(p => !Object.keys(p.aiCodes || {}).length);
@@ -294,47 +305,87 @@ const AICoder = (() => {
     if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add EMIS_API_KEY to the server\'s .env file (see Settings)', 'error'); return; }
 
     running = true; stopFlag = false;
+    abort = new AbortController();
     toggleRunButton(true);
     showProgress(true);
 
-    let done = 0;
-    for (const post of toCode) {
-      if (stopFlag) break;
+    const system = buildSystemPrompt();
+    let parallel = App.getParallel();
+    let done = 0, coded = 0, failed = 0, lastError = '';
+    let pending = toCode.slice();
+    updateProgress(0, toCode.length);
 
-      updateStatus('Coding post ' + (done + 1) + ' of ' + toCode.length + ': "' + post.text.slice(0, 60) + '\u2026"');
-      updateProgress(done, toCode.length);
-
+    for (let round = 0; round < 3 && pending.length && !stopFlag; round++) {
+      const byId = new Map(pending.map(p => [p.id, p]));
+      const retry = [];
+      updateStatus('Coding ' + pending.length + ' post' + (pending.length !== 1 ? 's' : '') + ' with ' + parallel + ' cop' + (parallel !== 1 ? 'ies' : 'y') + ' of the model at once' + (round ? ' (retry ' + round + ')' : '') + '…');
       try {
-        const codings = await codePost(post);
-        const current = App.getState();
-        const updated = current.posts.map(p => p.id === post.id ? Object.assign({}, p, { aiCodes: codings }) : p);
-        App.setState({ posts: updated });
-        refreshTable();
+        const out = await App.callClaudeBatch(pending.map(p => ({ id: p.id, system, messages: [{ role: 'user', content: buildUserMessage(p) }], max_tokens: 1000 })), {
+          feature: 'coding', parallel, delay: App.getState().settings.delay || 0, signal: abort.signal,
+          onResult(r) {
+            const post = byId.get(r.id);
+            if (!post) return;
+            let codings = null, problem = '';
+            if (r.ok) { try { codings = parseCodings(r.text); } catch (err) { problem = err.message; } }
+            else problem = r.error;
+            if (codings) {
+              const updated = App.getState().posts.map(p => p.id === post.id ? Object.assign({}, p, { aiCodes: codings }) : p);
+              App.setState({ posts: updated });
+              coded++; done++;
+              scheduleRefresh();
+            } else {
+              lastError = problem;
+              console.error('[AICoder] post', post.id, problem);
+              // An unreadable answer, or a passing EMIS problem, is worth another try
+              if (round < 2 && (r.ok || !r.status || r.status >= 500 || r.status === 408)) retry.push(post);
+              else { failed++; done++; }
+            }
+            updateProgress(done, toCode.length);
+            updateStatus('Coded ' + coded + ' of ' + toCode.length + ' · ' + parallel + ' at once' + (failed ? ' · ' + failed + ' failed' : '') + (lastError ? ' — last problem: ' + lastError : ''), !!lastError && !r.ok);
+          }
+        });
+        if (out.parallel && out.parallel < parallel) {
+          parallel = out.parallel;
+          App.notify('EMIS asked MetaCode to slow down, so ' + parallel + ' cop' + (parallel !== 1 ? 'ies' : 'y') + ' of the model now work at once', 'warning');
+        }
       } catch (err) {
-        console.error('[AICoder] post', post.id, err);
-        updateStatus('Error on post ' + (done + 1) + ': ' + err.message + ' — skipping', true);
+        if (stopFlag || err.name === 'AbortError') break;
+        lastError = err.message;
+        console.error('[AICoder] batch', err);
+        updateStatus('Error: ' + err.message, true);
+        break;
       }
-
-      done++;
-      updateProgress(done, toCode.length);
-
-      if (done < toCode.length && !stopFlag) {
-        await delay(App.getState().settings.delay || 500);
-      }
+      pending = retry;
     }
+    if (!stopFlag) { failed += pending.length; done += pending.length; }
 
-    running = false;
+    running = false; abort = null;
     toggleRunButton(false);
+    refreshTable();
     updateProgress(done, toCode.length);
 
     const doneMsg = stopFlag
-      ? 'Stopped after ' + done + ' posts.'
-      : '\u2713 Done \u2014 ' + done + ' posts coded.';
-    updateStatus(doneMsg, false);
+      ? 'Stopped after ' + coded + ' posts.'
+      : '✓ Done — ' + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError + ')' : '') : '') + '.';
+    updateStatus(doneMsg, !!failed && !stopFlag);
     App.notify(
-      stopFlag ? 'Stopped (' + done + ' coded)' : 'AI coding complete \u2014 ' + done + ' posts coded',
-      stopFlag ? 'warning' : 'success'
+      stopFlag ? 'Stopped (' + coded + ' coded)' : 'AI coding complete — ' + coded + ' posts coded' + (failed ? ', ' + failed + ' failed' : ''),
+      stopFlag || failed ? 'warning' : 'success'
     );
+  }
+
+  // Many answers can arrive at once: redraw the table at most a few times a second
+  let refreshTimer = null;
+  function scheduleRefresh() {
+    if (refreshTimer) return;
+    refreshTimer = setTimeout(() => { refreshTimer = null; refreshTable(); }, 250);
+  }
+
+  function setParallel(v) {
+    const n = App.setParallel(v);
+    const el = document.getElementById('ai-parallel');
+    if (el) el.value = n;
+    if (running) App.notify('The new number applies to the next run', 'info');
   }
 
   /* ── Single-post coding ──────────────────────*/
@@ -356,7 +407,7 @@ const AICoder = (() => {
     updateStatus('', false);
   }
 
-  function stop()     { stopFlag = true; }
+  function stop()     { stopFlag = true; if (abort) abort.abort(); }
 
   function clearOne(postId) {
     const updated = App.getState().posts.map(p => p.id === postId ? Object.assign({}, p, { aiCodes: {} }) : p);
@@ -438,5 +489,5 @@ const AICoder = (() => {
 
   /* ── Public API ──────────────────────────────*/
   return { render, run, stop, codeOne, clearOne, clearAll, showReasoning,
-           setFilter, prevPage, nextPage };
+           setFilter, prevPage, nextPage, setParallel };
 })();

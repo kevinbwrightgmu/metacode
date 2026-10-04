@@ -20,7 +20,7 @@ const app = express();
 // and the scraper routes make requests to Reddit on this server's behalf, so
 // only MetaCode's own pages (same origin) may call them. The other routes
 // keep the permissive CORS they always had.
-const AI_ROUTE   = /^\/api\/(ai|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?)\/?$/i;
+const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?)\/?$/i;
 const corsForAll = cors();
 app.use((req, res, next) => (AI_ROUTE.test(req.path) ? next() : corsForAll(req, res, next)));
 // …and state-changing requests to them must say they come from this site:
@@ -1393,67 +1393,165 @@ async function streamChat(res, chatRequest, ctx) {
 // same format; errors are { error: { message } } with an HTTP status. Any
 // API key the browser sends (x-api-key, from the old Settings key box) is
 // ignored: EMIS is only called with the server's own key.
+// Checks and resolves one chat request (the body of POST /api/ai).
+// → { failure } or { format, chatRequest, ctx, explicit }
+async function prepareChat(body, formatName) {
+  const format = FORMATS[formatName];
+  if (!format) return { failure: fail(400, 'invalid_request', 'Unknown provider: ' + redact(formatName, 40)) };
+  const notReady = notConfigured();
+  if (notReady) return { failure: notReady };
+  let chatRequest;
+  try {
+    chatRequest = format === 'anthropic' ? fromAnthropicRequest(body) : fromOpenAIRequest(body);
+  } catch (err) {
+    if (err instanceof RequestError) return { failure: fail(400, 'invalid_request', 'Invalid AI request: ' + err.message) };
+    throw err;
+  }
+  if (allKeysResting(Date.now())) return { failure: quotaFailure(Date.now()) };
+  const resolved = await resolveModel(chatRequest.model);
+  if (!resolved.ok) return { failure: resolved };
+  chatRequest.model = resolved.model;
+  const unsupported = capabilityProblem(chatRequest, resolved.info);
+  if (unsupported) return { failure: unsupported };
+  const askedFor = safeModelId(body && body.model);
+  return {
+    format, chatRequest,
+    ctx: { model: resolved.model, verified: resolved.verified, source: resolved.source },
+    explicit: !!askedFor && askedFor === resolved.model     // picked in Settings, not the server default
+  };
+}
+
+// Runs a prepared, non-streaming chat request.
+// → { aborted } or { failure } or { json, fallback? } (json in the request's format)
+async function answerChat(prep, signal) {
+  const { chatRequest, ctx, explicit } = prep;
+  let result = await completeChat(chatRequest, ctx, signal);
+  let fallback = null;
+  // The server's default model is failing at EMIS right now: try other models
+  // instead of failing the request (a model the user picked isn't swapped).
+  if (!result.ok && !result.aborted && !explicit && MODEL_FALLBACK_TYPES.has(result.type)) {
+    for (const alt of await fallbackModels(ctx.model)) {
+      const altCtx = Object.assign({}, ctx, { model: alt, verified: true });
+      const retry = await completeChat(Object.assign({}, chatRequest, { model: alt }), altCtx, signal);
+      if (retry.aborted) { result = retry; break; }
+      if (retry.ok) {
+        console.warn('[emis] The default model "' + ctx.model + '" failed (' + result.type + '); answered with "' + alt + '" instead.');
+        fallback = alt;
+        result = retry;
+        break;
+      }
+    }
+  }
+  if (result.aborted) return { aborted: true };
+  if (!result.ok && explicit && MODEL_FALLBACK_TYPES.has(result.type) && result.type !== 'malformed_response') {
+    result = Object.assign({}, result, { message: result.message.replace(/\.?$/, '.') + ' This happened with the model "' + ctx.model +
+      '" you picked — choose another one in Settings → AI models (or "Server default").' });
+  }
+  if (!result.ok) return { failure: result };
+  return { json: prep.format === 'anthropic' ? toAnthropicResponse(result.completion) : result.completion, fallback };
+}
+
 app.post('/api/ai', async (req, res) => {
   try {
-    const formatName = String(req.headers['x-provider'] || 'groq').toLowerCase();
-    const format = FORMATS[formatName];
-    if (!format) return sendFailure(res, fail(400, 'invalid_request', 'Unknown provider: ' + redact(formatName, 40)));
-    const notReady = notConfigured();
-    if (notReady) return sendFailure(res, notReady);
-
-    let chatRequest;
-    try {
-      chatRequest = format === 'anthropic' ? fromAnthropicRequest(req.body) : fromOpenAIRequest(req.body);
-    } catch (err) {
-      if (err instanceof RequestError) return sendFailure(res, fail(400, 'invalid_request', 'Invalid AI request: ' + err.message));
-      throw err;
-    }
-
-    if (allKeysResting(Date.now())) return sendFailure(res, quotaFailure(Date.now()));
-    const resolved = await resolveModel(chatRequest.model);
-    if (!resolved.ok) return sendFailure(res, resolved);
-    chatRequest.model = resolved.model;
-    const unsupported = capabilityProblem(chatRequest, resolved.info);
-    if (unsupported) return sendFailure(res, unsupported);
-    const ctx = { model: resolved.model, verified: resolved.verified, source: resolved.source };
-
-    if (chatRequest.stream) return await streamChat(res, chatRequest, ctx);
-
+    const prep = await prepareChat(req.body, String(req.headers['x-provider'] || 'groq').toLowerCase());
+    if (prep.failure) return sendFailure(res, prep.failure);
+    if (prep.chatRequest.stream) return await streamChat(res, prep.chatRequest, prep.ctx);
     const client = watchClient(res);
-    const askedFor = safeModelId(req.body && req.body.model);
-    const explicit = !!askedFor && askedFor === resolved.model;   // picked in Settings, not the server default
-    let result;
-    try {
-      result = await completeChat(chatRequest, ctx, client.signal);
-      // The server's default model is failing at EMIS right now: try other models
-      // instead of failing the request (a model the user picked isn't swapped).
-      if (!result.ok && !result.aborted && !explicit && MODEL_FALLBACK_TYPES.has(result.type)) {
-        for (const alt of await fallbackModels(resolved.model)) {
-          const altCtx = Object.assign({}, ctx, { model: alt, verified: true });
-          const retry = await completeChat(Object.assign({}, chatRequest, { model: alt }), altCtx, client.signal);
-          if (retry.aborted) { result = retry; break; }
-          if (retry.ok) {
-            console.warn('[emis] The default model "' + resolved.model + '" failed (' + result.type + '); answered with "' + alt + '" instead.');
-            res.set('X-MetaCode-Model-Fallback', alt);
-            result = retry;
-            break;
-          }
-        }
-      }
-    } finally {
-      client.release();
-    }
-    if (result.aborted) return;                       // the browser left; nobody to answer
-    if (!result.ok && explicit && MODEL_FALLBACK_TYPES.has(result.type) && result.type !== 'malformed_response') {
-      result = Object.assign({}, result, { message: result.message.replace(/\.?$/, '.') + ' This happened with the model "' + resolved.model +
-        '" you picked — choose another one in Settings → AI models (or "Server default").' });
-    }
-    if (!result.ok) return sendFailure(res, result);
-    res.json(format === 'anthropic' ? toAnthropicResponse(result.completion) : result.completion);
+    let out;
+    try { out = await answerChat(prep, client.signal); } finally { client.release(); }
+    if (out.aborted) return;                          // the browser left; nobody to answer
+    if (out.failure) return sendFailure(res, out.failure);
+    if (out.fallback) res.set('X-MetaCode-Model-Fallback', out.fallback);
+    res.json(out.json);
   } catch (err) {
     console.error('[emis] Unexpected error in /api/ai: ' + redact(err && err.message));
     if (!res.headersSent) res.status(500).json({ error: { message: 'Something went wrong in MetaCode\'s AI service.', type: 'internal_error' } });
     else if (!res.writableEnded) res.end();
+  }
+});
+
+// POST /api/ai/batch — many chat requests answered by several copies of the
+// same model in parallel (AI Coding). Body:
+//   { requests: [{ id, body }], parallel: 1…AI_MAX_PARALLEL, delayMs: 0…5000 }
+// (each body is what POST /api/ai takes, OpenAI format). The answer is NDJSON,
+// one line per request as soon as it finishes, in any order:
+//   { id, ok: true, data }  or  { id, ok: false, status, error: { message, type } }
+// then { done: true, parallel } — parallel is how many ran at the end (it is
+// lowered when EMIS rate-limits). Closing the connection stops the batch.
+const AI_BATCH_MAX_REQUESTS = 2000;
+function aiMaxParallel() {
+  const n = parseInt(process.env.AI_MAX_PARALLEL, 10);
+  return Number.isFinite(n) && n >= 1 ? Math.min(n, 64) : 16;
+}
+app.post('/api/ai/batch', async (req, res) => {
+  const list = req.body && Array.isArray(req.body.requests) ? req.body.requests : null;
+  if (!list || !list.length) return sendFailure(res, fail(400, 'invalid_request', 'Send a non-empty "requests" list.'));
+  if (list.length > AI_BATCH_MAX_REQUESTS) return sendFailure(res, fail(400, 'invalid_request', 'At most ' + AI_BATCH_MAX_REQUESTS + ' requests per batch.'));
+  if (list.some(r => !r || typeof r !== 'object' || !r.body || typeof r.body !== 'object' || r.body.stream)) {
+    return sendFailure(res, fail(400, 'invalid_request', 'Each request needs an "id" and a non-streaming "body".'));
+  }
+  const notReady = notConfigured();
+  if (notReady) return sendFailure(res, notReady);
+  const max = aiMaxParallel();
+  let parallel = Math.max(1, Math.min(max, parseInt(req.body.parallel, 10) || 1));
+  const delayMs = Math.max(0, Math.min(5000, parseInt(req.body.delayMs, 10) || 0));
+
+  res.status(200).set({ 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
+  res.flushHeaders();
+  const client = watchClient(res);
+  const send = obj => { if (!res.writableEnded && !client.signal.aborted) res.write(JSON.stringify(obj) + '\n'); };
+  const wait = ms => new Promise(resolve => { const t = setTimeout(resolve, ms); client.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true }); });
+
+  const queue = list.map(r => ({ id: r.id === undefined ? null : r.id, body: r.body, tries: 0 }));
+  let active = 0, pausedUntil = 0;
+  async function one(item) {
+    let out;
+    try {
+      const prep = await prepareChat(item.body, 'openai');
+      out = prep.failure ? { failure: prep.failure } : await answerChat(prep, client.signal);
+    } catch (err) {
+      console.error('[emis] Unexpected error in /api/ai/batch: ' + redact(err && err.message));
+      out = { failure: fail(500, 'internal_error', 'Something went wrong in MetaCode\'s AI service.') };
+    }
+    if (out.aborted) return;
+    if (out.failure && out.failure.status === 429 && out.failure.type === 'rate_limited' && item.tries < 3) {
+      // EMIS asked us to slow down: fewer copies at once, a short pause, then this one again
+      item.tries++;
+      if (parallel > 1) { parallel = Math.max(1, Math.floor(parallel / 2)); console.warn('[emis] Rate-limited during a batch; running ' + parallel + ' at once now.'); }
+      pausedUntil = Math.max(pausedUntil, Date.now() + Math.min(30, out.failure.retryAfterSeconds || 2 * item.tries) * 1000);
+      queue.unshift(item);
+      return;
+    }
+    if (out.failure) {
+      logFailure(out.failure);
+      const error = { message: out.failure.message, type: out.failure.type };
+      if (out.failure.retryAfterSeconds) error.retryAfterSeconds = out.failure.retryAfterSeconds;
+      send({ id: item.id, ok: false, status: out.failure.status, error });
+      return;
+    }
+    send(Object.assign({ id: item.id, ok: true, data: out.json }, out.fallback ? { fallback: out.fallback } : {}));
+  }
+  async function worker(slot) {
+    let first = true;
+    while (!client.signal.aborted) {
+      if (slot >= parallel) return;                    // the batch was scaled down
+      if (!queue.length) { if (!active) return; await wait(100); continue; }
+      const now = Date.now();
+      if (pausedUntil > now) { await wait(pausedUntil - now); continue; }
+      if (!first && delayMs) await wait(delayMs);
+      first = false;
+      if (client.signal.aborted || slot >= parallel || !queue.length) continue;
+      const item = queue.shift();
+      active++;
+      try { await one(item); } finally { active--; }
+    }
+  }
+  try {
+    await Promise.all(Array.from({ length: parallel }, (_, i) => worker(i)));
+    send({ done: true, parallel });
+  } finally {
+    client.release();
+    if (!res.writableEnded) res.end();
   }
 });
 
@@ -1663,7 +1761,7 @@ function settingsStatus() {
       searched: env.searched || [], loadedAt: env.loadedAt || null
     },
     ai: {
-      provider: 'emis', ready, keyCount: EMIS.keys.length, problem: EMIS.problem || (EMIS.keys.length ? null : 'EMIS_API_KEY isn\'t set in .env.'),
+      provider: 'emis', ready, keyCount: EMIS.keys.length, maxParallel: aiMaxParallel(), problem: EMIS.problem || (EMIS.keys.length ? null : 'EMIS_API_KEY isn\'t set in .env.'),
       warnings: EMIS.warnings, baseHost: (() => { try { return new URL(EMIS.baseUrl).host; } catch (e) { return null; } })(),
       defaultModel: EMIS.model || null,
       transport: emisTransport() === 'node' ? 'Node.js' : (emisPython.status().ok ? 'Python ' + emisPython.status().python + ' (' + emisPython.status().client + ')' : (emisTransport() === 'python' ? 'Python — not available: ' + (emisPython.status().problem || 'not started') : 'Node.js (Python not found)')),

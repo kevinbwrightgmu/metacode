@@ -284,7 +284,8 @@ For most research contexts, κ ≥ 0.61 is the acceptable threshold.
 - **Model selection**: Click "Fetch Models" in Settings to see exactly which models EMIS offers — the lineup can change over time
 - **Codebook quality**: Clear, specific code descriptions dramatically improve AI coding accuracy
 - **Fine-tuning a code**: If the AI keeps misapplying one specific code, open it in the Codebook and add a note in "AI Fine-Tuning Notes" — e.g. "don't count sarcastic praise as Positive." This is read by the AI on every future coding run but never shown to human coders, so it won't bias manual coding or your reliability comparison
-- **Batch size**: Code is processed one post at a time for reliability; you can stop and resume at any time
+- **Speed (copies at once)**: AI Coding splits the posts between several simultaneous requests to the same model — 4 by default. Change the number in the **at once** box next to **Run AI Coding** or in Settings → AI models (1 = one post at a time; up to `AI_MAX_PARALLEL`, 16 by default). Results appear as each post finishes. If EMIS rate-limits the key, MetaCode halves the number, pauses and retries by itself. Every post still uses one prompt of your quota, so more copies finish sooner but don't cost more
+- **Stop and resume**: **Stop** cancels the requests still waiting; run again later to code only the uncoded posts
 - **Reasoning**: Click the 💬 button on any AI-coded post to view the model's reasoning
 
 ---
@@ -328,6 +329,7 @@ Configuration lives only in the server's `.env` file:
 | `EMIS_MODELS_FILE` | no | Model list file, default `emis-models.json` in the MetaCode folder |
 | `EMIS_TRANSPORT` | no | What sends AI requests: `auto` (default — Python, with the `openai` package when installed, else Node.js), `python` or `node` |
 | `EMIS_PROXY` | no | Proxy for EMIS requests (`HTTPS_PROXY` / `NO_PROXY` are used too) |
+| `AI_MAX_PARALLEL` | no | The most copies of the model AI Coding may run at once (default 16, max 64); users choose up to this |
 | `EMIS_TIMEOUT_MS` | no | How long to wait for EMIS (default 120000 ms) |
 
 After changing `.env`, click **Settings → Reload .env** (AI settings apply at once; scraper and port settings
@@ -354,7 +356,8 @@ startup banner say when that happens.
 - **Settings page.** *AI connection* shows the `.env` file that was read (name, location, encoding), the names
   of the settings in it, warnings, whether AI is ready, and **Reload .env** / **Test connection**. *AI models*
   has a default model plus one per feature — AI Coding, Ask MetaCode, Import Data (column detection) and
-  Analyze CSV (edge detection); "Same as default" follows the default. *EMIS keys* lists each key masked, with
+  Analyze CSV (edge detection); "Same as default" follows the default. *AI Coding: copies of the model working
+  at once* sets how many posts are coded side by side. *EMIS keys* lists each key masked, with
   its status and remaining quota.
 - **Streaming.** `POST /api/ai` also accepts `"stream": true` (OpenAI request format) and then relays EMIS's
   server-sent events (`chat.completion.chunk` …, then `data: [DONE]`); a failure mid-stream arrives as a
