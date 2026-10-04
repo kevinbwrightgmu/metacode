@@ -802,6 +802,9 @@ const SurveyStudio = (() => {
       const keys = qs.map(q => Core.dataKeyOf(doc(), q));
       const extra = Array.from(new Set(list.flatMap(r => Object.keys(r.byKey || {})))).filter(k => !keys.includes(k));
       const cols = keys.concat(extra);
+      // Variables saved with each response (e.g. the condition a randomization block assigned)
+      const varCols = Array.from(new Set(list.flatMap(r => Object.keys(r.vars || {})))).filter(k => !/^__/.test(k) && !cols.includes(k));
+      const varOf = (r, c) => (r.vars && Object.prototype.hasOwnProperty.call(r.vars, c) ? r.vars[c] : undefined);
       const done = list.filter(r => r.status === 'complete');
       const durs = done.map(r => (Date.parse(r.completedAt) - Date.parse(r.startedAt)) / 1000).filter(x => x >= 0 && x < 86400 * 3);
       const med = durs.length ? durs.sort((a, b) => a - b)[Math.floor(durs.length / 2)] : null;
@@ -817,9 +820,9 @@ const SurveyStudio = (() => {
       if (!list.length) html += '<div class="card"><div class="empty-state"><div class="empty-title">No responses yet</div><div class="empty-sub">Responses appear here as soon as people submit the published survey.</div></div></div>';
       else {
         html += '<div class="ss-resp-summary">' + qs.map(q => summaryCard(q, done)).join('') + '</div>';
-        html += '<div class="card"><div class="card-title">All responses</div><div class="table-wrap"><table class="table ss-resp-table"><thead><tr><th>Response</th><th>Status</th><th>Version</th><th>Submitted</th><th>Score</th>' + cols.map(c => '<th>' + esc(c) + '</th>').join('') + '<th></th></tr></thead><tbody>' +
+        html += '<div class="card"><div class="card-title">All responses</div><div class="table-wrap"><table class="table ss-resp-table"><thead><tr><th>Response</th><th>Status</th><th>Version</th><th>Submitted</th><th>Score</th>' + cols.map(c => '<th>' + esc(c) + '</th>').join('') + varCols.map(c => '<th title="Variable">' + esc(c) + '</th>').join('') + '<th></th></tr></thead><tbody>' +
           list.slice().reverse().map(r => '<tr><td><code>' + esc(r.id) + '</code></td><td>' + (r.status === 'complete' ? '<span class="badge badge-green">Complete</span>' : '<span class="badge badge-amber">In progress</span>') + '</td><td>v' + r.version + '</td><td title="' + esc(r.completedAt || r.updatedAt) + '">' + rel(r.completedAt || r.updatedAt) + '</td><td>' + esc(r.score) + '</td>' +
-            cols.map(c => '<td class="ss-resp-cell">' + esc(cell(r.byKey ? r.byKey[c] : undefined)) + '</td>').join('') + '<td><button type="button" class="ss-icon-btn" data-del="' + esc(r.id) + '" aria-label="Delete response ' + esc(r.id) + '">✕</button></td></tr>').join('') +
+            cols.map(c => '<td class="ss-resp-cell">' + esc(cell(r.byKey ? r.byKey[c] : undefined)) + '</td>').join('') + varCols.map(c => '<td class="ss-resp-cell">' + esc(cell(varOf(r, c))) + '</td>').join('') + '<td><button type="button" class="ss-icon-btn" data-del="' + esc(r.id) + '" aria-label="Delete response ' + esc(r.id) + '">✕</button></td></tr>').join('') +
           '</tbody></table></div></div>';
       }
       box.innerHTML = html + '</div>';
@@ -827,8 +830,8 @@ const SurveyStudio = (() => {
         const b = e.target.closest('button'); if (!b || b.disabled) return;
         if (b.dataset.act === 'refresh') renderResponses();
         if (b.dataset.act === 'csv') {
-          const header = ['response_id', 'status', 'version', 'started_at', 'completed_at', 'score'].concat(cols);
-          App.downloadCSV(Core.slug(doc().title, 'survey') + '-responses.csv', header, list.map(r => [r.id, r.status, r.version, r.startedAt, r.completedAt || '', r.score].concat(cols.map(c => cell(r.byKey ? r.byKey[c] : undefined)))));
+          const header = ['response_id', 'status', 'version', 'started_at', 'completed_at', 'score'].concat(cols, varCols);
+          App.downloadCSV(Core.slug(doc().title, 'survey') + '-responses.csv', header, list.map(r => [r.id, r.status, r.version, r.startedAt, r.completedAt || '', r.score].concat(cols.map(c => cell(r.byKey ? r.byKey[c] : undefined)), varCols.map(c => cell(varOf(r, c))))));
         }
         if (b.dataset.act === 'json') download(Core.slug(doc().title, 'survey') + '-responses.json', JSON.stringify({ survey: { id: doc().id, title: doc().title }, responses: list }, null, 2), 'application/json');
         if (b.dataset.act === 'clear') { if (!confirm('Delete all ' + list.length + ' responses? This can\'t be undone.')) return; try { await api('/' + doc().id + '/responses', { method: 'DELETE' }); renderResponses(); } catch (err) { App.notify(err.message, 'error'); } }

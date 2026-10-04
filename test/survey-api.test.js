@@ -231,6 +231,30 @@ test('library round-trips and is filtered', async () => {
   assert.deepEqual(lib.styles.map(s => s.id), ['s1']);
 });
 
+test('randomization: balanced assignment counts come with the public survey and conditions are stored', async () => {
+  const { doc, q1, first } = surveyDoc();
+  doc.variables.push({ id: 'v_cond', name: 'condition', type: 'text', initial: '', formula: '' });
+  doc.rules.push({ id: 'rule_rand', name: 'Assign', enabled: true, trigger: { type: 'always' }, when: { op: 'all', items: [] }, else: [],
+    then: [{ type: 'assign', name: 'condition', method: 'balanced', options: ['control', 'treatment'] }] });
+  const rec = (await call('POST', '/api/surveys', { doc })).json.survey;
+  const publicId = (await call('POST', '/api/surveys/' + rec.id + '/publish', {})).json.publish.publicId;
+  const pv = await call('GET', '/api/public/surveys/' + publicId);
+  assert.deepEqual(pv.json.survey.balance, { condition: {} });
+  const sent = await call('POST', '/api/public/surveys/' + publicId + '/responses',
+    { version: 1, answers: { [q1.id]: first }, varState: { __seed: 's1', condition: 'treatment' }, complete: true });
+  assert.equal(sent.status, 201);
+  const tampered = await call('POST', '/api/public/surveys/' + publicId + '/responses',
+    { version: 1, answers: { [q1.id]: first }, varState: { __seed: 's2', condition: 'not-a-condition' }, complete: true });
+  assert.equal(tampered.status, 201);
+  const responses = (await call('GET', '/api/surveys/' + rec.id + '/responses')).json.responses;
+  assert.equal(responses[0].vars.condition, 'treatment');
+  assert.ok(['control', 'treatment'].includes(responses[1].vars.condition));
+  assert.equal(responses[0].vars.__seed, undefined);
+  const counts = (await call('GET', '/api/public/surveys/' + publicId)).json.survey.balance.condition;
+  assert.equal((counts.control || 0) + (counts.treatment || 0), 2);
+  assert.ok(counts.treatment >= 1);
+});
+
 test('public submissions are rate limited and unknown links are 404s', async () => {
   assert.equal((await call('GET', '/api/public/surveys/doesnotexist1')).status, 404);
   assert.equal((await fetch(base + '/s/bad$id')).status, 404);
@@ -244,3 +268,4 @@ test('public submissions are rate limited and unknown links are 404s', async () 
   }
   assert.ok(limited, 'a burst of submissions is eventually refused with 429');
 });
+

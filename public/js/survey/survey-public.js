@@ -60,8 +60,15 @@
     };
 
     main.innerHTML = '';
+    // The participant's random seed is kept in this browser for this survey, so a
+    // reload keeps the same randomly assigned condition.
+    let seed = null;
+    const seedKey = 'metacode_seed_' + survey.publicId;
+    try { seed = localStorage.getItem(seedKey); if (!seed) { seed = SurveyLogic.newSeed(); localStorage.setItem(seedKey, seed); } } catch (e) { seed = null; }
     SurveyRuntime.mount(main, doc, {
       mode: 'live',
+      seed: seed || undefined,
+      balance: survey.balance || {},
       onProgress: payload => send(payload, false),
       onSubmit: payload => send(payload, true)
     });

@@ -115,7 +115,9 @@
       return Core.descendants(doc, 'page:' + p.id).map(id => doc.elements[id]).filter(el => el && isQuestionType(el.type));
     }
     function recompute() {
-      state = Logic.computeState(doc, { answers, varState, visOverride, pageIndex });
+      state = Logic.computeState(doc, { answers, varState, visOverride, pageIndex, balance: opts.balance });
+      // Random assignments are kept for the rest of the session (and sent with the response)
+      (state.assigned || []).forEach(n => { if (varState[n] === undefined && state.vars[n] !== undefined && state.vars[n] !== null) varState[n] = state.vars[n]; });
       // property / text overrides from rules
       const next = {};
       const changed = [];
@@ -144,8 +146,31 @@
     }
     const pendingRefresh = [];
 
+    // "shuffle the choices of …": a fixed random order per participant; options marked
+    // exclusive (e.g. "None of these") stay last.
+    function applyShuffles() {
+      Object.keys(state.shuffle || {}).forEach(qid => {
+        const opts = Core.questionParts(doc, qid, 'option');
+        const nodes = opts.map(o => ({ o, n: renderer.node(o.id) })).filter(x => x.n && x.n.parentElement);
+        if (nodes.length < 2) return;
+        const parent = nodes[0].n.parentElement;
+        if (nodes.some(x => x.n.parentElement !== parent)) return;
+        const fixed = nodes.filter(x => x.o.props && (x.o.props.exclusive || x.o.props.other));
+        const moving = nodes.filter(x => !fixed.includes(x));
+        const seed = varState.__seed || '';
+        for (let i = moving.length - 1; i > 0; i--) {
+          const j = Math.floor(Logic.rand01(seed, 'shuffle:' + qid + ':' + i) * (i + 1));
+          const t = moving[i]; moving[i] = moving[j]; moving[j] = t;
+        }
+        const order = moving.concat(fixed).map(x => x.n);
+        const current = Array.from(parent.children).filter(c => order.includes(c));
+        if (current.every((c, i) => c === order[i])) return;
+        order.forEach(n => parent.appendChild(n));
+      });
+    }
     function applyState() {
       if (!state || finished) return;
+      applyShuffles();
       const nodes = renderer.nodes();
       nodes.forEach((node, id) => {
         const el = live.getEl(id);
@@ -682,7 +707,7 @@
     }
 
     function start() {
-      answers = {}; varState = {}; visOverride = {}; touched = new Set(); errors = {}; attempted = new Set(); history = []; rankOrder = {}; tabs = {};
+      answers = {}; varState = { __seed: opts.seed || Logic.newSeed() }; visOverride = {}; touched = new Set(); errors = {}; attempted = new Set(); history = []; rankOrder = {}; tabs = {};
       finished = false; busy = false; message = null; eventsLog = []; startedAt = new Date().toISOString();
       recompute();
       blockedLink = null;
@@ -691,6 +716,10 @@
       if (pageIndex < 0) pageIndex = 0;
       showBanner('');
       showPage();
+      log('start', 'Random seed ' + varState.__seed);
+      // "when the survey starts" scripts run once per participant
+      const startEffects = Logic.runEvent(doc, { type: 'start' }, state);
+      if (startEffects.length && applyEffects(startEffects, 'start')) { debug(); return; }
       const effects = Logic.runEvent(doc, { type: 'pageEnter', page: page().id }, state);
       if (effects.length) applyEffects(effects, 'pageEnter');
       log('start', 'Survey started on ' + page().name);

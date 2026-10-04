@@ -207,6 +207,7 @@ else
 |---|---|---|
 | Events | yellow | Hat blocks that start a script: *when any answer changes*, *when page … opens*, *when leaving page …*, *when … is clicked* (a button), *when the survey is submitted* |
 | Control | orange | *if ⟨ ⟩ then* and *if ⟨ ⟩ then … else*. They hold other blocks and can be nested |
+| Random | indigo | *when the survey starts*, *assign [condition ▾] [at random ▾ / balanced] to one of [A] [B] +*, *pick one of [2 ▾] at random* (a C-block with one mouth per option), ⟨*chance [50] %*⟩, ⟨*(condition) = A*⟩, *(random number from 1 to 10)*, *shuffle the choices of …*. See [Randomization](#randomization) |
 | Looks | purple | *show* / *hide* / *enable* / *disable* an element, *make … required* / *optional*, *set text of … to …*, *set [fill ▾] of … to …* (conditional styling), *show message* |
 | Pages | blue | *go to page*, *go to next page*, *go back a page*, *skip page*, *include page*, *submit the survey*, *end survey saying …*, *open link* |
 | Answers | teal | *(answer to …)*, ⟨*(answer to …) is answered*⟩, ⟨*(answer to …) = …*⟩, *(score)*, *(page number)*, *set answer of … to …* |
@@ -282,6 +283,56 @@ Every question can have an **answer key**, for example `age`; formulas refer to 
   *or* counts as false.
 - Hidden questions are skipped by validation. Their answers are not stored unless **Keep answers to
   questions hidden by logic** is turned on in Theme → Survey settings.
+
+### Randomization
+
+The **Random** blocks assign participants to conditions (between-subjects designs, A/B messages,
+counterbalancing). For example:
+
+```
+when the survey starts
+assign [condition ▾] [balanced ▾] to one of [control] [treatment]
+
+when any answer changes
+if < (condition) = [treatment] > then
+    show [Persuasive message ▾]
+else
+    show [Neutral message ▾]
+```
+
+or, without a variable to compare:
+
+```
+when any answer changes
+pick one of [3 ▾] at random · [record it in message ▾]
+    set text of [Intro ▾] to [Message one]
+or (option 2)
+    set text of [Intro ▾] to [Message two]
+or (option 3)
+    set text of [Intro ▾] to [Message three]
+```
+
+- **assign … at random** gives each participant one of the conditions with equal probability. **balanced**
+  gives a new participant one of the conditions that the fewest stored responses have so far (ties are
+  broken at random), so groups stay close to equal in size. Click **+** to add a condition and **×** to
+  remove one. The variable is created if it doesn't exist (pick *New variable…* to name it).
+- **pick one of N at random** runs exactly one of its mouths for each participant. *Record it in* a variable
+  to save which one (1, 2, 3 …) with the response.
+- ⟨**chance 50 %**⟩ is true for about that share of participants; *(random number from a to b)* is a whole
+  number in that range.
+- **shuffle the choices of** a question shows its choices in a random order (“Other” and “None of the
+  above” style options stay last). The stored answers are the same whatever the order.
+- **when the survey starts** runs once when a participant begins, before the first page opens.
+
+Every random draw is **fixed for the participant**: each participant gets a random seed when they start,
+and every block draws from that seed. The same participant sees the same condition on every page, after a
+reload of the published page (the seed is kept in their browser), and when the server checks the
+submitted response. The server recomputes assignments itself and only accepts one of the block's
+conditions, so a respondent can't submit a condition that doesn't exist. Assigned variables are stored with
+the response and appear as columns in the Responses table and CSV export.
+
+In **Preview**, **Restart** draws a new seed, so you can see the other conditions; clicking a random block
+in the Logic tab also uses a fresh draw each time.
 
 ### Problems
 
@@ -374,7 +425,8 @@ You can delete one response or all of them.
 
 Exports:
 
-- **CSV:** one column per answer key.
+- **CSV:** one column per answer key, then one per variable (such as the condition a Random block
+  assigned).
 - **JSON:** includes the path, score, variables and version.
 
 **Add text answers to project** turns open-text answers into MetaCode posts, ready for the codebook, AI
