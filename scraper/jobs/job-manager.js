@@ -48,6 +48,7 @@ class JobManager extends EventEmitter {
     const job = {
       id,
       mode: spec.mode,
+      owner: spec.owner || null,      // the browser that started it (owner.js); only it can see the job
       engine: spec.engine || 'server',
       status: 'queued',
       target: spec.target,

@@ -296,6 +296,15 @@ const App = (() => {
           </div>
         </div>
 
+        <div class="card" style="grid-column:1/-1" id="s-data-card">
+          <div class="card-title">Your data</div>
+          <p class="form-hint" style="margin:0 0 12px">Your projects, saved projects and Survey Studio surveys are kept <b>in this browser</b>, private to you — other people using this MetaCode server have their own. The server only holds what has to be public: surveys you publish and their responses (only this browser can see or manage them), and scrapes while they run. Clearing this browser's site data deletes your work, so download a backup now and then — or to move to another browser or computer. Keep backup files private: they also let whoever has them manage your published surveys.</p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-primary" onclick="App.downloadBackup()">Download a backup</button>
+            <button class="btn btn-secondary" onclick="App.restoreBackup()">Restore from a backup…</button>
+          </div>
+        </div>
+
         <div class="card" style="grid-column:1/-1">
           <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
             EMIS keys
@@ -338,6 +347,36 @@ const App = (() => {
     ['import', 'Import Data', 'works out the columns of a CSV'],
     ['csv', 'Analyze CSV', 'finds the source/target columns']
   ];
+
+  /* ── Backup of everything kept in this browser (local-db.js) ── */
+  async function downloadBackup() {
+    try {
+      const b = await LocalDB.exportAll();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(b)], { type: 'application/json' }));
+      a.download = 'metacode-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      notify('Backup downloaded — ' + b.stores.projects.length + ' saved project(s), ' + b.stores.surveys.length + ' survey(s)', 'success');
+    } catch (e) { notify('The backup couldn\'t be made: ' + e.message, 'error'); }
+  }
+  function restoreBackup() {
+    openModal('Restore from a backup',
+      '<p class="form-hint" style="margin-bottom:10px">Choose a <code>metacode-backup-….json</code> file. Its saved projects and surveys are added to this browser (ones with the same id are replaced), its open project replaces the one open now, and this browser takes over its published surveys and responses.</p>' +
+      '<input type="file" id="s-restore-file" accept=".json,application/json" class="form-input"><div class="form-error" id="s-restore-err"></div>',
+      '<button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button><button class="btn btn-primary" id="s-restore-go">Restore</button>');
+    document.getElementById('s-restore-go').onclick = async () => {
+      const f = document.getElementById('s-restore-file').files[0];
+      const err = document.getElementById('s-restore-err');
+      if (!f) { err.textContent = 'Choose a file first.'; return; }
+      try {
+        const r = await LocalDB.importAll(JSON.parse(await f.text()));
+        closeModal();
+        notify('Restored ' + r.records + ' item(s) — reloading', 'success');
+        setTimeout(() => location.reload(), 700);
+      } catch (e) { err.textContent = e instanceof SyntaxError ? 'That file isn\'t valid JSON.' : e.message; }
+    };
+  }
 
   function saveSettings() {
     const model = document.getElementById('s-model').value;
@@ -865,7 +904,7 @@ const App = (() => {
     callClaude, callClaudeBatch, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,
-    saveProject, saveSettings, testApi, clearCodes, resetAll,
+    saveProject, saveSettings, downloadBackup, restoreBackup, testApi, clearCodes, resetAll,
     exportCoded, exportReliability, exportCodebook, exportNetwork, exportNetworkAnalysis
   };
 })();

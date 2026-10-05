@@ -2,8 +2,13 @@
 // Two routers with different audiences:
 //
 //   /api/surveys/*         the editor (MetaCode's own pages; state changes only
-//                          from the same origin): drafts, autosave, publishing,
-//                          versions, responses, the shared library.
+//                          from the same origin): publishing, versions,
+//                          responses. Survey Studio keeps drafts and the
+//                          library in the browser (survey-store.js); what is
+//                          here belongs to the browser that sent it (the
+//                          mc_owner cookie, owner.js) and only that browser
+//                          can see or change it. The draft routes still work
+//                          the same way, per browser.
 //   /api/public/surveys/*  respondents: the published version of a survey and
 //                          response submission. Nothing else is reachable
 //                          with a public link.
@@ -21,6 +26,7 @@ const crypto = require('crypto');
 const Core = require('../public/js/survey/survey-core.js');
 const Logic = require('../public/js/survey/survey-logic.js');
 const { SurveyStore, randomId } = require('./store');
+const { ownerOf, isLoopback } = require('../owner');
 
 const MAX_DOC_BYTES = Core.LIMITS.docBytes;
 
@@ -76,6 +82,10 @@ function cleanDoc(input) {
   return { doc, problems };
 }
 
+// The owner hash stays on the server.
+function strip(rec) { const { owner, ...rest } = rec || {}; return rest; }   // eslint-disable-line no-unused-vars
+const publicSummary = strip;
+
 function sha(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
 
 function deviceOf(ua) {
@@ -96,8 +106,27 @@ function createSurveys(opts) {
   router.use(sameOriginOnly);
   router.use(express.json({ limit: '26mb' }));
 
+  // Surveys saved by older versions (before surveys belonged to a browser):
+  // the person running MetaCode on this computer can take them over.
+  const localOnly = (req, res, next) => (isLoopback(req) ? next() : sendError(res, new ApiError(404, 'not_found', 'Not found.')));
+  router.get('/legacy', localOnly, wrap(async (req, res) => { res.json({ surveys: (await store.list(null)).map(publicSummary), library: await store.legacyLibrary() }); }));
+  router.post('/legacy/:id/claim', localOnly, wrap(async (req, res) => {
+    const owner = ownerOf(req);
+    if (!owner) throw new ApiError(401, 'no_owner', 'This browser has no MetaCode identity yet — reload the page.');
+    const rec = await store.claim(req.params.id, owner);
+    if (!rec) throw new ApiError(404, 'not_found', 'That survey doesn\'t exist or was already imported.');
+    res.json({ survey: strip(Object.assign({}, rec, { doc: Core.normalizeDoc(rec.doc).doc })) });
+  }));
+
+  // Everything else belongs to the browser that sends the request
+  router.use((req, res, next) => {
+    req.owner = ownerOf(req);
+    if (!req.owner) return sendError(res, new ApiError(401, 'no_owner', 'This browser has no MetaCode identity yet — reload the page.'));
+    next();
+  });
+
   router.get('/', wrap(async (req, res) => {
-    res.json({ surveys: await store.list(), dataDir: opts.exposeDataDir ? store.dir : undefined });
+    res.json({ surveys: (await store.list(req.owner)).map(publicSummary), dataDir: opts.exposeDataDir ? store.dir : undefined });
   }));
 
   router.post('/', wrap(async (req, res) => {
@@ -112,11 +141,11 @@ function createSurveys(opts) {
     }
     if (typeof body.title === 'string' && body.title.trim()) doc.title = body.title.trim().slice(0, 300);
     doc.meta = Object.assign({}, doc.meta, { createdAt: new Date().toISOString() });
-    const rec = await store.create(doc);
-    res.status(201).json({ survey: rec, problems });
+    const rec = await store.create(doc, req.owner);
+    res.status(201).json({ survey: strip(rec), problems });
   }));
 
-  router.get('/library', wrap(async (req, res) => { res.json({ library: await store.library() }); }));
+  router.get('/library', wrap(async (req, res) => { res.json({ library: await store.library(req.owner) }); }));
 
   router.put('/library', wrap(async (req, res) => {
     const lib = req.body && req.body.library;
@@ -124,23 +153,25 @@ function createSurveys(opts) {
     const pick = (arr, max) => (Array.isArray(arr) ? arr.filter(x => x && typeof x === 'object' && typeof x.id === 'string').slice(0, max) : []);
     const clean = { components: pick(lib.components, 500), styles: pick(lib.styles, 500), templates: pick(lib.templates, 200) };
     if (Buffer.byteLength(JSON.stringify(clean)) > MAX_DOC_BYTES) throw new ApiError(413, 'too_large', 'The library is too large.');
-    await store.saveLibrary(clean);
+    await store.saveLibrary(req.owner, clean);
     res.json({ library: clean });
   }));
 
-  const load = async id => {
+  // Someone else's survey answers exactly like a missing one.
+  const load = async (id, req) => {
     const rec = await store.get(id);
-    if (!rec) throw new ApiError(404, 'not_found', 'That survey doesn\'t exist (it may have been deleted).');
+    if (!rec || !rec.owner || rec.owner !== req.owner) throw new ApiError(404, 'not_found', 'That survey doesn\'t exist (it may have been deleted).');
     return rec;
   };
 
   router.get('/:id', wrap(async (req, res) => {
-    const rec = await load(req.params.id);
+    const rec = await load(req.params.id, req);
     const { doc, problems } = Core.normalizeDoc(rec.doc);
-    res.json({ survey: Object.assign({}, rec, { doc }), problems });
+    res.json({ survey: strip(Object.assign({}, rec, { doc })), problems });
   }));
 
   router.put('/:id', wrap(async (req, res) => {
+    await load(req.params.id, req);
     const body = req.body || {};
     if (!body.doc) throw new ApiError(400, 'invalid_request', 'Send { doc, baseRevision }.');
     const { doc, problems } = cleanDoc(body.doc);
@@ -153,21 +184,29 @@ function createSurveys(opts) {
   }));
 
   router.delete('/:id', wrap(async (req, res) => {
+    await load(req.params.id, req);
     if (!(await store.remove(req.params.id))) throw new ApiError(404, 'not_found', 'That survey doesn\'t exist.');
     res.json({ ok: true });
   }));
 
   router.post('/:id/duplicate', wrap(async (req, res) => {
-    const rec = await load(req.params.id);
+    const rec = await load(req.params.id, req);
     const { doc } = Core.normalizeDoc(rec.doc);
     doc.id = Core.uid('sv');
     doc.title = (doc.title + ' (copy)').slice(0, 300);
-    const created = await store.create(doc);
-    res.status(201).json({ survey: created });
+    const created = await store.create(doc, req.owner);
+    res.status(201).json({ survey: strip(created) });
   }));
 
   router.post('/:id/publish', wrap(async (req, res) => {
-    const rec = await load(req.params.id);
+    // A draft kept in the browser is sent along with its first publish
+    if (req.body && req.body.doc && !(await store.get(req.params.id))) {
+      if (!store.validId(req.params.id)) throw new ApiError(400, 'invalid_request', 'Invalid survey id.');
+      const first = cleanDoc(req.body.doc).doc;
+      first.id = req.params.id;
+      await store.create(first, req.owner);
+    }
+    const rec = await load(req.params.id, req);
     // Publishing an explicit doc (the editor's current state) saves it first.
     let doc = rec.doc;
     if (req.body && req.body.doc) {
@@ -189,36 +228,39 @@ function createSurveys(opts) {
   }));
 
   router.patch('/:id/publish', wrap(async (req, res) => {
+    await load(req.params.id, req);
     const out = await store.setPublishState(req.params.id, { open: !!(req.body && req.body.open) });
     if (!out) throw new ApiError(404, 'not_published', 'This survey hasn\'t been published.');
     res.json({ publish: out });
   }));
 
   router.delete('/:id/publish', wrap(async (req, res) => {
+    await load(req.params.id, req);
     const out = await store.setPublishState(req.params.id, { unpublish: true });
     if (!out) throw new ApiError(404, 'not_published', 'This survey hasn\'t been published.');
     res.json({ publish: out });
   }));
 
   router.get('/:id/versions', wrap(async (req, res) => {
-    await load(req.params.id);
+    await load(req.params.id, req);
     res.json({ versions: await store.versions(req.params.id) });
   }));
 
   router.get('/:id/versions/:n', wrap(async (req, res) => {
+    await load(req.params.id, req);
     const v = await store.version(req.params.id, req.params.n);
     if (!v) throw new ApiError(404, 'not_found', 'That version doesn\'t exist.');
     res.json({ version: v });
   }));
 
   router.get('/:id/responses', wrap(async (req, res) => {
-    await load(req.params.id);
+    await load(req.params.id, req);
     const list = await store.responses(req.params.id);
     res.json({ responses: list.map(({ tokenHash, ...r }) => r) });
   }));
 
   router.delete('/:id/responses/:rid', wrap(async (req, res) => {
-    await load(req.params.id);
+    await load(req.params.id, req);
     const removed = await store.updateResponses(req.params.id, list => {
       const i = list.findIndex(r => r.id === req.params.rid);
       if (i === -1) return false;
@@ -230,7 +272,7 @@ function createSurveys(opts) {
   }));
 
   router.delete('/:id/responses', wrap(async (req, res) => {
-    await load(req.params.id);
+    await load(req.params.id, req);
     const n = await store.updateResponses(req.params.id, list => { const count = list.length; list.splice(0, list.length); return count; });
     res.json({ ok: true, deleted: n });
   }));

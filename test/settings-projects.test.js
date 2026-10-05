@@ -382,28 +382,23 @@ test('AI batch: capped by AI_MAX_PARALLEL, validated, same-origin only, and stop
   assert.ok(load.total <= 6, 'no new requests after Stop (sent ' + load.total + ')');
 });
 
-test('projects API: save, list, open, update, duplicate, delete; guarded and validated', async () => {
-  const data = { project: { name: 'Study A', description: 'd' }, posts: [{ id: 'p1', text: 'hello', aiCodes: { s: 'pos' }, humanCodes: {} }, { id: 'p2', text: 'x' }], codebook: [{ id: 'dim', codes: [] }], network: { nodes: [], edges: [] }, settings: { secret: 'no' } };
-  const created = await json('POST', '/api/projects', { name: 'Study A', data });
-  assert.equal(created.status, 201);
-  const id = created.json.project.id;
-  assert.match(id, /^pr_[A-Za-z0-9]+$/);
-  assert.deepEqual(created.json.project.counts, { posts: 2, aiCoded: 1, humanCoded: 0, dimensions: 1, nodes: 0, edges: 0 });
-  const list = (await json('GET', '/api/projects')).json.projects;
-  assert.ok(list.some(p => p.id === id && p.name === 'Study A'));
-  const got = (await json('GET', '/api/projects/' + id)).json.project;
-  assert.equal(got.data.posts.length, 2);
-  assert.equal(got.data.settings, undefined, 'browser settings are never stored with a project');
-  const put = await json('PUT', '/api/projects/' + id, { name: 'Study A v2', data: Object.assign({}, data, { posts: data.posts.slice(0, 1) }) });
-  assert.equal(put.json.project.revision, 2);
-  assert.equal(put.json.project.counts.posts, 1);
-  const dup = await json('POST', '/api/projects/' + id + '/duplicate', {});
-  assert.equal(dup.json.project.name, 'Study A v2 (copy)');
-  assert.equal((await json('DELETE', '/api/projects/' + dup.json.project.id)).status, 200);
-  assert.equal((await json('GET', '/api/projects/' + dup.json.project.id)).status, 404);
-  assert.equal((await json('GET', '/api/projects/../../etc')).status, 404);
-  assert.equal((await json('POST', '/api/projects', { data: 'nope' })).status, 400);
-  assert.equal((await json('POST', '/api/projects', { name: 'x', data }, { Origin: 'https://evil.example' })).status, 403);
+// Saved projects live in each browser now; projects an older version saved on
+// the server are only offered for import to the person on this computer.
+const legacyProject = { id: 'pr_legacyOne123', name: 'Old shared study', description: '', createdAt: '2025-01-01T00:00:00.000Z', savedAt: '2025-01-02T00:00:00.000Z', revision: 4,
+  data: { project: { name: 'Old shared study', description: '' }, posts: [{ id: 'o1', text: 'old post', aiCodes: {}, humanCodes: {} }], codebook: [], network: { nodes: [], edges: [] }, networkAnalysis: null } };
+test('projects saved on the server by older versions: listed and readable from this computer only; nothing new is stored there', async () => {
+  fs.mkdirSync(path.join(tmp, 'projects', 'projects'), { recursive: true });
+  fs.writeFileSync(path.join(tmp, 'projects', 'projects', legacyProject.id + '.json'), JSON.stringify(legacyProject));
+  const list = await json('GET', '/api/projects/legacy');
+  assert.equal(list.status, 200);
+  assert.deepEqual(list.json.projects.map(p => [p.id, p.name, p.counts.posts]), [[legacyProject.id, 'Old shared study', 1]]);
+  const one = await json('GET', '/api/projects/legacy/' + legacyProject.id);
+  assert.equal(one.json.project.data.posts[0].text, 'old post');
+  assert.equal((await json('GET', '/api/projects/legacy', undefined, { 'X-Forwarded-For': '203.0.113.7' })).status, 404, 'not through a proxy / from elsewhere');
+  assert.equal((await json('GET', '/api/projects/legacy/../../etc')).status, 404);
+  // The old shared routes are gone
+  assert.equal((await json('POST', '/api/projects', { name: 'x', data: legacyProject.data })).status, 404);
+  assert.equal((await json('GET', '/api/projects')).status, 404);
 });
 
 async function openApp(hash) {
@@ -438,26 +433,40 @@ test('Settings page: .env status, AI ready in the top bar, a model per feature u
   await context.close();
 });
 
-test('Projects page: save, autosave, new project, reopen a saved one', { skip: noBrowser, timeout: 120000 }, async () => {
+test('Projects page: saved in this browser (not on the server), autosave, reopen; other browsers see nothing; old server projects import', { skip: noBrowser, timeout: 120000 }, async () => {
   const { page, context, errors } = await openApp('#projects');
   await page.waitForSelector('#pj-current');
+  const local = () => page.evaluate(() => LocalDB.all('projects'));
   // Put some data in the open project, then save it
   await page.evaluate(() => App.setState({ project: { name: 'Climate study', description: '' }, posts: [{ id: 'a', text: 'one', aiCodes: {}, humanCodes: {} }] }));
   await page.evaluate(() => ProjectsView.render());
   await page.click('#pj-saveas');
   await page.click('#pj-ok');
   await page.waitForFunction(() => ProjectsView.link() && /Climate study/.test(document.getElementById('pj-list').textContent));
-  const saved = (await json('GET', '/api/projects')).json.projects.find(p => p.name === 'Climate study');
-  assert.ok(saved);
-  assert.equal(saved.counts.posts, 1);
-  // Autosave: a change is saved to the server a few seconds later
+  const saved = (await local()).find(p => p.name === 'Climate study');
+  assert.ok(saved, 'kept in the browser');
+  assert.equal(saved.data.posts.length, 1);
+  assert.ok(!fs.readdirSync(path.join(tmp, 'projects', 'projects')).some(f => f.startsWith(saved.id)), 'nothing written on the server');
+  // Autosave: a change is saved a few seconds later
   await page.evaluate(() => App.setState({ posts: App.getState().posts.concat([{ id: 'b', text: 'two', aiCodes: {}, humanCodes: {} }]) }));
   let counted = 0;
   for (let i = 0; i < 40 && counted !== 2; i++) {
     await new Promise(r => setTimeout(r, 400));
-    counted = (await json('GET', '/api/projects/' + saved.id)).json.project.counts.posts;
+    counted = (await local()).find(p => p.id === saved.id).data.posts.length;
   }
-  assert.equal(counted, 2, 'autosaved to the server');
+  assert.equal(counted, 2, 'autosaved');
+  // Another browser (another person) sees none of it
+  {
+    const other = await openApp('#projects');
+    await other.page.waitForFunction(() => /No saved projects yet/.test((document.getElementById('pj-list') || {}).textContent || ''));
+    assert.notEqual(await other.page.evaluate(() => LocalDB.owner()), await page.evaluate(() => LocalDB.owner()), 'each browser has its own identity');
+    await other.context.close();
+  }
+  // Projects an older version saved on the server can be imported
+  await page.waitForSelector('#pj-legacy-go');
+  await page.click('#pj-legacy-go');
+  await page.waitForFunction(id => !!document.querySelector('#pj-list tr[data-id="' + id + '"]'), legacyProject.id);
+  assert.equal(await page.locator('#pj-legacy-go').count(), 0, 'offered only until imported');
   // New empty project (the linked one is saved first, nothing is asked)
   await page.click('#pj-new');
   await page.waitForURL(/#dashboard/);
@@ -472,6 +481,35 @@ test('Projects page: save, autosave, new project, reopen a saved one', { skip: n
   assert.equal(await page.evaluate(() => ProjectsView.link().id), saved.id);
   assert.deepEqual(errors, []);
   await context.close();
+});
+
+test('Backup: everything kept in one browser can be restored in another, which then manages the same published surveys', { skip: noBrowser, timeout: 60000 }, async () => {
+  const a = await openApp('#settings');
+  await a.page.waitForSelector('#s-data-card');
+  await a.page.evaluate(() => LocalDB.put('projects', { id: 'pr_backupTest01', name: 'Backed up', savedAt: new Date().toISOString(), data: { posts: [{ id: 'x', text: 'y' }], codebook: [] } }));
+  await a.page.evaluate(() => LocalDB.put('surveys', { id: 'sv_backup01', revision: 1, doc: { title: 'S' } }));
+  const dl = a.page.waitForEvent('download');
+  await a.page.click('#s-data-card button:has-text("Download a backup")');
+  const file = path.join(tmp, 'backup.json');
+  await (await dl).saveAs(file);
+  const backup = JSON.parse(fs.readFileSync(file, 'utf8'));
+  assert.equal(backup.format, 'metacode-backup');
+  assert.ok(backup.stores.projects.some(p => p.id === 'pr_backupTest01'));
+  const ownerA = await a.page.evaluate(() => LocalDB.owner());
+
+  const b = await openApp('#settings');
+  await b.page.waitForSelector('#s-data-card');
+  assert.notEqual(await b.page.evaluate(() => LocalDB.owner()), ownerA);
+  await b.page.click('#s-data-card button:has-text("Restore from a backup")');
+  await b.page.setInputFiles('#s-restore-file', file);
+  await Promise.all([b.page.waitForNavigation(), b.page.click('#s-restore-go')]);
+  await b.page.waitForSelector('#s-data-card');
+  assert.equal(await b.page.evaluate(() => LocalDB.owner()), ownerA, 'takes over the identity');
+  assert.ok(await b.page.evaluate(() => document.cookie.includes('mc_owner=')));
+  assert.equal((await b.page.evaluate(() => LocalDB.get('projects', 'pr_backupTest01'))).name, 'Backed up');
+  assert.ok(await b.page.evaluate(() => LocalDB.get('surveys', 'sv_backup01')));
+  assert.deepEqual(a.errors.concat(b.errors), []);
+  await a.context.close(); await b.context.close();
 });
 
 test('AI Coding page: posts are coded by several copies of the model at once; the number is configurable', { skip: noBrowser, timeout: 90000 }, async () => {

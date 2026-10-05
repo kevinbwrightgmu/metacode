@@ -2,9 +2,11 @@
    projects.js — Projects page: saved copies of projects
 
    The open project lives in this browser (localStorage). This page saves
-   named copies on the MetaCode server (/api/projects) and lists them, so
-   earlier projects can be reopened, renamed, duplicated, exported or
-   deleted. When the open project is linked to a saved one, changes are
+   named copies in this browser too (LocalDB, js/local-db.js — nothing is
+   stored on the MetaCode server, so other people using the same server
+   never see them) and lists them, so earlier projects can be reopened,
+   renamed, duplicated, exported or deleted. Projects saved on the server
+   by older versions of MetaCode can be imported once (from this computer). When the open project is linked to a saved one, changes are
    saved to it automatically (Autosave), a few seconds after each change.
    Settings (models, delay) aren't part of a project.
    ══════════════════════════════════════════════ */
@@ -20,17 +22,80 @@ const ProjectsView = (() => {
   function readLink() { try { const l = JSON.parse(localStorage.getItem(LINK_KEY) || 'null'); return l && l.id ? l : null; } catch (e) { return null; } }
   function writeLink(l) { try { if (l) localStorage.setItem(LINK_KEY, JSON.stringify(l)); else localStorage.removeItem(LINK_KEY); } catch (e) { /* storage full or blocked */ } }
 
+  // The saved-projects "API", answered from this browser's storage. Same
+  // routes and answers as the old /api/projects server routes.
+  const isObj = v => v && typeof v === 'object' && !Array.isArray(v);
+  const str = (v, max) => (typeof v === 'string' ? v.trim().slice(0, max) : '');
+  function cleanData(input) {
+    if (!isObj(input)) throw new Error('Send the project as { name, data: { posts, codebook, … } }.');
+    const d = {};
+    d.project = isObj(input.project) ? { name: str(input.project.name, 300) || 'Untitled Project', description: str(input.project.description, 5000) } : { name: 'Untitled Project', description: '' };
+    d.posts = Array.isArray(input.posts) ? input.posts.filter(isObj) : [];
+    d.codebook = Array.isArray(input.codebook) ? input.codebook.filter(isObj) : [];
+    d.network = isObj(input.network) ? { nodes: Array.isArray(input.network.nodes) ? input.network.nodes : [], edges: Array.isArray(input.network.edges) ? input.network.edges : [] } : { nodes: [], edges: [] };
+    d.networkAnalysis = isObj(input.networkAnalysis) ? input.networkAnalysis : null;
+    return d;
+  }
+  const summary = r => ({ id: r.id, name: r.name, description: r.description || '', createdAt: r.createdAt, savedAt: r.savedAt, revision: r.revision || 1, counts: Object.assign({ posts: 0, aiCoded: 0, humanCoded: 0, dimensions: 0 }, counts(r.data || {})) });
+  const newId = () => 'pr_' + Array.from(crypto.getRandomValues(new Uint8Array(12)), b => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[b % 62]).join('');
+  function build(prev, body) {
+    const data = body.data !== undefined ? cleanData(body.data) : prev.data;
+    const name = str(body.name, 300) || prev.name || (data.project && data.project.name) || 'Untitled Project';
+    const description = body.description !== undefined ? str(body.description, 5000) : (prev.description || '');
+    return { name, description, data };
+  }
+  const notFound = () => new Error('That saved project doesn\'t exist (it may have been deleted).');
   async function api(path, opts) {
     opts = opts || {};
-    const res = await fetch('/api/projects' + path, {
-      method: opts.method || 'GET',
-      headers: opts.body ? { 'Content-Type': 'application/json' } : undefined,
-      body: opts.body ? JSON.stringify(opts.body) : undefined
-    });
-    let data = null;
-    try { data = await res.json(); } catch (e) { data = null; }
-    if (!res.ok) throw new Error((data && data.error && data.error.message) || ('Server error ' + res.status));
-    return data;
+    const method = opts.method || 'GET';
+    const body = opts.body || {};
+    const m = path.match(/^\/([^/]+)(\/duplicate)?$/);
+    const id = m ? decodeURIComponent(m[1]) : null;
+    const now = new Date().toISOString();
+    if (!id) {
+      if (method === 'GET') return { projects: (await LocalDB.all('projects')).map(summary).sort((a, b) => String(b.savedAt).localeCompare(String(a.savedAt))) };
+      const rec = Object.assign({ id: newId(), createdAt: now, savedAt: now, revision: 1 }, build({}, body));
+      await LocalDB.put('projects', rec);
+      return { project: summary(rec) };
+    }
+    const rec = await LocalDB.get('projects', id);
+    if (!rec) throw notFound();
+    if (m[2]) {
+      const copy = Object.assign({}, rec, { id: newId(), name: (rec.name + ' (copy)').slice(0, 300), createdAt: now, savedAt: now, revision: 1 });
+      await LocalDB.put('projects', copy);
+      return { project: summary(copy) };
+    }
+    if (method === 'GET') return { project: Object.assign(summary(rec), { data: rec.data }) };
+    if (method === 'PUT') {
+      const next = Object.assign({}, rec, build(rec, body), { savedAt: now, revision: (rec.revision || 1) + 1 });
+      await LocalDB.put('projects', next);
+      return { project: summary(next) };
+    }
+    if (method === 'DELETE') { await LocalDB.del('projects', id); return { ok: true }; }
+    throw new Error('Unsupported request');
+  }
+
+  // Projects an older MetaCode saved on the server (shared by everyone then).
+  // Only offered when MetaCode is opened on this computer (the server checks).
+  async function legacyList() {
+    try {
+      const res = await fetch('/api/projects/legacy');
+      if (!res.ok) return [];
+      const j = await res.json();
+      return Array.isArray(j.projects) ? j.projects : [];
+    } catch (e) { return []; }
+  }
+  async function importLegacy(ids) {
+    let n = 0;
+    for (const id of ids) {
+      const res = await fetch('/api/projects/legacy/' + encodeURIComponent(id));
+      if (!res.ok) continue;
+      const p = (await res.json()).project;
+      if (!p || !p.id) continue;
+      await LocalDB.put('projects', { id: p.id, name: p.name, description: p.description || '', createdAt: p.createdAt, savedAt: p.savedAt, revision: p.revision || 1, data: cleanData(p.data || {}) });
+      n++;
+    }
+    return n;
   }
 
   function snapshot() {
@@ -168,13 +233,14 @@ const ProjectsView = (() => {
     c.innerHTML = `
       <div class="view-header">
         <div><div class="view-title">Projects</div>
-          <div class="view-subtitle">Your saved projects on this MetaCode server — open an earlier one, or keep several side by side.</div></div>
+          <div class="view-subtitle">Your saved projects — kept in this browser, private to you. Open an earlier one, or keep several side by side.</div></div>
         <div class="view-actions" style="display:flex;gap:10px">
           <button class="btn btn-secondary" id="pj-import">Import JSON</button>
           <button class="btn btn-secondary" id="pj-new">New empty project</button>
         </div>
       </div>
       <div class="card" id="pj-current" style="margin-bottom:20px"></div>
+      <div id="pj-legacy"></div>
       <div class="card" style="padding:0;overflow:hidden">
         <div style="padding:16px 20px 8px" class="card-title">Saved projects</div>
         <div id="pj-list"><div class="loading-state" style="padding:20px">Loading…</div></div>
@@ -183,6 +249,24 @@ const ProjectsView = (() => {
     document.getElementById('pj-import').onclick = importDialog;
     renderCurrent();
     refreshList();
+    renderLegacy();
+  }
+
+  async function renderLegacy() {
+    const box = document.getElementById('pj-legacy');
+    if (!box) return;
+    const list = await legacyList();
+    const have = new Set((await LocalDB.all('projects')).map(p => p.id));
+    const fresh = list.filter(p => !have.has(p.id));
+    if (!fresh.length) { box.innerHTML = ''; return; }
+    box.innerHTML = '<div class="card" style="margin-bottom:20px;border-color:var(--amber, #F59E0B)"><div style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap">' +
+      '<div><div class="card-title" style="margin-bottom:4px">Projects saved on this server by an older MetaCode</div>' +
+      '<div class="text-muted" style="font-size:13px">Saved projects now stay in your browser. ' + fresh.length + ' project' + (fresh.length === 1 ? ' was' : 's were') + ' saved on the server before: ' + fresh.slice(0, 4).map(p => '“' + esc(p.name) + '”').join(', ') + (fresh.length > 4 ? '…' : '') + '</div></div>' +
+      '<button class="btn btn-primary" id="pj-legacy-go">Import ' + (fresh.length === 1 ? 'it' : 'all ' + fresh.length) + ' into this browser</button></div></div>';
+    document.getElementById('pj-legacy-go').onclick = async () => {
+      try { const n = await importLegacy(fresh.map(p => p.id)); App.notify(n + ' project' + (n === 1 ? '' : 's') + ' imported', 'success'); render(); }
+      catch (e) { App.notify('Import failed: ' + e.message, 'error'); }
+    };
   }
 
   function renderCurrent() {
@@ -296,7 +380,7 @@ const ProjectsView = (() => {
     } catch (e) { App.notify(e.message, 'error'); }
   }
   function deleteProject(p) {
-    App.openModal('Delete “' + p.name + '”?', '<p>The saved copy is removed from the Projects list (the server keeps it in its <code>project-data/trash</code> folder). ' +
+    App.openModal('Delete “' + p.name + '”?', '<p>The saved copy is deleted from this browser. Export it first if you may want it back. ' +
       (readLink() && readLink().id === p.id ? 'The project open in this browser stays open, but is no longer saved anywhere.' : '') + '</p>',
       '<button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button><button class="btn btn-danger" id="pj-del">Delete</button>');
     document.getElementById('pj-del').onclick = async () => {
@@ -330,14 +414,14 @@ const ProjectsView = (() => {
     };
   }
 
-  // Save pending changes when the tab closes (best effort; keepalive requests are limited to 64 KB).
+  // Save pending changes when the tab closes (best effort; the open project
+  // itself is always in localStorage, so nothing is lost if this doesn't finish).
   window.addEventListener('pagehide', () => {
     const link = readLink();
     if (!link || !link.autosave || !link.dirty) return;
     try {
       const s = App.getState();
-      const body = JSON.stringify({ name: (s.project && s.project.name) || link.name, data: snapshot() });
-      if (body.length < 60000) fetch('/api/projects/' + encodeURIComponent(link.id), { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body, keepalive: true });
+      api('/' + encodeURIComponent(link.id), { method: 'PUT', body: { name: (s.project && s.project.name) || link.name, data: snapshot() } }).catch(() => {});
     } catch (e) { /* ignore */ }
   });
 

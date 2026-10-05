@@ -35,6 +35,7 @@ const { JobManager, FINISHED } = require('./jobs/job-manager');
 const { createCustomRunner, sandboxSupported, validateCode } = require('./sandbox/custom-runner');
 const PYODIDE_VERSION = (() => { try { return require('pyodide/package.json').version; } catch (e) { return 'not installed'; } })();
 const exporter = require('./export');
+const { ownerOf } = require('../owner');
 
 const SCRAMJET_FILES = {
   'scramjet.js':          ['@mercuryworkshop/scramjet', 'dist/scramjet.js'],
@@ -158,8 +159,9 @@ function createScraper(opts) {
     if (type === 'status' && FINISHED.has(payload.status)) relay.cancelJob(job.id);
   });
   jobs.on('removed', job => relay.cancelJob(job.id));
+  relay.ownerOfJob = jobId => { const j = jobs.get(jobId); return j ? j.owner || null : null; };
 
-  function status() {
+  function status(req) {
     const sandbox = sandboxSupported('javascript');
     const pySandbox = sandboxSupported('python');
     const floor = http.mode === 'oauth' ? config.minDelayMs : Math.max(config.minDelayMs, config.publicMinDelayMs);
@@ -204,7 +206,7 @@ function createScraper(opts) {
       // through Scramjet (no setup); "server" = this server (API credentials, or
       // public pages subject to robots.txt).
       engines: {
-        browser: { available: config.enabled && config.browserEnabled, minDelayMs: Math.max(config.minDelayMs, config.publicMinDelayMs), connectedTabs: relay.subscribers },
+        browser: { available: config.enabled && config.browserEnabled, minDelayMs: Math.max(config.minDelayMs, config.publicMinDelayMs), connectedTabs: req ? relay.tabsFor(ownerOf(req)) : relay.subscribers },
         server: { available: config.enabled, mode: http.mode, minDelayMs: floor },
         redditapis: { available: config.enabled && !!config.redditApisKey, minDelayMs: config.minDelayMs }
       },
@@ -233,7 +235,8 @@ function createScraper(opts) {
 
   function findJob(req) {
     const job = jobs.get(String(req.params.id || ''));
-    if (!job) throw new ScraperError('not_found', 'That scraper job doesn\'t exist (it may have expired or the server restarted).', { status: 404 });
+    // Another browser's job answers like a missing one
+    if (!job || (job.owner || null) !== ownerOf(req)) throw new ScraperError('not_found', 'That scraper job doesn\'t exist (it may have expired or the server restarted).', { status: 404 });
     return job;
   }
 
@@ -292,7 +295,7 @@ function createScraper(opts) {
     next();
   });
 
-  router.get('/status', (req, res) => res.json(status()));
+  router.get('/status', (req, res) => res.json(status(req)));
 
   router.post('/resolve', (req, res) => {
     try {
@@ -327,7 +330,7 @@ function createScraper(opts) {
       }
       applySaved(creds);
       http.token = probe.token;      // reuse the token just obtained
-      res.json(status());
+      res.json(status(req));
     } catch (err) { sendError(res, err); }
   });
 
@@ -355,7 +358,7 @@ function createScraper(opts) {
       config.redditApisKey = key;
       config.redditApisSource = 'saved';
       redditApisBalance = balanceOf(account);
-      res.json(status());
+      res.json(status(req));
     } catch (err) { sendError(res, err); }
   });
 
@@ -368,7 +371,7 @@ function createScraper(opts) {
       config.redditApisKey = null;
       config.redditApisSource = null;
       redditApisBalance = null;
-      res.json(status());
+      res.json(status(req));
     } catch (err) { sendError(res, err); }
   });
 
@@ -380,17 +383,19 @@ function createScraper(opts) {
       credentials.remove(credFile);
       applySaved(null);
       http.token = null;
-      res.json(status());
+      res.json(status(req));
     } catch (err) { sendError(res, err); }
   });
 
   router.get('/jobs', (req, res) => {
-    res.json({ jobs: jobs.list().map(j => jobs.summary(j)) });
+    const owner = ownerOf(req);
+    res.json({ jobs: jobs.list().filter(j => (j.owner || null) === owner).map(j => jobs.summary(j)) });
   });
 
   router.post('/jobs', (req, res) => {
     try {
       const spec = parseSpec(req.body);
+      spec.owner = ownerOf(req);
       const job = jobs.create(spec);
       res.status(202).json({ job: jobs.summary(job) });
     } catch (err) { sendError(res, err); }
@@ -513,11 +518,12 @@ function createScraper(opts) {
     res.flushHeaders();
     res.on('error', () => {});
     const write = (event, data) => { if (!res.writableEnded && !res.destroyed) res.write('event: ' + event + '\ndata: ' + JSON.stringify(data) + '\n\n'); };
-    const onRequest = r => write('relay', r);
+    const owner = ownerOf(req);
+    const onRequest = r => { if (relay.allowed(r, owner)) write('relay', r); };
     const onCancel = c => write('relay-cancel', c);
-    relay.subscribers++;
+    relay.subscribe(owner);
     write('ready', { allowedHosts: config.apiHosts });
-    relay.unclaimed().forEach(onRequest);
+    relay.unclaimed(owner).forEach(onRequest);
     relay.on('request', onRequest);
     relay.on('cancel', onCancel);
     const heartbeat = setInterval(() => { if (!res.writableEnded) res.write(': ping\n\n'); }, 15000);
@@ -525,7 +531,7 @@ function createScraper(opts) {
     req.on('close', () => {
       if (closed) return;
       closed = true;
-      relay.subscribers--;
+      relay.unsubscribe(owner);
       clearInterval(heartbeat);
       relay.off('request', onRequest);
       relay.off('cancel', onCancel);
@@ -533,12 +539,16 @@ function createScraper(opts) {
   });
 
   router.post('/relay/:rid/claim', (req, res) => {
+    const jobOwner = relay.ownerOfRequest(String(req.params.rid));
+    if (jobOwner && jobOwner !== ownerOf(req)) return sendError(res, new ScraperError('invalid_state', 'Another tab is already handling this request, or it has ended.', { status: 409 }));
     const request = relay.claim(String(req.params.rid));
     if (!request) return sendError(res, new ScraperError('invalid_state', 'Another tab is already handling this request, or it has ended.', { status: 409 }));
     res.json({ request });
   });
 
   router.post('/relay/:rid', (req, res) => {
+    const jobOwner = relay.ownerOfRequest(String(req.params.rid));
+    if (jobOwner && jobOwner !== ownerOf(req)) return sendError(res, new ScraperError('invalid_state', 'This request has already ended.', { status: 409 }));
     if (!relay.respond(String(req.params.rid), req.body)) {
       return sendError(res, new ScraperError('invalid_state', 'This request has already ended.', { status: 409 }));
     }

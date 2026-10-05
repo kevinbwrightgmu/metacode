@@ -29,11 +29,24 @@ class RelayHub extends EventEmitter {
     this.maxResponseBytes = (opts && opts.maxResponseBytes) || 8 * 1024 * 1024;
     this.pending = new Map();   // id → { id, jobId, request, claimed, resolve, reject, timer }
     this.subscribers = 0;
+    this.byOwner = new Map();   // owner → connected tabs
+    this.ownerOfJob = () => null;   // set by the scraper: which browser a job belongs to
   }
 
+  // Tabs connect per browser: a job's requests only go to its own browser's tabs.
+  subscribe(owner) { this.subscribers++; if (owner) this.byOwner.set(owner, (this.byOwner.get(owner) || 0) + 1); }
+  unsubscribe(owner) {
+    this.subscribers--;
+    if (owner) { const n = (this.byOwner.get(owner) || 1) - 1; if (n > 0) this.byOwner.set(owner, n); else this.byOwner.delete(owner); }
+  }
+  tabsFor(owner) { return owner ? (this.byOwner.get(owner) || 0) : this.subscribers; }
+  // Whether a tab of this browser may see / answer the request
+  allowed(request, owner) { const o = this.ownerOfJob(request.jobId); return !o || o === owner; }
+  ownerOfRequest(id) { const e = this.pending.get(id); return e ? this.ownerOfJob(e.jobId) : null; }
+
   // Requests no tab has claimed yet (sent to a tab when it connects).
-  unclaimed() {
-    return Array.from(this.pending.values()).filter(p => !p.claimed).map(p => p.request);
+  unclaimed(owner) {
+    return Array.from(this.pending.values()).filter(p => !p.claimed && (owner === undefined || this.allowed(p.request, owner))).map(p => p.request);
   }
 
   transportFor(jobId) {
@@ -63,7 +76,7 @@ class RelayHub extends EventEmitter {
       entry.timer = setTimeout(() => {
         finish();
         this.emit('cancel', { id });
-        reject(this.subscribers
+        reject(this.tabsFor(this.ownerOfJob(jobId))
           ? new ScraperError('timeout', 'Reddit didn\'t answer the browser within ' + Math.round((req.timeoutMs || 20000) / 1000) + ' seconds.', { status: 504, retryable: true })
           : new ScraperError('browser_unavailable', 'No MetaCode browser tab is connected to run this browser-mode scrape. ' +
               'Keep MetaCode open (any page) until the job finishes, or reopen the Scraper page.', { status: 503 }));

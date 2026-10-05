@@ -39,6 +39,11 @@ let server, baseUrl, browser, dataDir;
 test.before(async () => {
   if (skip) return;
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-survey-e2e-'));
+  // A survey an older MetaCode saved on the server (no owner), with a response
+  const legacy = Core.createSurvey({ title: 'Old shared survey' });
+  legacy.id = 'sv_oldshared01';
+  fs.mkdirSync(path.join(dataDir, 'surveys'), { recursive: true });
+  fs.writeFileSync(path.join(dataDir, 'surveys', legacy.id + '.json'), JSON.stringify({ id: legacy.id, revision: 2, createdAt: '2025-01-01T00:00:00.000Z', updatedAt: '2025-01-01T00:00:00.000Z', doc: legacy, publish: null }));
   Object.assign(process.env, testEnv({ SURVEY_DATA_DIR: dataDir, EMIS_API_KEY: '' }));
   const { start } = require('../server');
   server = await start(0);
@@ -710,6 +715,62 @@ test('Random blocks: assign conditions, pick one message at random, preview and 
   await page.waitForSelector('.ss-resp-table');
   const heads = await page.locator('.ss-resp-table th').allTextContents();
   assert.ok(heads.includes('condition') && heads.includes('message'), heads.join(','));
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('Survey drafts stay in this browser; other browsers see only their own; publishing puts just the published copy on the server', { skip, timeout: 120000 }, async () => {
+  const { page, context, errors } = await openApp('/studio.html');
+  await page.waitForSelector('#ss-new');
+  await page.click('#ss-new');
+  await page.waitForSelector('.ss-viewport .sv-artboard');
+  await page.click('.ss-pal-item[data-type="single"]');
+  const id = (await studio.doc(page)).id;
+  await page.evaluate(() => SurveyStudio.current().store.flush({ force: true }));
+  const draft = await page.evaluate(id => LocalDB.get('surveys', id), id);
+  assert.ok(draft && draft.doc.elements, 'the draft is in this browser');
+  assert.equal(await page.evaluate(id => fetch('/api/surveys/' + id).then(r => r.status), id), 404, 'and not on the server');
+  assert.ok(!fs.existsSync(path.join(dataDir, 'surveys', id + '.json')));
+  // Another browser: an empty list, and the survey can't be opened there
+  const other = await openApp('/studio.html');
+  await other.page.waitForSelector('#ss-list .empty-state, #ss-list table');
+  assert.equal(await other.page.locator(`#ss-list tr[data-id="${id}"]`).count(), 0);
+  await other.page.goto(baseUrl + '/studio.html#' + id);
+  await other.page.waitForSelector('.empty-title');
+  assert.match(await other.page.textContent('.empty-title'), /not found/i);
+  // Publish: now the server has the published copy, owned by this browser only
+  await page.click('#ss-publish');
+  await page.waitForSelector('#ss-pub-go');
+  await page.click('#ss-pub-go');
+  await page.waitForSelector('#ss-pub-url', { timeout: 10000 });
+  assert.equal(await page.evaluate(id => fetch('/api/surveys/' + id + '/responses').then(r => r.status), id), 200);
+  assert.equal(await other.page.evaluate(id => fetch('/api/surveys/' + id + '/responses').then(r => r.status), id), 404, 'other browsers can\'t read the responses');
+  // The list shows it as live, and edits after publishing show as "Edited"
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => SurveyStudio.current().store.tx('Rename', t => t.set('title', 'Renamed after publishing')));
+  await page.evaluate(() => SurveyStudio.current().store.flush({ force: true }));
+  await page.goto(baseUrl + '/studio.html');
+  await page.waitForSelector(`#ss-list tr[data-id="${id}"]`);
+  const row = await page.textContent(`#ss-list tr[data-id="${id}"]`);
+  assert.match(row, /Renamed after publishing/);
+  assert.match(row, /Live · v1/);
+  assert.match(row, /Edited/);
+  await other.context.close();
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('Surveys an older MetaCode saved on the server are offered for import, and then open from this browser', { skip, timeout: 60000 }, async () => {
+  const { page, context, errors } = await openApp('/studio.html');
+  await page.waitForSelector('#ss-legacy-go');
+  assert.match(await page.textContent('#ss-legacy'), /Old shared survey/);
+  await page.click('#ss-legacy-go');
+  await page.waitForSelector('#ss-list tr[data-id="sv_oldshared01"]');
+  assert.equal(await page.locator('#ss-legacy-go').count(), 0);
+  assert.equal((await page.evaluate(() => LocalDB.get('surveys', 'sv_oldshared01'))).revision, 2);
+  await page.click('#ss-list tr[data-id="sv_oldshared01"] a.ss-list-title');
+  await page.waitForSelector('.ss-viewport .sv-artboard');
+  assert.equal((await studio.doc(page)).title, 'Old shared survey');
   assert.deepEqual(errors, []);
   await context.close();
 });

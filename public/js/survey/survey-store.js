@@ -9,11 +9,16 @@
      Continuous edits (dragging, typing) pass a `coalesce` key so they
      become one undo step.
    • Selection, current page and change notifications live here too.
-   • Autosave: changes are saved to the server after a short pause (and at
-     least every few seconds while editing), with a local backup in
-     localStorage until the server confirms. Conflicts (the survey was
-     saved from another tab) and network failures are reported, never
-     silently overwritten.
+   • Autosave: changes are saved after a short pause (and at least every
+     few seconds while editing), with a backup in localStorage until the
+     save is confirmed. Conflicts (the survey was saved from another tab)
+     are reported, never silently overwritten.
+   • Where surveys live: drafts and the library are kept in this browser
+     (LocalDB, js/local-db.js), so people sharing a MetaCode server never
+     see each other's surveys. Only publishing puts a copy on the server:
+     the published versions and their responses, which belong to this
+     browser (the mc_owner cookie). api() answers the draft routes itself
+     and sends the rest to /api/surveys.
    ══════════════════════════════════════════════ */
 (function (root) {
   'use strict';
@@ -22,7 +27,7 @@
   const HISTORY_LIMIT = 250;
   const DOC_KEYS = ['title', 'description', 'settings', 'theme', 'variables', 'rules', 'styles', 'meta'];
 
-  function api(path, opts) {
+  function server(path, opts) {
     opts = opts || {};
     return fetch('/api/surveys' + path, {
       method: opts.method || 'GET',
@@ -38,6 +43,148 @@
       }
       return data;
     }, () => { const err = new Error('Couldn\'t reach the MetaCode server.'); err.network = true; throw err; });
+  }
+
+  /* ── Drafts in this browser ─────────────── */
+  const DB = root.LocalDB;
+  const failure = (status, message, extra) => Object.assign(new Error(message), { status }, extra || {});
+  const nowIso = () => new Date().toISOString();
+  const clean = input => {
+    const size = JSON.stringify(input || {}).length;
+    if (size > Core.LIMITS.docBytes) throw failure(413, 'The survey is too large to save (25 MB at most — large images are the usual cause).');
+    return Core.normalizeDoc(input);
+  };
+  function summarize(rec) {
+    const doc = rec.doc || {};
+    return {
+      id: rec.id, title: doc.title || 'Untitled survey', description: doc.description || '',
+      createdAt: rec.createdAt, updatedAt: rec.updatedAt, revision: rec.revision,
+      pages: (doc.pages || []).length, questions: Object.values(doc.elements || {}).filter(e => e && Core.isQuestionType(e.type)).length,
+      publish: rec.publish || null, responses: 0, completed: 0, lastResponseAt: null
+    };
+  }
+  async function loadLocal(id) {
+    const rec = await DB.get('surveys', id);
+    if (!rec) throw failure(404, 'That survey doesn\'t exist (it may have been deleted, or it was made in another browser).');
+    return rec;
+  }
+  // The server's publish state, with the draft revision that was published as recorded here
+  const mergePublish = (local, remote) => (remote ? Object.assign({}, remote, { publishedRevision: local && local.publishedRevision !== undefined ? local.publishedRevision : remote.publishedRevision }) : local || null);
+
+  async function local(path, opts) {
+    const method = opts.method || 'GET';
+    const body = opts.body || {};
+    if (path === '' && method === 'GET') {
+      const list = (await DB.all('surveys')).map(summarize);
+      let remote = [];
+      try { remote = (await server('')).surveys || []; } catch (e) { remote = []; }   // offline: drafts still list
+      const byId = new Map(remote.map(r => [r.id, r]));
+      list.forEach(sum => {
+        const r = byId.get(sum.id);
+        if (!r) return;
+        sum.publish = mergePublish(sum.publish, r.publish);
+        Object.assign(sum, { responses: r.responses, completed: r.completed, lastResponseAt: r.lastResponseAt });
+      });
+      return { surveys: list.sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt))) };
+    }
+    if (path === '' && method === 'POST') {
+      let doc, problems = [];
+      if (body.doc) { ({ doc, problems } = clean(body.doc)); doc.id = Core.uid('sv'); }
+      else doc = Core.createSurvey({ title: typeof body.title === 'string' && body.title.trim() ? body.title.trim().slice(0, 300) : 'Untitled survey' });
+      if (typeof body.title === 'string' && body.title.trim()) doc.title = body.title.trim().slice(0, 300);
+      doc.meta = Object.assign({}, doc.meta, { createdAt: nowIso() });
+      const rec = { id: doc.id, revision: 1, createdAt: nowIso(), updatedAt: nowIso(), doc, publish: null };
+      await DB.put('surveys', rec);
+      return { survey: rec, problems };
+    }
+    if (path === '/library') {
+      if (method === 'GET') {
+        const r = await DB.get('meta', 'survey-library');
+        return { library: Object.assign({ components: [], styles: [], templates: [] }, r ? r.library : {}) };
+      }
+      const lib = body.library || {};
+      const pick = (arr, max) => (Array.isArray(arr) ? arr.filter(x => x && typeof x === 'object' && typeof x.id === 'string').slice(0, max) : []);
+      const cleanLib = { components: pick(lib.components, 500), styles: pick(lib.styles, 500), templates: pick(lib.templates, 200) };
+      await DB.put('meta', { id: 'survey-library', library: cleanLib });
+      return { library: cleanLib };
+    }
+    const m = path.match(/^\/([^/]+)(\/duplicate|\/publish)?$/);
+    if (!m) return null;
+    const id = decodeURIComponent(m[1]);
+    const rec = await loadLocal(id);
+    if (!m[2]) {
+      if (method === 'GET') {
+        const { doc, problems } = Core.normalizeDoc(rec.doc);
+        let publish = rec.publish || null;
+        if (publish) {
+          try { publish = mergePublish(publish, (await server('/' + encodeURIComponent(id))).survey.publish); } catch (e) { /* offline or not on the server: keep the last known state */ }
+        }
+        return { survey: Object.assign({}, rec, { doc, publish }), problems };
+      }
+      if (method === 'PUT') {
+        if (!body.doc) throw failure(400, 'Send { doc, baseRevision }.');
+        const { doc, problems } = clean(body.doc);
+        doc.id = id;
+        doc.meta = Object.assign({}, doc.meta, { updatedAt: nowIso() });
+        const latest = await loadLocal(id);
+        if (!body.force && body.baseRevision !== undefined && body.baseRevision !== null && Number(body.baseRevision) !== latest.revision) {
+          throw failure(409, 'This survey was changed somewhere else (another tab or window) since you opened it.', { type: 'conflict', data: { revision: latest.revision, updatedAt: latest.updatedAt } });
+        }
+        const next = Object.assign({}, latest, { doc, revision: latest.revision + 1, updatedAt: nowIso() });
+        await DB.put('surveys', next);
+        return { revision: next.revision, updatedAt: next.updatedAt, problems, publish: next.publish };
+      }
+      if (method === 'DELETE') {
+        // A published copy and its responses go too
+        if (rec.publish) { try { await server('/' + encodeURIComponent(id), { method: 'DELETE' }); } catch (e) { if (e.status !== 404) throw e; } }
+        await DB.del('surveys', id);
+        return { ok: true };
+      }
+    }
+    if (m[2] === '/duplicate') {
+      const { doc } = Core.normalizeDoc(rec.doc);
+      doc.id = Core.uid('sv');
+      doc.title = (doc.title + ' (copy)').slice(0, 300);
+      const copy = { id: doc.id, revision: 1, createdAt: nowIso(), updatedAt: nowIso(), doc, publish: null };
+      await DB.put('surveys', copy);
+      return { survey: copy };
+    }
+    if (m[2] === '/publish') {
+      // The server keeps the published copy; the draft stays here
+      const out = await server('/' + encodeURIComponent(id) + '/publish', { method, body: method === 'POST' ? Object.assign({}, body, { doc: rec.doc, force: true }) : opts.body });
+      const latest = await loadLocal(id);
+      const publish = Object.assign({}, out.publish, { publishedRevision: method === 'POST' ? latest.revision : (latest.publish && latest.publish.publishedRevision) });
+      await DB.put('surveys', Object.assign({}, latest, { publish }));
+      return Object.assign({}, out, { publish, revision: latest.revision });
+    }
+    return null;
+  }
+
+  // Older versions kept surveys on the server, shared by everyone. The person
+  // running MetaCode on this computer can move them into this browser.
+  async function legacy() {
+    try { return await server('/legacy'); } catch (e) { return { surveys: [], library: null }; }
+  }
+  async function importLegacy(ids, lib) {
+    let n = 0;
+    for (const id of ids) {
+      const rec = (await server('/legacy/' + encodeURIComponent(id) + '/claim', { method: 'POST', body: {} })).survey;
+      await DB.put('surveys', { id: rec.id, revision: rec.revision, createdAt: rec.createdAt, updatedAt: rec.updatedAt, doc: rec.doc, publish: rec.publish || null });
+      n++;
+    }
+    if (lib) {
+      const cur = (await local('/library', { method: 'GET' })).library;
+      const add = (a, b) => a.concat((b || []).filter(x => x && !a.some(y => y.id === x.id)));
+      await local('/library', { method: 'PUT', body: { library: { components: add(cur.components, lib.components), styles: add(cur.styles, lib.styles), templates: add(cur.templates, lib.templates) } } });
+    }
+    return n;
+  }
+
+  // Same answers as the server's routes, for both kinds.
+  function api(path, opts) {
+    opts = opts || {};
+    if (!DB) return server(path, opts);
+    return Promise.resolve().then(() => local(path, opts)).then(out => (out === null ? server(path, opts) : out));
   }
 
   function backupKey(id) { return 'metacode_survey_backup_' + id; }
@@ -297,5 +444,5 @@
     };
   }
 
-  root.SurveyStore = { create, api };
+  root.SurveyStore = { create, api, legacy, importLegacy };
 })(typeof window !== 'undefined' ? window : this);
