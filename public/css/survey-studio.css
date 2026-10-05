@@ -501,3 +501,5 @@ kbd { font-family: var(--f-mono); font-size: 11px; background: var(--bg-muted); 
 
 /* Surveys saved on the server by an older MetaCode, offered for import */
 .ss-legacy { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; padding: 14px 18px; margin-bottom: 16px; border: 1px solid #F59E0B; border-radius: var(--r-lg, 12px); background: rgba(245, 158, 11, .08); }
+.st-tour { padding: 7px 12px; border-radius: 8px; font: 600 13px var(--f-body, Inter, system-ui); color: #DDD6FE; background: rgba(167, 139, 250, .16); border: 1px solid rgba(167, 139, 250, .35); cursor: pointer; margin-left: 4px; }
+.st-tour:hover { background: rgba(167, 139, 250, .28); color: #fff; }

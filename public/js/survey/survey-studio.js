@@ -43,6 +43,7 @@ const SurveyStudio = (() => {
     tidy: '<line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>',
     plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>', minus: '<line x1="5" y1="12" x2="19" y2="12"/>',
     link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+    tour: '<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',
     kbd: '<rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="10" x2="6.01" y2="10"/><line x1="10" y1="10" x2="10.01" y2="10"/><line x1="14" y1="10" x2="14.01" y2="10"/><line x1="18" y1="10" x2="18.01" y2="10"/><line x1="7" y1="14" x2="17" y2="14"/>'
   };
 
@@ -240,6 +241,7 @@ const SurveyStudio = (() => {
         '<div class="ss-bar-right"><button type="button" class="ss-icon-btn" id="ss-undo" title="Undo (Ctrl+Z)" aria-label="Undo">' + icon(I.undo) + '</button>' +
         '<button type="button" class="ss-icon-btn" id="ss-redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">' + icon(I.redo) + '</button>' +
         '<button type="button" class="ss-icon-btn" id="ss-keys" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">' + icon(I.kbd) + '</button>' +
+        '<button type="button" class="ss-icon-btn" id="ss-tour" title="Take the tour of the editor" aria-label="Take the tour of the editor">' + icon(I.tour) + '</button>' +
         '<span class="ss-pub-state" id="ss-pub-state"></span><button type="button" class="btn btn-primary btn-sm" id="ss-publish">Publish</button></div>' +
       '</header>' +
       '<div class="ss-views">' +
@@ -297,6 +299,7 @@ const SurveyStudio = (() => {
     function doUndo() { const l = store.undo(); if (l) say('Undid ' + l.toLowerCase()); }
     function doRedo() { const l = store.redo(); if (l) say('Redid ' + l.toLowerCase()); }
     $('#ss-keys').addEventListener('click', shortcutsDialog);
+    $('#ss-tour').addEventListener('click', () => { if (window.Tour) window.Tour.start('studio-editor'); });
 
     function renderPubState() {
       const p = store.publish;

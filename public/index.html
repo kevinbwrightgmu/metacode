@@ -58,6 +58,8 @@
   .cta:hover svg { transform: translateX(3px); }
   .cta-row { display: flex; gap: 12px; justify-content: center; flex-wrap: wrap; }
   .cta.cta-ghost { background: rgba(255,255,255,.06); color: #fff; border: 1px solid rgba(255,255,255,.35); box-shadow: none; backdrop-filter: blur(6px); }
+  .cta-tour { display: inline-block; margin-top: 16px; color: #DDD6FE; font-weight: 600; font-size: 14.5px; text-decoration: none; border-bottom: 1px solid rgba(221,214,254,.4); padding-bottom: 1px; }
+  .cta-tour:hover { color: #fff; border-bottom-color: #fff; }
   .cta.cta-ghost:hover { background: rgba(255,255,255,.12); box-shadow: 0 10px 30px rgba(0,0,0,.25); }
   .cta-sub { margin-top: 16px; font-size: 12.5px; color: var(--mc-text-dim); }
 
@@ -157,7 +159,8 @@
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
       </a>
     </div>
-    <div class="cta-sub">Runs on your own machine · Free Groq tier supported · No account required</div>
+    <a class="cta-tour" href="app.html?tour=1">New here? Take the guided tour of the whole platform →</a>
+    <div class="cta-sub">Runs on your own machine · Your work stays in your browser · No account required</div>
   </div>
   <div class="scroll-hint">
     <span>Scroll to learn more</span>
