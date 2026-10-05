@@ -186,7 +186,7 @@ The **Library** tab (left panel) holds three things:
 - **Saved styles:** save an element's style under a name and apply it to other elements with one click.
 - **Style clipboard:** the style you last copied with **Ctrl+Alt+C**.
 
-The library is stored on the server, so it is shared by every survey.
+The library is kept in your browser, so it is shared by every survey you make there.
 
 ## Logic
 
@@ -460,6 +460,15 @@ Also shown by the ⌨ button in the editor.
 | Ctrl+Z / Ctrl+Shift+Z | Undo · redo |
 | Ctrl+S | Save now |
 
+## Guided tour
+
+**Take the tour** in the top bar (or the compass button in the editor's top bar) starts a tour: on the list,
+the templates, new/import and your surveys; in the editor, every tab — Design (elements, canvas, tools,
+properties), Logic (blocks, the Random category, scripts), Theme, Preview and its test panel, Responses —
+then saving and publishing. From the list, the tour can make a practice survey to show the editor on.
+`studio.html?tour=1` starts it; the coding app's tour ends by offering it. The first visit to the list and
+to the editor each offer their tour once.
+
 ## Data model
 
 A survey is one JSON document:
@@ -509,7 +518,10 @@ respondent page and the server.
 
 ### Editor routes
 
-All editor routes are under `/api/surveys`. They are same-origin only, and the JSON limit is 26 MB.
+All editor routes are under `/api/surveys`. They are same-origin only, the JSON limit is 26 MB, and each
+works only on surveys owned by the requesting browser (see Storage). Survey Studio itself uses the publish,
+versions and responses routes; drafts stay in the browser. `POST /:id/publish` with `{ doc }` creates the
+server copy of a browser draft on its first publish.
 
 | Method & path | Purpose |
 |---|---|
@@ -519,7 +531,7 @@ All editor routes are under `/api/surveys`. They are same-origin only, and the J
 | `POST /:id/publish` · `PATCH /:id/publish` · `DELETE /:id/publish` | Publish a new version (422 with `problems` when logic is broken) · open/close responses · unpublish |
 | `GET /:id/versions` · `GET /:id/versions/:n` | Published versions |
 | `GET /:id/responses` · `DELETE /:id/responses/:rid` · `DELETE /:id/responses` | Responses |
-| `GET /library` · `PUT /library` | Shared components, saved styles, templates |
+| `GET /library` · `PUT /library` | This browser's components, saved styles, templates |
 
 ### Respondent routes
 
@@ -536,12 +548,24 @@ client.
 
 ### Storage
 
-Data is stored as JSON files under `SURVEY_DATA_DIR`:
+Drafts and the library live in the **browser** that made them (IndexedDB through `public/js/local-db.js`;
+`survey-store.js`'s `api()` answers the draft routes itself, with the same answers as the server routes
+below). Other people using the same MetaCode server never see them.
+
+The server stores a survey only once it is **published** — the published copy, its versions and its
+responses — as JSON files under `SURVEY_DATA_DIR`:
 
 ```
 surveys/<id>.json          versions/<id>/<n>.json
-responses/<id>.json        library.json        trash/
+responses/<id>.json        libraries/<owner>.json        trash/
 ```
+
+Each record has an `owner`: a hash of the publishing browser's random identity (the `mc_owner` cookie,
+see `owner.js`). Editor routes only show and change the requesting browser's surveys; anyone else gets
+404, and a request without an identity gets 401. Surveys saved by older versions (no owner, plus the old
+shared `library.json`) are listed at `GET /legacy` and taken over with `POST /legacy/:id/claim` — only from
+the computer running MetaCode (loopback, not through a proxy). Settings → Your data in the coding app backs
+up and restores everything, identity included.
 
 Every write is atomic: it goes to a temporary file, which is then renamed. Writes to the same file are
 serialised.

@@ -513,3 +513,26 @@ test('Reddit API: collapsed "load more" comments are loaded (public mode skips w
   assert.equal(job.status, 'completed');
   assert.ok(job.logs.some(l => /needs Reddit API access/.test(l.message)));
 });
+
+test('scraper jobs belong to the browser that started them', async () => {
+  const A = { cookie: 'mc_owner=' + 'a'.repeat(48) };
+  const B = { cookie: 'mc_owner=' + 'b'.repeat(48) };
+  const r = await postJson(app.api + '/jobs', { target: { type: 'subreddit', subreddit: 'test' }, options: { maxItems: 5, maxPages: 1, includeMetadata: false } }, A);
+  assert.equal(r.status, 202);
+  const id = r.json.job.id;
+  const get = async (u, h) => { const res = await fetch(app.api + u, { headers: h }); const text = await res.text(); return { status: res.status, json: () => JSON.parse(text) }; };
+  assert.ok((await (await get('/jobs', A)).json()).jobs.some(j => j.id === id), 'listed for its browser');
+  assert.ok(!(await (await get('/jobs', B)).json()).jobs.some(j => j.id === id), 'not for another');
+  assert.ok(!(await (await get('/jobs', {})).json()).jobs.some(j => j.id === id), 'nor without an identity');
+  for (const u of ['/jobs/' + id, '/jobs/' + id + '/results', '/jobs/' + id + '/logs', '/jobs/' + id + '/export?format=csv', '/jobs/' + id + '/events']) {
+    assert.equal((await get(u, B)).status, 404, u);
+  }
+  const del = await fetch(app.api + '/jobs/' + id, { method: 'DELETE', headers: B });
+  await del.text();
+  assert.equal(del.status, 404);
+  assert.equal((await get('/jobs/' + id, A)).status, 200);
+  for (let i = 0; i < 100; i++) {
+    if (['completed', 'failed', 'cancelled'].includes((await get('/jobs/' + id, A)).json().job.status)) break;
+    await new Promise(r => setTimeout(r, 100));
+  }
+});

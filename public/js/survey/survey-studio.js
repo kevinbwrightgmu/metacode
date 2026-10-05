@@ -43,6 +43,7 @@ const SurveyStudio = (() => {
     tidy: '<line x1="4" y1="6" x2="20" y2="6"/><line x1="4" y1="12" x2="20" y2="12"/><line x1="4" y1="18" x2="20" y2="18"/>',
     plus: '<line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>', minus: '<line x1="5" y1="12" x2="19" y2="12"/>',
     link: '<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
+    tour: '<circle cx="12" cy="12" r="10"/><polygon points="16.24 7.76 14.12 14.12 7.76 16.24 9.88 9.88 16.24 7.76"/>',
     kbd: '<rect x="2" y="6" width="20" height="12" rx="2"/><line x1="6" y1="10" x2="6.01" y2="10"/><line x1="10" y1="10" x2="10.01" y2="10"/><line x1="14" y1="10" x2="14.01" y2="10"/><line x1="18" y1="10" x2="18.01" y2="10"/><line x1="7" y1="14" x2="17" y2="14"/>'
   };
 
@@ -91,7 +92,7 @@ const SurveyStudio = (() => {
     container.classList.remove('is-flush');
     container.innerHTML = '<div class="view-header"><div><div class="view-title">Survey Studio</div><div class="view-subtitle">Design surveys visually — every element is yours to shape — then publish a link and collect responses.</div></div>' +
       '<div class="view-actions"><button class="btn btn-secondary" id="ss-import">Import JSON</button><button class="btn btn-primary" id="ss-new">' + icon(I.plus) + 'New survey</button></div></div>' +
-      '<div class="ss-templates" id="ss-templates" aria-label="Start from a template"></div><div class="card ss-list-card" id="ss-list"><div class="loading-state">Loading surveys…</div></div>';
+      '<div class="ss-templates" id="ss-templates" aria-label="Start from a template"></div><div id="ss-legacy"></div><div class="card ss-list-card" id="ss-list"><div class="loading-state">Loading surveys…</div></div>';
     const lib = await loadLibrary();
     const tpl = document.getElementById('ss-templates');
     if (!tpl) return;
@@ -103,9 +104,31 @@ const SurveyStudio = (() => {
     await refreshList();
   }
 
+  // Surveys saved on the server by an older MetaCode (shared by everyone then)
+  async function renderLegacy() {
+    const box = document.getElementById('ss-legacy');
+    if (!box) return;
+    const old = await window.SurveyStore.legacy();
+    const list = old.surveys || [];
+    if (!list.length) { box.innerHTML = ''; return; }
+    box.innerHTML = '<div class="ss-legacy"><div><b>' + list.length + ' survey' + (list.length === 1 ? '' : 's') + ' saved on this server by an older MetaCode</b>' +
+      '<div class="ss-list-sub">Surveys now stay in your browser. Import ' + (list.length === 1 ? 'it' : 'them') + ' to keep editing — published links and responses keep working: ' +
+      list.slice(0, 3).map(x => '“' + esc(x.title) + '”').join(', ') + (list.length > 3 ? '…' : '') + '</div></div>' +
+      '<button type="button" class="btn btn-primary btn-sm" id="ss-legacy-go">Import into this browser</button></div>';
+    document.getElementById('ss-legacy-go').onclick = async () => {
+      try {
+        const n = await window.SurveyStore.importLegacy(list.map(x => x.id), old.library);
+        App.notify(n + ' survey' + (n === 1 ? '' : 's') + ' imported', 'success');
+        libraryLoaded = false;
+        renderList(document.getElementById('view-container'));
+      } catch (e) { App.notify('Import failed: ' + e.message, 'error'); }
+    };
+  }
+
   async function refreshList() {
     const box = document.getElementById('ss-list');
     if (!box) return;
+    renderLegacy();
     let surveys;
     try { surveys = (await api('')).surveys; } catch (e) {
       box.innerHTML = '<div class="empty-state"><div class="empty-title">Couldn\'t load surveys</div><div class="empty-sub">' + esc(e.message) + ' Survey Studio needs the MetaCode server (npm start).</div></div>';
@@ -140,7 +163,7 @@ const SurveyStudio = (() => {
         ['Save as template', async () => { try { const r = await api('/' + id); await loadLibrary(); library.templates.push({ id: Core.uid('tpl'), name: r.survey.doc.title, description: 'Saved from “' + r.survey.doc.title + '”', doc: r.survey.doc }); await saveLibrary(); App.notify('Saved as a template', 'success'); renderList(document.getElementById('view-container')); } catch (err) { App.notify(err.message, 'error'); } }],
         null,
         ['Delete…', async () => {
-          if (!confirm('Delete “' + s.title + '”' + (s.responses ? ' and its ' + s.responses + ' response' + (s.responses === 1 ? '' : 's') : '') + '? It is moved to the survey-data/trash folder on the server.')) return;
+          if (!confirm('Delete “' + s.title + '”' + (s.responses ? ' and its ' + s.responses + ' response' + (s.responses === 1 ? '' : 's') : '') + '? It is deleted from this browser' + (s.publish ? ', and its link and responses are removed from the server (kept in its survey-data/trash folder)' : '') + '.')) return;
           try { await api('/' + id, { method: 'DELETE' }); App.notify('Survey deleted', 'success'); refreshList(); } catch (err) { App.notify(err.message, 'error'); }
         }, true]
       ]);
@@ -218,6 +241,7 @@ const SurveyStudio = (() => {
         '<div class="ss-bar-right"><button type="button" class="ss-icon-btn" id="ss-undo" title="Undo (Ctrl+Z)" aria-label="Undo">' + icon(I.undo) + '</button>' +
         '<button type="button" class="ss-icon-btn" id="ss-redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">' + icon(I.redo) + '</button>' +
         '<button type="button" class="ss-icon-btn" id="ss-keys" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">' + icon(I.kbd) + '</button>' +
+        '<button type="button" class="ss-icon-btn" id="ss-tour" title="Take the tour of the editor" aria-label="Take the tour of the editor">' + icon(I.tour) + '</button>' +
         '<span class="ss-pub-state" id="ss-pub-state"></span><button type="button" class="btn btn-primary btn-sm" id="ss-publish">Publish</button></div>' +
       '</header>' +
       '<div class="ss-views">' +
@@ -275,6 +299,7 @@ const SurveyStudio = (() => {
     function doUndo() { const l = store.undo(); if (l) say('Undid ' + l.toLowerCase()); }
     function doRedo() { const l = store.redo(); if (l) say('Redid ' + l.toLowerCase()); }
     $('#ss-keys').addEventListener('click', shortcutsDialog);
+    $('#ss-tour').addEventListener('click', () => { if (window.Tour) window.Tour.start('studio-editor'); });
 
     function renderPubState() {
       const p = store.publish;

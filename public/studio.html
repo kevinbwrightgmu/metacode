@@ -11,6 +11,7 @@
   <link rel="stylesheet" href="css/survey.css">
   <link rel="stylesheet" href="css/survey-studio.css">
   <link rel="stylesheet" href="css/survey-blocks.css">
+  <link rel="stylesheet" href="css/tour.css">
 </head>
 <body class="studio-page">
 
@@ -24,6 +25,7 @@
   <nav class="st-nav" aria-label="MetaCode">
     <a href="index.html">Home</a>
     <a href="app.html">Coding app</a>
+    <button type="button" class="st-tour" id="st-tour" title="A guided tour of Survey Studio">Take the tour</button>
   </nav>
 </header>
 
@@ -44,6 +46,7 @@
 <!-- Notifications -->
 <div class="notif-stack" id="notif-stack"></div>
 
+<script src="js/local-db.js"></script>
 <script src="js/survey/studio-shell.js"></script>
 <script src="js/survey/survey-core.js"></script>
 <script src="js/survey/survey-logic.js"></script>
@@ -57,5 +60,8 @@
 <script src="js/survey/survey-blocks.js"></script>
 <script src="js/survey/survey-templates.js"></script>
 <script src="js/survey/survey-studio.js"></script>
+<script src="js/tour.js"></script>
+<script src="js/survey/studio-tour.js"></script>
+<script>StudioTour.init();</script>
 </body>
 </html>

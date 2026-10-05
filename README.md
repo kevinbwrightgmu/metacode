@@ -12,7 +12,7 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 |---|---|
 | **Import Data** | Upload CSVs for posts, engagement metrics, and social network data. The `text` column is optional — if no text-like column is found by name, AI reads the file's structure and maps it for you |
 | **Reddit Scraper** | Collect subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed Python, JavaScript or TypeScript (custom code mode); live progress, results table/JSON, CSV/JSON export, and **Add to project** to code the posts. Server requests go through a Python worker (or epoxy-tls over Wisp without Python); an in-app Reddit browser uses Scramjet. See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
-| **Projects** | Save the open project on the MetaCode server and keep as many as you like: reopen an earlier one, rename, duplicate, export/import as JSON, delete. A project that's open is saved automatically (Autosave) |
+| **Projects** | Save the open project and keep as many as you like (in your browser — private to you, even on a shared MetaCode server): reopen an earlier one, rename, duplicate, export/import as JSON, delete. A project that's open is saved automatically (Autosave) |
 | **Survey Studio** | Its own page, opened from the front page (**Open Survey Studio**). Build surveys on a freeform canvas where every part — down to a single answer choice — can be moved, resized, rotated, scaled, distorted and styled; 30+ element types, layers, groups, components, a theme with per-element overrides, Scratch-style block logic (show/hide, skip, branching, variables, formulas, scores, conditional styling, randomization blocks for assigning participants to conditions or messages), device preview, versioned publishing to a public link, and response collection with CSV/JSON export. Open-text answers can be added to the project for coding. See [docs/survey-studio.md](docs/survey-studio.md) |
 | **Codebook Builder** | Define custom coding dimensions and codes; each code has an optional AI Fine-Tuning Notes field the model reads during Auto-Coding, separate from the Description shown to human coders; import/export as CSV |
 | **AI Auto-Coding** | The AI applies your codebook to posts and provides confidence scores + reasoning |
@@ -240,8 +240,9 @@ Survey Studio builds and runs surveys on its own page, `studio.html`. Open it fr
 - **Responses:** summaries, a response table, and CSV/JSON export. **Add text answers to project** sends
   open-text answers to the coding tools.
 
-Surveys and responses are stored as JSON files in `SURVEY_DATA_DIR` (default `survey-data/`). Respondents
-must be able to reach your MetaCode server to answer.
+Survey drafts stay in your browser. Publishing puts the published version on the server (JSON files in
+`SURVEY_DATA_DIR`, default `survey-data/`), where its responses are collected; only the browser that
+published it can see them. Respondents must be able to reach your MetaCode server to answer.
 
 ---
 
@@ -284,7 +285,8 @@ For most research contexts, κ ≥ 0.61 is the acceptable threshold.
 - **Model selection**: Click "Fetch Models" in Settings to see exactly which models EMIS offers — the lineup can change over time
 - **Codebook quality**: Clear, specific code descriptions dramatically improve AI coding accuracy
 - **Fine-tuning a code**: If the AI keeps misapplying one specific code, open it in the Codebook and add a note in "AI Fine-Tuning Notes" — e.g. "don't count sarcastic praise as Positive." This is read by the AI on every future coding run but never shown to human coders, so it won't bias manual coding or your reliability comparison
-- **Batch size**: Code is processed one post at a time for reliability; you can stop and resume at any time
+- **Speed (copies at once)**: AI Coding splits the posts between several simultaneous requests to the same model — 4 by default. Change the number in the **at once** box next to **Run AI Coding** or in Settings → AI models (1 = one post at a time; up to `AI_MAX_PARALLEL`, 16 by default). Results appear as each post finishes. If EMIS rate-limits the key, MetaCode halves the number, pauses and retries by itself. Every post still uses one prompt of your quota, so more copies finish sooner but don't cost more
+- **Stop and resume**: **Stop** cancels the requests still waiting; run again later to code only the uncoded posts
 - **Reasoning**: Click the 💬 button on any AI-coded post to view the model's reasoning
 
 ---
@@ -328,6 +330,7 @@ Configuration lives only in the server's `.env` file:
 | `EMIS_MODELS_FILE` | no | Model list file, default `emis-models.json` in the MetaCode folder |
 | `EMIS_TRANSPORT` | no | What sends AI requests: `auto` (default — Python, with the `openai` package when installed, else Node.js), `python` or `node` |
 | `EMIS_PROXY` | no | Proxy for EMIS requests (`HTTPS_PROXY` / `NO_PROXY` are used too) |
+| `AI_MAX_PARALLEL` | no | The most copies of the model AI Coding may run at once (default 16, max 64); users choose up to this |
 | `EMIS_TIMEOUT_MS` | no | How long to wait for EMIS (default 120000 ms) |
 
 After changing `.env`, click **Settings → Reload .env** (AI settings apply at once; scraper and port settings
@@ -354,7 +357,8 @@ startup banner say when that happens.
 - **Settings page.** *AI connection* shows the `.env` file that was read (name, location, encoding), the names
   of the settings in it, warnings, whether AI is ready, and **Reload .env** / **Test connection**. *AI models*
   has a default model plus one per feature — AI Coding, Ask MetaCode, Import Data (column detection) and
-  Analyze CSV (edge detection); "Same as default" follows the default. *EMIS keys* lists each key masked, with
+  Analyze CSV (edge detection); "Same as default" follows the default. *AI Coding: copies of the model working
+  at once* sets how many posts are coded side by side. *EMIS keys* lists each key masked, with
   its status and remaining quota.
 - **Streaming.** `POST /api/ai` also accepts `"stream": true` (OpenAI request format) and then relays EMIS's
   server-sent events (`chat.completion.chunk` …, then `data: [DONE]`); a failure mid-stream arrives as a
@@ -362,23 +366,46 @@ startup banner say when that happens.
 
 ---
 
-## All Data is Local
+## Guided Tour
 
-All posts, codes, and settings are stored in your browser's **localStorage**. Nothing is sent to any
-server except AI requests to EMIS (for coding, structure detection and assistant questions — they include the
+New to MetaCode? The front page's **Take the guided tour** link, the **Take the tour** button at the bottom
+of the sidebar, or `app.html?tour=1` starts a tour: a spotlight moves through every page in workflow order
+(Dashboard → Projects → Import → Scraper → Codebook → AI Coding → Human Coding → Reliability → Analyze CSV →
+Network → Metrics → Export → Settings) with a card explaining each, then hands over to Survey Studio's tour
+(the survey list, then each editor tab — it can make a practice survey to show the editor on). Use → / ←
+or the buttons, and Esc to stop. A first visit offers the tour in a small card (once per browser).
+
+---
+
+## All Data is Local — and Private to Each Browser
+
+Your work lives in **your browser**: the open project, posts, codes and settings in localStorage, and
+saved projects and Survey Studio surveys in the browser's IndexedDB storage (`public/js/local-db.js`).
+Several people can share one MetaCode server without seeing each other's work — each browser gets a
+random identity (kept in localStorage and the `mc_owner` cookie), and the few things the server has to
+hold belong to that browser only. **Settings → Your data** downloads a backup of everything, and restores
+it in another browser or on another computer. Keep backup files private: they include the identity that
+manages your published surveys.
+
+Nothing is sent to any server except AI requests to EMIS (for coding, structure detection and assistant questions — they include the
 post text being coded) and your own machine's Python process (for NetworkX analysis — this never leaves your
 computer). The EMIS key stays in the server's `.env` file and is only sent to EMIS.
 
-Survey Studio also keeps data on the server: surveys, published versions and responses are stored as JSON files
-on the MetaCode server (`SURVEY_DATA_DIR`, default `survey-data/`), so respondents on other devices can
-answer them.
+Survey Studio puts a survey on the server only when you publish it: the published versions and their
+responses are stored as JSON files (`SURVEY_DATA_DIR`, default `survey-data/`) so respondents on other
+devices can answer, and only the browser that published it can see or manage them.
 
 The Reddit Scraper is the exception that reaches out on purpose: when you run a scrape (or open the in-app
 Reddit browser), MetaCode's server requests data from Reddit. Scrape results are kept in the server's memory
-until they expire or the server restarts; they only become part of your project (localStorage) when you
+(visible only to the browser that started the job) until they expire or the server restarts; they only become part of your project (localStorage) when you
 click **Add to project**.
 
 To reset everything: Settings → Danger Zone → Reset All Data.
+
+**Upgrading from an older version?** Older versions saved projects (`project-data/`) and surveys on the
+server, shared by everyone. Open MetaCode on the computer that runs it (`http://localhost:…`) and the
+Projects page and Survey Studio offer to import them into your browser; published survey links and their
+responses keep working. Other computers aren't offered them.
 
 ---
 
@@ -401,7 +428,8 @@ metacode/
 │   ├── jobs/job-manager.js     Job queue, status, logs, results
 │   └── sandbox/                Custom code: Pyodide (Python) and QuickJS (JS/TS) sandbox processes, SDKs, runner
 ├── env-file.js                 Reads .env (encodings, .env.txt, other folders, reload) — see AI Provider (EMIS)
-├── projects/                   Saved projects (Projects page): /api/projects, JSON files in project-data/
+├── owner.js                    Which browser a request comes from (mc_owner cookie) — published surveys, scraper jobs
+├── projects/                   Import of projects older versions saved on the server (this computer only)
 ├── surveys/                    Survey Studio server side: API routes, publishing, responses, JSON-file store
 ├── docs/reddit-scraper.md      Scraper guide
 ├── docs/survey-studio.md       Survey Studio guide
@@ -423,7 +451,9 @@ metacode/
 │   ├── css/survey.css            Survey rendering; css/survey-studio.css + survey-blocks.css  Survey Studio editor
 │   └── js/
 │       ├── app.js               Router, state, modals, notifications, Settings, AI requests (via the server)
-│       ├── projects.js          Projects page: saved projects, autosave
+│       ├── local-db.js          Your data in this browser (IndexedDB), browser identity, backup/restore
+│       ├── tour.js · app-tour.js  Guided tours (spotlight + card); the coding app's tour
+│       ├── projects.js          Projects page: saved projects (in the browser), autosave
 │       ├── data.js              CSV import for posts/engagement/network (AI-assisted structure detection)
 │       ├── codebook.js          Coding scheme management
 │       ├── ai-coding.js         Batch AI coding

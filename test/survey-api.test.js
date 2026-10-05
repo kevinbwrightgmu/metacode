@@ -31,8 +31,11 @@ test.after(async () => {
   fs.rmSync(dataDir, { recursive: true, force: true });
 });
 
+// Each browser has its own identity (the mc_owner cookie, owner.js); these tests are one browser.
+const ME = 'mc_owner=' + 'a'.repeat(48);
+const OTHER = 'mc_owner=' + 'b'.repeat(48);
 async function call(method, url, body, headers) {
-  const res = await fetch(base + url, { method, headers: Object.assign({ 'content-type': 'application/json' }, headers || {}), body: body === undefined ? undefined : JSON.stringify(body) });
+  const res = await fetch(base + url, { method, headers: Object.assign({ 'content-type': 'application/json', cookie: ME }, headers || {}), body: body === undefined ? undefined : JSON.stringify(body) });
   const text = await res.text();
   let json = null;
   try { json = JSON.parse(text); } catch (e) { /* not JSON */ }
@@ -255,6 +258,73 @@ test('randomization: balanced assignment counts come with the public survey and 
   assert.ok(counts.treatment >= 1);
 });
 
+test('surveys belong to the browser that made them; other browsers get 404s and empty lists', async () => {
+  const { doc, q1, first } = surveyDoc();
+  const rec = (await call('POST', '/api/surveys', { doc })).json.survey;
+  assert.equal(rec.owner, undefined, 'the owner hash isn\'t sent back');
+  const pub = await call('POST', '/api/surveys/' + rec.id + '/publish', {});
+  assert.equal(pub.status, 200);
+  const other = { cookie: OTHER };
+  assert.ok(!(await call('GET', '/api/surveys', undefined, other)).json.surveys.some(x => x.id === rec.id));
+  for (const [m, u, b] of [['GET', ''], ['PUT', '', { doc }], ['DELETE', ''], ['GET', '/responses'], ['DELETE', '/responses'], ['GET', '/versions'], ['GET', '/versions/1'], ['PATCH', '/publish', { open: false }], ['DELETE', '/publish'], ['POST', '/duplicate', {}]]) {
+    assert.equal((await call(m, '/api/surveys/' + rec.id + u, b, other)).status, 404, m + ' ' + u);
+  }
+  // …and can't publish over it either
+  assert.equal((await call('POST', '/api/surveys/' + rec.id + '/publish', { doc }, other)).status, 404);
+  // No identity at all: refused
+  const anon = await call('GET', '/api/surveys', undefined, { cookie: '' });
+  assert.equal(anon.status, 401);
+  // Respondents need no identity
+  const r = await fetch(base + '/api/public/surveys/' + pub.json.publish.publicId + '/responses', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ version: 1, answers: { [q1.id]: first }, complete: true }) });
+  assert.equal(r.status, 201);
+  assert.equal((await call('GET', '/api/surveys/' + rec.id + '/responses')).json.responses.length, 1);
+  // Libraries are per browser too
+  await call('PUT', '/api/surveys/library', { library: { components: [{ id: 'c1', name: 'Mine' }], styles: [], templates: [] } });
+  assert.equal((await call('GET', '/api/surveys/library', undefined, other)).json.library.components.length, 0);
+});
+
+test('a draft kept in the browser is sent with its first publish', async () => {
+  const { doc } = surveyDoc();
+  doc.id = 'sv_localdraft01';
+  const pub = await call('POST', '/api/surveys/' + doc.id + '/publish', { doc, force: true });
+  assert.equal(pub.status, 200);
+  assert.equal(pub.json.publish.version, 1);
+  const again = await call('POST', '/api/surveys/' + doc.id + '/publish', { doc: Object.assign({}, doc, { title: 'Edited' }), force: true });
+  assert.equal(again.json.publish.version, 2);
+  assert.equal((await call('GET', '/api/surveys/' + doc.id)).json.survey.doc.title, 'Edited');
+  assert.equal((await call('POST', '/api/surveys/bad%20id!/publish', { doc })).status, 400);
+});
+
+test('surveys from older versions (no owner) can be claimed only from this computer', async () => {
+  const { doc } = surveyDoc();
+  doc.id = 'sv_legacy0001';
+  const { SurveyStore } = require('../surveys/store');
+  // written straight into the data folder, the way an older version stored it
+  const st = new SurveyStore(dataDir);
+  await st.writeJson(st.file('surveys', doc.id + '.json'), { id: doc.id, revision: 3, createdAt: '2025-01-01T00:00:00.000Z', updatedAt: '2025-01-02T00:00:00.000Z', doc, publish: null });
+  // the running server indexed its folder already; a new router sees the file
+  const surveys = require('../surveys').createSurveys({ dataDir, rateLimit: 40 });
+  const app = express();
+  app.use('/api/surveys', surveys.router);
+  const srv = http.createServer(app);
+  await new Promise(r => srv.listen(0, '127.0.0.1', r));
+  const b2 = 'http://127.0.0.1:' + srv.address().port;
+  try {
+    const get = (u, h) => fetch(b2 + u, { headers: Object.assign({ cookie: ME }, h || {}) });
+    const list = await (await get('/api/surveys/legacy')).json();
+    assert.deepEqual(list.surveys.map(x => x.id), [doc.id]);
+    assert.equal((await get('/api/surveys/' + doc.id)).status, 404, 'nobody owns it yet');
+    assert.equal((await get('/api/surveys/legacy', { 'x-forwarded-for': '203.0.113.9' })).status, 404, 'not through a proxy');
+    const claim = await fetch(b2 + '/api/surveys/legacy/' + doc.id + '/claim', { method: 'POST', headers: { cookie: ME, 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(claim.status, 200);
+    const j = await claim.json();
+    assert.equal(j.survey.revision, 3);
+    assert.equal(j.survey.doc.title, 'API test');
+    assert.equal((await get('/api/surveys/' + doc.id)).status, 200, 'now it is mine');
+    assert.equal((await fetch(b2 + '/api/surveys/legacy/' + doc.id + '/claim', { method: 'POST', headers: { cookie: OTHER, 'content-type': 'application/json' }, body: '{}' })).status, 404, 'claimed only once');
+  } finally { srv.closeAllConnections(); await new Promise(r => srv.close(r)); }
+});
+
 test('public submissions are rate limited and unknown links are 404s', async () => {
   assert.equal((await call('GET', '/api/public/surveys/doesnotexist1')).status, 404);
   assert.equal((await fetch(base + '/s/bad$id')).status, 404);
@@ -268,4 +338,3 @@ test('public submissions are rate limited and unknown links are 404s', async () 
   }
   assert.ok(limited, 'a burst of submissions is eventually refused with 429');
 });
-

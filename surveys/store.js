@@ -1,10 +1,12 @@
 // ── Survey Studio storage ─────────────────────────────────────────────────────
 // JSON files under SURVEY_DATA_DIR (default: survey-data/ next to server.js):
 //
-//   surveys/<id>.json           { id, revision, createdAt, updatedAt, doc, publish }
+//   surveys/<id>.json           { id, owner, revision, createdAt, updatedAt, doc, publish }
+//                               (owner: a hash of the browser that made it — see owner.js;
+//                               records from older versions have none)
 //   versions/<id>/<n>.json      { version, publishedAt, doc }   (immutable)
 //   responses/<id>.json         { responses: [...] }
-//   library.json                { components, styles, templates }
+//   libraries/<owner>.json      { components, styles, templates }
 //
 // Writes go to a temporary file first and are renamed into place, and writes
 // to the same file are serialized, so a crash never leaves half a file.
@@ -84,7 +86,7 @@ class SurveyStore {
     const doc = rec.doc || {};
     const qCount = Object.values(doc.elements || {}).filter(e => e && ['single', 'multiple', 'dropdown', 'shorttext', 'longtext', 'number', 'slider', 'rating', 'ranking', 'date', 'time', 'matrix', 'yesno', 'likert'].includes(e.type)).length;
     return {
-      id: rec.id, title: doc.title || 'Untitled survey', description: doc.description || '',
+      id: rec.id, owner: rec.owner || null, title: doc.title || 'Untitled survey', description: doc.description || '',
       createdAt: rec.createdAt, updatedAt: rec.updatedAt, revision: rec.revision,
       pages: (doc.pages || []).length, questions: qCount,
       publish: rec.publish || null,
@@ -93,9 +95,10 @@ class SurveyStore {
     };
   }
 
-  async list() {
+  // owner: only that browser's surveys; null: those from older versions (no owner)
+  async list(owner) {
     const index = await this.loadIndex();
-    return Array.from(index.values()).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
+    return Array.from(index.values()).filter(sum => (sum.owner || null) === (owner || null)).sort((a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)));
   }
 
   async get(id) {
@@ -104,10 +107,10 @@ class SurveyStore {
     return this.readJson(this.file('surveys', id + '.json'), null);
   }
 
-  async create(doc) {
+  async create(doc, owner) {
     await this.loadIndex();
     const now = new Date().toISOString();
-    const rec = { id: doc.id, revision: 1, createdAt: now, updatedAt: now, doc, publish: null };
+    const rec = { id: doc.id, owner: owner || null, revision: 1, createdAt: now, updatedAt: now, doc, publish: null };
     await this.serial('s:' + rec.id, () => this.writeJson(this.file('surveys', rec.id + '.json'), rec));
     this.index.set(rec.id, this.summarize(rec, []));
     return rec;
@@ -231,13 +234,32 @@ class SurveyStore {
     });
   }
 
-  async library() {
+  // Gives a survey from an older version (no owner) to a browser.
+  async claim(id, owner) {
+    return this.serial('s:' + id, async () => {
+      const rec = await this.readJson(this.file('surveys', id + '.json'), null);
+      if (!rec || rec.owner) return null;
+      rec.owner = owner;
+      await this.writeJson(this.file('surveys', id + '.json'), rec);
+      const sum = this.index && this.index.get(id);
+      if (sum) sum.owner = owner;
+      return rec;
+    });
+  }
+
+  // The single shared library older versions kept (library.json)
+  async legacyLibrary() {
     const lib = await this.readJson(this.file('library.json'), null);
+    return lib ? Object.assign({ components: [], styles: [], templates: [] }, lib) : null;
+  }
+
+  async library(owner) {
+    const lib = await this.readJson(this.file('libraries', owner + '.json'), null);
     return Object.assign({ components: [], styles: [], templates: [] }, lib || {});
   }
 
-  async saveLibrary(lib) {
-    return this.serial('library', () => this.writeJson(this.file('library.json'), lib));
+  async saveLibrary(owner, lib) {
+    return this.serial('library:' + owner, () => this.writeJson(this.file('libraries', owner + '.json'), lib));
   }
 }
 

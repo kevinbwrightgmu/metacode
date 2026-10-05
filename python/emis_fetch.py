@@ -196,7 +196,7 @@ def handle(line):
 
 def main():
     emit({"ready": True, "python": platform.python_version(), "client": CLIENT})
-    pool = ThreadPoolExecutor(max_workers=8)
+    pool = ThreadPoolExecutor(max_workers=64)   # AI Coding runs several requests at once (AI_MAX_PARALLEL)
     for raw in sys.stdin.buffer:            # bytes: decoded as UTF-8 whatever the locale is
         line = raw.decode("utf-8", "replace").strip()
         if line:

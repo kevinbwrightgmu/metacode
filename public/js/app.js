@@ -11,7 +11,7 @@ const App = (() => {
     codebook: [],   // [{id, name, description, codes:[{id,label,description}]}]
     network:  { nodes: [], edges: [] },
     networkAnalysis: null, // last NetworkX result from Analyze CSV (see csv-analyzer.js)
-    settings: { model: '', models: {}, delay: 500 }   // AI models (Settings → AI models); keys live in the server's .env
+    settings: { model: '', models: {}, delay: 500, parallel: 4 }   // AI models (Settings → AI models); keys live in the server's .env
   };
 
   const STORAGE_KEY = 'strata_v1'; // kept stable so existing users' saved data isn't orphaned by the rename
@@ -36,6 +36,7 @@ const App = (() => {
     if (typeof state.settings.model !== 'string') state.settings.model = '';
     if (!state.settings.models || typeof state.settings.models !== 'object') state.settings.models = {};
     if (!Number.isFinite(Number(state.settings.delay))) state.settings.delay = 500;
+    if (!Number.isFinite(Number(state.settings.parallel)) || Number(state.settings.parallel) < 1) state.settings.parallel = 4;
   }
   function getState()  { return state; }
   function setState(patch) { Object.assign(state, patch); save(); }
@@ -282,11 +283,25 @@ const App = (() => {
               <div class="s-feature-models" id="s-feature-models"></div>
             </div>
             <div class="form-group">
-              <label class="form-label" for="s-delay">Delay between AI Coding calls <span>(ms)</span></label>
+              <label class="form-label" for="s-parallel">AI Coding: copies of the model working at once</label>
+              <input class="form-input" id="s-parallel" type="number" value="${getParallel()}" min="1" max="${maxParallel()}" step="1">
+              <div class="form-hint">Posts are split between this many simultaneous requests to the same model, so coding finishes up to that many times faster. 1 codes one post at a time. Lower it if EMIS rate-limits you (MetaCode also slows down by itself when that happens). Up to ${maxParallel()} (the server's AI_MAX_PARALLEL).</div>
+            </div>
+            <div class="form-group">
+              <label class="form-label" for="s-delay">Pause between each copy's requests <span>(ms)</span></label>
               <input class="form-input" id="s-delay" type="number" value="${settings.delay}" min="0" max="5000" step="100">
               <div class="form-hint">Increase if you hit rate limits (default: 500 ms)</div>
             </div>
             <div><button class="btn btn-primary" onclick="App.saveSettings()">Save model settings</button></div>
+          </div>
+        </div>
+
+        <div class="card" style="grid-column:1/-1" id="s-data-card">
+          <div class="card-title">Your data</div>
+          <p class="form-hint" style="margin:0 0 12px">Your projects, saved projects and Survey Studio surveys are kept <b>in this browser</b>, private to you — other people using this MetaCode server have their own. The server only holds what has to be public: surveys you publish and their responses (only this browser can see or manage them), and scrapes while they run. Clearing this browser's site data deletes your work, so download a backup now and then — or to move to another browser or computer. Keep backup files private: they also let whoever has them manage your published surveys.</p>
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-primary" onclick="App.downloadBackup()">Download a backup</button>
+            <button class="btn btn-secondary" onclick="App.restoreBackup()">Restore from a backup…</button>
           </div>
         </div>
 
@@ -333,12 +348,43 @@ const App = (() => {
     ['csv', 'Analyze CSV', 'finds the source/target columns']
   ];
 
+  /* ── Backup of everything kept in this browser (local-db.js) ── */
+  async function downloadBackup() {
+    try {
+      const b = await LocalDB.exportAll();
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(new Blob([JSON.stringify(b)], { type: 'application/json' }));
+      a.download = 'metacode-backup-' + new Date().toISOString().slice(0, 10) + '.json';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      notify('Backup downloaded — ' + b.stores.projects.length + ' saved project(s), ' + b.stores.surveys.length + ' survey(s)', 'success');
+    } catch (e) { notify('The backup couldn\'t be made: ' + e.message, 'error'); }
+  }
+  function restoreBackup() {
+    openModal('Restore from a backup',
+      '<p class="form-hint" style="margin-bottom:10px">Choose a <code>metacode-backup-….json</code> file. Its saved projects and surveys are added to this browser (ones with the same id are replaced), its open project replaces the one open now, and this browser takes over its published surveys and responses.</p>' +
+      '<input type="file" id="s-restore-file" accept=".json,application/json" class="form-input"><div class="form-error" id="s-restore-err"></div>',
+      '<button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button><button class="btn btn-primary" id="s-restore-go">Restore</button>');
+    document.getElementById('s-restore-go').onclick = async () => {
+      const f = document.getElementById('s-restore-file').files[0];
+      const err = document.getElementById('s-restore-err');
+      if (!f) { err.textContent = 'Choose a file first.'; return; }
+      try {
+        const r = await LocalDB.importAll(JSON.parse(await f.text()));
+        closeModal();
+        notify('Restored ' + r.records + ' item(s) — reloading', 'success');
+        setTimeout(() => location.reload(), 700);
+      } catch (e) { err.textContent = e instanceof SyntaxError ? 'That file isn\'t valid JSON.' : e.message; }
+    };
+  }
+
   function saveSettings() {
     const model = document.getElementById('s-model').value;
     const models = {};
     document.querySelectorAll('#s-feature-models select[data-feature]').forEach(sel => { if (sel.value) models[sel.dataset.feature] = sel.value; });
     const delay = parseInt(document.getElementById('s-delay').value, 10);
-    setState({ settings: { ...state.settings, model, models, delay: Number.isFinite(delay) ? Math.max(0, delay) : 500 } });
+    const parallel = clampParallel(document.getElementById('s-parallel').value);
+    setState({ settings: { ...state.settings, model, models, delay: Number.isFinite(delay) ? Math.max(0, delay) : 500, parallel } });
     notify('Model settings saved', 'success');
   }
 
@@ -668,6 +714,62 @@ const App = (() => {
     return String(text || '').trim();
   }
 
+  // How many copies of the model AI Coding runs at once (Settings / AI Coding page).
+  function maxParallel() { return (serverStatus && serverStatus.ai && serverStatus.ai.maxParallel) || 16; }
+  function clampParallel(v) { const n = parseInt(v, 10); return Number.isFinite(n) ? Math.max(1, Math.min(maxParallel(), n)) : 4; }
+  function getParallel() { return clampParallel(state.settings.parallel); }
+  function setParallel(v) { const parallel = clampParallel(v); setState({ settings: { ...state.settings, parallel } }); return parallel; }
+
+  // Many chat requests at once: the server runs up to `parallel` of them side by
+  // side with the same model and streams each answer back as it finishes.
+  //   items: [{ id, messages, system, max_tokens }]
+  //   opts:  { feature, parallel, delay, signal, onResult({ id, ok, text, error, status }) }
+  // Resolves to { parallel } (how many ran at the end; the server lowers it when rate-limited).
+  async function callClaudeBatch(items, opts) {
+    opts = opts || {};
+    const model = modelFor(opts.feature);
+    const requests = items.map(it => {
+      const body = { messages: it.system ? [{ role: 'system', content: it.system }].concat(it.messages) : it.messages.slice(), max_tokens: it.max_tokens || 1000, temperature: 0.1 };
+      if (model) body.model = model;
+      return { id: it.id, body };
+    });
+    const res = await fetch('/api/ai/batch', { method: 'POST', signal: opts.signal, headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ requests, parallel: clampParallel(opts.parallel || getParallel()), delayMs: opts.delay || 0 }) });
+    if (!res.ok) {
+      let data = null;
+      try { data = await res.json(); } catch (e) { data = null; }
+      const err = new Error((data && data.error && data.error.message) || ('API error ' + res.status));
+      err.status = res.status;
+      throw err;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '', finished = null;
+    const handle = line => {
+      if (!line.trim()) return;
+      let msg;
+      try { msg = JSON.parse(line); } catch (e) { return; }
+      if (msg.done) { finished = msg; return; }
+      if (msg.ok) {
+        lastModelUsed = (msg.data && msg.data.model) || model;
+        const c = msg.data && msg.data.choices && msg.data.choices[0];
+        opts.onResult && opts.onResult({ id: msg.id, ok: true, text: String((c && c.message && c.message.content) || '').trim() });
+      } else {
+        opts.onResult && opts.onResult({ id: msg.id, ok: false, status: msg.status, error: (msg.error && msg.error.message) || 'AI request failed', type: msg.error && msg.error.type });
+      }
+    };
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n')) >= 0) { handle(buf.slice(0, i)); buf = buf.slice(i + 1); }
+    }
+    handle(buf + decoder.decode());
+    if (!finished) throw new Error('The connection to MetaCode\'s server closed before the batch finished.');
+    return { parallel: finished.parallel };
+  }
+
   // Number of EMIS keys the server loaded from .env (0 when it can't be reached).
   function getEnvKeyCount() { return serverStatus && serverStatus.ai ? serverStatus.ai.keyCount : 0; }
 
@@ -799,10 +901,10 @@ const App = (() => {
     init, navigate: (v) => navigate(v), setViewCleanup, fetchModels, fetchKeyStatus, reloadEnv, modelFor, AI_FEATURES,
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
     getState, setState, save,
-    callClaude, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
+    callClaude, callClaudeBatch, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,
-    saveProject, saveSettings, testApi, clearCodes, resetAll,
+    saveProject, saveSettings, downloadBackup, restoreBackup, testApi, clearCodes, resetAll,
     exportCoded, exportReliability, exportCodebook, exportNetwork, exportNetworkAnalysis
   };
 })();

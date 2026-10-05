@@ -225,6 +225,8 @@ async function run(start) {
     Object.freeze(filesystems);
   }
 
+  // Python is up: the time limit counts from here, not from Pyodide's start-up
+  send({ type: 'started' });
   const resultJson = await runner(start.code, JSON.stringify(start.init));
   runner.destroy();
   let result = null;
