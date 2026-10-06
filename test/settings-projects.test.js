@@ -63,6 +63,9 @@ let lastUserAgent = '';
 let emptyHits = 0;
 // Parallel AI Coding: how many slow requests EMIS is working on at once
 const load = { now: 0, max: 0, total: 0, garbled: new Set() };
+// Rate limits: how often each model was called, and the budget the mock reports
+const hits = {};
+const budget = { remaining: 100 };
 
 function findChromium() {
   const candidates = [];
@@ -83,7 +86,7 @@ test.before(async () => {
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       if (!req.url.startsWith('/v1/')) { res.setHeader('Content-Type', 'text/html'); return res.end('<!doctype html><html><body>EMIS website</body></html>'); }
-      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }, { id: 'unicode-model' }, { id: 'streams-unless-told' }, { id: 'stream-only-model' }, { id: 'responses-sse-model' }, { id: 'empty-unless-stream' }, { id: 'slow-model' }, { id: 'coder-model' }] }));
+      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }, { id: 'unicode-model' }, { id: 'streams-unless-told' }, { id: 'stream-only-model' }, { id: 'responses-sse-model' }, { id: 'empty-unless-stream' }, { id: 'slow-model' }, { id: 'coder-model' }, { id: 'acme-opus-4-8' }, { id: 'acme-opus-4-7' }, { id: 'acme-opus-3-0' }, { id: 'acme-mini-2' }, { id: 'acme-opus-4-9' }, { id: 'busy-a' }, { id: 'busy-b' }, { id: 'busy-c' }, { id: 'budget-model' }, { id: 'strm-pro-2-0' }, { id: 'strm-pro-1-9' }] }));
       if (req.url === '/v1/chat/completions') {
         const j = JSON.parse(body || '{}');
         lastUserAgent = String(req.headers['user-agent'] || '');
@@ -104,6 +107,15 @@ test.before(async () => {
         }
         if (j.model === 'unicode-model') return res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok → café … 你好 — ' + j.messages.map(m => m.content).join('|') }, finish_reason: 'stop' }] }));
         if (j.model === 'forbidden-model') { res.statusCode = 403; return res.end('{"error":{"message":"this key may not use forbidden-model"}}'); }
+        hits[j.model] = (hits[j.model] || 0) + 1;
+        const quotaHeaders = { 'X-RateLimit-Window': 'day', 'X-RateLimit-Limit-Prompts': '100', 'X-RateLimit-Remaining-Prompts': String(budget.remaining), 'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + 3600) };
+        // EMIS throttles these models although the key has budget left
+        if (j.model === 'strm-pro-1-9') { res.setHeader('Content-Type', 'text/event-stream'); return res.end('data: {"model":"strm-pro-1-9","choices":[{"delta":{"content":"streamed by 1-9"}}]}\n\ndata: [DONE]\n\n'); }
+        if (j.model === 'acme-opus-4-8' || j.model === 'acme-opus-4-9' || j.model === 'strm-pro-2-0') { res.writeHead(429, Object.assign({ 'Content-Type': 'application/json' }, quotaHeaders)); return res.end('{"error":{"message":"model busy"}}'); }
+        // 429s without quota headers: the key is being paused (Retry-After 1 s)
+        if (/^busy-/.test(j.model)) { res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '1' }); return res.end('{"error":{"message":"slow down"}}'); }
+        // The key's budget is used up: every model would fail
+        if (j.model === 'budget-model') { res.writeHead(429, Object.assign({ 'Content-Type': 'application/json' }, quotaHeaders, { 'X-RateLimit-Remaining-Prompts': '0', 'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + 2) })); return res.end('{"error":{"message":"budget used up"}}'); }
         // Takes a while, like a real model; answers AI Coding prompts with codings JSON
         if (j.model === 'slow-model' || j.model === 'coder-model') {
           load.now++; load.total++; load.max = Math.max(load.max, load.now);
@@ -386,6 +398,77 @@ test('AI batch: capped by AI_MAX_PARALLEL, validated, same-origin only, and stop
 // the server are only offered for import to the person on this computer.
 const legacyProject = { id: 'pr_legacyOne123', name: 'Old shared study', description: '', createdAt: '2025-01-01T00:00:00.000Z', savedAt: '2025-01-02T00:00:00.000Z', revision: 4,
   data: { project: { name: 'Old shared study', description: '' }, posts: [{ id: 'o1', text: 'old post', aiCodes: {}, humanCodes: {} }], codebook: [], network: { nodes: [], edges: [] }, networkAnalysis: null } };
+/* ── Rate-limited models switch to the closest one ─── */
+const ask = (model, headers) => fetch(base + '/api/ai', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', 'x-provider': 'openai' }, headers || {}), body: JSON.stringify({ model, max_tokens: 20, messages: [{ role: 'user', content: 'hi' }] }) });
+
+test('a rate-limited model is answered by the closest similar model, and isn\'t called again while it rests', async () => {
+  let res = await ask('acme-opus-4-8');
+  let body = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(body));
+  assert.equal(body.model, 'acme-opus-4-7', 'same family and line, nearest version — not acme-opus-3-0 or acme-mini-2');
+  // The nearest version (4-9) was tried first, but it is rate-limited too
+  assert.deepEqual([hits['acme-opus-4-9'], hits['acme-opus-3-0'], hits['acme-mini-2']], [1, undefined, undefined]);
+  assert.equal(res.headers.get('x-metacode-model-fallback'), 'acme-opus-4-7');
+  assert.equal(res.headers.get('x-metacode-model-fallback-reason'), 'rate_limited');
+  assert.equal(res.headers.get('x-metacode-model-requested'), 'acme-opus-4-8');
+  assert.equal(hits['acme-opus-4-8'], 1);
+  // The key still has budget: it isn't resting, and other models are unaffected
+  const keys = (await json('GET', '/api/keys/status')).json;
+  assert.ok(JSON.stringify(keys).includes('available'), JSON.stringify(keys));
+  // While it rests, requests go straight to the substitute
+  res = await ask('acme-opus-4-8');
+  assert.equal((await res.json()).model, 'acme-opus-4-7');
+  assert.equal(hits['acme-opus-4-8'], 1, 'not called again');
+  const st = (await json('GET', '/api/settings/status')).json;
+  assert.deepEqual(st.ai.rateLimitedModels.map(x => x.model).sort(), ['acme-opus-4-8', 'acme-opus-4-9']);
+  assert.equal(st.ai.modelSwitch, true);
+  // A resting model whose closest match is resting too: the next closest answers, nothing rate-limited is called
+  res = await ask('acme-opus-4-9');
+  body = await res.json();
+  assert.equal(body.model, 'acme-opus-4-7');
+  assert.deepEqual([hits['acme-opus-4-8'], hits['acme-opus-4-9']], [1, 1]);
+  // Switching turned off (Settings → AI models): a clear 429 instead
+  res = await ask('acme-opus-4-8', { 'X-MetaCode-Model-Switch': 'off' });
+  body = await res.json();
+  assert.equal(res.status, 429);
+  assert.equal(body.error.type, 'model_rate_limited');
+  assert.match(body.error.message, /acme-opus-4-8.*turned off in Settings/);
+  assert.ok(Number(res.headers.get('retry-after')) > 0);
+  // AI Coding's batch: each answer says which model answered
+  const r = await fetch(base + '/api/ai/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parallel: 2, requests: [1, 2].map(id => ({ id, body: { model: 'acme-opus-4-8', max_tokens: 20, messages: [{ role: 'user', content: 'x' }] } })) }) });
+  const lines = (await r.text()).split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(l => !l.done);
+  assert.deepEqual(lines.map(l => [l.ok, l.fallback, l.fallbackReason, l.requested]), [[true, 'acme-opus-4-7', 'rate_limited', 'acme-opus-4-8'], [true, 'acme-opus-4-7', 'rate_limited', 'acme-opus-4-8']]);
+});
+
+test('streamed requests switch to the closest model too, before anything is sent', async () => {
+  const res = await fetch(base + '/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-provider': 'openai' }, body: JSON.stringify({ model: 'strm-pro-2-0', stream: true, max_tokens: 20, messages: [{ role: 'user', content: 'hi' }] }) });
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get('content-type'), /event-stream/);
+  assert.equal(res.headers.get('x-metacode-model-fallback'), 'strm-pro-1-9');
+  assert.match(await res.text(), /streamed by 1-9/);
+});
+
+test('a used-up key budget isn\'t "solved" by switching models; 429s on several models without quota headers pause the key', async () => {
+  let res = await ask('budget-model');
+  let body = await res.json();
+  assert.equal(res.status, 429);
+  assert.equal(body.error.type, 'quota_exceeded');
+  assert.equal(res.headers.get('x-metacode-model-fallback'), null, 'no other model was tried');
+  assert.ok(!(await json('GET', '/api/settings/status')).json.ai.rateLimitedModels.some(x => x.model === 'budget-model'), 'the key rests, not the model');
+  await new Promise(r => setTimeout(r, 2300));            // the budget window resets
+  // busy-a → busy-b → busy-c all refused without quota headers: it's the key being paused
+  res = await ask('busy-a');
+  body = await res.json();
+  assert.equal(res.status, 429);
+  assert.equal(body.error.type, 'rate_limited');
+  assert.match(body.error.message, /pause/);
+  assert.deepEqual([hits['busy-a'], hits['busy-b'], hits['busy-c']], [1, 1, 1]);
+  assert.ok(!(await json('GET', '/api/settings/status')).json.ai.rateLimitedModels.some(x => /^busy-/.test(x.model)), 'the models aren\'t blamed for the key\'s pause');
+  await new Promise(r => setTimeout(r, 1300));            // Retry-After: 1
+  res = await ask('model-b');
+  assert.equal(res.status, 200, 'the key is back');
+});
+
 test('projects saved on the server by older versions: listed and readable from this computer only; nothing new is stored there', async () => {
   fs.mkdirSync(path.join(tmp, 'projects', 'projects'), { recursive: true });
   fs.writeFileSync(path.join(tmp, 'projects', 'projects', legacyProject.id + '.json'), JSON.stringify(legacyProject));
@@ -429,6 +512,29 @@ test('Settings page: .env status, AI ready in the top bar, a model per feature u
   assert.deepEqual(seenModels, ['model-c', 'model-b'], 'the assistant uses its own model; AI Coding uses the default');
   await page.click('text=Test connection');
   await page.waitForFunction(() => /Connected/.test(document.getElementById('api-test-result').textContent));
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('Settings: switching to a similar model is on by default, says which model answered, and can be turned off', { skip: noBrowser, timeout: 60000 }, async () => {
+  const { page, context, errors } = await openApp('#settings');
+  await page.waitForSelector('#s-switch');
+  assert.equal(await page.isChecked('#s-switch'), true);
+  // acme-opus-4-8 is still resting from the test above
+  await page.waitForFunction(() => /acme-opus-4-8/.test(document.getElementById('s-limited').textContent));
+  await page.evaluate(() => App.setState({ settings: Object.assign({}, App.getState().settings, { model: 'acme-opus-4-8', models: {} }) }));
+  const text = await page.evaluate(() => App.callClaude([{ role: 'user', content: 'hi' }], '', 20, { feature: 'assistant' }));
+  assert.match(text, /ok from acme-opus-4-7/);
+  await page.waitForSelector('.notif', { state: 'attached' });
+  assert.match(await page.textContent('#notif-stack'), /rate-limiting “acme-opus-4-8”.*“acme-opus-4-7”/);
+  // Off: the request waits for the chosen model instead
+  await page.uncheck('#s-switch');
+  await page.click('text=Save model settings');
+  assert.equal(await page.evaluate(() => App.getState().settings.switchModels), false);
+  await page.evaluate(() => App.setState({ settings: Object.assign({}, App.getState().settings, { model: 'acme-opus-4-8' }) }));   // (saving also saved the dropdown's model)
+  const err = await page.evaluate(() => App.callClaude([{ role: 'user', content: 'hi' }], '', 20, { feature: 'assistant' }).then(() => null, e => e.message));
+  assert.match(err, /rate-limiting the model "acme-opus-4-8"/);
+  await page.evaluate(() => App.setState({ settings: Object.assign({}, App.getState().settings, { model: '', switchModels: true }) }));
   assert.deepEqual(errors, []);
   await context.close();
 });

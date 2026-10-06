@@ -11,7 +11,7 @@ const App = (() => {
     codebook: [],   // [{id, name, description, codes:[{id,label,description}]}]
     network:  { nodes: [], edges: [] },
     networkAnalysis: null, // last NetworkX result from Analyze CSV (see csv-analyzer.js)
-    settings: { model: '', models: {}, delay: 500, parallel: 4 }   // AI models (Settings → AI models); keys live in the server's .env
+    settings: { model: '', models: {}, delay: 500, parallel: 4, switchModels: true }   // AI models (Settings → AI models); keys live in the server's .env
   };
 
   const STORAGE_KEY = 'strata_v1'; // kept stable so existing users' saved data isn't orphaned by the rename
@@ -37,6 +37,7 @@ const App = (() => {
     if (!state.settings.models || typeof state.settings.models !== 'object') state.settings.models = {};
     if (!Number.isFinite(Number(state.settings.delay))) state.settings.delay = 500;
     if (!Number.isFinite(Number(state.settings.parallel)) || Number(state.settings.parallel) < 1) state.settings.parallel = 4;
+    if (typeof state.settings.switchModels !== 'boolean') state.settings.switchModels = true;
   }
   function getState()  { return state; }
   function setState(patch) { Object.assign(state, patch); save(); }
@@ -283,6 +284,11 @@ const App = (() => {
               <div class="s-feature-models" id="s-feature-models"></div>
             </div>
             <div class="form-group">
+              <label class="s-check-row" for="s-switch"><input type="checkbox" id="s-switch" ${settings.switchModels !== false ? 'checked' : ''}> If a model is rate-limited, use the closest similar model</label>
+              <div class="form-hint">When EMIS throttles the model you picked, requests go to the most similar available model — same family and line, nearest version and size (e.g. Claude Opus 4.8 → Opus 4.7) — until it can be used again, and a note says which one answered. Turn off to wait for your model instead (e.g. so every post is coded by the same model). A used-up EMIS budget can't be avoided this way: it applies to every model.</div>
+              <div class="form-hint" id="s-limited"></div>
+            </div>
+            <div class="form-group">
               <label class="form-label" for="s-parallel">AI Coding: copies of the model working at once</label>
               <input class="form-input" id="s-parallel" type="number" value="${getParallel()}" min="1" max="${maxParallel()}" step="1">
               <div class="form-hint">Posts are split between this many simultaneous requests to the same model, so coding finishes up to that many times faster. 1 codes one post at a time. Lower it if EMIS rate-limits you (MetaCode also slows down by itself when that happens). Up to ${maxParallel()} (the server's AI_MAX_PARALLEL).</div>
@@ -384,7 +390,9 @@ const App = (() => {
     document.querySelectorAll('#s-feature-models select[data-feature]').forEach(sel => { if (sel.value) models[sel.dataset.feature] = sel.value; });
     const delay = parseInt(document.getElementById('s-delay').value, 10);
     const parallel = clampParallel(document.getElementById('s-parallel').value);
-    setState({ settings: { ...state.settings, model, models, delay: Number.isFinite(delay) ? Math.max(0, delay) : 500, parallel } });
+    const sw = document.getElementById('s-switch');
+    const switchModels = sw ? sw.checked : state.settings.switchModels !== false;
+    setState({ settings: { ...state.settings, model, models, delay: Number.isFinite(delay) ? Math.max(0, delay) : 500, parallel, switchModels } });
     notify('Model settings saved', 'success');
   }
 
@@ -568,7 +576,20 @@ const App = (() => {
 
   // Shows what the server read from .env and whether AI is ready — names of
   // settings only, never values.
+  // Settings → AI models: which models EMIS is rate-limiting right now
+  function renderLimited(st) {
+    const el = document.getElementById('s-limited');
+    if (!el) return;
+    const list = (st && st.ai && st.ai.rateLimitedModels) || [];
+    const sw = document.getElementById('s-switch');
+    if (sw && st && st.ai && st.ai.modelSwitch === false) { sw.checked = false; sw.disabled = true; sw.title = 'Turned off for this server (EMIS_MODEL_SWITCH=off in .env)'; }
+    el.innerHTML = list.length
+      ? '<b>Rate-limited right now:</b> ' + list.map(x => esc(x.model) + ' (until ' + esc(new Date(x.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) + ')').join(', ')
+      : '';
+  }
+
   function renderEnvStatus(statusOverride) {
+    renderLimited(statusOverride || serverStatus);
     const box = document.getElementById('s-env-status');
     const badge = document.getElementById('s-ai-badge');
     const st = statusOverride || serverStatus;
@@ -696,13 +717,27 @@ const App = (() => {
   // Sends a chat request to MetaCode's server, which calls EMIS with the key
   // from .env. opts.feature ('coding' | 'assistant' | 'import' | 'csv') picks
   // that feature's model.
+  // A similar model answered because the one asked for is rate-limited (or failing):
+  // say so once in a while, not on every request.
+  const fallbackNoted = new Map();
+  function noteFallback(requested, used, reason) {
+    if (!requested || !used || requested === used) return;
+    const k = requested + '>' + used, now = Date.now();
+    if (now - (fallbackNoted.get(k) || 0) < 10 * 60 * 1000) return;
+    fallbackNoted.set(k, now);
+    notify(reason === 'rate_limited'
+      ? 'EMIS is rate-limiting “' + requested + '”, so the closest similar model, “' + used + '”, is answering until it\'s available again.'
+      : '“' + requested + '” isn\'t working at EMIS right now, so the closest model, “' + used + '”, answered.', 'warning', 7000);
+  }
+  const switchHeader = () => (state.settings.switchModels === false ? { 'X-MetaCode-Model-Switch': 'off' } : {});
+
   async function callClaude(messages, system='', max_tokens=1000, opts=null) {
     const feature = opts && typeof opts === 'object' ? opts.feature : null;
     const model = modelFor(feature);
     const allMsgs = system ? [{ role: 'system', content: system }, ...messages] : [...messages];
     const body = { messages: allMsgs, max_tokens, temperature: 0.1 };
     if (model) body.model = model;
-    const res  = await fetch('/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-provider': 'openai' }, body: JSON.stringify(body) });
+    const res  = await fetch('/api/ai', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', 'x-provider': 'openai' }, switchHeader()), body: JSON.stringify(body) });
     let data = null;
     try { data = await res.json(); } catch (e) { data = null; }
     if (!res.ok) {
@@ -710,6 +745,8 @@ const App = (() => {
       throw new Error(msg);
     }
     lastModelUsed = (data && data.model) || model;
+    const fb = res.headers.get('X-MetaCode-Model-Fallback');
+    if (fb) { lastModelUsed = fb; noteFallback(res.headers.get('X-MetaCode-Model-Requested'), fb, res.headers.get('X-MetaCode-Model-Fallback-Reason')); }
     const text = (data && data.choices && data.choices[0] && data.choices[0].message) ? data.choices[0].message.content : '';
     return String(text || '').trim();
   }
@@ -723,7 +760,8 @@ const App = (() => {
   // Many chat requests at once: the server runs up to `parallel` of them side by
   // side with the same model and streams each answer back as it finishes.
   //   items: [{ id, messages, system, max_tokens }]
-  //   opts:  { feature, parallel, delay, signal, onResult({ id, ok, text, error, status }) }
+  //   opts:  { feature, parallel, delay, signal, onResult({ id, ok, text, error, status, model, requested, fallbackReason }) }
+  //   (model: the model that answered — a similar one when the requested model was rate-limited)
   // Resolves to { parallel } (how many ran at the end; the server lowers it when rate-limited).
   async function callClaudeBatch(items, opts) {
     opts = opts || {};
@@ -734,7 +772,7 @@ const App = (() => {
       return { id: it.id, body };
     });
     const res = await fetch('/api/ai/batch', { method: 'POST', signal: opts.signal, headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requests, parallel: clampParallel(opts.parallel || getParallel()), delayMs: opts.delay || 0 }) });
+      body: JSON.stringify({ requests, parallel: clampParallel(opts.parallel || getParallel()), delayMs: opts.delay || 0, switchModels: state.settings.switchModels !== false }) });
     if (!res.ok) {
       let data = null;
       try { data = await res.json(); } catch (e) { data = null; }
@@ -751,9 +789,11 @@ const App = (() => {
       try { msg = JSON.parse(line); } catch (e) { return; }
       if (msg.done) { finished = msg; return; }
       if (msg.ok) {
-        lastModelUsed = (msg.data && msg.data.model) || model;
+        lastModelUsed = msg.fallback || (msg.data && msg.data.model) || model;
+        if (msg.fallback) noteFallback(msg.requested, msg.fallback, msg.fallbackReason);
         const c = msg.data && msg.data.choices && msg.data.choices[0];
-        opts.onResult && opts.onResult({ id: msg.id, ok: true, text: String((c && c.message && c.message.content) || '').trim() });
+        opts.onResult && opts.onResult({ id: msg.id, ok: true, text: String((c && c.message && c.message.content) || '').trim(),
+          model: msg.fallback || null, requested: msg.requested || null, fallbackReason: msg.fallbackReason || null });
       } else {
         opts.onResult && opts.onResult({ id: msg.id, ok: false, status: msg.status, error: (msg.error && msg.error.message) || 'AI request failed', type: msg.error && msg.error.type });
       }

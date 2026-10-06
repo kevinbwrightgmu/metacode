@@ -312,6 +312,7 @@ const AICoder = (() => {
     const system = buildSystemPrompt();
     let parallel = App.getParallel();
     let done = 0, coded = 0, failed = 0, lastError = '';
+    const substitutes = {};      // model → posts it coded because the chosen model was rate-limited or failing
     let pending = toCode.slice();
     updateProgress(0, toCode.length);
 
@@ -332,6 +333,7 @@ const AICoder = (() => {
               const updated = App.getState().posts.map(p => p.id === post.id ? Object.assign({}, p, { aiCodes: codings }) : p);
               App.setState({ posts: updated });
               coded++; done++;
+              if (r.model) substitutes[r.model] = (substitutes[r.model] || 0) + 1;
               scheduleRefresh();
             } else {
               lastError = problem;
@@ -364,9 +366,11 @@ const AICoder = (() => {
     refreshTable();
     updateProgress(done, toCode.length);
 
-    const doneMsg = stopFlag
+    const subs = Object.keys(substitutes);
+    const subMsg = subs.length ? ' ' + subs.map(m => substitutes[m] + ' of them by “' + m + '”').join(', ') + ' — the closest model, used while the chosen one was rate-limited or unavailable.' : '';
+    const doneMsg = (stopFlag
       ? 'Stopped after ' + coded + ' posts.'
-      : '✓ Done — ' + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError + ')' : '') : '') + '.';
+      : '✓ Done — ' + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError + ')' : '') : '') + '.') + subMsg;
     updateStatus(doneMsg, !!failed && !stopFlag);
     App.notify(
       stopFlag ? 'Stopped (' + coded + ' coded)' : 'AI coding complete — ' + coded + ' posts coded' + (failed ? ', ' + failed + ' failed' : ''),
