@@ -135,7 +135,10 @@ const SurveyStudio = (() => {
       return;
     }
     if (!surveys.length) {
-      box.innerHTML = '<div class="empty-state"><div class="empty-title">No surveys yet</div><div class="empty-sub">Pick a template above, or start with a blank survey.</div></div>';
+      box.innerHTML = '<div class="empty-state"><div class="empty-title">No surveys yet</div><div class="empty-sub">Pick a template above, or start with a blank survey. New to Survey Studio? Build your first one step by step.</div>' +
+        '<button type="button" class="btn btn-primary" id="ss-empty-tutorial">Start the tutorial</button></div>';
+      const tut = document.getElementById('ss-empty-tutorial');
+      if (tut) tut.onclick = () => { if (window.StudioTutorial) window.StudioTutorial.start(true); };
       return;
     }
     box.innerHTML = '<div class="table-wrap"><table class="table ss-table"><thead><tr><th>Survey</th><th>Status</th><th>Responses</th><th>Questions</th><th>Updated</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>' +
@@ -241,7 +244,7 @@ const SurveyStudio = (() => {
         '<div class="ss-bar-right"><button type="button" class="ss-icon-btn" id="ss-undo" title="Undo (Ctrl+Z)" aria-label="Undo">' + icon(I.undo) + '</button>' +
         '<button type="button" class="ss-icon-btn" id="ss-redo" title="Redo (Ctrl+Shift+Z)" aria-label="Redo">' + icon(I.redo) + '</button>' +
         '<button type="button" class="ss-icon-btn" id="ss-keys" title="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">' + icon(I.kbd) + '</button>' +
-        '<button type="button" class="ss-icon-btn" id="ss-tour" title="Take the tour of the editor" aria-label="Take the tour of the editor">' + icon(I.tour) + '</button>' +
+        '<button type="button" class="ss-icon-btn" id="ss-tour" title="Tutorial & tour" aria-label="Learn Survey Studio: tutorial and tour">' + icon(I.tour) + '</button>' +
         '<span class="ss-pub-state" id="ss-pub-state"></span><button type="button" class="btn btn-primary btn-sm" id="ss-publish">Publish</button></div>' +
       '</header>' +
       '<div class="ss-views">' +
@@ -299,7 +302,7 @@ const SurveyStudio = (() => {
     function doUndo() { const l = store.undo(); if (l) say('Undid ' + l.toLowerCase()); }
     function doRedo() { const l = store.redo(); if (l) say('Redid ' + l.toLowerCase()); }
     $('#ss-keys').addEventListener('click', shortcutsDialog);
-    $('#ss-tour').addEventListener('click', () => { if (window.Tour) window.Tour.start('studio-editor'); });
+    $('#ss-tour').addEventListener('click', () => { if (window.StudioTutorial) window.StudioTutorial.chooser(); else if (window.Tour) window.Tour.start('studio-editor'); });
 
     function renderPubState() {
       const p = store.publish;

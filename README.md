@@ -22,7 +22,7 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 | **Network Graph** | Interactive D3.js force-directed visualization — can be populated directly from the NetworkX analysis, with detected communities as node colors; export the full graph as PNG or SVG at any time, regardless of current zoom/pan |
 | **Metrics** | Engagement averages, code distributions, engagement by code, AI–human agreement and completion charts |
 | **Export** | Download coded data, reliability reports, and codebook as CSV |
-| **MetaCode Assistant** | Built-in help chat — click **Ask MetaCode** (top right) to ask how to use any feature, what a number means, or how to fix an error; answers come from the same AI as AI Coding (EMIS) and use a summary of your project's current state |
+| **MetaCode Assistant** | Built-in help chat — click **Ask MetaCode** (top right) to ask how to use any feature, what a number means, or how to fix an error; answers come from the same AI as AI Coding and use a summary of your project's current state |
 
 ---
 
@@ -31,7 +31,7 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 ### Prerequisites
 - **Node.js** v18 or higher → [nodejs.org](https://nodejs.org) (**v22 or higher** for the Reddit Scraper)
 - **Python** 3.9 or higher (only needed for the "Analyze CSV" NetworkX feature) → [python.org](https://python.org)
-- An **EMIS API key** (`emis-…`). EMIS keys are issued manually by EMIS.
+- An **AI API key** for MetaCode's AI service (keys are issued manually by the service's operator).
 
 ### Setup (4 steps)
 
@@ -45,13 +45,13 @@ npm install
 pip install -r requirements.txt
 ```
 
-**3. Add your EMIS key**
+**3. Add your AI key**
 ```bash
 cp .env.example .env
 # Edit .env and set your key:
-# EMIS_API_KEY=emis-...
+# EMIS_API_KEY=your-key
 ```
-The key is only read by MetaCode's server — it never reaches the browser. See [AI Provider (EMIS)](#ai-provider-emis)
+The key is only read by MetaCode's server — it never reaches the browser. See [AI Provider](#ai-provider)
 for the other settings. **Settings → AI connection** shows which file was read and which settings it contained
 (names only); after editing `.env`, click **Reload .env** — no restart needed for the AI settings. In **Settings →
 AI models** pick a default model and, if you like, a different model for each AI feature.
@@ -61,7 +61,7 @@ AI models** pick a default model and, if you like, a different model for each AI
 npm start
 ```
 
-Then open **http://localhost:3000** in your browser. The top bar and the "Analyze CSV" page both show a live status indicator so you always know whether the AI (EMIS) and Python/NetworkX are ready.
+Then open **http://localhost:3000** in your browser. The top bar and the "Analyze CSV" page both show a live status indicator so you always know whether the AI and Python/NetworkX are ready.
 
 **Reddit Scraper** works with no extra setup: by default your open MetaCode tab fetches Reddit through Scramjet.
 Reddit API credentials are optional — see [Reddit Scraper](#reddit-scraper).
@@ -224,6 +224,14 @@ All scraper variables (concurrency, retention, response size, browser on/off, te
 Survey Studio builds and runs surveys on its own page, `studio.html`. Open it from the front page with
 **Open Survey Studio**. Full guide: **[docs/survey-studio.md](docs/survey-studio.md)**.
 
+**New to it? Take the hands-on tutorial** — **Tutorial & tour** in the Studio's top bar (or the compass
+button in the editor, the empty survey list, or `studio.html?tutorial=1`). In about five minutes it walks you
+through the whole workflow on a practice survey: name it, add and edit a question, make it required, add a
+follow-up shown by logic, change the theme colour, preview on a phone, publish and find the responses. Each
+step points at what to use and moves on once you've done it; any step can be skipped, and a closed tutorial
+can be resumed. It works on phones too (the side panels open by themselves). The same menu has a 2-minute
+tour of the screen.
+
 - **Design:** start from a template or a blank page. Add questions, text, media and layout elements from the
   palette.
   - Every element, including each answer, indicator and label, has its own transform, appearance,
@@ -280,12 +288,12 @@ For most research contexts, κ ≥ 0.61 is the acceptable threshold.
 
 ## AI Coding Tips
 
-- **Provider**: all AI features run through EMIS (see [AI Provider (EMIS)](#ai-provider-emis))
-- **Quota**: EMIS gives each key a budget of prompts and tokens per day, week or month. Coding a large dataset uses one prompt per post (more if a post has to be retried), so check your quota before a big run
-- **Model selection**: Click "Fetch Models" in Settings to see exactly which models EMIS offers — the lineup can change over time
+- **Provider**: all AI features run through the AI service (see [AI Provider](#ai-provider))
+- **Quota**: The AI service gives each key a budget of prompts and tokens per day, week or month. Coding a large dataset uses one prompt per post (more if a post has to be retried), so check your quota before a big run
+- **Model selection**: Click "Fetch Models" in Settings to see exactly which models the AI service offers — the lineup can change over time
 - **Codebook quality**: Clear, specific code descriptions dramatically improve AI coding accuracy
 - **Fine-tuning a code**: If the AI keeps misapplying one specific code, open it in the Codebook and add a note in "AI Fine-Tuning Notes" — e.g. "don't count sarcastic praise as Positive." This is read by the AI on every future coding run but never shown to human coders, so it won't bias manual coding or your reliability comparison
-- **Speed (copies at once)**: AI Coding splits the posts between several simultaneous requests to the same model — 4 by default. Change the number in the **at once** box next to **Run AI Coding** or in Settings → AI models (1 = one post at a time; up to `AI_MAX_PARALLEL`, 16 by default). Results appear as each post finishes. If EMIS rate-limits the key, MetaCode halves the number, pauses and retries by itself. Every post still uses one prompt of your quota, so more copies finish sooner but don't cost more
+- **Speed (copies at once)**: AI Coding splits the posts between several simultaneous requests to the same model — 4 by default. Change the number in the **at once** box next to **Run AI Coding** or in Settings → AI models (1 = one post at a time; up to `AI_MAX_PARALLEL`, 16 by default). Results appear as each post finishes. If the AI service rate-limits the key, MetaCode halves the number, pauses and retries by itself. Every post still uses one prompt of your quota, so more copies finish sooner but don't cost more
 - **Stop and resume**: **Stop** cancels the requests still waiting; run again later to code only the uncoded posts
 - **Reasoning**: Click the 💬 button on any AI-coded post to view the model's reasoning
 
@@ -298,8 +306,8 @@ page, what a statistic means, or why something isn't working — e.g. "Explain m
 "Why is my Network Graph blank?". Suggested questions change with the page you're on. On screens 1440px and
 wider the panel sits beside your work; on smaller screens it opens over the right side (press **Esc** or ✕ to close).
 
-**How it works:** the assistant uses the same AI as AI Coding — EMIS, with the model chosen in Settings and the
-key in the server's `.env` — through the same local server, with key rotation. Each question sends EMIS:
+**How it works:** the assistant uses the same AI as AI Coding, with the model chosen in Settings and the
+key in the server's `.env` — through the same local server, with key rotation. Each question sends the AI service:
 - a short reference guide to MetaCode (`public/js/assistant-knowledge.js` — update it when features change);
 - a summary of your project's current state — counts, codebook dimension and code names, reliability and
   network statistics, the page you're on, and how many API keys are configured (never the keys themselves,
@@ -307,14 +315,14 @@ key in the server's `.env` — through the same local server, with key rotation.
 - the last few messages of the conversation.
 
 The conversation lives in memory only: it's cleared when you reload the page or click the clear button.
-Each question uses roughly 3,000 tokens of your EMIS token quota.
+Each question uses roughly 3,000 tokens of your AI token quota.
 
 ---
 
-## AI Provider (EMIS)
+## AI Provider
 
 Every AI feature — AI Coding, the assistant, column detection in Import Data and Analyze CSV, and Test
-Connection — goes through MetaCode's own server to **EMIS**, an OpenAI-compatible AI gateway:
+Connection — goes through MetaCode's own server to the **AI service**, an OpenAI-compatible AI gateway:
 
 ```
 browser → POST /api/ai (MetaCode server) → POST https://emis.zxs-is-very.cool/v1/chat/completions
@@ -324,15 +332,15 @@ Configuration lives only in the server's `.env` file:
 
 | Variable | Required | What it does |
 |---|---|---|
-| `EMIS_API_KEY` | yes | Your EMIS key. Several keys can be listed, comma-separated — MetaCode rotates between them |
-| `EMIS_BASE_URL` | no | EMIS API address, default `https://emis.zxs-is-very.cool/v1` |
-| `EMIS_MODEL` | no | Default model. If empty: the first model in `emis-models.json` (without that file: `gpt-oss-120b` if EMIS lists it, otherwise the first model EMIS lists) |
+| `EMIS_API_KEY` | yes | Your AI key. Several keys can be listed, comma-separated — MetaCode rotates between them |
+| `EMIS_BASE_URL` | no | AI service address, default `https://emis.zxs-is-very.cool/v1` |
+| `EMIS_MODEL` | no | Default model. If empty: the first model in `emis-models.json` (without that file: `gpt-oss-120b` if the AI service lists it, otherwise the first model the AI service lists) |
 | `EMIS_MODELS_FILE` | no | Model list file, default `emis-models.json` in the MetaCode folder |
 | `EMIS_TRANSPORT` | no | What sends AI requests: `auto` (default — Python, with the `openai` package when installed, else Node.js), `python` or `node` |
-| `EMIS_PROXY` | no | Proxy for EMIS requests (`HTTPS_PROXY` / `NO_PROXY` are used too) |
-| `EMIS_MODEL_SWITCH` | no | `off` stops MetaCode from answering with the closest similar model when EMIS rate-limits the chosen one (on by default) |
+| `EMIS_PROXY` | no | Proxy for AI requests (`HTTPS_PROXY` / `NO_PROXY` are used too) |
+| `EMIS_MODEL_SWITCH` | no | `off` stops MetaCode from answering with the closest similar model when the AI service rate-limits the chosen one (on by default) |
 | `AI_MAX_PARALLEL` | no | The most copies of the model AI Coding may run at once (default 16, max 64); users choose up to this |
-| `EMIS_TIMEOUT_MS` | no | How long to wait for EMIS (default 120000 ms) |
+| `EMIS_TIMEOUT_MS` | no | How long to wait for the AI service (default 120000 ms) |
 
 After changing `.env`, click **Settings → Reload .env** (AI settings apply at once; scraper and port settings
 need a restart). MetaCode looks for `.env` next to `server.js`, then in the folder the server was started from,
@@ -341,41 +349,62 @@ then in the folder above; `.env.txt` (Windows often adds `.txt`) is accepted, an
 system environment (an old system variable is a common reason a new key seems not to load) — Settings and the
 startup banner say when that happens.
 
-- **Models.** The model list comes from `emis-models.json` — EMIS's models in OpenCode's config format
+- **Models.** The model list comes from `emis-models.json` — the AI service's models in OpenCode's config format
   (`provider.emis.models`: id → name, `tool_call`, `reasoning`, `attachment`). To update it, edit the file or
-  replace it with a newer OpenCode config from EMIS; changes are picked up without a restart. Only the model
-  ids, names and capability flags are read from it — the EMIS address and key always come from `.env`. If the
-  file is missing, MetaCode asks EMIS for its live list (`GET /v1/models`) instead. The model picked in Settings
+  replace it with a newer OpenCode config from the AI service; changes are picked up without a restart. Only the model
+  ids, names and capability flags are read from it — the AI service address and key always come from `.env`. If the
+  file is missing, MetaCode asks the AI service for its live list (`GET /v1/models`) instead. The model picked in Settings
   is used when it's listed; otherwise the default above is used (the server log says so). A request that needs
   something a model's flags say it lacks (tool calling, images) is refused with a clear message.
-- **Quota.** EMIS reports each key's remaining prompts and tokens with every answer and returns HTTP 429 once
+- **Quota.** The AI service reports each key's remaining prompts and tokens with every answer and returns HTTP 429 once
   the budget for the current day, week or month is used up. MetaCode then rests that key until the reset
-  time EMIS gave (another key is used if you listed several) and shows a message saying when the quota
+  time the AI service gave (another key is used if you listed several) and shows a message saying when the quota
   resets. Restarting the server clears this memory.
-- **Rate-limited models switch to the closest one.** A 429 while the key still has budget means EMIS is
+- **Rate-limited models switch to the closest one.** A 429 while the key still has budget means the AI service is
   throttling that one model. MetaCode then rests just that model (1 minute, doubling while it keeps
   happening, up to 15 — or what `Retry-After` says) and answers with the **closest similar model**: same
   family and line first (Claude Opus → Claude Opus, Qwen Max Thinking → Qwen Max Thinking), then the nearest
   version and size, the same speed tier and capabilities (`model-match.js`). Requests for the resting model go
-  straight to the substitute without calling EMIS, and the app says which model answered (AI Coding's summary
+  straight to the substitute without calling the AI service, and the app says which model answered (AI Coding's summary
   counts the posts coded by a substitute). Up to four similar models are tried per request. If one key gets
   429s on three different models within 20 seconds without quota headers, it's the key being paused, so the
   key rests instead. Turn switching off per browser in Settings → AI models (*If a model is rate-limited, use
   the closest similar model*) or for the whole server with `EMIS_MODEL_SWITCH=off`. A used-up budget applies
   to every model, so switching doesn't help there.
-- **Security.** The key is sent only to the EMIS address in `.env`: never to the browser, never logged,
-  never returned by an endpoint or included in an error. The browser can't choose the EMIS address or key.
+- **Security.** The key is sent only to the AI service address in `.env`: never to the browser, never logged,
+  never returned by an endpoint or included in an error. The browser can't choose the AI service address or key.
   Other websites open in your browser can't use MetaCode's AI endpoints (they're same-origin only).
 - **Settings page.** *AI connection* shows the `.env` file that was read (name, location, encoding), the names
   of the settings in it, warnings, whether AI is ready, and **Reload .env** / **Test connection**. *AI models*
   has a default model plus one per feature — AI Coding, Ask MetaCode, Import Data (column detection) and
   Analyze CSV (edge detection); "Same as default" follows the default. *AI Coding: copies of the model working
   at once* sets how many posts are coded side by side; *If a model is rate-limited, use the closest similar
-  model* (on by default) and a list of the models EMIS is rate-limiting right now. *EMIS keys* lists each key masked, with
+  model* (on by default) and a list of the models the AI service is rate-limiting right now. *AI keys* lists each key masked, with
   its status and remaining quota.
-- **Streaming.** `POST /api/ai` also accepts `"stream": true` (OpenAI request format) and then relays EMIS's
+- **Streaming.** `POST /api/ai` also accepts `"stream": true` (OpenAI request format) and then relays the AI service's
   server-sent events (`chat.completion.chunk` …, then `data: [DONE]`); a failure mid-stream arrives as a
   final `data: {"error": {...}}` event. The current interface doesn't use streaming.
+
+---
+
+## Status Page
+
+`status.metac0.de` shows whether MetaCode is working, in the usual status-page style: an overall state
+("All systems operational", "Some systems are degraded", "Partial outage", "Major outage"), each component
+with its last 24 hours as 30-minute bars and its uptime, and recent incidents. Components: **MetaCode app**,
+**AI service** (reachable, quota, rate-limited models — checked without spending prompts), **Survey publishing
+& responses** (storage writable), **Network analysis** (Python/NetworkX) and the **Reddit scraper**. It
+refreshes every 30 seconds. Nothing secret is shown — no keys, addresses, paths or error details.
+
+- **Same server, no separate deployment.** MetaCode answers requests for `status.metac0.de` (set another name
+  with `STATUS_HOST`; any host starting with `status.` works too) with the status page and its data
+  (`GET /api/status`, public, CORS-enabled JSON). Other paths on that host redirect to the main site. The page
+  is also at **`/status`** on the main site (linked from the front page's footer), e.g.
+  `http://localhost:3000/status` — or `http://status.localhost:3000` to try the subdomain locally.
+- **To put it online:** point a DNS record for `status.metac0.de` at the same server as the main site (a
+  CNAME to `metac0.de` is enough), include the name in your TLS certificate, and if a reverse proxy sits in
+  front of MetaCode, make it pass the original host name (nginx: `proxy_set_header Host $host;`).
+- History is kept in memory since the server last started (the page says since when).
 
 ---
 
@@ -385,7 +414,8 @@ New to MetaCode? The front page's **Take the guided tour** link, the **Take the 
 of the sidebar, or `app.html?tour=1` starts a tour: a spotlight moves through every page in workflow order
 (Dashboard → Projects → Import → Scraper → Codebook → AI Coding → Human Coding → Reliability → Analyze CSV →
 Network → Metrics → Export → Settings) with a card explaining each, then hands over to Survey Studio's tour
-(the survey list, then each editor tab — it can make a practice survey to show the editor on). Use → / ←
+(the survey list, then each editor tab — it can make a practice survey to show the editor on). Survey Studio
+also has a hands-on tutorial (see [Survey Studio](#survey-studio)). Use → / ←
 or the buttons, and Esc to stop. A first visit offers the tour in a small card (once per browser).
 
 ---
@@ -400,9 +430,9 @@ hold belong to that browser only. **Settings → Your data** downloads a backup 
 it in another browser or on another computer. Keep backup files private: they include the identity that
 manages your published surveys.
 
-Nothing is sent to any server except AI requests to EMIS (for coding, structure detection and assistant questions — they include the
+Nothing is sent to any server except AI requests to the AI service (for coding, structure detection and assistant questions — they include the
 post text being coded) and your own machine's Python process (for NetworkX analysis — this never leaves your
-computer). The EMIS key stays in the server's `.env` file and is only sent to EMIS.
+computer). The AI key stays in the server's `.env` file and is only sent to the AI service.
 
 Survey Studio puts a survey on the server only when you publish it: the published versions and their
 responses are stored as JSON files (`SURVEY_DATA_DIR`, default `survey-data/`) so respondents on other
@@ -426,11 +456,11 @@ responses keep working. Other computers aren't offered them.
 
 ```
 metacode/
-├── server.js                  Express server: AI requests to EMIS + Python/NetworkX bridge + scraper wiring
+├── server.js                  Express server: AI requests to the AI service + Python/NetworkX bridge + scraper wiring
 ├── package.json
 ├── requirements.txt            Python dependency (networkx) for the NetworkX feature
-├── .env.example                Copy to .env and add your EMIS key
-├── emis-models.json            The EMIS models offered in Settings (OpenCode config format)
+├── .env.example                Copy to .env and add your AI key
+├── emis-models.json            The AI models offered in Settings (OpenCode config format)
 ├── scraper/                    Reddit scraper (server side) — see docs/reddit-scraper.md
 │   ├── index.js                /api/scraper routes, SSE, exports, Scramjet file serving
 │   ├── config.js               SCRAPER_* / REDDIT_* settings
@@ -440,8 +470,9 @@ metacode/
 │   ├── reddit/                 Targets/URL parsing, record formatters, standard scraper
 │   ├── jobs/job-manager.js     Job queue, status, logs, results
 │   └── sandbox/                Custom code: Pyodide (Python) and QuickJS (JS/TS) sandbox processes, SDKs, runner
-├── env-file.js                 Reads .env (encodings, .env.txt, other folders, reload) — see AI Provider (EMIS)
-├── model-match.js              "Closest model" ranking, used when EMIS rate-limits a model
+├── env-file.js                 Reads .env (encodings, .env.txt, other folders, reload) — see AI Provider
+├── status-page.js              Status page (status.metac0.de, /status): checks, history, host routing
+├── model-match.js              "Closest model" ranking, used when the AI service rate-limits a model
 ├── owner.js                    Which browser a request comes from (mc_owner cookie) — published surveys, scraper jobs
 ├── projects/                   Import of projects older versions saved on the server (this computer only)
 ├── surveys/                    Survey Studio server side: API routes, publishing, responses, JSON-file store
@@ -457,6 +488,7 @@ metacode/
 │   ├── scramjet-sw.js            Service worker for the Scraper's in-app Reddit browser (Scramjet)
 │   ├── app.html                  The actual application shell (dashboard, sidebar, etc.)
 │   ├── studio.html               Survey Studio (its own page, linked from the front page)
+│   ├── status.html               Status page (served for status.metac0.de and at /status); css/status.css, js/status.js
 │   ├── survey.html               Respondent page for published surveys (/s/<id>)
 │   ├── img/
 │   │   ├── metacode-mark.png     Logo mark (used as favicon + sidebar brand)
@@ -466,7 +498,7 @@ metacode/
 │   └── js/
 │       ├── app.js               Router, state, modals, notifications, Settings, AI requests (via the server)
 │       ├── local-db.js          Your data in this browser (IndexedDB), browser identity, backup/restore
-│       ├── tour.js · app-tour.js  Guided tours (spotlight + card); the coding app's tour
+│       ├── tour.js · app-tour.js  Guided tours and hands-on tutorials (spotlight + card); the coding app's tour
 │       ├── projects.js          Projects page: saved projects (in the browser), autosave
 │       ├── data.js              CSV import for posts/engagement/network (AI-assisted structure detection)
 │       ├── codebook.js          Coding scheme management
@@ -505,32 +537,32 @@ If you use MetaCode in your research, please acknowledge:
 `EMIS_API_KEY=your-key` in it (one setting per line), save, and click **Reload .env**. If it says no file was
 found, the file must be called `.env` (not `.env.example`) next to `server.js`.
 
-**HTTP 502 / "Couldn't reach EMIS" / "EMIS had a temporary server problem"**
-→ MetaCode already retries temporary EMIS failures twice and, when the server's default model is the one
+**HTTP 502 / "Couldn't reach the AI service" / "The AI service had a temporary server problem"**
+→ MetaCode already retries temporary AI service failures twice and, when the server's default model is the one
 failing, answers with another model. If it still fails: open **Settings → AI connection → Test connection**
 to see the exact message. On networks that only allow the internet through a proxy, add
 `HTTPS_PROXY=http://proxy:port` (or `EMIS_PROXY`) to `.env` and click **Reload .env** — Node.js doesn't use
 the system proxy by itself. If a model you picked keeps failing, choose another one in Settings → AI models.
 
-**HTTP 403 / "EMIS's website check answered instead of the API"**
-→ MetaCode sends EMIS requests from Python (with the official `openai` package when installed), as EMIS's
+**HTTP 403 / "The AI service's website check answered instead of the API"**
+→ MetaCode sends AI requests from Python (with the official `openai` package when installed), as the AI service's
 documentation does. Install Python 3, run `pip install -r requirements.txt` (adds `openai`), and restart.
 **Settings → AI connection** shows what sends the requests ("requests sent by Python … (openai …)"). A 403
 that names a model means your key can't use that model: pick another in Settings → AI models.
 
-**"Your EMIS usage quota … is used up"**
-→ The key's EMIS budget for the current day/week/month is spent; the message says when it resets. Wait until
-then, or add another EMIS key to `EMIS_API_KEY` (comma-separated).
+**"Your AI usage quota … is used up"**
+→ The key's AI budget for the current day/week/month is spent; the message says when it resets. Wait until
+then, or add another AI key to `EMIS_API_KEY` (comma-separated).
 
-**"EMIS doesn't offer the model …"**
+**"The AI service doesn't offer the model …"**
 → In Settings → AI models, pick another model and click "Save model settings" (or set `EMIS_MODEL` in `.env`).
-If the model is listed in `emis-models.json` but EMIS no longer serves it, update that file.
+If the model is listed in `emis-models.json` but the AI service no longer serves it, update that file.
 
 **"NetworkX not available" on the Analyze CSV page**
 → Run `pip install -r requirements.txt` (or `pip3 install -r requirements.txt`) in the project folder, then refresh the page
 
 **CSV not importing correctly / posts show blank text**
-→ Ensure your file is UTF-8 encoded. If no text-like column is detected and no EMIS key is set, posts import with blank text by design — set `EMIS_API_KEY` in `.env` to enable AI-assisted column detection
+→ Ensure your file is UTF-8 encoded. If no text-like column is detected and no AI key is set, posts import with blank text by design — set `EMIS_API_KEY` in `.env` to enable AI-assisted column detection
 
 **Network graph not rendering**
 → Check that your nodes CSV has an `id` column and edges CSV has `source` and `target` columns matching node IDs — or use "Analyze CSV" instead, which detects this automatically

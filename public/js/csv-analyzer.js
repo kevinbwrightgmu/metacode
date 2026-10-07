@@ -123,7 +123,7 @@ const CSVAnalyzer = (() => {
     }
 
     if (!App.hasApiKeys()) {
-      lastMapping = blankMapping('AI isn\'t set up — pick the source/target columns manually below, or add EMIS_API_KEY to the server\'s .env file (see Settings) for AI-assisted detection.');
+      lastMapping = blankMapping('AI isn\'t set up — pick the source/target columns manually below, or add your AI key (EMIS_API_KEY) to the server\'s .env file (see Settings) for AI-assisted detection.');
       renderMappingConfirm(lastMapping, 'manual');
       return;
     }

@@ -255,7 +255,7 @@ const App = (() => {
 
         <div class="card">
           <div class="card-title" style="display:flex;align-items:center;justify-content:space-between;gap:8px">
-            AI connection (EMIS)
+            AI connection
             <span id="s-ai-badge"></span>
           </div>
           <div id="s-env-status" style="display:flex;flex-direction:column;gap:10px;font-size:13px">
@@ -285,13 +285,13 @@ const App = (() => {
             </div>
             <div class="form-group">
               <label class="s-check-row" for="s-switch"><input type="checkbox" id="s-switch" ${settings.switchModels !== false ? 'checked' : ''}> If a model is rate-limited, use the closest similar model</label>
-              <div class="form-hint">When EMIS throttles the model you picked, requests go to the most similar available model — same family and line, nearest version and size (e.g. Claude Opus 4.8 → Opus 4.7) — until it can be used again, and a note says which one answered. Turn off to wait for your model instead (e.g. so every post is coded by the same model). A used-up EMIS budget can't be avoided this way: it applies to every model.</div>
+              <div class="form-hint">When the AI service throttles the model you picked, requests go to the most similar available model — same family and line, nearest version and size (e.g. Claude Opus 4.8 → Opus 4.7) — until it can be used again, and a note says which one answered. Turn off to wait for your model instead (e.g. so every post is coded by the same model). A used-up AI budget can't be avoided this way: it applies to every model.</div>
               <div class="form-hint" id="s-limited"></div>
             </div>
             <div class="form-group">
               <label class="form-label" for="s-parallel">AI Coding: copies of the model working at once</label>
               <input class="form-input" id="s-parallel" type="number" value="${getParallel()}" min="1" max="${maxParallel()}" step="1">
-              <div class="form-hint">Posts are split between this many simultaneous requests to the same model, so coding finishes up to that many times faster. 1 codes one post at a time. Lower it if EMIS rate-limits you (MetaCode also slows down by itself when that happens). Up to ${maxParallel()} (the server's AI_MAX_PARALLEL).</div>
+              <div class="form-hint">Posts are split between this many simultaneous requests to the same model, so coding finishes up to that many times faster. 1 codes one post at a time. Lower it if the AI service rate-limits you (MetaCode also slows down by itself when that happens). Up to ${maxParallel()} (the server's AI_MAX_PARALLEL).</div>
             </div>
             <div class="form-group">
               <label class="form-label" for="s-delay">Pause between each copy's requests <span>(ms)</span></label>
@@ -313,7 +313,7 @@ const App = (() => {
 
         <div class="card" style="grid-column:1/-1">
           <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-            EMIS keys
+            AI keys
             <button class="btn btn-ghost btn-sm" onclick="App.fetchKeyStatus()" style="font-size:11.5px;padding:2px 8px">&#8635; Refresh</button>
           </div>
           <div style="font-size:12.5px;color:var(--tx-second);margin-bottom:12px">
@@ -611,7 +611,7 @@ const App = (() => {
     }
     (env.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
     if (env.overridden && env.overridden.length) rows.push('<div style="color:#B45309">⚠ .env replaced older values set in this computer\'s environment for: ' + env.overridden.map(k => '<code>' + esc(k) + '</code>').join(' ') + '</div>');
-    if (ai.ready) rows.push('<div>✓ AI is ready: ' + ai.keyCount + ' EMIS key' + (ai.keyCount === 1 ? '' : 's') + (ai.baseHost ? ' · ' + esc(ai.baseHost) : '') + (ai.defaultModel ? ' · EMIS_MODEL=' + esc(ai.defaultModel) : '') + (ai.proxy ? ' · via proxy ' + esc(ai.proxy) : '') + (ai.transport ? ' · requests sent by ' + esc(ai.transport) : '') + '</div>');
+    if (ai.ready) rows.push('<div>✓ AI is ready: ' + ai.keyCount + ' AI key' + (ai.keyCount === 1 ? '' : 's') + (ai.baseHost ? ' · ' + esc(ai.baseHost) : '') + (ai.defaultModel ? ' · EMIS_MODEL=' + esc(ai.defaultModel) : '') + (ai.proxy ? ' · via proxy ' + esc(ai.proxy) : '') + (ai.transport ? ' · requests sent by ' + esc(ai.transport) : '') + '</div>');
     else rows.push('<div style="color:var(--error)">✗ AI isn\'t ready: ' + esc(ai.problem || 'EMIS_API_KEY isn\'t set.') + '</div>');
     (ai.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
     rows.push('<div class="form-hint">Server ' + esc(st.server.version || '') + ' started ' + esc(new Date(st.server.startedAt).toLocaleString()) + (env.loadedAt ? ' · .env read ' + esc(new Date(env.loadedAt).toLocaleTimeString()) : '') + '</div>');
@@ -657,7 +657,7 @@ const App = (() => {
         if (current && !models.find(m => m.id === current)) {
           modelSel.insertAdjacentHTML('beforeend', '<option value="' + esc(current) + '" selected>' + esc(current) + ' (not in the list)</option>');
         }
-        if (hintEl) hintEl.textContent = models.length + ' model' + (models.length !== 1 ? 's' : '') + ' available' + (data.source ? ' (from ' + data.source + ')' : '') + '.';
+        if (hintEl) hintEl.textContent = models.length + ' model' + (models.length !== 1 ? 's' : '') + ' available' + (data.source ? ' (from ' + (data.source === 'emis' ? 'the live model list' : data.source) + ')' : '') + '.';
       }
       if (feats) {
         const per = state.settings.models || {};
@@ -686,7 +686,7 @@ const App = (() => {
       const data = await res.json();
       const items = data.keys || [];
       if (!items.length) {
-        listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">No EMIS keys loaded — add <code>EMIS_API_KEY=…</code> to .env and click Reload .env above.</div>';
+        listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">No AI keys loaded — add <code>EMIS_API_KEY=…</code> to .env and click Reload .env above.</div>';
         return;
       }
       listEl.innerHTML = items.map(k => {
@@ -694,7 +694,7 @@ const App = (() => {
           ? '<span class="badge badge-green">Available</span>'
           : k.status === 'cooling_down'
             ? '<span class="badge badge-amber">Resting ' + k.cooldownSecondsLeft + 's</span>'
-            : '<span class="badge badge-red">Rejected by EMIS</span>';
+            : '<span class="badge badge-red">Rejected by the AI service</span>';
         const quota = k.quota && k.quota.remainingPrompts !== null && k.quota.remainingPrompts !== undefined ? '<span style="color:var(--tx-muted)">' + k.quota.remainingPrompts + ' prompts left</span>' : '';
         return '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg-muted);border-radius:var(--r-sm);font-size:12.5px">' +
           '<span class="font-mono">' + esc(k.masked) + '</span><span class="badge badge-gray" style="font-size:10px">.env</span>' + quota +
@@ -726,8 +726,8 @@ const App = (() => {
     if (now - (fallbackNoted.get(k) || 0) < 10 * 60 * 1000) return;
     fallbackNoted.set(k, now);
     notify(reason === 'rate_limited'
-      ? 'EMIS is rate-limiting “' + requested + '”, so the closest similar model, “' + used + '”, is answering until it\'s available again.'
-      : '“' + requested + '” isn\'t working at EMIS right now, so the closest model, “' + used + '”, answered.', 'warning', 7000);
+      ? 'The AI service is rate-limiting “' + requested + '”, so the closest similar model, “' + used + '”, is answering until it\'s available again.'
+      : '“' + requested + '” isn\'t working at the AI service right now, so the closest model, “' + used + '”, answered.', 'warning', 7000);
   }
   const switchHeader = () => (state.settings.switchModels === false ? { 'X-MetaCode-Model-Switch': 'off' } : {});
 

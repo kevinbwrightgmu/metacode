@@ -146,7 +146,9 @@ test('Survey Studio tours: the list, a practice survey, every editor tab; replay
   assert.deepEqual(await page.evaluate(() => [Tour.seen('studio'), Tour.seen('studio-editor')]), [true, true]);
   // The tour left the editor on the Design tab, and it can be replayed from the editor's top bar
   assert.equal(await page.getAttribute('.ss-mode[data-mode="design"]', 'aria-selected'), 'true');
-  await page.click('#ss-tour');
+  await page.click('#ss-tour');                            // Learn Survey Studio → quick tour
+  await page.waitForSelector('[data-learn="tour"]');
+  await page.click('[data-learn="tour"]');
   await ready(page);
   assert.equal((await state(page)).name, 'studio-editor');
   await page.keyboard.press('Escape');
@@ -183,4 +185,162 @@ test('first visit: a small invite (not for automated browsers); "No thanks" is r
   assert.equal(await phone.page.evaluate(() => document.querySelector('.tour-pop').classList.contains('is-docked')), true);
   assert.deepEqual(errors.concat(phone.errors), []);
   await phone.context.close();
+});
+
+
+/* ── Hands-on Survey Studio tutorial ─────── */
+// Does each step the way a person would, and checks the tutorial notices and moves on.
+async function doTutorial(page, phone) {
+  const at = async n => {
+    await page.waitForFunction(n => Tour.running && Tour.running.name === 'studio-tutorial' && Tour.running.step === n && !document.querySelector('.tour-pop.is-busy'), n, { timeout: 15000 });
+    await page.waitForTimeout(400);
+    const s = await state(page);
+    assert.ok(s.popInView, 'the card is on screen at step ' + n);
+    assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= (window.visualViewport ? visualViewport.width : innerWidth) + 1), 'no sideways scrolling at step ' + n);
+    return s;
+  };
+  const tap = async sel => { const l = page.locator(sel).first(); await l.scrollIntoViewIfNeeded(); await l.click(); };
+  const spotOn = async sel => page.evaluate(sel => {
+    const spot = document.querySelector('.tour-spot').getBoundingClientRect();
+    const el = document.querySelector(sel).getBoundingClientRect();
+    return el.left >= spot.left - 1 && el.right <= spot.right + 1 && el.top >= spot.top - 1 && el.bottom <= spot.bottom + 1;
+  }, sel);
+  await at(0);
+  assert.match(await page.textContent('.tour-title'), /Build your first survey/);
+  await page.click('.tour-pop [data-tour="next"]');
+  // 1. name it — while a step waits, its button says "Skip step"
+  await at(1);
+  assert.equal((await page.textContent('.tour-pop [data-tour="next"]')).trim(), 'Skip step');
+  assert.ok(await spotOn('#ss-title'));
+  await page.fill('#ss-title', 'Lunch survey');
+  await page.press('#ss-title', 'Enter');
+  // 2. add a question (on phones the Add panel opens by itself)
+  await at(2);
+  if (phone) assert.ok(await page.evaluate(() => document.querySelector('.ss-app').classList.contains('show-left')));
+  await tap('.ss-pal-item[data-type="single"]');
+  // 3. edit its text on the canvas
+  await at(3);
+  const qt = await page.evaluate(() => SurveyCore.questionParts(SurveyStudio.current().store.doc, StudioTutorial.state.q1, 'qtitle')[0].id);
+  await page.dblclick('.ss-viewport [data-svid="' + qt + '"]');
+  await page.keyboard.press('Control+a');
+  await page.keyboard.type('Where do you usually eat lunch?');
+  await page.mouse.click(phone ? 200 : 700, phone ? 700 : 820);
+  // 4. make it required (the Properties panel opens on phones)
+  await at(4);
+  if (phone) assert.ok(await page.evaluate(() => document.querySelector('.ss-app').classList.contains('show-right')));
+  await page.evaluate(() => Array.from(document.querySelectorAll('.ss-right .ss-field')).find(r => r.querySelector('.ss-field-label').textContent.trim() === 'Required').querySelector('.ss-switch').click());
+  // 5. a follow-up question
+  await at(5);
+  await tap('.ss-pal-item[data-type="longtext"]');
+  // 6–8. logic: open the tab, let the tutorial add an example, read it
+  await at(6);
+  await tap('.ss-mode[data-mode="logic"]');
+  await at(7);
+  await page.click('.tour-pop [data-tour="custom"]');     // Add an example for me
+  await at(8);
+  assert.ok(await page.evaluate(() => !!document.querySelector('.bk-script[data-rule="' + StudioTutorial.state.rule + '"]')));
+  await page.click('.tour-pop [data-tour="next"]');
+  // 9–10. theme colour
+  await at(9);
+  await tap('.ss-mode[data-mode="theme"]');
+  await at(10);
+  await page.fill('[data-token-in="primary"]', '#0EA5E9');
+  await page.press('[data-token-in="primary"]', 'Enter');
+  // 11–13. preview on a phone and submit
+  await at(11);
+  await tap('.ss-mode[data-mode="preview"]');
+  await at(12);
+  await tap('.ss-seg-btn[data-device="mobile"]');
+  await at(13);
+  const opt = await page.evaluate(() => SurveyCore.questionParts(SurveyStudio.current().store.doc, StudioTutorial.state.q1, 'option')[0].id);
+  await page.locator('#ss-pv-host [data-svid="' + opt + '"]').click({ force: true });
+  await page.locator('#ss-pv-host .sv-button', { hasText: 'Submit' }).click();
+  // 14–16. publish
+  await at(14);
+  await tap('#ss-publish');
+  await at(15);
+  await page.click('#ss-pub-go');
+  await at(16);
+  await page.click('.tour-pop [data-tour="next"]');
+  // 17–18. responses
+  await at(17);
+  await tap('.ss-mode[data-mode="responses"]');
+  await at(18);
+  await page.click('.tour-pop [data-tour="next"]');
+  await at(19);
+  await page.click('.tour-pop [data-tour="next"]');      // Finish
+  assert.equal(await page.locator('.tour-pop').count(), 0);
+  const result = await page.evaluate(() => {
+    const d = SurveyStudio.current().store.doc;
+    const q = d.elements[StudioTutorial.state.q1];
+    return { title: d.title, required: q.behavior.required, rules: d.rules.length, primary: d.theme.tokens.primary, published: !!SurveyStudio.current().store.publish,
+      seen: Tour.seen('studio-tutorial'), progress: localStorage.getItem('metacode_tutorial_progress') };
+  });
+  assert.deepEqual(result, { title: 'Lunch survey', required: true, rules: 1, primary: '#0EA5E9', published: true, seen: true, progress: null });
+}
+
+test('hands-on tutorial on a desktop: builds, styles, previews and publishes a real practice survey', { skip, timeout: 180000 }, async () => {
+  const { page, context, errors } = await open('/studio.html?tutorial=1', { width: 1440, height: 900 });
+  await doTutorial(page, false);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('hands-on tutorial on a phone: panels open by themselves, the card stays on screen', { skip, timeout: 180000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true });
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.route(/^https?:\/\/(?!localhost)/, r => r.abort());
+  await page.goto(base + '/studio.html?tutorial=1');
+  await doTutorial(page, true);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('tutorial entry points, resuming after closing, skipping, and keys that don\'t get in the way of typing', { skip, timeout: 90000 }, async () => {
+  const { page, context, errors } = await open('/studio.html');
+  // The empty survey list offers it; the top bar's "Tutorial & tour" opens the chooser
+  await page.waitForSelector('#ss-empty-tutorial');
+  await page.click('#st-tour');
+  await page.waitForSelector('[data-learn="tutorial"]');
+  assert.match(await page.textContent('[data-learn="tutorial"]'), /Hands-on tutorial/);
+  await page.click('[data-learn="tutorial"]');
+  await ready(page);
+  await page.click('.tour-pop [data-tour="next"]');
+  await page.waitForFunction(() => Tour.running && Tour.running.step === 1 && !document.querySelector('.tour-pop.is-busy'));
+  // Typing in the page isn't taken over by the tutorial's keys (→ / Enter / Esc)
+  await page.click('#ss-title');
+  await page.keyboard.press('ArrowRight');
+  assert.equal(await page.evaluate(() => Tour.running.step), 1);
+  // Skip a step
+  await page.click('.tour-pop [data-tour="next"]');
+  await page.waitForFunction(() => Tour.running.step === 2);
+  const id = await page.evaluate(() => StudioTutorial.state.surveyId);
+  // Close it; the chooser offers to resume where it stopped, on the same survey
+  await page.click('.tour-pop [data-tour="close"]');
+  assert.equal(await page.locator('.tour-pop').count(), 0);
+  await page.click('#ss-tour');
+  await page.waitForSelector('[data-learn="tutorial"]');
+  assert.match(await page.textContent('[data-learn="tutorial"]'), /Resume the tutorial.*step 3/);
+  assert.equal(await page.locator('[data-learn="restart"]').count(), 1);
+  await page.click('[data-learn="tutorial"]');
+  await page.waitForFunction(() => Tour.running && Tour.running.step === 2 && !document.querySelector('.tour-pop.is-busy'));
+  assert.equal(await page.evaluate(() => StudioTutorial.state.surveyId), id);
+  // A finished step shows that it's done when you come back to it
+  await page.click('.tour-pop [data-tour="back"]');
+  await page.waitForFunction(() => Tour.running.step === 1 && !document.querySelector('.tour-pop.is-busy'));
+  await page.fill('#ss-title', 'Renamed');
+  await page.press('#ss-title', 'Enter');
+  await page.waitForFunction(() => Tour.running.step === 2, null, { timeout: 5000 });
+  // Each new step moves focus to the card (screen readers announce it); once you're back in the page, Esc belongs to the editor
+  assert.ok(await page.evaluate(() => !!document.activeElement.closest('.tour-pop')));
+  await page.click('#ss-title');
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.tour-pop').count(), 1);
+  await page.locator('.tour-pop').focus();
+  await page.keyboard.press('Escape');
+  assert.equal(await page.locator('.tour-pop').count(), 0);
+  assert.deepEqual(errors, []);
+  await context.close();
 });

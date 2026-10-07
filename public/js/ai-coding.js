@@ -302,7 +302,7 @@ const AICoder = (() => {
     const toCode = filterPosts(posts).filter(p => !Object.keys(p.aiCodes || {}).length);
 
     if (!toCode.length) { App.notify('All visible posts are already coded', 'info'); return; }
-    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add EMIS_API_KEY to the server\'s .env file (see Settings)', 'error'); return; }
+    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add your AI key (EMIS_API_KEY) to the server\'s .env file (see Settings)', 'error'); return; }
 
     running = true; stopFlag = false;
     abort = new AbortController();
@@ -348,7 +348,7 @@ const AICoder = (() => {
         });
         if (out.parallel && out.parallel < parallel) {
           parallel = out.parallel;
-          App.notify('EMIS asked MetaCode to slow down, so ' + parallel + ' cop' + (parallel !== 1 ? 'ies' : 'y') + ' of the model now work at once', 'warning');
+          App.notify('The AI service asked MetaCode to slow down, so ' + parallel + ' cop' + (parallel !== 1 ? 'ies' : 'y') + ' of the model now work at once', 'warning');
         }
       } catch (err) {
         if (stopFlag || err.name === 'AbortError') break;
@@ -394,7 +394,7 @@ const AICoder = (() => {
 
   /* ── Single-post coding ──────────────────────*/
   async function codeOne(postId) {
-    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add EMIS_API_KEY to the server\'s .env file (see Settings)', 'error'); return; }
+    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add your AI key (EMIS_API_KEY) to the server\'s .env file (see Settings)', 'error'); return; }
     const post = App.getState().posts.find(p => p.id === postId);
     if (!post) return;
 

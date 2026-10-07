@@ -440,6 +440,16 @@ test('a rate-limited model is answered by the closest similar model, and isn\'t 
   assert.deepEqual(lines.map(l => [l.ok, l.fallback, l.fallbackReason, l.requested]), [[true, 'acme-opus-4-7', 'rate_limited', 'acme-opus-4-8'], [true, 'acme-opus-4-7', 'rate_limited', 'acme-opus-4-8']]);
 });
 
+test('the status page shows the AI service as degraded while models are rate-limited (without spending prompts)', async () => {
+  const before = Object.assign({}, hits);
+  const j = (await json('GET', '/api/status')).json;
+  const ai = j.components.find(c => c.id === 'ai');
+  assert.equal(ai.status, 'degraded');
+  assert.match(ai.note, /rate-limited; requests use the closest similar model/);
+  assert.deepEqual(hits, before, 'no chat requests were made');
+  assert.ok(!/emis/i.test(JSON.stringify(j)));
+});
+
 test('streamed requests switch to the closest model too, before anything is sent', async () => {
   const res = await fetch(base + '/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-provider': 'openai' }, body: JSON.stringify({ model: 'strm-pro-2-0', stream: true, max_tokens: 20, messages: [{ role: 'user', content: 'hi' }] }) });
   assert.equal(res.status, 200);
