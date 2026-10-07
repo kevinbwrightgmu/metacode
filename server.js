@@ -2055,6 +2055,7 @@ function printBanner(PORT) {
   console.log('  ║   MetaCode — Social Media Coding Platform ║');
   console.log('  ╚══════════════════════════════════════════╝\n');
   console.log('  Running at → http://localhost:' + PORT);
+  console.log('  Status     → http://localhost:' + PORT + '/status  (and ' + (process.env.STATUS_HOST || 'status.metac0.de') + ' when its DNS points here)');
   const env = envLoader.info;
   if (env.found && !env.error) console.log('  Settings   → ' + env.file + ' (' + env.keys.length + ' value' + (env.keys.length === 1 ? '' : 's') + (env.encoding && env.encoding !== 'UTF-8' ? ', ' + env.encoding : '') + ')');
   else if (env.error) console.warn('  ⚠ ' + env.file + ': ' + env.error);

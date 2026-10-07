@@ -3,7 +3,11 @@
 
    Reads /api/status every 30 seconds (and on "Refresh") and shows the
    overall state, each component with its last 24 hours, and incidents.
-   On status.* hosts, links to MetaCode go to the main site.
+   On status.* hosts, links to MetaCode go to the main site, and if this
+   host can't answer /api/status (e.g. the page is served from somewhere
+   else), the main site's /api/status is used instead (it allows that).
+   A 404 means the MetaCode server is older than this page: it needs a
+   restart to run the version that has the status checks.
    ══════════════════════════════════════════════ */
 (function () {
   'use strict';
@@ -68,21 +72,44 @@
     $('st-foot').textContent = 'Times are shown in your time zone. History is kept since the server last started (' + dateTime(d.startedAt) + ').';
   }
 
+  // Where the status data comes from: this host, or (status.* hosts) the main site
+  const sources = ['/api/status'].concat(main ? [main + '/api/status'] : []);
+  let source = 0;
+  async function fetchStatus() {
+    let last = null;
+    for (let k = 0; k < sources.length; k++) {
+      const i = (source + k) % sources.length;
+      try {
+        const res = await fetch(sources[i], { cache: 'no-store' });
+        if (!res.ok) { last = Object.assign(new Error('HTTP ' + res.status), { status: res.status }); continue; }
+        source = i;                                  // keep using what worked
+        return await res.json();
+      } catch (e) { last = last || e; }
+    }
+    throw last || new Error('no answer');
+  }
+  function problem(title, sub) {
+    const ov = $('st-overall');
+    ov.className = 'st-overall is-unreachable';
+    ov.setAttribute('aria-busy', 'false');
+    $('st-overall-title').textContent = title;
+    $('st-overall-sub').textContent = sub;
+  }
+
   let timer = null;
   async function load() {
     const btn = $('st-refresh');
     btn.classList.add('is-spinning');
     btn.disabled = true;
     try {
-      const res = await fetch('/api/status', { cache: 'no-store' });
-      if (!res.ok) throw new Error('HTTP ' + res.status);
-      render(await res.json());
+      render(await fetchStatus());
     } catch (e) {
-      const ov = $('st-overall');
-      ov.className = 'st-overall is-unreachable';
-      ov.setAttribute('aria-busy', 'false');
-      $('st-overall-title').textContent = 'MetaCode can\'t be reached';
-      $('st-overall-sub').textContent = 'The status check didn\'t answer (' + e.message + '). Trying again in 30 seconds.';
+      if (e.status === 404) {
+        problem('The status checks aren\'t running on this server',
+          'The MetaCode server here is running an older version than this page. Restart it (stop it, then run npm start) and this page fills in.');
+      } else {
+        problem('MetaCode can\'t be reached', 'The status check didn\'t answer (' + e.message + '). Trying again in 30 seconds.');
+      }
     } finally {
       btn.classList.remove('is-spinning');
       btn.disabled = false;
