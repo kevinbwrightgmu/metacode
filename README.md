@@ -330,6 +330,7 @@ Configuration lives only in the server's `.env` file:
 | `EMIS_MODELS_FILE` | no | Model list file, default `emis-models.json` in the MetaCode folder |
 | `EMIS_TRANSPORT` | no | What sends AI requests: `auto` (default — Python, with the `openai` package when installed, else Node.js), `python` or `node` |
 | `EMIS_PROXY` | no | Proxy for EMIS requests (`HTTPS_PROXY` / `NO_PROXY` are used too) |
+| `EMIS_MODEL_SWITCH` | no | `off` stops MetaCode from answering with the closest similar model when EMIS rate-limits the chosen one (on by default) |
 | `AI_MAX_PARALLEL` | no | The most copies of the model AI Coding may run at once (default 16, max 64); users choose up to this |
 | `EMIS_TIMEOUT_MS` | no | How long to wait for EMIS (default 120000 ms) |
 
@@ -351,6 +352,17 @@ startup banner say when that happens.
   the budget for the current day, week or month is used up. MetaCode then rests that key until the reset
   time EMIS gave (another key is used if you listed several) and shows a message saying when the quota
   resets. Restarting the server clears this memory.
+- **Rate-limited models switch to the closest one.** A 429 while the key still has budget means EMIS is
+  throttling that one model. MetaCode then rests just that model (1 minute, doubling while it keeps
+  happening, up to 15 — or what `Retry-After` says) and answers with the **closest similar model**: same
+  family and line first (Claude Opus → Claude Opus, Qwen Max Thinking → Qwen Max Thinking), then the nearest
+  version and size, the same speed tier and capabilities (`model-match.js`). Requests for the resting model go
+  straight to the substitute without calling EMIS, and the app says which model answered (AI Coding's summary
+  counts the posts coded by a substitute). Up to four similar models are tried per request. If one key gets
+  429s on three different models within 20 seconds without quota headers, it's the key being paused, so the
+  key rests instead. Turn switching off per browser in Settings → AI models (*If a model is rate-limited, use
+  the closest similar model*) or for the whole server with `EMIS_MODEL_SWITCH=off`. A used-up budget applies
+  to every model, so switching doesn't help there.
 - **Security.** The key is sent only to the EMIS address in `.env`: never to the browser, never logged,
   never returned by an endpoint or included in an error. The browser can't choose the EMIS address or key.
   Other websites open in your browser can't use MetaCode's AI endpoints (they're same-origin only).
@@ -358,7 +370,8 @@ startup banner say when that happens.
   of the settings in it, warnings, whether AI is ready, and **Reload .env** / **Test connection**. *AI models*
   has a default model plus one per feature — AI Coding, Ask MetaCode, Import Data (column detection) and
   Analyze CSV (edge detection); "Same as default" follows the default. *AI Coding: copies of the model working
-  at once* sets how many posts are coded side by side. *EMIS keys* lists each key masked, with
+  at once* sets how many posts are coded side by side; *If a model is rate-limited, use the closest similar
+  model* (on by default) and a list of the models EMIS is rate-limiting right now. *EMIS keys* lists each key masked, with
   its status and remaining quota.
 - **Streaming.** `POST /api/ai` also accepts `"stream": true` (OpenAI request format) and then relays EMIS's
   server-sent events (`chat.completion.chunk` …, then `data: [DONE]`); a failure mid-stream arrives as a
@@ -428,6 +441,7 @@ metacode/
 │   ├── jobs/job-manager.js     Job queue, status, logs, results
 │   └── sandbox/                Custom code: Pyodide (Python) and QuickJS (JS/TS) sandbox processes, SDKs, runner
 ├── env-file.js                 Reads .env (encodings, .env.txt, other folders, reload) — see AI Provider (EMIS)
+├── model-match.js              "Closest model" ranking, used when EMIS rate-limits a model
 ├── owner.js                    Which browser a request comes from (mc_owner cookie) — published surveys, scraper jobs
 ├── projects/                   Import of projects older versions saved on the server (this computer only)
 ├── surveys/                    Survey Studio server side: API routes, publishing, responses, JSON-file store

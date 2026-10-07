@@ -13,6 +13,7 @@ envLoader.load();
 const { createScraper } = require('./scraper');
 const { createSurveys } = require('./surveys');
 const { createProjects } = require('./projects');
+const { rankSimilar } = require('./model-match');
 
 const app = express();
 
@@ -69,6 +70,9 @@ const MODEL_LIST_RETRY_MS   = 15 * 1000;             // after a failed fetch, wa
 const DEFAULT_TIMEOUT_MS    = 120 * 1000;
 const DEFAULT_COOLDOWN_SEC  = 30;                        // a 429 that carries no reset information
 const MAX_COOLDOWN_MS       = 400 * 24 * 3600 * 1000;    // reset times further out than this are ignored as bogus
+const MODEL_COOLDOWN_MS     = 60 * 1000;                 // a rate-limited model rests this long (doubling while it keeps happening)
+const MODEL_COOLDOWN_MAX_MS = 15 * 60 * 1000;
+const MAX_RATE_LIMIT_SWITCHES = 4;                       // similar models tried for one request when models are rate-limited
 
 // Model ids end up in the Settings dropdown, so only plain ids are accepted
 // (letters, digits and . _ - : / @ +), never markup.
@@ -296,6 +300,89 @@ function markKeyUsed(key) {
   state.lastUsed = Date.now();
   state.invalid = false;
   state.lastError = null;
+}
+
+// ── Rate-limited models ───────────────────────────────────────────────────────
+// A 429 means one of two things. If the quota headers say the key's budget is
+// used up, every model on that key would fail too: the key rests (above). If
+// the key still has budget, EMIS is throttling that one model: the model
+// rests instead, and requests for it are answered by the closest similar
+// model (closestModel, model-match.js) until it's back. A model that keeps
+// getting limited rests longer each time (1, 2, 4… up to 15 minutes, or what
+// Retry-After says). If one key gets 429s for three different models within
+// 20 seconds without quota headers, it's really the key being paused, so the
+// key rests as before. EMIS_MODEL_SWITCH=off in .env turns switching off;
+// each browser can also turn it off (Settings → AI models).
+
+// model -> { until, hits, lastAt, logged }
+const modelLimits = new Map();
+
+function budgetUsedUp(quota) {
+  return !!quota && (quota.remainingPrompts === 0 || quota.remainingTokens === 0);
+}
+function modelRestingUntil(model, now) {
+  const st = modelLimits.get(model);
+  return st && st.until > now ? st.until : 0;
+}
+function restingModels(now) {
+  return Array.from(modelLimits.entries()).filter(([, st]) => st.until > now).map(([model, st]) => ({ model, until: st.until }));
+}
+// Several models refused on one key in a short time: the key is being paused.
+function keyWidePause(key, model, now) {
+  const state = getKeyState(key);
+  state.recentModelLimits = (state.recentModelLimits || []).filter(x => now - x.at < 20000 && x.model !== model);
+  state.recentModelLimits.push({ model, at: now });
+  if (state.recentModelLimits.length < 3) return false;
+  // It was the key all along: the models it refused aren't to blame
+  state.recentModelLimits.forEach(x => modelLimits.delete(x.model));
+  state.recentModelLimits = [];
+  return true;
+}
+function modelLimitedFailure(model, until, now) {
+  const f = fail(429, 'model_rate_limited', 'EMIS is rate-limiting the model "' + model + '" right now. It can be used again ' + describeWhen(until, now) + '.');
+  f.retryAfterSeconds = Math.max(1, Math.ceil((until - now) / 1000));
+  f.model = model;
+  return f;
+}
+function onModelLimited(model, headers, now) {
+  const st = modelLimits.get(model) || { until: 0, hits: 0, lastAt: 0 };
+  st.hits = now - st.lastAt < MODEL_COOLDOWN_MAX_MS * 2 ? st.hits + 1 : 1;
+  st.lastAt = now;
+  const waitMs = retryAfterMs(headers && headers.get('retry-after'), now);
+  const backoff = Math.min(MODEL_COOLDOWN_MAX_MS, MODEL_COOLDOWN_MS * 2 ** Math.min(st.hits - 1, 6));
+  st.until = Math.max(st.until, now + (waitMs !== null ? Math.min(MODEL_COOLDOWN_MAX_MS, Math.max(1000, waitMs)) : backoff));
+  modelLimits.set(model, st);
+  console.warn('[emis] EMIS rate-limited the model "' + model + '"; it rests until ' + new Date(st.until).toLocaleTimeString() +
+    (switchingAllowed() ? ' and requests for it use the closest similar model.' : '.'));
+  return modelLimitedFailure(model, st.until, now);
+}
+function switchingAllowed() { return !/^(off|no|false|0)$/i.test(String(process.env.EMIS_MODEL_SWITCH || '').trim()); }
+// A 429 from EMIS for this key and model: rest the key (→ true: try the next key) or only the model (→ the failure).
+function classifyLimit(key, model, quota, headers, now) {
+  if (budgetUsedUp(quota) || (!quota && model && keyWidePause(key, model, now)) || !model) {
+    onQuotaExhausted(key, quota, headers, now);
+    return true;
+  }
+  return onModelLimited(model, headers, now);
+}
+
+// The available model most like `target` that can take this request (not
+// rate-limited, not tried yet, supports what the request needs), or null.
+async function closestModel(target, chatRequest, tried) {
+  const list = await getModelList(false);
+  if (!list.ok) return null;
+  const now = Date.now();
+  const candidates = list.ids.filter(id => !tried.has(id) && !NOT_A_CHAT_MODEL.test(id) && !modelRestingUntil(id, now) &&
+    !capabilityProblem(chatRequest, list.info ? list.info.get(id) : null));
+  return rankSimilar(target, candidates, list.info)[0] || null;
+}
+
+const switchesLogged = new Map();
+function noteSwitch(from, to, why) {
+  const k = from + '>' + to, now = Date.now();
+  if (now - (switchesLogged.get(k) || 0) < 60000) return;
+  switchesLogged.set(k, now);
+  console.warn('[emis] "' + from + '" ' + (why === 'rate_limited' ? 'is rate-limited' : 'failed') + '; answered with the closest model, "' + to + '".');
 }
 
 // ── Talking to EMIS ───────────────────────────────────────────────────────────
@@ -1102,7 +1189,11 @@ async function completeChat(chatRequest, ctx, signal, retriedLength) {
     const now = Date.now();
     const quota = readQuotaHeaders(r.headers);
     recordQuota(key, quota, now);
-    if (r.status === 429) { onQuotaExhausted(key, quota, r.headers, now); limited = true; continue; }
+    if (r.status === 429) {
+      const limit = classifyLimit(key, chatRequest.model, quota, r.headers, now);
+      if (limit === true) { limited = true; continue; }       // the key's budget: another key may have some
+      return limit;                                           // this model only: answerChat picks the closest one
+    }
     if (r.status === 401 || (r.status === 403 && !/^\s*</.test(r.text || '') && !/model/i.test(providerMessage(r)))) { markKeyRejected(key, r); rejection = describeFailure(r, ctx); continue; }
     if (r.status === 403) return describeFailure(r, ctx);   // a website check or a model this key can't use: not the key's fault
     if (!r.ok) return describeFailure(r, ctx);
@@ -1349,38 +1440,66 @@ async function relayStream(res, attempt, key, model) {
   if (!res.writableEnded) res.end();
 }
 
-async function streamChat(res, chatRequest, ctx) {
+// One model's attempt: relays the stream, or sends the failure; → { modelLimited }
+// when EMIS is rate-limiting this model (nothing has been sent yet).
+async function streamWith(res, chatRequest, ctx, signal) {
+  const now0 = Date.now();
+  const resting = modelRestingUntil(chatRequest.model, now0);
+  if (resting) return { modelLimited: modelLimitedFailure(chatRequest.model, resting, now0) };
+  const keys = keysForRequest(Date.now());
+  if (!keys.length) return sendFailure(res, quotaFailure(Date.now()));
+  let rejection = null;
+  let limited = false;
+  for (const key of keys) {
+    const attempt = await openStream(key, chatRequest, signal);
+    if (attempt.failed === 'aborted') return;
+    if (attempt.failed) return sendFailure(res, describeFailure(attempt, ctx));
+    const upstream = attempt.response;
+    const now = Date.now();
+    const quota = readQuotaHeaders(upstream.headers);
+    recordQuota(key, quota, now);
+    if (!upstream.ok) {
+      const r = await readErrorBody(attempt);
+      if (r.failed === 'aborted') return;
+      if (r.failed) return sendFailure(res, describeFailure(r, ctx));
+      if (r.status === 429) {
+        const limit = classifyLimit(key, chatRequest.model, quota, r.headers, now);
+        if (limit === true) { limited = true; continue; }
+        return { modelLimited: limit };
+      }
+      if (r.status === 401 || r.status === 403) { markKeyRejected(key, r); rejection = describeFailure(r, ctx); continue; }
+      return sendFailure(res, describeFailure(r, ctx));
+    }
+    if (!/^text\/event-stream/i.test(upstream.headers.get('content-type') || '')) {
+      attempt.cancel();
+      attempt.finish();
+      return sendFailure(res, fail(502, 'malformed_response', 'EMIS didn\'t send a stream for a streaming request.',
+        'content-type ' + redact(upstream.headers.get('content-type') || 'missing', 60)));
+    }
+    return await relayStream(res, attempt, key, chatRequest.model);
+  }
+  return sendFailure(res, limited ? quotaFailure(Date.now()) : rejection);
+}
+
+// Streaming chat; a rate-limited model is swapped for the closest similar one
+// before anything is sent (see answerChat).
+async function streamChat(res, prep) {
   const client = watchClient(res);
   try {
-    const keys = keysForRequest(Date.now());
-    if (!keys.length) return sendFailure(res, quotaFailure(Date.now()));
-    let rejection = null;
-    let limited = false;
-    for (const key of keys) {
-      const attempt = await openStream(key, chatRequest, client.signal);
-      if (attempt.failed === 'aborted') return;
-      if (attempt.failed) return sendFailure(res, describeFailure(attempt, ctx));
-      const upstream = attempt.response;
-      const now = Date.now();
-      const quota = readQuotaHeaders(upstream.headers);
-      recordQuota(key, quota, now);
-      if (!upstream.ok) {
-        const r = await readErrorBody(attempt);
-        if (r.failed === 'aborted') return;
-        if (r.failed) return sendFailure(res, describeFailure(r, ctx));
-        if (r.status === 429) { onQuotaExhausted(key, quota, r.headers, now); limited = true; continue; }
-        if (r.status === 401 || r.status === 403) { markKeyRejected(key, r); rejection = describeFailure(r, ctx); continue; }
-        return sendFailure(res, describeFailure(r, ctx));
-      }
-      if (!/^text\/event-stream/i.test(upstream.headers.get('content-type') || '')) {
-        attempt.cancel();
-        attempt.finish();
-        return sendFailure(res, fail(502, 'malformed_response', 'EMIS didn\'t send a stream for a streaming request.',
-          'content-type ' + redact(upstream.headers.get('content-type') || 'missing', 60)));
-      }
-      return await relayStream(res, attempt, key, chatRequest.model);
+    const { chatRequest, ctx } = prep;
+    const tried = new Set();
+    let model = ctx.model, switches = 0;
+    for (;;) {
+      tried.add(model);
+      const out = await streamWith(res, Object.assign({}, chatRequest, { model }), Object.assign({}, ctx, { model }), client.signal);
+      if (!out || !out.modelLimited) return;
+      const alt = prep.switchModels && switches < MAX_RATE_LIMIT_SWITCHES ? await closestModel(ctx.model, chatRequest, tried) : null;
+      if (!alt) return sendFailure(res, out.modelLimited);
+      switches++;
+      noteSwitch(ctx.model, alt, 'rate_limited');
+      model = alt;
+      setFallbackHeaders(res, { fallback: alt, fallbackReason: 'rate_limited', requested: ctx.model });
     }
-    return sendFailure(res, limited ? quotaFailure(Date.now()) : rejection);
   } finally {
     client.release();
   }
@@ -1395,7 +1514,8 @@ async function streamChat(res, chatRequest, ctx) {
 // ignored: EMIS is only called with the server's own key.
 // Checks and resolves one chat request (the body of POST /api/ai).
 // → { failure } or { format, chatRequest, ctx, explicit }
-async function prepareChat(body, formatName) {
+// opts.switchModels: false = don't answer with a similar model when this one is rate-limited
+async function prepareChat(body, formatName, opts) {
   const format = FORMATS[formatName];
   if (!format) return { failure: fail(400, 'invalid_request', 'Unknown provider: ' + redact(formatName, 40)) };
   const notReady = notConfigured();
@@ -1417,51 +1537,81 @@ async function prepareChat(body, formatName) {
   return {
     format, chatRequest,
     ctx: { model: resolved.model, verified: resolved.verified, source: resolved.source },
-    explicit: !!askedFor && askedFor === resolved.model     // picked in Settings, not the server default
+    explicit: !!askedFor && askedFor === resolved.model,    // picked in Settings, not the server default
+    switchModels: switchingAllowed() && !(opts && opts.switchModels === false)
   };
 }
 
 // Runs a prepared, non-streaming chat request.
-// → { aborted } or { failure } or { json, fallback? } (json in the request's format)
+// → { aborted } or { failure } or { json, fallback?, fallbackReason?, requested }
+//   (json in the request's format; fallback = the model that answered instead
+//   of the requested one, fallbackReason = 'rate_limited' | 'failed')
+//
+// When the model is rate-limited (now, or still resting from earlier), the
+// closest similar model answers instead — even one picked in Settings, unless
+// switching is turned off. When the server's default model fails in other
+// ways (EMIS can't run it right now), the closest models are tried too; a
+// model the user picked isn't swapped for those failures.
 async function answerChat(prep, signal) {
   const { chatRequest, ctx, explicit } = prep;
-  let result = await completeChat(chatRequest, ctx, signal);
-  let fallback = null;
-  // The server's default model is failing at EMIS right now: try other models
-  // instead of failing the request (a model the user picked isn't swapped).
-  if (!result.ok && !result.aborted && !explicit && MODEL_FALLBACK_TYPES.has(result.type)) {
-    for (const alt of await fallbackModels(ctx.model)) {
-      const altCtx = Object.assign({}, ctx, { model: alt, verified: true });
-      const retry = await completeChat(Object.assign({}, chatRequest, { model: alt }), altCtx, signal);
-      if (retry.aborted) { result = retry; break; }
-      if (retry.ok) {
-        console.warn('[emis] The default model "' + ctx.model + '" failed (' + result.type + '); answered with "' + alt + '" instead.');
-        fallback = alt;
-        result = retry;
-        break;
-      }
-    }
+  const tried = new Set();
+  let model = ctx.model, fallback = null, fallbackReason = null;
+  let rateSwitches = 0, otherSwitches = 0, result;
+  for (;;) {
+    tried.add(model);
+    const now = Date.now();
+    const resting = modelRestingUntil(model, now);
+    result = resting ? modelLimitedFailure(model, resting, now)
+      : await completeChat(Object.assign({}, chatRequest, { model }), Object.assign({}, ctx, { model, verified: ctx.verified || model !== ctx.model }), signal);
+    if (result.aborted) return { aborted: true };
+    if (result.ok) break;
+    let why = null;
+    if (result.type === 'model_rate_limited' && prep.switchModels && rateSwitches < MAX_RATE_LIMIT_SWITCHES) why = 'rate_limited';
+    // (once switching for a rate limit, a similar model that fails another way is skipped too)
+    else if ((!explicit || fallbackReason === 'rate_limited') && MODEL_FALLBACK_TYPES.has(result.type) && otherSwitches < 2) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
+    if (!why) break;
+    const alt = await closestModel(ctx.model, chatRequest, tried);     // closest to what was asked for
+    if (!alt) break;
+    if (why === 'rate_limited') rateSwitches++; else otherSwitches++;
+    noteSwitch(ctx.model, alt, why);
+    model = alt; fallback = alt; fallbackReason = why;
   }
-  if (result.aborted) return { aborted: true };
+  if (!result.ok && result.type === 'model_rate_limited') {
+    const others = Array.from(tried).filter(m => m !== ctx.model);
+    const soonest = Math.min(...Array.from(tried).map(m => modelRestingUntil(m, Date.now()) || Infinity));
+    let message = 'EMIS is rate-limiting the model "' + ctx.model + '"' + (others.length ? ' and the most similar models (' + others.map(m => '"' + m + '"').join(', ') + ')' : '') + ' right now.';
+    if (Number.isFinite(soonest)) message += ' The first one can be used again ' + describeWhen(soonest, Date.now()) + '.';
+    if (!prep.switchModels) message += switchingAllowed() ? ' (Switching to a similar model is turned off in Settings → AI models.)' : ' (EMIS_MODEL_SWITCH=off in .env turns off switching to a similar model.)';
+    result = Object.assign({}, result, { message, retryAfterSeconds: Number.isFinite(soonest) ? Math.max(1, Math.ceil((soonest - Date.now()) / 1000)) : result.retryAfterSeconds });
+  }
   if (!result.ok && explicit && MODEL_FALLBACK_TYPES.has(result.type) && result.type !== 'malformed_response') {
     result = Object.assign({}, result, { message: result.message.replace(/\.?$/, '.') + ' This happened with the model "' + ctx.model +
       '" you picked — choose another one in Settings → AI models (or "Server default").' });
   }
   if (!result.ok) return { failure: result };
-  return { json: prep.format === 'anthropic' ? toAnthropicResponse(result.completion) : result.completion, fallback };
+  return { json: prep.format === 'anthropic' ? toAnthropicResponse(result.completion) : result.completion, fallback, fallbackReason, requested: ctx.model };
+}
+
+// Tells the browser which model answered when it wasn't the one asked for
+function setFallbackHeaders(res, out) {
+  if (!out.fallback) return;
+  res.set('X-MetaCode-Model-Fallback', out.fallback);
+  res.set('X-MetaCode-Model-Fallback-Reason', out.fallbackReason || 'failed');
+  res.set('X-MetaCode-Model-Requested', out.requested || '');
 }
 
 app.post('/api/ai', async (req, res) => {
   try {
-    const prep = await prepareChat(req.body, String(req.headers['x-provider'] || 'groq').toLowerCase());
+    const switchModels = !/^(off|no|false|0)$/i.test(String(req.headers['x-metacode-model-switch'] || ''));
+    const prep = await prepareChat(req.body, String(req.headers['x-provider'] || 'groq').toLowerCase(), { switchModels });
     if (prep.failure) return sendFailure(res, prep.failure);
-    if (prep.chatRequest.stream) return await streamChat(res, prep.chatRequest, prep.ctx);
+    if (prep.chatRequest.stream) return await streamChat(res, prep);
     const client = watchClient(res);
     let out;
     try { out = await answerChat(prep, client.signal); } finally { client.release(); }
     if (out.aborted) return;                          // the browser left; nobody to answer
     if (out.failure) return sendFailure(res, out.failure);
-    if (out.fallback) res.set('X-MetaCode-Model-Fallback', out.fallback);
+    setFallbackHeaders(res, out);
     res.json(out.json);
   } catch (err) {
     console.error('[emis] Unexpected error in /api/ai: ' + redact(err && err.message));
@@ -1472,10 +1622,11 @@ app.post('/api/ai', async (req, res) => {
 
 // POST /api/ai/batch — many chat requests answered by several copies of the
 // same model in parallel (AI Coding). Body:
-//   { requests: [{ id, body }], parallel: 1…AI_MAX_PARALLEL, delayMs: 0…5000 }
+//   { requests: [{ id, body }], parallel: 1…AI_MAX_PARALLEL, delayMs: 0…5000, switchModels?: false }
 // (each body is what POST /api/ai takes, OpenAI format). The answer is NDJSON,
 // one line per request as soon as it finishes, in any order:
-//   { id, ok: true, data }  or  { id, ok: false, status, error: { message, type } }
+//   { id, ok: true, data, fallback?, fallbackReason?, requested? }  or  { id, ok: false, status, error: { message, type } }
+// (fallback: the similar model that answered because the requested one was rate-limited or failing)
 // then { done: true, parallel } — parallel is how many ran at the end (it is
 // lowered when EMIS rate-limits). Closing the connection stops the batch.
 const AI_BATCH_MAX_REQUESTS = 2000;
@@ -1495,6 +1646,7 @@ app.post('/api/ai/batch', async (req, res) => {
   const max = aiMaxParallel();
   let parallel = Math.max(1, Math.min(max, parseInt(req.body.parallel, 10) || 1));
   const delayMs = Math.max(0, Math.min(5000, parseInt(req.body.delayMs, 10) || 0));
+  const switchModels = req.body.switchModels !== false;
 
   res.status(200).set({ 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
   res.flushHeaders();
@@ -1507,14 +1659,14 @@ app.post('/api/ai/batch', async (req, res) => {
   async function one(item) {
     let out;
     try {
-      const prep = await prepareChat(item.body, 'openai');
+      const prep = await prepareChat(item.body, 'openai', { switchModels });
       out = prep.failure ? { failure: prep.failure } : await answerChat(prep, client.signal);
     } catch (err) {
       console.error('[emis] Unexpected error in /api/ai/batch: ' + redact(err && err.message));
       out = { failure: fail(500, 'internal_error', 'Something went wrong in MetaCode\'s AI service.') };
     }
     if (out.aborted) return;
-    if (out.failure && out.failure.status === 429 && out.failure.type === 'rate_limited' && item.tries < 3) {
+    if (out.failure && out.failure.status === 429 && (out.failure.type === 'rate_limited' || out.failure.type === 'model_rate_limited') && item.tries < 3) {
       // EMIS asked us to slow down: fewer copies at once, a short pause, then this one again
       item.tries++;
       if (parallel > 1) { parallel = Math.max(1, Math.floor(parallel / 2)); console.warn('[emis] Rate-limited during a batch; running ' + parallel + ' at once now.'); }
@@ -1529,7 +1681,7 @@ app.post('/api/ai/batch', async (req, res) => {
       send({ id: item.id, ok: false, status: out.failure.status, error });
       return;
     }
-    send(Object.assign({ id: item.id, ok: true, data: out.json }, out.fallback ? { fallback: out.fallback } : {}));
+    send(Object.assign({ id: item.id, ok: true, data: out.json }, out.fallback ? { fallback: out.fallback, fallbackReason: out.fallbackReason, requested: out.requested } : {}));
   }
   async function worker(slot) {
     let first = true;
@@ -1557,11 +1709,6 @@ app.post('/api/ai/batch', async (req, res) => {
 
 // Failures that a different model may not have (EMIS can't run one model right now).
 const MODEL_FALLBACK_TYPES = new Set(['upstream_error', 'malformed_response', 'model_not_found', 'not_found', 'permission_error']);
-async function fallbackModels(failed) {
-  const list = await getModelList(false);
-  if (!list.ok) return [];
-  return list.ids.filter(id => id !== failed && !NOT_A_CHAT_MODEL.test(id)).slice(0, 2);
-}
 
 // GET /api/models — the model list for the Settings dropdown (from
 // emis-models.json, or EMIS's live list), default model first: the frontend
@@ -1761,7 +1908,7 @@ function settingsStatus() {
       searched: env.searched || [], loadedAt: env.loadedAt || null
     },
     ai: {
-      provider: 'emis', ready, keyCount: EMIS.keys.length, maxParallel: aiMaxParallel(), problem: EMIS.problem || (EMIS.keys.length ? null : 'EMIS_API_KEY isn\'t set in .env.'),
+      provider: 'emis', ready, keyCount: EMIS.keys.length, maxParallel: aiMaxParallel(), modelSwitch: switchingAllowed(), rateLimitedModels: restingModels(Date.now()).map(x => ({ model: x.model, until: new Date(x.until).toISOString() })), problem: EMIS.problem || (EMIS.keys.length ? null : 'EMIS_API_KEY isn\'t set in .env.'),
       warnings: EMIS.warnings, baseHost: (() => { try { return new URL(EMIS.baseUrl).host; } catch (e) { return null; } })(),
       defaultModel: EMIS.model || null,
       transport: emisTransport() === 'node' ? 'Node.js' : (emisPython.status().ok ? 'Python ' + emisPython.status().python + ' (' + emisPython.status().client + ')' : (emisTransport() === 'python' ? 'Python — not available: ' + (emisPython.status().problem || 'not started') : 'Node.js (Python not found)')),
