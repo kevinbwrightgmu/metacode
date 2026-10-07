@@ -405,6 +405,11 @@ refreshes every 30 seconds. Nothing secret is shown — no keys, addresses, path
   CNAME to `metac0.de` is enough), include the name in your TLS certificate, and if a reverse proxy sits in
   front of MetaCode, make it pass the original host name (nginx: `proxy_set_header Host $host;`).
 - History is kept in memory since the server last started (the page says since when).
+- **After updating MetaCode, restart the server** (stop it, then `npm start`). The page's files are served
+  straight from disk, but its data (`/api/status`) only exists once the server runs the new code — until then
+  the page says *"The status checks aren't running on this server"* (the browser console shows a 404 for
+  `api/status`). On a `status.*` host the page also tries the main site's `/api/status`, so it still works if
+  the status host is served from somewhere else.
 
 ---
 
@@ -543,6 +548,10 @@ failing, answers with another model. If it still fails: open **Settings → AI c
 to see the exact message. On networks that only allow the internet through a proxy, add
 `HTTPS_PROXY=http://proxy:port` (or `EMIS_PROXY`) to `.env` and click **Reload .env** — Node.js doesn't use
 the system proxy by itself. If a model you picked keeps failing, choose another one in Settings → AI models.
+
+**Status page: "The status checks aren't running on this server" / 404 for `api/status`**
+→ The MetaCode server is still running the version from before the update. Restart it (stop it, then
+`npm start`).
 
 **HTTP 403 / "The AI service's website check answered instead of the API"**
 → MetaCode sends AI requests from Python (with the official `openai` package when installed), as the AI service's

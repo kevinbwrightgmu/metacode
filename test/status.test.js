@@ -170,3 +170,26 @@ test('the status page renders on desktop and phones; on status.* links point at 
     }
   } finally { await browser.close(); }
 });
+
+test('a server without the status checks (not restarted) gets a clear message; status.* pages fall back to the main site\'s data', { skip: !chromiumPath && 'no Chromium', timeout: 60000 }, async () => {
+  const browser = await require('playwright-core').chromium.launch({ executablePath: chromiumPath });
+  try {
+    // An older server answers /api/status with 404
+    let page = await browser.newPage();
+    await page.route(/^https?:\/\/(?!localhost)/, r => r.abort());
+    await page.route('**/api/status', r => r.fulfill({ status: 404, body: 'Cannot GET /api/status' }));
+    await page.goto('http://localhost:' + port + '/status.html');
+    await page.waitForFunction(() => document.getElementById('st-overall').classList.contains('is-unreachable'));
+    assert.match(await page.textContent('#st-overall-title'), /status checks aren't running on this server/);
+    assert.match(await page.textContent('#st-overall-sub'), /older version.*npm start/);
+    await page.close();
+    // status.* host that can't answer itself: the main site's /api/status is used
+    page = await browser.newPage();
+    await page.route(/^https?:\/\/(?!localhost|status\.localhost)/, r => r.abort());
+    await page.route('http://status.localhost:' + port + '/api/status', r => r.fulfill({ status: 404, body: '' }));
+    await page.goto('http://status.localhost:' + port + '/');
+    await page.waitForFunction(() => document.querySelectorAll('.st-comp').length === 5);
+    assert.doesNotMatch(await page.textContent('#st-overall-title'), /can't|aren't/);
+    await page.close();
+  } finally { await browser.close(); }
+});
