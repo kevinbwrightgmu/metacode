@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>MetaCode Status</title>
+  <meta name="description" content="Live status of MetaCode: the app, AI service, survey publishing, network analysis and the Reddit scraper.">
+  <link rel="icon" type="image/png" href="/img/metacode-mark.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/status.css">
+</head>
+<body class="status-page">
+  <a class="st-skip" href="#st-main">Skip to status</a>
+  <header class="st-header">
+    <div class="st-wrap st-header-row">
+      <a class="st-logo" href="/" id="st-home" aria-label="MetaCode home">
+        <img src="/img/metacode-mark.png" alt="" width="30" height="30">
+        <span>MetaCode <b>Status</b></span>
+      </a>
+      <button type="button" class="st-refresh" id="st-refresh" aria-label="Check again now">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>
+        <span>Refresh</span>
+      </button>
+    </div>
+  </header>
+
+  <main id="st-main" class="st-wrap">
+    <section class="st-overall is-loading" id="st-overall" aria-live="polite" aria-busy="true">
+      <span class="st-overall-icon" aria-hidden="true"></span>
+      <div>
+        <h1 class="st-overall-title" id="st-overall-title">Checking MetaCode…</h1>
+        <p class="st-overall-sub" id="st-overall-sub">Getting the latest status.</p>
+      </div>
+    </section>
+
+    <section class="st-card" aria-labelledby="st-components-h">
+      <div class="st-card-head">
+        <h2 id="st-components-h">Components</h2>
+        <span class="st-range" id="st-range">Last 24 hours</span>
+      </div>
+      <ul class="st-components" id="st-components"></ul>
+      <div class="st-legend" aria-hidden="true">
+        <span><i class="is-operational"></i>Operational</span>
+        <span><i class="is-degraded"></i>Degraded</span>
+        <span><i class="is-outage"></i>Outage</span>
+        <span><i class="is-none"></i>No data</span>
+      </div>
+    </section>
+
+    <section class="st-card" aria-labelledby="st-incidents-h">
+      <div class="st-card-head"><h2 id="st-incidents-h">Incidents</h2></div>
+      <ul class="st-incidents" id="st-incidents"><li class="st-empty">Loading…</li></ul>
+    </section>
+
+    <p class="st-foot" id="st-foot"></p>
+  </main>
+
+  <footer class="st-footer">
+    <div class="st-wrap">
+      <a href="/" id="st-home2">MetaCode</a> · <a href="/app.html" id="st-app">Coding app</a> · <a href="/studio.html" id="st-studio">Survey Studio</a>
+    </div>
+  </footer>
+  <script src="/js/status.js"></script>
+</body>
+</html>

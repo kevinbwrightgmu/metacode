@@ -503,3 +503,21 @@ kbd { font-family: var(--f-mono); font-size: 11px; background: var(--bg-muted); 
 .ss-legacy { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; padding: 14px 18px; margin-bottom: 16px; border: 1px solid #F59E0B; border-radius: var(--r-lg, 12px); background: rgba(245, 158, 11, .08); }
 .st-tour { padding: 7px 12px; border-radius: 8px; font: 600 13px var(--f-body, Inter, system-ui); color: #DDD6FE; background: rgba(167, 139, 250, .16); border: 1px solid rgba(167, 139, 250, .35); cursor: pointer; margin-left: 4px; }
 .st-tour:hover { background: rgba(167, 139, 250, .28); color: #fff; }
+
+/* Learn Survey Studio (tutorial & tour chooser) */
+.ss-learn { display: flex; flex-direction: column; gap: 10px; }
+.ss-learn-card { display: flex; align-items: flex-start; gap: 12px; width: 100%; text-align: left; padding: 14px 16px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--bg-surface); cursor: pointer; font: inherit; color: var(--tx-primary); transition: border-color .15s, box-shadow .15s; }
+.ss-learn-card:hover, .ss-learn-card:focus-visible { border-color: var(--violet); box-shadow: 0 0 0 3px var(--violet-lt); outline: none; }
+.ss-learn-card.is-main { border-color: var(--violet-mid); background: var(--violet-lt); }
+.ss-learn-card b { display: block; font: 600 14.5px var(--f-display); margin-bottom: 2px; }
+.ss-learn-card span span { display: block; font-size: 13px; color: var(--tx-second); line-height: 1.5; }
+.ss-learn-icon { font-size: 22px; line-height: 1; margin-top: 2px; }
+
+/* Phones: the top bar and the list's buttons fit without sideways scrolling */
+@media (max-width: 600px) {
+  .st-brand-name, .st-brand-sep { display: none; }
+  .st-nav a[href="index.html"] { display: none; }
+  .st-nav a, .st-tour { padding: 6px 9px; }
+  .studio-page .view-header { flex-wrap: wrap; gap: 10px; }
+  .studio-page .view-actions { flex-wrap: wrap; }
+}

@@ -130,6 +130,8 @@
   }
   footer .foot-brand { display: flex; align-items: center; gap: 10px; }
   footer img { height: 22px; width: 22px; border-radius: 6px; }
+  footer .foot-link { color: inherit; text-decoration: underline; text-underline-offset: 2px; }
+  footer .foot-link:hover { color: #fff; }
 
   @media (max-width: 840px) {
     .studio { grid-template-columns: 1fr; gap: 32px; }
@@ -304,7 +306,7 @@
     <img src="img/metacode-mark.png" alt="MetaCode">
     <span>MetaCode — a self-hosted research tool</span>
   </div>
-  <span>Runs locally with Node.js + Python</span>
+  <span>Runs locally with Node.js + Python · <a class="foot-link" href="/status">System status</a></span>
 </footer>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>

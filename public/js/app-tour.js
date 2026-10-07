@@ -65,7 +65,7 @@
       text: '<p>Download the coded posts, the reliability results, the codebook and the network as CSV or JSON for SPSS, R, Excel or a paper\'s appendix.</p>' },
     { before: page('settings'), target: ['#view-container .card:has(#s-env-status)', '#s-env-status', '#view-container .card'],
       title: 'Settings — AI connection and models',
-      text: '<p>Shows whether AI is set up (the EMIS key in the server\'s <code>.env</code> file), lets you pick the AI model for each feature, and tests the connection.</p>' },
+      text: '<p>Shows whether AI is set up (the AI key in the server\'s <code>.env</code> file), lets you pick the AI model for each feature, and tests the connection.</p>' },
     { before: page('settings'), target: '#s-data-card',
       title: 'Your data',
       text: '<p>Because your work lives in this browser, download a <b>backup</b> now and then — and restore it to move to another browser or computer.</p>' },

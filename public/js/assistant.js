@@ -121,7 +121,7 @@ const Assistant = (() => {
   // Provider line, key notice and suggestions can change while the panel is
   // closed (Settings edits, navigation), so they're refreshed on every open.
   function refreshPanel() {
-    els.sub.textContent = 'Using EMIS · ' + (App.modelFor('assistant') || 'default model');
+    els.sub.textContent = 'Using ' + (App.modelFor('assistant') || 'the default model');
     els.notice.hidden = App.hasApiKeys();
     renderSuggestions();
     updateEmptyState();
@@ -310,7 +310,7 @@ const Assistant = (() => {
   }
 
   /* ── Errors ──────────────────────────────────*/
-  function providerLabel() { return 'EMIS'; }
+  function providerLabel() { return 'The AI service'; }
 
   // Turns the error App.callClaude threw into a message the user can act on.
   function describeError(err) {
@@ -325,10 +325,10 @@ const Assistant = (() => {
       return { settings: true, text: 'MetaCode’s AI isn’t set up: add `EMIS_API_KEY=…` to the server’s `.env` file, then click **Reload .env** in **Settings**.' };
     }
     if (/rate.?limit|too many requests|\b429\b/i.test(msg)) {
-      return { settings: true, text: providerLabel() + ' is rate-limiting requests right now. Wait a few seconds and try again — or add another EMIS key to `.env` (comma-separated).' };
+      return { settings: true, text: providerLabel() + ' is rate-limiting requests right now. Wait a few seconds and try again — or add another AI key to `.env` (comma-separated).' };
     }
     if (/invalid.{0,12}(api.?key|x-api-key)|unauthori[sz]ed|authentication|\b401\b|\b403\b/i.test(msg)) {
-      return { settings: true, text: 'EMIS rejected the key. Check `EMIS_API_KEY` in the server’s `.env` file, then click **Reload .env** in **Settings**.' };
+      return { settings: true, text: 'The AI service rejected the key. Check `EMIS_API_KEY` in the server’s `.env` file, then click **Reload .env** in **Settings**.' };
     }
     return { settings: false, text: 'The assistant couldn’t get an answer: ' + clean(msg, 300) };
   }
@@ -353,7 +353,7 @@ const Assistant = (() => {
       lines.push('- Page open: ' + (App.getCurrentView().title || 'Dashboard'));
       lines.push('- Project: "' + clean(s.project && s.project.name, 80) + '"');
       const per = settings.models || {};
-      lines.push('- AI: EMIS via the server .env (' + (App.hasApiKeys() ? 'ready, ' + App.getEnvKeyCount() + ' key(s)' : 'NOT set up') + '); default model ' + (clean(settings.model, 60) || 'server default') +
+      lines.push('- AI: the AI key in the server .env (' + (App.hasApiKeys() ? 'ready, ' + App.getEnvKeyCount() + ' key(s)' : 'NOT set up') + '); default model ' + (clean(settings.model, 60) || 'server default') +
         (Object.keys(per).length ? '; per-feature models: ' + Object.keys(per).map(k => k + '=' + clean(per[k], 60)).join(', ') : '') +
         '; delay between calls ' + (Number(settings.delay) || 500) + ' ms');
       lines.push(describePosts(s.posts));

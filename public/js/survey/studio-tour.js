@@ -102,7 +102,7 @@
       text: '<p>Publishing creates a link to share. Keep editing afterwards and publish again for a new version — responses remember which version they answered. Only you can see the responses.</p>' },
     { target: ['#ss-tour', '#st-tour'], placement: 'bottom',
       title: 'That\'s Survey Studio',
-      text: '<p>Replay this tour any time with this button (on the survey list it\'s <b>Take the tour</b> in the top bar). Happy surveying!</p>' }
+      text: '<p>This button opens the hands-on tutorial and this tour again (on the survey list it\'s <b>Tutorial & tour</b> in the top bar). Happy surveying!</p>' }
   ]);
 
   function current() { return editorOpen() ? 'studio-editor' : 'studio'; }
@@ -110,8 +110,13 @@
   window.StudioTour = {
     init() {
       const btn = document.getElementById('st-tour');
-      if (btn) btn.addEventListener('click', () => Tour.start(current()));
+      if (btn) btn.addEventListener('click', () => (window.StudioTutorial ? StudioTutorial.chooser() : Tour.start(current())));
       const q = new URLSearchParams(location.search);
+      if (q.has('tutorial') && window.StudioTutorial) {
+        history.replaceState(null, '', location.pathname + location.hash);
+        setTimeout(() => StudioTutorial.start(), 400);
+        return;
+      }
       if (q.has('tour')) {
         history.replaceState(null, '', location.pathname + location.hash);
         setTimeout(() => Tour.start('studio'), 400);
@@ -121,7 +126,7 @@
       const offer = () => setTimeout(() => {
         if (Tour.running) return;
         if (editorOpen()) Tour.offerOnce('studio-editor', { delay: 10, title: 'First time in the editor?', text: 'A short tour of the canvas, logic blocks, theme, preview and publishing.' });
-        else if (document.getElementById('ss-list')) Tour.offerOnce('studio', { delay: 10, title: 'New to Survey Studio?', text: 'Take a short tour — what each part does and how to build, publish and collect a survey.' });
+        else if (document.getElementById('ss-list') && window.StudioTutorial) Tour.offerOnce('studio-tutorial', { delay: 10, title: 'New to Survey Studio?', text: 'Build your first survey in a 5-minute hands-on tutorial — or close this and explore on your own (Tutorial & tour in the top bar has it any time).', goLabel: 'Start the tutorial', onGo: () => StudioTutorial.start() });
       }, 900);
       window.addEventListener('hashchange', offer);
       offer();

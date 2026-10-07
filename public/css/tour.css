@@ -15,7 +15,7 @@
   font-family: var(--f-body, Inter, system-ui, sans-serif); transition: left .3s ease, top .3s ease, opacity .15s;
 }
 .tour-pop.is-busy { opacity: .6; }
-.tour-pop.is-docked { left: 12px !important; right: 12px; bottom: 12px; top: auto !important; width: auto; }
+.tour-pop.is-docked { overflow-y: auto; }
 .tour-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .tour-count { font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--violet, #7C3AED); }
 .tour-x { border: 0; background: none; font-size: 15px; color: var(--tx-muted, #94A3B8); cursor: pointer; padding: 4px 6px; border-radius: 6px; }
@@ -66,3 +66,18 @@ html.tour-on, html.tour-on body { scroll-behavior: auto; }
   .tour-spot, .tour-pop, .tour-progress span { transition: none; }
   .tour-invite { animation: none; }
 }
+
+/* Hands-on steps (tutorials): the page stays usable, the dimming is lighter */
+html.tour-interactive .tour-shield, html.tour-interactive .tour-spot { pointer-events: none; }
+html.tour-interactive .tour-spot { box-shadow: 0 0 0 200vmax rgba(15, 23, 42, .28), 0 0 0 3px #A78BFA, 0 0 24px 4px rgba(167, 139, 250, .55); }
+html.tour-interactive .tour-shield.is-dim { background: rgba(15, 23, 42, .28); }
+html.tour-interactive .tour-spot { animation: tour-pulse 1.8s ease-in-out infinite; }
+@keyframes tour-pulse { 50% { box-shadow: 0 0 0 200vmax rgba(15, 23, 42, .28), 0 0 0 5px #C4B5FD, 0 0 30px 8px rgba(167, 139, 250, .7); } }
+.tour-pop:focus { outline: none; }
+.tour-pop:focus-visible { outline: 2px solid #A78BFA; outline-offset: 2px; }
+.tour-done { margin-top: 10px; font-size: 13.5px; font-weight: 600; color: #047857; min-height: 1px; }
+.tour-done:empty { display: none; }
+.tour-pop.is-done { box-shadow: 0 18px 50px rgba(15, 23, 42, .35), 0 0 0 2px #10B981; }
+.tour-text .tour-do { display: block; margin-top: 8px; padding: 8px 10px; border-radius: 8px; background: var(--violet-lt, #F5F3FF); color: var(--tx-primary, #0F172A); font-weight: 500; }
+.tour-text .tour-do::before { content: '→ '; color: var(--violet, #7C3AED); font-weight: 700; }
+@media (prefers-reduced-motion: reduce) { html.tour-interactive .tour-spot { animation: none; } }

@@ -14,8 +14,14 @@ const { createScraper } = require('./scraper');
 const { createSurveys } = require('./surveys');
 const { createProjects } = require('./projects');
 const { rankSimilar } = require('./model-match');
+const { createStatusMonitor, statusRoutes } = require('./status-page');
 
 const app = express();
+
+// status.metac0.de (any status.* host): only the status page and its data;
+// anything else on that host goes to the main site. See status-page.js.
+const statusSite = statusRoutes({ publicDir: path.join(__dirname, 'public') });
+app.use(statusSite.hostRouter);
 
 // The AI routes spend the EMIS quota of the key(s) configured on this server,
 // and the scraper routes make requests to Reddit on this server's behalf, so
@@ -45,6 +51,7 @@ app.get('/s/:publicId', surveys.pageHandler);
 const projects = createProjects();
 app.use('/api/projects', projects.router);
 app.use(express.json({ limit: '10mb' }));
+app.get('/status', statusSite.page);   // the status page on the main site too
 // Pages, scripts and styles are revalidated on every load, so an updated
 // MetaCode is never run with yesterday's cached JavaScript.
 app.use(express.static(path.join(__dirname, 'public'), {
@@ -140,7 +147,7 @@ function redact(text, max) {
   let s = String(text === undefined || text === null ? '' : text);
   EMIS.keys.forEach(k => { s = s.split(k).join('[redacted]'); });
   s = s.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
-       .replace(/\bemis-[A-Za-z0-9._~+/=-]+/gi, 'emis-[redacted]')
+       .replace(/\bemis-[A-Za-z0-9._~+/=-]+/gi, '[redacted key]')
        .replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/gi, '[url]')
        .replace(/[\u0000-\u001F\u007F]+/g, ' ')
        .replace(/\s{2,}/g, ' ')
@@ -149,11 +156,11 @@ function redact(text, max) {
   return s.length > limit ? s.slice(0, limit - 1) + '…' : s;
 }
 
-// "emis-…a1b2" for Settings → Key Rotation Status: at most the public
-// "emis-" prefix and the last 4 characters. Short keys show nothing.
+// "…a1b2" for Settings → Key Rotation Status: only the last 4 characters.
+// Short keys show nothing.
 function maskKey(key) {
   if (!key || key.length < 16) return '••••';
-  return (/^emis-/i.test(key) ? key.slice(0, 5) : '') + '…' + key.slice(-4);
+  return '…' + key.slice(-4);
 }
 
 // How keys are named in the server log: by position, never by value.
@@ -253,13 +260,13 @@ function recordQuota(key, quota, now) {
   const resetAt = plausibleResetTime(quota.resetAt, now);
   if (usedUp && resetAt) {
     if (!isResting(state, now)) {
-      console.warn('[emis] ' + keyLabel(key) + ' has used up its ' + (quota.window ? quota.window + ' ' : '') +
+      console.warn('[ai] ' + keyLabel(key) + ' has used up its ' + (quota.window ? quota.window + ' ' : '') +
         'quota; it rests until ' + new Date(resetAt).toLocaleString() + '.');
     }
     state.cooldownUntil = resetAt;
     state.cooldownReason = 'quota';
   } else if (isLow(quota) && !isLow(previous)) {
-    console.warn('[emis] ' + keyLabel(key) + ' is running low: ' + describeRemaining(quota) + ' left' +
+    console.warn('[ai] ' + keyLabel(key) + ' is running low: ' + describeRemaining(quota) + ' left' +
       (quota.window ? ' this ' + quota.window : '') + '.');
   }
 }
@@ -283,7 +290,7 @@ function onQuotaExhausted(key, quota, headers, now) {
   state.cooldownUntil = until;
   state.cooldownReason = resetAt ? 'quota' : 'paused';
   state.lastError = 'HTTP 429';
-  if (!alreadyLogged) console.warn('[emis] ' + keyLabel(key) + ' got 429 from EMIS; it rests until ' + new Date(until).toLocaleString() + '.');
+  if (!alreadyLogged) console.warn('[ai] ' + keyLabel(key) + ' got 429 from the AI service; it rests until ' + new Date(until).toLocaleString() + '.');
 }
 
 function markKeyRejected(key, r) {
@@ -291,7 +298,7 @@ function markKeyRejected(key, r) {
   state.invalid = true;
   state.lastError = 'HTTP ' + r.status;
   const detail = providerMessage(r);
-  console.error('[emis] EMIS rejected ' + keyLabel(key) + ' (HTTP ' + r.status + ')' + (detail ? ': ' + detail.replace(/\.$/, '') : '') + '.');
+  console.error('[ai] The AI service rejected ' + keyLabel(key) + ' (HTTP ' + r.status + ')' + (detail ? ': ' + detail.replace(/\.$/, '') : '') + '.');
 }
 
 function markKeyUsed(key) {
@@ -339,7 +346,7 @@ function keyWidePause(key, model, now) {
   return true;
 }
 function modelLimitedFailure(model, until, now) {
-  const f = fail(429, 'model_rate_limited', 'EMIS is rate-limiting the model "' + model + '" right now. It can be used again ' + describeWhen(until, now) + '.');
+  const f = fail(429, 'model_rate_limited', 'The AI service is rate-limiting the model "' + model + '" right now. It can be used again ' + describeWhen(until, now) + '.');
   f.retryAfterSeconds = Math.max(1, Math.ceil((until - now) / 1000));
   f.model = model;
   return f;
@@ -352,7 +359,7 @@ function onModelLimited(model, headers, now) {
   const backoff = Math.min(MODEL_COOLDOWN_MAX_MS, MODEL_COOLDOWN_MS * 2 ** Math.min(st.hits - 1, 6));
   st.until = Math.max(st.until, now + (waitMs !== null ? Math.min(MODEL_COOLDOWN_MAX_MS, Math.max(1000, waitMs)) : backoff));
   modelLimits.set(model, st);
-  console.warn('[emis] EMIS rate-limited the model "' + model + '"; it rests until ' + new Date(st.until).toLocaleTimeString() +
+  console.warn('[ai] The AI service rate-limited the model "' + model + '"; it rests until ' + new Date(st.until).toLocaleTimeString() +
     (switchingAllowed() ? ' and requests for it use the closest similar model.' : '.'));
   return modelLimitedFailure(model, st.until, now);
 }
@@ -382,11 +389,11 @@ function noteSwitch(from, to, why) {
   const k = from + '>' + to, now = Date.now();
   if (now - (switchesLogged.get(k) || 0) < 60000) return;
   switchesLogged.set(k, now);
-  console.warn('[emis] "' + from + '" ' + (why === 'rate_limited' ? 'is rate-limited' : 'failed') + '; answered with the closest model, "' + to + '".');
+  console.warn('[ai] "' + from + '" ' + (why === 'rate_limited' ? 'is rate-limited' : 'failed') + '; answered with the closest model, "' + to + '".');
 }
 
 // ── Talking to EMIS ───────────────────────────────────────────────────────────
-const TIMED_OUT   = new Error('EMIS request timed out');
+const TIMED_OUT   = new Error('AI request timed out');
 const CLIENT_GONE = new Error('Browser disconnected');
 const CANCELLED   = new Error('Request cancelled');
 
@@ -464,7 +471,7 @@ async function emisRequest(method, pathname, key, body, opts) {
   let r = await emisRequestOnce(method, pathname, key, body, opts);
   for (const ms of delays) {
     if (!isTransient(r) || (opts.signal && opts.signal.aborted)) break;
-    console.warn('[emis] ' + method + ' ' + pathname + ' failed (' + (r.failed ? r.failed + ' ' + (r.code || '') : 'HTTP ' + r.status) + '); retrying in ' + (ms / 1000) + ' s');
+    console.warn('[ai] ' + method + ' ' + pathname + ' failed (' + (r.failed ? r.failed + ' ' + (r.code || '') : 'HTTP ' + r.status) + '); retrying in ' + (ms / 1000) + ' s');
     await new Promise(resolve => setTimeout(resolve, ms));
     if (opts.signal && opts.signal.aborted) break;
     r = await emisRequestOnce(method, pathname, key, body, opts);
@@ -486,7 +493,7 @@ async function emisRequestOnce(method, pathname, key, body, opts) {
     const r = await emisPython.request({ method, url: EMIS.baseUrl + pathname, key, body, timeoutMs: opts.timeoutMs, signal: opts.signal, proxy: String(process.env.EMIS_PROXY || '').trim() });
     if (r && !r.failed) return { status: r.status, ok: r.ok, headers: r.headers, text: r.text, json: parseJson(r.text), pathname, via: 'python' };
     if (r && r.failed === 'aborted') return { failed: 'aborted' };
-    if (r) console.warn('[emis] Python request to ' + pathname + ' failed (' + r.failed + ' ' + (r.code || '') + '): ' + redact(String(r.message || ''), 300));
+    if (r) console.warn('[ai] Python request to ' + pathname + ' failed (' + r.failed + ' ' + (r.code || '') + '): ' + redact(String(r.message || ''), 300));
     if (transport === 'python') return r ? { failed: r.failed === 'client' ? 'network' : r.failed, code: r.code, detail: r.message } : { failed: 'network', code: 'NO_PYTHON', detail: 'Python wasn\'t found' };
     // auto: try the same request from Node.js before giving up
     const n = await emisRequestNode(method, pathname, key, body, opts);
@@ -547,19 +554,19 @@ function fail(status, type, message, log) {
 function notConfigured() {
   if (EMIS.problem) return fail(500, 'not_configured', 'MetaCode\'s AI isn\'t set up correctly: ' + EMIS.problem);
   if (!EMIS.keys.length) {
-    return fail(401, 'not_configured', 'MetaCode\'s AI isn\'t set up yet: add your EMIS key to the server\'s .env file ' +
+    return fail(401, 'not_configured', 'MetaCode\'s AI isn\'t set up yet: add your AI key to the server\'s .env file ' +
       '(EMIS_API_KEY=…), then click "Reload .env" in Settings (or restart MetaCode).');
   }
   return null;
 }
 
 function networkMessage(code) {
-  if (/^(ENOTFOUND|EAI_AGAIN)$/.test(code)) return 'Couldn\'t find the EMIS server (address lookup failed). Check your internet connection and EMIS_BASE_URL in the server\'s .env file.';
-  if (code === 'ECONNREFUSED') return 'The EMIS server refused the connection. Check EMIS_BASE_URL in the server\'s .env file.';
-  if (/CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/i.test(code)) return 'Couldn\'t make a secure connection to EMIS (certificate problem).';
-  if (/^(ECONNRESET|EPIPE|UND_ERR_SOCKET)$/.test(code)) return 'The connection to EMIS dropped before it answered. Try again.';
-  if (/TIMEOUT|ETIMEDOUT/.test(code)) return 'Couldn\'t connect to EMIS in time. Check your internet connection and try again.';
-  return 'Couldn\'t reach EMIS. Check your internet connection and try again. If your network only allows the internet through a proxy, add HTTPS_PROXY=http://proxy:port (or EMIS_PROXY) to .env and click Reload .env in Settings.';
+  if (/^(ENOTFOUND|EAI_AGAIN)$/.test(code)) return 'Couldn\'t find the AI service (address lookup failed). Check your internet connection and EMIS_BASE_URL in the server\'s .env file.';
+  if (code === 'ECONNREFUSED') return 'The AI service refused the connection. Check EMIS_BASE_URL in the server\'s .env file.';
+  if (/CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/i.test(code)) return 'Couldn\'t make a secure connection to the AI service (certificate problem).';
+  if (/^(ECONNRESET|EPIPE|UND_ERR_SOCKET)$/.test(code)) return 'The connection to the AI service dropped before it answered. Try again.';
+  if (/TIMEOUT|ETIMEDOUT/.test(code)) return 'Couldn\'t connect to the AI service in time. Check your internet connection and try again.';
+  return 'Couldn\'t reach the AI service. Check your internet connection and try again. If your network only allows the internet through a proxy, add HTTPS_PROXY=http://proxy:port (or EMIS_PROXY) to .env and click Reload .env in Settings.';
 }
 
 const MODEL_MISSING = /model[^.]{0,80}(not\s+found|does\s*n[o']?t\s+exist|unknown|is\s+not\s+available|no\s+such)|(unknown|invalid|no\s+such)\s+model/i;
@@ -569,7 +576,7 @@ const MODEL_MISSING = /model[^.]{0,80}(not\s+found|does\s*n[o']?t\s+exist|unknow
 function describeFailure(r, ctx) {
   ctx = ctx || {};
   if (r.failed === 'timeout') {
-    return fail(504, 'timeout', 'EMIS didn\'t answer within ' + timeoutSeconds() + ' seconds. Try again; if this keeps ' +
+    return fail(504, 'timeout', 'The AI service didn\'t answer within ' + timeoutSeconds() + ' seconds. Try again; if this keeps ' +
       'happening, raise EMIS_TIMEOUT_MS in the server\'s .env file.');
   }
   if (r.failed === 'network') return fail(502, 'network', networkMessage(r.code) + (r.detail ? ' (details: ' + redact(String(r.detail), 300) + ')' : ''), 'network error ' + (r.code || '(no code)') + (r.detail ? ' — ' + r.detail : ''));
@@ -578,44 +585,44 @@ function describeFailure(r, ctx) {
   const detail = providerMessage(r);
   const log = 'HTTP ' + status + (detail ? ': ' + detail : '');
   if (status >= 300 && status < 400) {
-    return fail(502, 'bad_base_url', 'EMIS answered with a redirect instead of a result. Check EMIS_BASE_URL in the server\'s .env file.', log);
+    return fail(502, 'bad_base_url', 'The AI service answered with a redirect instead of a result. Check EMIS_BASE_URL in the server\'s .env file.', log);
   }
   if (status === 401) {
-    return fail(401, 'authentication_error', 'EMIS didn\'t accept the configured key' + (detail ? ' ("' + detail + '")' : '') + '. Check EMIS_API_KEY in the server\'s .env file, then click Reload .env in Settings.', log);
+    return fail(401, 'authentication_error', 'The AI service didn\'t accept the configured key' + (detail ? ' ("' + detail + '")' : '') + '. Check EMIS_API_KEY in the server\'s .env file, then click Reload .env in Settings.', log);
   }
   if (status === 403) {
     if (/^\s*</.test(r.text || '')) {
-      return fail(403, 'blocked', 'EMIS\'s website check answered instead of the API (a web page with HTTP 403). MetaCode sends EMIS requests ' +
+      return fail(403, 'blocked', 'The AI service\'s website check answered instead of the API (a web page with HTTP 403). MetaCode sends AI requests ' +
         'through Python to avoid this — make sure Python 3 is installed (and ideally run "pip install openai"), then restart MetaCode. ' +
         'Also check that EMIS_BASE_URL is ' + EMIS_DEFAULT_BASE_URL + '.', log);
     }
-    return fail(403, 'permission_error', 'EMIS refused this request' + (detail ? ': "' + detail + '"' : ' for the configured key') +
+    return fail(403, 'permission_error', 'The AI service refused this request' + (detail ? ': "' + detail + '"' : ' for the configured key') +
       (ctx.model ? ' (model "' + ctx.model + '")' : '') + '. Check EMIS_API_KEY in the server\'s .env file, or pick another model in Settings → AI models.', log);
   }
   if (ctx.model && (status === 404 || ((status === 400 || status === 422) && MODEL_MISSING.test(detail)))) {
     modelList.fetchedAt = 0;                       // EMIS's list may have changed: fetch it again next time
     if (status !== 404 || /model/i.test(detail) || ctx.verified) {
       if (ctx.source === 'file') {
-        return fail(404, 'model_not_found', 'EMIS doesn\'t offer the model "' + ctx.model + '", although it\'s listed in ' + MODELS_FILE_NAME + '. ' +
+        return fail(404, 'model_not_found', 'The AI service doesn\'t offer the model "' + ctx.model + '", although it\'s listed in ' + MODELS_FILE_NAME + '. ' +
           'Pick another model in Settings → Fetch Models, or update ' + MODELS_FILE_NAME + '.', log);
       }
-      return fail(404, 'model_not_found', 'EMIS doesn\'t offer the model "' + ctx.model + '". Pick a model in Settings → Fetch Models, ' +
+      return fail(404, 'model_not_found', 'The AI service doesn\'t offer the model "' + ctx.model + '". Pick a model in Settings → Fetch Models, ' +
         'or set EMIS_MODEL in the server\'s .env file.', log);
     }
-    return fail(404, 'not_found', 'EMIS answered "not found" for the model "' + ctx.model + '". Check the model (Settings → Fetch Models) ' +
+    return fail(404, 'not_found', 'The AI service answered "not found" for the model "' + ctx.model + '". Check the model (Settings → Fetch Models) ' +
       'and that EMIS_BASE_URL in the server\'s .env file ends in /v1.', log);
   }
   if (status === 404) {
-    return fail(502, 'bad_base_url', 'EMIS couldn\'t find the requested endpoint. Check that EMIS_BASE_URL in the server\'s .env file ends in /v1.', log);
+    return fail(502, 'bad_base_url', 'The AI service couldn\'t find the requested endpoint. Check that EMIS_BASE_URL in the server\'s .env file ends in /v1.', log);
   }
-  if (status === 408) return fail(504, 'timeout', 'EMIS took too long to answer. Try again.', log);
-  if (status === 413) return fail(413, 'request_too_large', 'The request was too large for EMIS. Try a shorter text or a smaller sample.', log);
-  if (status === 429) return fail(429, 'rate_limited', 'EMIS asked MetaCode to pause. Try again in a moment.', log);
-  if (status >= 500) return fail(502, 'upstream_error', 'EMIS had a temporary server problem (HTTP ' + status + '). Try again in a moment.', log);
+  if (status === 408) return fail(504, 'timeout', 'The AI service took too long to answer. Try again.', log);
+  if (status === 413) return fail(413, 'request_too_large', 'The request was too large for the AI service. Try a shorter text or a smaller sample.', log);
+  if (status === 429) return fail(429, 'rate_limited', 'The AI service asked MetaCode to pause. Try again in a moment.', log);
+  if (status >= 500) return fail(502, 'upstream_error', 'The AI service had a temporary server problem (HTTP ' + status + '). Try again in a moment.', log);
   if (status >= 400) {
-    return fail(400, 'invalid_request', 'EMIS couldn\'t process the request' + (detail ? ': ' + detail : ' (HTTP ' + status + ').'), log);
+    return fail(400, 'invalid_request', 'The AI service couldn\'t process the request' + (detail ? ': ' + detail : ' (HTTP ' + status + ').'), log);
   }
-  return fail(502, 'malformed_response', 'EMIS sent a response MetaCode couldn\'t read.', log);
+  return fail(502, 'malformed_response', 'The AI service sent a response MetaCode couldn\'t read.', log);
 }
 
 function describeWhen(until, now) {
@@ -637,16 +644,16 @@ function allKeysResting(now) {
 // saying when the first key becomes available again.
 function quotaFailure(now) {
   const resting = EMIS.keys.map(getKeyState).filter(state => isResting(state, now));
-  if (!resting.length) return fail(503, 'unavailable', 'No EMIS key is available right now. Try again in a moment.');
+  if (!resting.length) return fail(503, 'unavailable', 'No AI key is available right now. Try again in a moment.');
   const next = resting.reduce((a, b) => (b.cooldownUntil < a.cooldownUntil ? b : a));
   const until = next.cooldownUntil;
   const when = describeWhen(until, now);
   const windowName = next.quota && next.quota.window;
   const usedUp = next.cooldownReason === 'quota';
   let message;
-  if (!usedUp) message = 'EMIS asked MetaCode to pause. Try again ' + when + '.';
-  else if (EMIS.keys.length > 1) message = 'Every configured EMIS key has used up its usage quota. The first one resets ' + when + '.';
-  else message = 'Your EMIS usage quota' + (windowName ? ' for this ' + windowName : '') + ' is used up. It resets ' + when + '.';
+  if (!usedUp) message = 'The AI service asked MetaCode to pause. Try again ' + when + '.';
+  else if (EMIS.keys.length > 1) message = 'Every configured AI key has used up its usage quota. The first one resets ' + when + '.';
+  else message = 'Your AI usage quota' + (windowName ? ' for this ' + windowName : '') + ' is used up. It resets ' + when + '.';
   const failure = fail(429, usedUp ? 'quota_exceeded' : 'rate_limited', message);
   failure.retryAfterSeconds = Math.max(1, Math.ceil((until - now) / 1000));
   failure.resetAt = new Date(until).toISOString();
@@ -658,7 +665,7 @@ function quotaFailure(now) {
 // post); the log gets one line per kind of failure per minute.
 const recentLogLines = new Map();
 function logFailure(f) {
-  const line = '[emis] ' + f.status + ' ' + f.type + ' — ' + (f.log || f.message);
+  const line = '[ai] ' + f.status + ' ' + f.type + ' — ' + (f.log || f.message);
   const now = Date.now();
   if (recentLogLines.has(line) && now - recentLogLines.get(line) < 60 * 1000) return;
   recentLogLines.set(line, now);
@@ -734,20 +741,20 @@ function parseModelsFile(json) {
 function reportModelsFile(result) {
   if (!result.ok) {
     if (result.missing) {
-      if (process.env.EMIS_MODELS_FILE) console.warn('[emis] EMIS_MODELS_FILE points to ' + MODELS_FILE + ', which doesn\'t exist; using EMIS\'s live model list.');
-      else if (modelsFile.loads) console.warn('[emis] ' + MODELS_FILE_NAME + ' was removed; using EMIS\'s live model list.');
+      if (process.env.EMIS_MODELS_FILE) console.warn('[ai] EMIS_MODELS_FILE points to ' + MODELS_FILE + ', which doesn\'t exist; using the live model list.');
+      else if (modelsFile.loads) console.warn('[ai] ' + MODELS_FILE_NAME + ' was removed; using the live model list.');
       return;
     }
-    console.warn('[emis] ' + result.problem + ' Using EMIS\'s live model list instead.');
+    console.warn('[ai] ' + result.problem + ' Using the live model list instead.');
     return;
   }
-  if (modelsFile.loads) console.log('[emis] ' + MODELS_FILE_NAME + ' changed: ' + result.models.length + ' models loaded.');
-  if (result.skipped) console.warn('[emis] ' + MODELS_FILE_NAME + ': skipped ' + result.skipped + ' entr' + (result.skipped === 1 ? 'y' : 'ies') + ' without a usable model id.');
+  if (modelsFile.loads) console.log('[ai] ' + MODELS_FILE_NAME + ' changed: ' + result.models.length + ' models loaded.');
+  if (result.skipped) console.warn('[ai] ' + MODELS_FILE_NAME + ': skipped ' + result.skipped + ' entr' + (result.skipped === 1 ? 'y' : 'ies') + ' without a usable model id.');
   if (result.baseURL && EMIS.baseUrl && result.baseURL !== EMIS.baseUrl) {
-    console.warn('[emis] ' + MODELS_FILE_NAME + ' was written for ' + result.baseURL + ', but EMIS_BASE_URL is ' + EMIS.baseUrl + '. MetaCode uses EMIS_BASE_URL.');
+    console.warn('[ai] ' + MODELS_FILE_NAME + ' was written for ' + result.baseURL + ', but EMIS_BASE_URL is ' + EMIS.baseUrl + '. MetaCode uses EMIS_BASE_URL.');
   }
   if (result.hasLiteralKey) {
-    console.warn('[emis] ' + MODELS_FILE_NAME + ' contains an API key. MetaCode never reads keys from this file; keep the key in .env ' +
+    console.warn('[ai] ' + MODELS_FILE_NAME + ' contains an API key. MetaCode never reads keys from this file; keep the key in .env ' +
       '(EMIS_API_KEY) and replace it in this file with {env:EMIS_API_KEY}.');
   }
 }
@@ -788,7 +795,7 @@ function readModelsFile() {
 }
 
 function listLabel(source) {
-  return source === 'file' ? MODELS_FILE_NAME : 'EMIS\'s model list';
+  return source === 'file' ? MODELS_FILE_NAME : 'the live model list';
 }
 
 function parseModelList(json) {
@@ -800,7 +807,7 @@ function parseModelList(json) {
     if (!id) skipped++;
     else if (!ids.includes(id)) ids.push(id);
   });
-  if (skipped) console.warn('[emis] Skipped ' + skipped + ' model list entr' + (skipped === 1 ? 'y' : 'ies') + ' without a usable id.');
+  if (skipped) console.warn('[ai] Skipped ' + skipped + ' model list entr' + (skipped === 1 ? 'y' : 'ies') + ' without a usable id.');
   return ids;
 }
 
@@ -814,11 +821,11 @@ async function fetchModelList() {
     if (r.status === 429) { failure = describeFailure(r); continue; }
     if (!r.ok) return describeFailure(r);
     const ids = parseModelList(r.json);
-    if (!ids) return fail(502, 'malformed_response', 'EMIS sent its model list in a format MetaCode couldn\'t read.', 'HTTP ' + r.status + ' without a data array');
+    if (!ids) return fail(502, 'malformed_response', 'The AI service sent its model list in a format MetaCode couldn\'t read.', 'HTTP ' + r.status + ' without a data array');
     getKeyState(key).invalid = false;
     return { ok: true, ids };
   }
-  return failure || notConfigured() || fail(503, 'unavailable', 'No EMIS key is available right now.');
+  return failure || notConfigured() || fail(503, 'unavailable', 'No AI key is available right now.');
 }
 
 // Resolves to { ok: true, ids, info, source } — info is a Map of id → { name,
@@ -837,7 +844,7 @@ function getModelList(forceRefresh) {
   }
   if (!modelList.pending) {
     modelList.pending = fetchModelList()
-      .catch(err => fail(500, 'internal_error', 'Couldn\'t load EMIS\'s model list.', 'model list: ' + redact(err && err.message)))
+      .catch(err => fail(500, 'internal_error', 'Couldn\'t load the model list.', 'model list: ' + redact(err && err.message)))
       .then(result => {
         if (result.ok) {
           modelList.ids = result.ids;
@@ -869,14 +876,14 @@ function chooseDefaultModel(ids, source) {
   if (source === 'file') return ids.length ? { model: ids[0] } : { error: fail(500, 'no_models', MODELS_FILE_NAME + ' lists no models.') };
   if (ids.includes(EMIS_EXAMPLE_MODEL)) return { model: EMIS_EXAMPLE_MODEL };
   const model = ids.find(id => !NOT_A_CHAT_MODEL.test(id)) || ids[0];
-  return model ? { model } : { error: fail(502, 'no_models', 'EMIS returned an empty model list.') };
+  return model ? { model } : { error: fail(502, 'no_models', 'The AI service returned an empty model list.') };
 }
 
 const substitutionsLogged = new Set();
 function noteSubstitution(from, to, source) {
   if (substitutionsLogged.has(from)) return;
   substitutionsLogged.add(from);
-  console.warn('[emis] "' + from + '" isn\'t in ' + listLabel(source) + ', so "' + to + '" is used instead. Choose a model in ' +
+  console.warn('[ai] "' + from + '" isn\'t in ' + listLabel(source) + ', so "' + to + '" is used instead. Choose a model in ' +
     'Settings → Fetch Models, or set EMIS_MODEL in .env.');
 }
 
@@ -1106,7 +1113,7 @@ function fromSse(text) {
 const streamPref = new Map();
 function streamPreferred(model) { return streamPref.has(model) ? streamPref.get(model) : !!streamPref.get('*'); }
 function setStreamPreferred(model, v) {
-  if (streamPref.get(model) !== v) console.log('[emis] ' + model + ': using ' + (v ? 'streamed' : 'plain') + ' replies from now on.');
+  if (streamPref.get(model) !== v) console.log('[ai] ' + model + ': using ' + (v ? 'streamed' : 'plain') + ' replies from now on.');
   streamPref.set(model, v);
   if (v) streamPref.set('*', true);   // new models start with what worked
 }
@@ -1171,7 +1178,7 @@ function noteEmptyAnswer(completion, model) {
   const choice = completion.choices[0];
   const toolCalls = Array.isArray(choice.message.tool_calls) && choice.message.tool_calls.length > 0;
   if (choice.message.content.trim() || toolCalls) return;
-  console.warn('[emis] ' + model + ' returned an empty answer (finish_reason: ' + (choice.finish_reason || 'none') + ')' +
+  console.warn('[ai] ' + model + ' returned an empty answer (finish_reason: ' + (choice.finish_reason || 'none') + ')' +
     (choice.finish_reason === 'length' ? ' — it used its whole max_tokens budget, probably on reasoning.' : '.'));
 }
 
@@ -1201,7 +1208,7 @@ async function completeChat(chatRequest, ctx, signal, retriedLength) {
     if (!completion && /web page/.test(describeReply(r)) && !/\/v1$/.test(EMIS.baseUrl)) {
       // EMIS_BASE_URL is missing /v1, so the website answered instead of the API: try the API address
       const fixed = EMIS.baseUrl + '/v1';
-      console.warn('[emis] ' + EMIS.baseUrl + ' answered with a web page; trying ' + fixed + ' (set EMIS_BASE_URL=' + fixed + ' in .env).');
+      console.warn('[ai] ' + EMIS.baseUrl + ' answered with a web page; trying ' + fixed + ' (set EMIS_BASE_URL=' + fixed + ' in .env).');
       const prev = EMIS.baseUrl;
       EMIS.baseUrl = fixed;
       const r2 = await emisRequest('POST', '/chat/completions', key, chatRequest, { timeoutMs: EMIS.timeoutMs, signal });
@@ -1214,7 +1221,7 @@ async function completeChat(chatRequest, ctx, signal, retriedLength) {
       // Empty or unreadable: ask the other way — streamed (as in EMIS's own example) or plain —
       // straight away, and remember what works for this model.
       const asStream = !streamFirst;
-      console.warn('[emis] ' + (streamFirst ? 'Streamed' : 'Non-streamed') + ' reply from ' + chatRequest.model + ' unreadable (' + describeReply(r) + replyHeaders(r) + '); asking again ' + (asStream ? 'with stream: true' : 'without streaming') + '.');
+      console.warn('[ai] ' + (streamFirst ? 'Streamed' : 'Non-streamed') + ' reply from ' + chatRequest.model + ' unreadable (' + describeReply(r) + replyHeaders(r) + '); asking again ' + (asStream ? 'with stream: true' : 'without streaming') + '.');
       other = await emisRequest('POST', '/chat/completions', key, Object.assign({}, chatRequest, { stream: asStream }), { timeoutMs: EMIS.timeoutMs, signal, buffered: asStream, retry: false });
       if (other.ok) completion = readReply(other);
       if (completion) {
@@ -1224,9 +1231,9 @@ async function completeChat(chatRequest, ctx, signal, retriedLength) {
     } else if (streamFirst === false && streamPref.get(chatRequest.model) === undefined) setStreamPreferred(chatRequest.model, false);
     if (!completion) {
       const what = describeReply(r) + (other ? '; asked ' + (streamFirst ? 'without streaming' : 'with stream: true') + ', it sent ' + (other.failed ? 'nothing (' + other.failed + ' ' + (other.code || '') + ')' : (other.ok ? describeReply(other) : 'HTTP ' + other.status)) : '');
-      console.error('[emis] Details: ' + (r.via || 'node') + replyHeaders(r));
-      console.error('[emis] Unreadable reply to chat/completions (model ' + chatRequest.model + ', HTTP ' + r.status + '): ' + what);
-      return fail(502, 'malformed_response', 'EMIS answered, but not with a chat reply MetaCode can read — it sent ' + what + '.' +
+      console.error('[ai] Details: ' + (r.via || 'node') + replyHeaders(r));
+      console.error('[ai] Unreadable reply to chat/completions (model ' + chatRequest.model + ', HTTP ' + r.status + '): ' + what);
+      return fail(502, 'malformed_response', 'The AI service answered, but not with a chat reply MetaCode can read — it sent ' + what + '.' +
         (/web page/.test(what) ? ' Check that EMIS_BASE_URL in .env is the API address ending in /v1 (default ' + EMIS_DEFAULT_BASE_URL + ').' : ''),
         'HTTP ' + r.status + ': ' + what);
     }
@@ -1235,7 +1242,7 @@ async function completeChat(chatRequest, ctx, signal, retriedLength) {
     const c0 = completion.choices[0];
     if (!String(c0.message.content || '').trim() && c0.finish_reason === 'length' && !retriedLength) {
       const bigger = Math.min(8192, Math.max(1024, (Number(chatRequest.max_tokens) || 256) * 4));
-      console.warn('[emis] ' + chatRequest.model + ' used all ' + (chatRequest.max_tokens || '?') + ' tokens without answering; retrying with ' + bigger + '.');
+      console.warn('[ai] ' + chatRequest.model + ' used all ' + (chatRequest.max_tokens || '?') + ' tokens without answering; retrying with ' + bigger + '.');
       return completeChat(Object.assign({}, chatRequest, { max_tokens: bigger }), ctx, signal, true);
     }
     markKeyUsed(key);
@@ -1375,13 +1382,13 @@ async function relayStream(res, attempt, key, model) {
     if (payload.trim() === '[DONE]') return STREAM_DONE;
     const chunk = parseJson(payload);
     if (!chunk || typeof chunk !== 'object' || Array.isArray(chunk)) {
-      return { type: 'malformed_response', message: 'EMIS sent part of the answer in a format MetaCode couldn\'t read.',
+      return { type: 'malformed_response', message: 'The AI service sent part of the answer in a format MetaCode couldn\'t read.',
                log: 'unreadable stream event (' + payload.length + ' characters)' };
     }
     if (event.event === 'error' || chunk.error) {
       const raw = chunk.error && typeof chunk.error === 'object' ? chunk.error.message : chunk.error;
       const detail = redact(raw, 200);
-      return { type: 'upstream_error', message: 'EMIS reported a problem while answering' + (detail ? ': ' + detail : '.') };
+      return { type: 'upstream_error', message: 'The AI service reported a problem while answering' + (detail ? ': ' + detail : '.') };
     }
     if (Array.isArray(chunk.choices) && chunk.choices.some(c => c && c.finish_reason)) finishSeen = true;
     const written = await writeSse(res, 'data: ' + JSON.stringify(chunk) + '\n\n');
@@ -1410,9 +1417,9 @@ async function relayStream(res, attempt, key, model) {
     const reason = attempt.controller.signal.reason;
     if (reason === CLIENT_GONE || res.destroyed) outcome = { gone: true };
     else if (reason === TIMED_OUT) {
-      outcome = { type: 'timeout', message: 'EMIS stopped sending the answer for ' + timeoutSeconds() + ' seconds, so the stream was ended.' };
+      outcome = { type: 'timeout', message: 'The AI service stopped sending the answer for ' + timeoutSeconds() + ' seconds, so the stream was ended.' };
     } else {
-      outcome = { type: 'network', message: 'The connection to EMIS dropped in the middle of the answer.' };
+      outcome = { type: 'network', message: 'The connection to the AI service dropped in the middle of the answer.' };
     }
   } finally {
     attempt.finish();
@@ -1421,7 +1428,7 @@ async function relayStream(res, attempt, key, model) {
   if (outcome && outcome.gone) {
     attempt.cancel();
     reader.cancel().catch(() => {});
-    console.warn('[emis] The browser disconnected mid-stream; the EMIS request was cancelled.');
+    console.warn('[ai] The browser disconnected mid-stream; the AI request was cancelled.');
     return;
   }
   if (outcome === STREAM_DONE || (!outcome && finishSeen)) {
@@ -1431,7 +1438,7 @@ async function relayStream(res, attempt, key, model) {
     if (!res.writableEnded) res.end();
     return;
   }
-  const problem = outcome || { type: 'stream_interrupted', message: 'The EMIS stream ended before the answer was complete.' };
+  const problem = outcome || { type: 'stream_interrupted', message: 'The AI stream ended before the answer was complete.' };
   attempt.cancel();
   reader.cancel().catch(() => {});
   logFailure(fail(502, problem.type, problem.message, (problem.log || problem.message).replace(/\.$/, '') + ' (after ' + forwarded +
@@ -1473,7 +1480,7 @@ async function streamWith(res, chatRequest, ctx, signal) {
     if (!/^text\/event-stream/i.test(upstream.headers.get('content-type') || '')) {
       attempt.cancel();
       attempt.finish();
-      return sendFailure(res, fail(502, 'malformed_response', 'EMIS didn\'t send a stream for a streaming request.',
+      return sendFailure(res, fail(502, 'malformed_response', 'The AI service didn\'t send a stream for a streaming request.',
         'content-type ' + redact(upstream.headers.get('content-type') || 'missing', 60)));
     }
     return await relayStream(res, attempt, key, chatRequest.model);
@@ -1579,7 +1586,7 @@ async function answerChat(prep, signal) {
   if (!result.ok && result.type === 'model_rate_limited') {
     const others = Array.from(tried).filter(m => m !== ctx.model);
     const soonest = Math.min(...Array.from(tried).map(m => modelRestingUntil(m, Date.now()) || Infinity));
-    let message = 'EMIS is rate-limiting the model "' + ctx.model + '"' + (others.length ? ' and the most similar models (' + others.map(m => '"' + m + '"').join(', ') + ')' : '') + ' right now.';
+    let message = 'The AI service is rate-limiting the model "' + ctx.model + '"' + (others.length ? ' and the most similar models (' + others.map(m => '"' + m + '"').join(', ') + ')' : '') + ' right now.';
     if (Number.isFinite(soonest)) message += ' The first one can be used again ' + describeWhen(soonest, Date.now()) + '.';
     if (!prep.switchModels) message += switchingAllowed() ? ' (Switching to a similar model is turned off in Settings → AI models.)' : ' (EMIS_MODEL_SWITCH=off in .env turns off switching to a similar model.)';
     result = Object.assign({}, result, { message, retryAfterSeconds: Number.isFinite(soonest) ? Math.max(1, Math.ceil((soonest - Date.now()) / 1000)) : result.retryAfterSeconds });
@@ -1614,7 +1621,7 @@ app.post('/api/ai', async (req, res) => {
     setFallbackHeaders(res, out);
     res.json(out.json);
   } catch (err) {
-    console.error('[emis] Unexpected error in /api/ai: ' + redact(err && err.message));
+    console.error('[ai] Unexpected error in /api/ai: ' + redact(err && err.message));
     if (!res.headersSent) res.status(500).json({ error: { message: 'Something went wrong in MetaCode\'s AI service.', type: 'internal_error' } });
     else if (!res.writableEnded) res.end();
   }
@@ -1662,14 +1669,14 @@ app.post('/api/ai/batch', async (req, res) => {
       const prep = await prepareChat(item.body, 'openai', { switchModels });
       out = prep.failure ? { failure: prep.failure } : await answerChat(prep, client.signal);
     } catch (err) {
-      console.error('[emis] Unexpected error in /api/ai/batch: ' + redact(err && err.message));
+      console.error('[ai] Unexpected error in /api/ai/batch: ' + redact(err && err.message));
       out = { failure: fail(500, 'internal_error', 'Something went wrong in MetaCode\'s AI service.') };
     }
     if (out.aborted) return;
     if (out.failure && out.failure.status === 429 && (out.failure.type === 'rate_limited' || out.failure.type === 'model_rate_limited') && item.tries < 3) {
       // EMIS asked us to slow down: fewer copies at once, a short pause, then this one again
       item.tries++;
-      if (parallel > 1) { parallel = Math.max(1, Math.floor(parallel / 2)); console.warn('[emis] Rate-limited during a batch; running ' + parallel + ' at once now.'); }
+      if (parallel > 1) { parallel = Math.max(1, Math.floor(parallel / 2)); console.warn('[ai] Rate-limited during a batch; running ' + parallel + ' at once now.'); }
       pausedUntil = Math.max(pausedUntil, Date.now() + Math.min(30, out.failure.retryAfterSeconds || 2 * item.tries) * 1000);
       queue.unshift(item);
       return;
@@ -1749,8 +1756,8 @@ app.get('/api/models', async (req, res) => {
     if (choice.error) body.note = choice.error.message;
     res.json(body);
   } catch (err) {
-    console.error('[emis] Unexpected error in /api/models: ' + redact(err && err.message));
-    res.json({ models: [], note: 'Couldn\'t load EMIS\'s model list.' });
+    console.error('[ai] Unexpected error in /api/models: ' + redact(err && err.message));
+    res.json({ models: [], note: 'Couldn\'t load the model list.' });
   }
 });
 
@@ -1884,6 +1891,60 @@ const scraper = createScraper();
 app.use('/api/scraper', scraper.router);
 app.use('/scramjet', scraper.scramjetRouter);
 
+// ── Status page (status.metac0.de, /status) ───────────────────────────────────
+// Public: says whether each part works, never how it's configured.
+let aiProbe = { at: 0, result: null };
+async function aiStatusCheck() {
+  if (notConfigured()) return { status: 'off', note: 'AI isn\'t set up on this server.' };
+  let now = Date.now();
+  if (allKeysResting(now)) {
+    const f = quotaFailure(now);
+    const when = f.resetAt ? describeWhen(Date.parse(f.resetAt), now).replace(/ \(.*\)$/, '') : 'soon';
+    return { status: 'degraded', note: f.type === 'quota_exceeded' ? 'The usage quota is used up; AI features resume ' + when + '.' : 'Paused briefly at the AI provider\'s request; back ' + when + '.' };
+  }
+  if (Date.now() - aiProbe.at > 60000) aiProbe = { at: Date.now(), result: await fetchModelList() };   // no prompts spent
+  const r = aiProbe.result;
+  if (!r.ok) {
+    if (r.status === 429) return { status: 'degraded', note: 'The AI provider is rate-limiting requests.' };
+    return { status: 'outage', note: r.type === 'timeout' || r.type === 'network' ? 'The AI provider can\'t be reached.' : 'The AI provider isn\'t accepting requests.' };
+  }
+  now = Date.now();
+  const limited = restingModels(now).length;
+  if (limited) return { status: 'degraded', note: limited + ' model' + (limited === 1 ? ' is' : 's are') + ' rate-limited; requests use the closest similar model.' };
+  return { status: 'operational', note: 'Responding normally.' };
+}
+let pyProbe = { at: 0, result: null };
+async function analysisStatusCheck() {
+  if (Date.now() - pyProbe.at > 5 * 60000) pyProbe = { at: Date.now(), result: await runPython(PY_CHECK_SCRIPT) };
+  const r = pyProbe.result || {};
+  if (r.ok) return { status: 'operational', note: 'Python and NetworkX are ready.' };
+  if (/networkx/i.test(String(r.error || ''))) return { status: 'degraded', note: 'Python is available, but NetworkX isn\'t installed.' };
+  return { status: 'outage', note: 'Python isn\'t available on this server.' };
+}
+async function surveyStatusCheck() {
+  try {
+    await fs.promises.mkdir(surveys.store.dir, { recursive: true });
+    await fs.promises.access(surveys.store.dir, fs.constants.W_OK);
+    return { status: 'operational', note: 'Published surveys are open and responses are being saved.' };
+  } catch (e) { return { status: 'outage', note: 'Responses can\'t be saved right now.' }; }
+}
+function scraperStatusCheck() {
+  const st = scraper.status();
+  if (!st.enabled) return { status: 'off', note: 'The scraper is turned off on this server.' };
+  if (!st.transport.available) return { status: 'degraded', note: 'Server-side scraping is unavailable; scraping through the browser still works.' };
+  return { status: 'operational', note: 'Ready to collect posts.' };
+}
+const statusMonitor = createStatusMonitor({
+  components: [
+    { id: 'app', name: 'MetaCode app', description: 'The coding app, Survey Studio and the website', check: () => ({ status: 'operational', note: 'Pages are being served.' }) },
+    { id: 'ai', name: 'AI service', description: 'AI Coding, the assistant and column detection', check: aiStatusCheck },
+    { id: 'surveys', name: 'Survey publishing & responses', description: 'Published survey links and response collection', check: surveyStatusCheck },
+    { id: 'analysis', name: 'Network analysis', description: 'Python / NetworkX for Analyze CSV and network metrics', check: analysisStatusCheck },
+    { id: 'scraper', name: 'Reddit scraper', description: 'Collecting posts and comments from Reddit', check: scraperStatusCheck }
+  ]
+});
+app.get('/api/status', statusMonitor.handler);
+
 // ── Health ────────────────────────────────────────────────────────────────────
 // ── Settings status (Settings page) ───────────────────────────────────────────
 // What MetaCode read from .env and whether AI is ready: file name and
@@ -1972,6 +2033,7 @@ function start(port) {
     const server = app.listen(port, () => {
       scraper.setPort(server.address().port);
       if (emisTransport() !== 'node') emisPython.warm();   // start the Python EMIS worker early
+      statusMonitor.start();
       resolve(server);
     });
     server.on('error', reject);
@@ -1979,6 +2041,7 @@ function start(port) {
     const close = server.close.bind(server);
     server.close = cb => {
       scraper.shutdown();
+      statusMonitor.stop();
       scraper.onUpgrade.closeAll();
       emisPython.stop();
       return close(cb);
@@ -1999,20 +2062,20 @@ function printBanner(PORT) {
   env.warnings.forEach(w => console.warn('  ⚠ ' + w));
   if (env.overridden.length) console.warn('  ⚠ .env replaced system environment variables: ' + env.overridden.join(', '));
   const keyCount = EMIS.keys.length;
-  console.log('  AI (EMIS)  → ' + (EMIS.problem ? 'NOT READY — ' + EMIS.problem
+  console.log('  AI         → ' + (EMIS.problem ? 'NOT READY — ' + EMIS.problem
     : keyCount ? keyCount + ' key' + (keyCount === 1 ? '' : 's') + ' set via .env ✓'
     : 'Not set — add EMIS_API_KEY to .env to turn on AI features'));
-  if (EMIS.baseUrl) console.log('  EMIS API   → ' + EMIS.baseUrl + (emisTransport() === 'node' ? ' (via Node.js)' : ' (via Python when available; EMIS_TRANSPORT=' + emisTransport() + ')'));
+  if (EMIS.baseUrl) console.log('  AI API     → ' + EMIS.baseUrl + (emisTransport() === 'node' ? ' (via Node.js)' : ' (via Python when available; EMIS_TRANSPORT=' + emisTransport() + ')'));
   if (fileModels.ok) {
     const choice = chooseDefaultModel(fileModels.ids, 'file');
     console.log('  Models     → ' + fileModels.models.length + ' from ' + MODELS_FILE_NAME + '; default: ' +
       (choice.model ? choice.model + (EMIS.model ? ' (EMIS_MODEL)' : '') : 'none — ' + choice.error.message));
   } else {
-    console.log('  Models     → EMIS\'s live list (GET /models)' + (EMIS.model ? '; default: ' + EMIS.model + ' (EMIS_MODEL)' : ''));
+    console.log('  Models     → the live model list (GET /models)' + (EMIS.model ? '; default: ' + EMIS.model + ' (EMIS_MODEL)' : ''));
   }
   EMIS.warnings.forEach(w => console.warn('  ⚠ ' + w));
   ['GROQ_API_KEY', 'ANTHROPIC_API_KEY'].forEach(name => {
-    if (process.env[name]) console.warn('  ⚠ ' + name + ' is set but no longer used: MetaCode now uses EMIS (EMIS_API_KEY).');
+    if (process.env[name]) console.warn('  ⚠ ' + name + ' is set but no longer used: MetaCode now uses the AI key in EMIS_API_KEY.');
   });
   console.log('  Python     → child_process bridge ready (auto-detects python3/python)');
   const sc = scraper.status();

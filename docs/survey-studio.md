@@ -460,14 +460,40 @@ Also shown by the ⌨ button in the editor.
 | Ctrl+Z / Ctrl+Shift+Z | Undo · redo |
 | Ctrl+S | Save now |
 
-## Guided tour
+## Tutorial and guided tour
 
-**Take the tour** in the top bar (or the compass button in the editor's top bar) starts a tour: on the list,
+**Tutorial & tour** in the top bar, or the compass button in the editor's top bar, opens *Learn Survey
+Studio* with two choices:
+
+- **Hands-on tutorial** (about 5 minutes) — *Build your first survey*. The tutorial creates a practice
+  survey and walks through the whole workflow on it, one action per step:
+  1. name the survey;
+  2. add a single-choice question and write its text on the canvas;
+  3. make it required (Properties panel);
+  4. add a long-text follow-up;
+  5. open Logic and add a script (drag blocks, or **Add an example for me**: *if the first answer is
+     picked, show the follow-up, else hide it*), then read how it works;
+  6. change the theme's primary colour;
+  7. preview on a phone and submit an answer;
+  8. publish and see the link;
+  9. open Responses.
+
+  The step's control is spotlighted and stays usable; the tutorial notices when the step is done and moves
+  on (**Skip step** goes on without doing it). On phones the Add and Properties panels open by themselves and
+  the card docks at the top or bottom of the screen. Keys aimed at the card work (→ / ← / Esc); typing in the
+  editor isn't intercepted. Each new step moves focus to the card and announces completion, for screen
+  readers. Closing the tutorial keeps its place: the menu then offers **Resume the tutorial** (or start again
+  with a new practice survey). It also starts from the empty survey list (**Start the tutorial**), from the
+  first-visit card, or with `studio.html?tutorial=1`. The practice survey is an ordinary survey — delete it
+  from the list when you're done.
+- **Quick tour of the screen** (about 2 minutes) — see below.
+
+The quick tour (`studio.html?tour=1`) shows: on the list,
 the templates, new/import and your surveys; in the editor, every tab — Design (elements, canvas, tools,
 properties), Logic (blocks, the Random category, scripts), Theme, Preview and its test panel, Responses —
 then saving and publishing. From the list, the tour can make a practice survey to show the editor on.
-`studio.html?tour=1` starts it; the coding app's tour ends by offering it. The first visit to the list and
-to the editor each offer their tour once.
+The coding app's tour ends by offering it. The first visit to the list offers the tutorial, and the first
+visit to the editor offers the quick tour, once each.
 
 ## Data model
 
@@ -641,6 +667,8 @@ public/js/survey/
   survey-panels.js                   Palette, layers, library
   survey-blocks.js                   Logic tab: Scratch-style blocks (palette, workspace, drag and drop)
   studio-shell.js                    studio.html bootstrap: routing, dialogs, notifications, project access
+  studio-tour.js                     The quick tour of the list and the editor (uses ../tour.js)
+  studio-tutorial.js                 The hands-on tutorial and the Learn Survey Studio menu
   survey-templates.js                Built-in templates
   survey-studio.js                   Survey list, editor shell, theme, preview, publish, responses
 test/survey-core.test.js             Model + logic unit tests
