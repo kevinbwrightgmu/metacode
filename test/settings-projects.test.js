@@ -66,6 +66,8 @@ const load = { now: 0, max: 0, total: 0, garbled: new Set() };
 // Rate limits: how often each model was called, and the budget the mock reports
 const hits = {};
 const budget = { remaining: 100 };
+// Server errors (HTTP 502): flop-* models always fail; wobbly-coder fails while wobble.left > 0
+const wobble = { left: 0 };
 
 function findChromium() {
   const candidates = [];
@@ -86,7 +88,7 @@ test.before(async () => {
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       if (!req.url.startsWith('/v1/')) { res.setHeader('Content-Type', 'text/html'); return res.end('<!doctype html><html><body>EMIS website</body></html>'); }
-      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }, { id: 'unicode-model' }, { id: 'streams-unless-told' }, { id: 'stream-only-model' }, { id: 'responses-sse-model' }, { id: 'empty-unless-stream' }, { id: 'slow-model' }, { id: 'coder-model' }, { id: 'acme-opus-4-8' }, { id: 'acme-opus-4-7' }, { id: 'acme-opus-3-0' }, { id: 'acme-mini-2' }, { id: 'acme-opus-4-9' }, { id: 'busy-a' }, { id: 'busy-b' }, { id: 'busy-c' }, { id: 'budget-model' }, { id: 'strm-pro-2-0' }, { id: 'strm-pro-1-9' }] }));
+      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }, { id: 'unicode-model' }, { id: 'streams-unless-told' }, { id: 'stream-only-model' }, { id: 'responses-sse-model' }, { id: 'empty-unless-stream' }, { id: 'slow-model' }, { id: 'coder-model' }, { id: 'acme-opus-4-8' }, { id: 'acme-opus-4-7' }, { id: 'acme-opus-3-0' }, { id: 'acme-mini-2' }, { id: 'acme-opus-4-9' }, { id: 'busy-a' }, { id: 'busy-b' }, { id: 'busy-c' }, { id: 'budget-model' }, { id: 'strm-pro-2-0' }, { id: 'strm-pro-1-9' }, { id: 'flop-pro-3-0' }, { id: 'flop-pro-2-9' }, { id: 'flop-pro-2-8' }, { id: 'wobbly-coder' }] }));
       if (req.url === '/v1/chat/completions') {
         const j = JSON.parse(body || '{}');
         lastUserAgent = String(req.headers['user-agent'] || '');
@@ -107,6 +109,14 @@ test.before(async () => {
         }
         if (j.model === 'unicode-model') return res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok → café … 你好 — ' + j.messages.map(m => m.content).join('|') }, finish_reason: 'stop' }] }));
         if (j.model === 'forbidden-model') { res.statusCode = 403; return res.end('{"error":{"message":"this key may not use forbidden-model"}}'); }
+        if (/^flop-/.test(j.model) || (j.model === 'wobbly-coder' && wobble.left > 0)) {
+          if (j.model === 'wobbly-coder') wobble.left--;
+          res.statusCode = 502; return res.end('{"error":{"message":"bad gateway"}}');
+        }
+        if (j.model === 'wobbly-coder') {
+          const user = String((j.messages.find(m => m.role === 'user') || {}).content || '');
+          return res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: '{"codings":{"d1":{"code":"' + (/happy/.test(user) ? 'pos' : 'neg') + '","confidence":0.9,"reasoning":"ok"}}}' }, finish_reason: 'stop' }] }));
+        }
         hits[j.model] = (hits[j.model] || 0) + 1;
         const quotaHeaders = { 'X-RateLimit-Window': 'day', 'X-RateLimit-Limit-Prompts': '100', 'X-RateLimit-Remaining-Prompts': String(budget.remaining), 'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + 3600) };
         // EMIS throttles these models although the key has budget left
@@ -219,6 +229,12 @@ test('a temporary EMIS failure is retried; a failing default model falls back; a
   assert.equal(res.status, 200, 'answered by another model');
   assert.notEqual(body.model, def);
   assert.equal(res.headers.get('x-metacode-model-fallback'), body.model);
+  // While it rests, the next request goes straight to the similar model
+  seenModels.length = 0;
+  const next = await fetch(base + '/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }) });
+  assert.equal(next.status, 200);
+  assert.equal(next.headers.get('x-metacode-model-fallback'), body.model);
+  assert.ok(!seenModels.includes(def), 'the failing model wasn\'t asked again');
 
   r = await ask(def);
   assert.equal(r.status, 502, 'a model the user picked is not swapped');
@@ -658,6 +674,81 @@ test('AI Coding page: posts are coded by several copies of the model at once; th
   await page.fill('#s-parallel', '99');
   await page.click('text=Save model settings');
   assert.equal(await page.evaluate(() => App.getState().settings.parallel), 16, 'clamped to the server\'s limit');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('a batch that hits server errors (HTTP 502) pauses, runs fewer at once, tries again and recovers', { timeout: 60000 }, async () => {
+  wobble.left = 12;                      // the first 4 requests fail, each after MetaCode's own 3 tries
+  const res = await fetch(base + '/api/ai/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parallel: 4,
+    requests: [1, 2, 3, 4].map(i => ({ id: 'w' + i, body: { model: 'wobbly-coder', max_tokens: 50, messages: [{ role: 'user', content: 'post ' + i }] } })) }) });
+  const lines = (await res.text()).trim().split('\n').map(l => JSON.parse(l));
+  const notices = lines.filter(l => l.notice);
+  assert.equal(notices.length, 1, 'one pause, however many requests were running when it began');
+  assert.deepEqual([notices[0].notice.type, notices[0].notice.waitSeconds, notices[0].notice.parallel], ['upstream_error', 5, 2]);
+  assert.match(notices[0].notice.message, /server error \(HTTP 502\)/);
+  const results = lines.filter(l => l.id);
+  assert.deepEqual(results.map(l => l.ok), [true, true, true, true], 'every request answered after the pause');
+  assert.deepEqual(lines[lines.length - 1], { done: true, parallel: 4 }, 'server errors don\'t lower the speed for good');
+  assert.equal(wobble.left, 0);
+});
+
+test('a batch stops sending when the AI service keeps failing, instead of trying every request', { timeout: 90000 }, async () => {
+  process.env.AI_BATCH_PAUSE_SECONDS = '0.05';
+  try {
+    const res = await fetch(base + '/api/ai/batch', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ parallel: 1,
+      requests: [1, 2, 3, 4].map(i => ({ id: 'f' + i, body: { model: 'flop-pro-3-0', max_tokens: 20, messages: [{ role: 'user', content: 'hi ' + i }] } })) }) });
+    const lines = (await res.text()).trim().split('\n').map(l => JSON.parse(l));
+    assert.deepEqual(lines.filter(l => l.notice).map(l => l.notice.waitSeconds), [0.1, 0.1, 0.2, 0.4, 0.8], '5 pauses, each longer');
+    const results = lines.filter(l => l.id);
+    assert.deepEqual(results.map(l => [l.id, l.ok, l.error.type]), [['f1', false, 'upstream_error'], ['f2', false, 'upstream_error'], ['f3', false, 'service_unavailable'], ['f4', false, 'service_unavailable']]);
+    assert.match(results[2].error.message, /kept failing for about 2 minutes .*HTTP 502.*what was already done is kept/);
+    assert.equal(lines[lines.length - 1].done, true);
+  } finally { delete process.env.AI_BATCH_PAUSE_SECONDS; }
+});
+
+test('server errors from several models are reported as the AI service having problems, also on the status page; an answer clears it', { timeout: 30000 }, async () => {
+  const bodies = [];
+  for (const model of ['flop-pro-3-0', 'flop-pro-2-9', 'flop-pro-2-8']) {
+    const r = await ask(model);
+    assert.equal(r.status, 502, model);
+    bodies.push((await r.json()).error);
+  }
+  assert.equal(bodies[0].type, 'upstream_error');
+  assert.match(bodies[0].message, /couldn't run the model "flop-pro-3-0" right now: it answered with a server error \(HTTP 502\)/);
+  assert.match(bodies[0].message, /you picked/);
+  assert.match(bodies[2].message, /having server problems right now: 3 different models answered with server errors \(HTTP 502\)/);
+  assert.equal(bodies[2].retryAfterSeconds, 30);
+  assert.doesNotMatch(bodies[2].message, /you picked/, 'picking another model wouldn\'t help');
+  const aiStatus = async () => (await json('GET', '/api/status')).json.components.find(c => c.id === 'ai');
+  let ai;
+  for (let end = Date.now() + 8000; Date.now() < end; await new Promise(r => setTimeout(r, 500))) if ((ai = await aiStatus()).status === 'outage') break;
+  assert.equal(ai.status, 'outage');
+  assert.match(ai.note, /server errors for several models/);
+  // An answer from any model: the service is working again (the failing models still rest)
+  assert.equal((await ask('model-b')).status, 200);
+  for (let end = Date.now() + 8000; Date.now() < end; await new Promise(r => setTimeout(r, 500))) if ((ai = await aiStatus()).status !== 'outage') break;
+  assert.equal(ai.status, 'degraded');
+  assert.match(ai.note, /\d+ models are failing at the AI provider/);
+});
+
+test('AI Coding page: server errors pause the run (the status line says so) and every post is still coded', { skip: noBrowser, timeout: 90000 }, async () => {
+  const { page, context, errors } = await openApp('#dashboard');
+  await page.waitForFunction(() => App.hasApiKeys());
+  const posts = Array.from({ length: 6 }, (_, i) => ({ id: 'wp' + i, text: (i % 2 ? 'I am happy ' : 'I am sad ') + i, aiCodes: {}, humanCodes: {} }));
+  await page.evaluate(posts => {
+    App.setState({ posts, codebook: [{ id: 'd1', name: 'Mood', codes: [{ id: 'pos', label: 'Positive' }, { id: 'neg', label: 'Negative' }] }],
+      settings: Object.assign({}, App.getState().settings, { model: 'wobbly-coder', models: {}, delay: 0, parallel: 3 }) });
+  }, posts);
+  await page.evaluate(() => App.navigate('ai-coding'));
+  await page.waitForSelector('#run-btn');
+  wobble.left = 9;                       // the first 3 posts fail, each after 3 tries
+  await page.click('#run-btn');
+  await page.waitForFunction(() => /server problem \(HTTP 502\) — pausing 5 s/.test(document.getElementById('status-msg').textContent), null, { timeout: 30000 });
+  await page.waitForFunction(() => /Done/.test(document.getElementById('status-msg').textContent), null, { timeout: 45000 });
+  const coded = await page.evaluate(() => App.getState().posts.map(p => p.aiCodes.d1 && p.aiCodes.d1.code));
+  assert.deepEqual(coded, posts.map((p, i) => (i % 2 ? 'pos' : 'neg')));
+  assert.match(await page.textContent('#status-msg'), /6 posts coded\./);
   assert.deepEqual(errors, []);
   await context.close();
 });

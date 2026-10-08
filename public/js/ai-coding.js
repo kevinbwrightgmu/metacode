@@ -295,7 +295,9 @@ const AICoder = (() => {
   /* ── Batch run ───────────────────────────────*/
   // Several copies of the same model code posts side by side (Settings → AI
   // models, or the "at once" box on this page). Posts whose answer can't be
-  // used are tried again, up to 3 times in all.
+  // used are tried again, up to 3 times in all. When the AI service has
+  // server problems, the server pauses and slows the batch down (the status
+  // line says so), and failed posts are tried again after a wait.
   let abort = null;
   async function run() {
     const { posts } = App.getState();
@@ -311,18 +313,27 @@ const AICoder = (() => {
 
     const system = buildSystemPrompt();
     let parallel = App.getParallel();
-    let done = 0, coded = 0, failed = 0, lastError = '';
+    let done = 0, coded = 0, failed = 0, lastError = '', serverFailed = 0, serverProblems = false, gaveUp = false;
     const substitutes = {};      // model → posts it coded because the chosen model was rate-limited or failing
     let pending = toCode.slice();
     updateProgress(0, toCode.length);
 
-    for (let round = 0; round < 3 && pending.length && !stopFlag; round++) {
+    for (let round = 0; round < 3 && pending.length && !stopFlag && !gaveUp; round++) {
       const byId = new Map(pending.map(p => [p.id, p]));
       const retry = [];
+      // Posts that failed because of the AI service: give it a little time first
+      if (round && serverFailed && !(await countdown(round === 1 ? 15 : 30, pending.length))) break;
+      serverFailed = 0;
       updateStatus('Coding ' + pending.length + ' post' + (pending.length !== 1 ? 's' : '') + ' with ' + parallel + ' cop' + (parallel !== 1 ? 'ies' : 'y') + ' of the model at once' + (round ? ' (retry ' + round + ')' : '') + '…');
       try {
         const out = await App.callClaudeBatch(pending.map(p => ({ id: p.id, system, messages: [{ role: 'user', content: buildUserMessage(p) }], max_tokens: 1000 })), {
           feature: 'coding', parallel, delay: App.getState().settings.delay || 0, signal: abort.signal,
+          onNotice(n) {
+            const code = (String(n.message || '').match(/HTTP \d{3}/) || [])[0];
+            console.warn('[AICoder] ' + n.message);
+            updateStatus('The AI service had a server problem' + (code ? ' (' + code + ')' : n.type === 'network' ? ' (the connection dropped)' : '') +
+              ' — pausing ' + n.waitSeconds + ' s, then coding ' + n.parallel + ' at once. ' + coded + ' of ' + toCode.length + ' coded so far…', true);
+          },
           onResult(r) {
             const post = byId.get(r.id);
             if (!post) return;
@@ -337,10 +348,13 @@ const AICoder = (() => {
               scheduleRefresh();
             } else {
               lastError = problem;
-              console.error('[AICoder] post', post.id, problem);
+              const serverSide = !r.ok && (!r.status || r.status >= 500 || r.status === 408);
+              if (serverSide) { serverFailed++; serverProblems = true; }
+              if (r.type === 'service_unavailable') gaveUp = true;     // the server stopped this run: no more rounds
               // An unreadable answer, or a passing EMIS problem, is worth another try
-              if (round < 2 && (r.ok || !r.status || r.status >= 500 || r.status === 408)) retry.push(post);
-              else { failed++; done++; }
+              // (not once the server has given up on the AI service for this run)
+              if (round < 2 && (r.ok || (serverSide && r.type !== 'service_unavailable'))) { retry.push(post); console.warn('[AICoder] post', post.id, '— will try again:', problem); }
+              else { failed++; done++; console.error('[AICoder] post', post.id, problem); }
             }
             updateProgress(done, toCode.length);
             updateStatus('Coded ' + coded + ' of ' + toCode.length + ' · ' + parallel + ' at once' + (failed ? ' · ' + failed + ' failed' : '') + (lastError ? ' — last problem: ' + lastError : ''), !!lastError && !r.ok);
@@ -370,12 +384,23 @@ const AICoder = (() => {
     const subMsg = subs.length ? ' ' + subs.map(m => substitutes[m] + ' of them by “' + m + '”').join(', ') + ' — the closest model, used while the chosen one was rate-limited or unavailable.' : '';
     const doneMsg = (stopFlag
       ? 'Stopped after ' + coded + ' posts.'
-      : '✓ Done — ' + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError + ')' : '') : '') + '.') + subMsg;
+      : '✓ Done — ' + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError.replace(/\.$/, '') + ')' : '') : '') + '.' +
+        (failed && serverProblems ? ' Click Run AI Coding again later to code the rest — posts already coded are kept.' : '')) + subMsg;
     updateStatus(doneMsg, !!failed && !stopFlag);
     App.notify(
       stopFlag ? 'Stopped (' + coded + ' coded)' : 'AI coding complete — ' + coded + ' posts coded' + (failed ? ', ' + failed + ' failed' : ''),
       stopFlag || failed ? 'warning' : 'success'
     );
+  }
+
+  // Waits before trying failed posts again, counting down in the status line.
+  // → false when Stop was clicked meanwhile.
+  async function countdown(seconds, count) {
+    for (let s = seconds; s > 0 && !stopFlag; s--) {
+      updateStatus('The AI service had server problems. Trying ' + count + ' post' + (count !== 1 ? 's' : '') + ' again in ' + s + ' s… (Stop to end the run)', true);
+      await delay(1000);
+    }
+    return !stopFlag;
   }
 
   // Many answers can arrive at once: redraw the table at most a few times a second
