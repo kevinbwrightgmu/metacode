@@ -359,6 +359,7 @@ const DataManager = (() => {
           updated++;
           const get = k => { const key=Object.keys(row).find(r=>r.toLowerCase()===k); return key?row[key]:null; };
           return { ...p, engagement: {
+            ...(p.engagement || {}),    // keeps other numbers (e.g. a Reddit post's upvote ratio)
             likes:    num(get('likes'))    ?? p.engagement?.likes,
             shares:   num(get('shares'))   ?? p.engagement?.shares,
             comments: num(get('comments')) ?? p.engagement?.comments,

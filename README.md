@@ -20,7 +20,7 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 | **Reliability Analysis** | Cohen's Kappa, Krippendorff's Alpha, % agreement, confusion matrices |
 | **Analyze CSV (NetworkX)** | Upload *any* CSV — AI (or heuristics) detects source/target edge columns, then a real Python NetworkX backend computes density, centrality (degree/betweenness/closeness/eigenvector), components, and communities |
 | **Network Graph** | Interactive D3.js force-directed visualization — can be populated directly from the NetworkX analysis, with detected communities as node colors; export the full graph as PNG or SVG at any time, regardless of current zoom/pan |
-| **Metrics** | Engagement averages, code distributions, engagement by code, AI–human agreement and completion charts |
+| **Metrics** | Engagement averages, every post's engagement (sortable list and top-10 chart — posts from the Scraper bring theirs), code distributions, engagement by code, AI–human agreement and completion charts |
 | **Export** | Download coded data, reliability reports, and codebook as CSV |
 | **MetaCode Assistant** | Built-in help chat — click **Ask MetaCode** (top right) to ask how to use any feature, what a number means, or how to fix an error; answers come from the same AI as AI Coding and use a summary of your project's current state |
 
@@ -188,7 +188,8 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 - **Jobs** run in the background (queued → running → completed / failed / cancelled) with live progress over
   server-sent events. Results: table with search/filter/sort and record details, JSON, logs, metadata;
   export CSV/JSON/NDJSON or a reply-network edge list for Analyze CSV; **Add to project** turns posts and
-  comments into project posts (the whole post — title, text, link/media, poll options — as the text; score → likes).
+  comments into project posts (the whole post — title, text, link/media, poll options — as the text) and sends each one's
+  engagement to **Metrics** (score → likes, comments, crossposts → shares, upvote ratio, awards; adding again refreshes the numbers).
 - **Networking**: every Reddit request goes through MetaCode's own Wisp endpoint (`/wisp/`, wisp-js), which
   only connects to Reddit's hosts, using epoxy-tls (end-to-end TLS in WebAssembly). The **Browse Reddit**
   panel is built on Scramjet with epoxy-transport over the same endpoint.

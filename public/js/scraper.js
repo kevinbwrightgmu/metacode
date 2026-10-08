@@ -1753,6 +1753,19 @@ async def scrape(ctx):
     App.notify('Exported ' + edges.length + ' reply edges — load them in Analyze CSV', 'success', 4500);
   }
 
+  // Reddit's engagement numbers → the project's engagement fields, which
+  // Metrics charts and lists per post: score → likes, comments → comments,
+  // crossposts → shares, plus upvote ratio and awards. Reddit doesn't
+  // publish view counts.
+  function engagementOf(r) {
+    const n = x => (typeof x === 'number' && isFinite(x) ? x : null);
+    if (r.record_type === 'post') {
+      return { likes: n(r.score), shares: n(r.num_crossposts), comments: n(r.num_comments), views: null,
+        upvoteRatio: n(r.upvote_ratio), awards: n(r.total_awards) };
+    }
+    return { likes: n(r.score), shares: null, comments: null, views: null };
+  }
+
   // Scraped record → MetaCode post (the same shape Import Data creates).
   function toPost(r) {
     if (r.record_type === 'post') {
@@ -1761,7 +1774,7 @@ async def scrape(ctx):
         text: postText(r),
         author: r.author || '',
         timestamp: r.created_at || '',
-        engagement: { likes: r.score === undefined ? null : r.score, shares: r.num_crossposts === undefined ? null : r.num_crossposts, comments: r.num_comments === undefined ? null : r.num_comments, views: null },
+        engagement: engagementOf(r),
         humanCodes: {}, aiCodes: {},
         source: { platform: 'reddit', type: 'post', subreddit: r.subreddit, permalink: r.permalink }
       };
@@ -1771,7 +1784,7 @@ async def scrape(ctx):
       text: r.body || '',
       author: r.author || '',
       timestamp: r.created_at || '',
-      engagement: { likes: r.score === undefined ? null : r.score, shares: null, comments: null, views: null },
+      engagement: engagementOf(r),
       humanCodes: {}, aiCodes: {},
       source: { platform: 'reddit', type: 'comment', subreddit: r.subreddit, permalink: r.permalink, post_id: r.post_id, parent_id: r.parent_id }
     };
@@ -1782,7 +1795,8 @@ async def scrape(ctx):
     const comments = records.filter(r => r.record_type === 'comment' && r.comment_id);
     App.openModal('Add to project', `
       <p style="font-size:13.5px;color:var(--tx-second);margin-bottom:14px">Scraped items become project posts you can code in AI Coding and Human Coding.
-        Score becomes <em>likes</em> and comment count becomes <em>comments</em>. Items already in the project are skipped.</p>
+        Each one's engagement goes to <b>Metrics</b>: score becomes <em>likes</em>, comment count <em>comments</em>, crossposts <em>shares</em>,
+        plus upvote ratio and awards. Items already in the project keep their text and codes; their engagement numbers are updated.</p>
       <div style="display:flex;flex-direction:column;gap:10px">
         <label class="sc-check"><input type="checkbox" id="sc-add-posts" ${posts.length ? 'checked' : 'disabled'}> ${fmtNum(posts.length)} posts (the whole post: title, text, and links, images or polls)</label>
         <label class="sc-check"><input type="checkbox" id="sc-add-comments" ${comments.length ? (posts.length ? '' : 'checked') : 'disabled'}> ${fmtNum(comments.length)} comments</label>
@@ -1790,21 +1804,47 @@ async def scrape(ctx):
       '<button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button><button class="btn btn-primary" onclick="RedditScraper.confirmAdd()">Add</button>');
   }
 
+  // The newer numbers of a re-scraped item, over what the project has (a
+  // number Reddit didn't send, e.g. views from an engagement CSV, is kept).
+  // null when nothing changed.
+  function refreshedEngagement(old, latest) {
+    const merged = Object.assign({}, old || {});
+    let changed = false;
+    Object.keys(latest).forEach(k => {
+      if (latest[k] !== null && latest[k] !== undefined && merged[k] !== latest[k]) { merged[k] = latest[k]; changed = true; }
+    });
+    return changed ? merged : null;
+  }
+
   function confirmAdd() {
     const wantPosts = $('sc-add-posts') && $('sc-add-posts').checked;
     const wantComments = $('sc-add-comments') && $('sc-add-comments').checked;
     const existing = App.getState().posts || [];
-    const ids = new Set(existing.map(p => p.id));
-    const fresh = records
+    const chosen = records
       .filter(r => (wantPosts && r.record_type === 'post' && r.post_id) || (wantComments && r.record_type === 'comment' && r.comment_id))
-      .map(toPost)
-      .filter(p => !ids.has(p.id) && (ids.add(p.id), true));
+      .map(toPost);
+    const latest = new Map(chosen.map(p => [p.id, p]));
+    // Items already in the project: same text and codes, newer engagement
+    let updated = 0;
+    const kept = existing.map(p => {
+      const again = latest.get(p.id);
+      const engagement = again && refreshedEngagement(p.engagement, again.engagement);
+      if (!engagement) return p;
+      updated++;
+      return Object.assign({}, p, { engagement });
+    });
+    const ids = new Set(existing.map(p => p.id));
+    const fresh = chosen.filter(p => !ids.has(p.id) && (ids.add(p.id), true));
     App.closeModal();
-    if (!fresh.length) { App.notify('Nothing new to add — these items are already in the project', 'warning'); return; }
-    App.setState({ posts: existing.concat(fresh) });
+    if (!fresh.length && !updated) { App.notify('Nothing new to add — these items are already in the project', 'warning'); return; }
+    App.setState({ posts: kept.concat(fresh) });
     const stat = document.getElementById('stat-posts');
-    if (stat) stat.textContent = existing.length + fresh.length;
-    App.notify('Added ' + fmtNum(fresh.length) + ' items to the project (' + fmtNum(existing.length + fresh.length) + ' posts total)', 'success', 4500);
+    if (stat) stat.textContent = kept.length + fresh.length;
+    const refreshed = fmtNum(updated) + ' item' + (updated === 1 ? '' : 's') + ' already in the project';
+    App.notify(fresh.length
+      ? 'Added ' + fmtNum(fresh.length) + ' items to the project (' + fmtNum(kept.length + fresh.length) + ' posts total)' +
+        (updated ? ' and updated the engagement numbers of ' + refreshed : '') + ' — see Metrics for their engagement'
+      : 'Nothing new to add — updated the engagement numbers of ' + refreshed + ' (see Metrics)', 'success', 5000);
   }
 
   /* ── Recent jobs ──────────────────────────── */

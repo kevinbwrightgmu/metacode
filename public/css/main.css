@@ -580,6 +580,19 @@ svg { flex-shrink: 0; }
 }
 .chart-card-title { font-family: var(--f-display); font-weight: 600; font-size: 14px; margin-bottom: 16px; }
 .chart-wrap { position: relative; }
+/* Engagement by post */
+.eng-posts-head { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; justify-content: space-between; margin-bottom: 14px; }
+.eng-top-title { font-size: 12.5px; font-weight: 600; color: var(--tx-second); margin-bottom: 6px; }
+.eng-posts-table td.num, .eng-posts-table th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.eng-th { border: 0; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
+.eng-th:hover { color: var(--tx-primary); }
+.eng-th:focus-visible { outline: 2px solid var(--violet); outline-offset: 2px; border-radius: 3px; }
+.eng-posts-table th.is-sorted { color: var(--tx-primary); }
+.eng-rank { color: var(--tx-muted); font-size: 12px; width: 1%; }
+.eng-post-text { min-width: 200px; max-width: 560px; line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; overflow-wrap: anywhere; }
+.eng-post-meta { font-size: 11.5px; color: var(--tx-muted); margin-top: 3px; }
+.eng-post-meta a { color: var(--blue); }
+.eng-more { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 12px; }
 
 /* ── Export ──────────────────────────────────── */
 .export-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }

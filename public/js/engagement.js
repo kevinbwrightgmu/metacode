@@ -1,11 +1,29 @@
 /* ══════════════════════════════════════════════
    engagement.js — Metrics section: engagement & coding charts via Chart.js
    (route id "metrics"; module keeps its original EngagementViz name)
+
+   "Engagement by post" lists every post's numbers (sortable, with a top-10
+   chart) and needs no codebook — posts added from the Reddit scraper show
+   up there with their score, comments, crossposts, upvote ratio and awards.
    ══════════════════════════════════════════════ */
 
 const EngagementViz = (() => {
 
   const chartInstances = {};
+
+  // Engagement fields a post can have (Reddit posts add upvoteRatio and awards)
+  const METRICS = [
+    { key: 'likes',       label: 'Likes',        color: '#EF4444' },
+    { key: 'comments',    label: 'Comments',     color: '#7C3AED' },
+    { key: 'shares',      label: 'Shares',       color: '#3B82F6' },
+    { key: 'views',       label: 'Views',        color: '#0D9488' },
+    { key: 'upvoteRatio', label: 'Upvote ratio', color: '#F97316', pct: true },
+    { key: 'awards',      label: 'Awards',       color: '#CA8A04' }
+  ];
+  const PAGE = 20;
+  const postView = { sort: 'likes', shown: PAGE };
+  const numOf = (p, key) => { const v = p.engagement?.[key]; return typeof v === 'number' && isFinite(v) ? v : null; };
+  const hasNumbers = p => METRICS.some(m => numOf(p, m.key) !== null);
 
   function render() {
     const { posts, codebook } = App.getState();
@@ -15,6 +33,8 @@ const EngagementViz = (() => {
     Object.values(chartInstances).forEach(c => c?.destroy());
 
     const withEng = posts.filter(p => p.engagement?.likes != null || p.engagement?.shares != null);
+    const withNumbers = posts.filter(hasNumbers);
+    postView.shown = PAGE;
 
     if (!posts.length) {
       container.innerHTML = `<div class="empty-state">
@@ -38,6 +58,13 @@ const EngagementViz = (() => {
       <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:22px">
         ${summaryStats(withEng)}
       </div>
+
+      <!-- Every post's engagement (no codebook needed) -->
+      ${withNumbers.length ? `<div class="chart-card eng-posts" id="eng-posts" style="margin-bottom:20px">${postsSection(withNumbers)}</div>` : `
+      <div class="card" style="margin-bottom:20px;font-size:13.5px;color:var(--tx-second)">
+        No engagement numbers yet. Posts added from the <a href="#scraper">Scraper</a> bring theirs (score, comments, crossposts, upvote ratio, awards),
+        or upload an engagement CSV in <a href="#import">Import Data</a>.
+      </div>`}
 
       ${!codebook.length ? `
         <div class="card" style="text-align:center;padding:40px">
@@ -106,11 +133,16 @@ const EngagementViz = (() => {
     `;
 
     // Build charts after DOM is ready
-    setTimeout(() => buildCharts(posts, codebook, withEng), 50);
+    setTimeout(() => { buildTopPostsChart(); buildCharts(posts, codebook, withEng); }, 50);
   }
 
   function summaryStats(withEng) {
-    const avg = (arr, key) => arr.length ? (arr.reduce((s,p)=>s+(p.engagement?.[key]||0),0)/arr.length).toFixed(1) : '—';
+    // Averaged over the posts that have the number ("—" when none do, e.g.
+    // views for Reddit posts), so a missing number doesn't count as 0.
+    const avg = (arr, key) => {
+      const vals = arr.map(p => numOf(p, key)).filter(v => v !== null);
+      return vals.length ? (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1) : '—';
+    };
     return [
       ['Avg Likes',    avg(withEng,'likes'),   '#EF4444', 'M0,10 C5,-5 15,25 20,10'],
       ['Avg Shares',   avg(withEng,'shares'),  '#3B82F6', 'M0,10 C5,20 15,0 20,10'],
@@ -128,6 +160,123 @@ const EngagementViz = (() => {
           </svg>
         </div>
       </div>`).join('');
+  }
+
+  /* ── Engagement by post ─────────────────────── */
+  function metricsIn(list) { return METRICS.filter(m => list.some(p => numOf(p, m.key) !== null)); }
+  function fmtMetric(m, v) {
+    if (v === null) return '—';
+    return m.pct ? Math.round(v * 100) + '%' : Number(v).toLocaleString();
+  }
+  function sortedPosts(list, key) {
+    return list.slice().sort((a, b) => {
+      const x = numOf(a, key), y = numOf(b, key);
+      return (y === null ? -Infinity : y) - (x === null ? -Infinity : x);
+    });
+  }
+  function excerpt(text, n) {
+    const t = String(text || '').replace(/\s+/g, ' ').trim();
+    return t.length > n ? t.slice(0, n - 1) + '…' : t;
+  }
+  function sourceOf(p) {
+    const s = p.source;
+    if (s && typeof s === 'object') {
+      if (s.subreddit) return 'r/' + s.subreddit + (s.type === 'comment' ? ' (comment)' : '');
+      if (s.platform) return String(s.platform);
+    }
+    return typeof s === 'string' && /^survey:/.test(s) ? 'survey' : '';
+  }
+  function dateOf(p) {
+    if (!p.timestamp) return '';
+    const t = Date.parse(p.timestamp);
+    return isNaN(t) ? String(p.timestamp).slice(0, 16) : new Date(t).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  }
+
+  function postsSection(list) {
+    const cols = metricsIn(list);
+    if (!cols.some(m => m.key === postView.sort)) postView.sort = cols[0].key;
+    const sortBy = cols.find(m => m.key === postView.sort);
+    const rows = sortedPosts(list, sortBy.key);
+    const shown = rows.slice(0, postView.shown);
+    const reddit = list.some(p => p.source && p.source.platform === 'reddit');
+    return `
+      <div class="eng-posts-head">
+        <div>
+          <div class="chart-card-title" style="margin-bottom:2px">Engagement by post</div>
+          <div class="form-hint">${list.length} post${list.length === 1 ? '' : 's'} · sorted by ${sortBy.label.toLowerCase()} · click a column to sort${reddit ? ' · Reddit: likes = score, shares = crossposts' : ''}</div>
+        </div>
+      </div>
+      <div class="eng-top-title">Top ${Math.min(10, rows.length)} by ${sortBy.label.toLowerCase()}</div>
+      <div class="chart-wrap" id="eng-top-wrap" style="height:${Math.max(120, Math.min(10, rows.length) * 30 + 30)}px"><canvas id="chart-top-posts" aria-label="Top posts by ${App.esc(sortBy.label.toLowerCase())}" role="img"></canvas></div>
+      <div class="table-wrap" style="margin-top:14px">
+        <table class="table eng-posts-table">
+          <thead><tr><th scope="col">#</th><th scope="col">Post</th>${cols.map(m => `
+            <th scope="col" class="num${m.key === sortBy.key ? ' is-sorted' : ''}" aria-sort="${m.key === sortBy.key ? 'descending' : 'none'}">
+              <button type="button" class="eng-th" onclick="EngagementViz.sortPosts('${m.key}')">${m.label}${m.key === sortBy.key ? ' ▾' : ''}</button></th>`).join('')}
+          </tr></thead>
+          <tbody>${shown.map((p, i) => {
+            const link = p.source && typeof p.source.permalink === 'string' && /^https:\/\//.test(p.source.permalink) ? p.source.permalink : '';
+            const meta = [p.author ? '@' + p.author : '', sourceOf(p), dateOf(p)].filter(Boolean).map(App.esc).join(' · ');
+            return `<tr>
+              <td class="eng-rank">${i + 1}</td>
+              <td><div class="eng-post-text" title="${App.esc(excerpt(p.text, 400))}">${App.esc(excerpt(p.text, 200)) || '<span class="text-muted">(no text)</span>'}</div>
+                <div class="eng-post-meta">${meta}${link ? `${meta ? ' · ' : ''}<a href="${App.esc(link)}" target="_blank" rel="noopener noreferrer">Open</a>` : ''}</div></td>
+              ${cols.map(m => `<td class="num">${fmtMetric(m, numOf(p, m.key))}</td>`).join('')}
+            </tr>`;
+          }).join('')}</tbody>
+        </table>
+      </div>
+      ${rows.length > shown.length ? `<div class="eng-more">
+        <span class="form-hint">Showing ${shown.length} of ${rows.length}</span>
+        <button class="btn btn-secondary btn-sm" onclick="EngagementViz.morePosts()">Show ${Math.min(PAGE, rows.length - shown.length)} more</button>
+        <button class="btn btn-secondary btn-sm" onclick="EngagementViz.morePosts(true)">Show all</button></div>` : ''}`;
+  }
+
+  function buildTopPostsChart() {
+    chartInstances.topPosts?.destroy();
+    chartInstances.topPosts = null;
+    const canvas = document.getElementById('chart-top-posts');
+    if (!canvas) return;
+    if (typeof Chart === 'undefined') { document.getElementById('eng-top-wrap')?.remove(); document.querySelector('.eng-top-title')?.remove(); return; }
+    const list = App.getState().posts.filter(hasNumbers);
+    const m = METRICS.find(x => x.key === postView.sort) || METRICS[0];
+    const top = sortedPosts(list, m.key).filter(p => numOf(p, m.key) !== null).slice(0, 10);
+    chartInstances.topPosts = new Chart(canvas, {
+      type: 'bar',
+      data: {
+        labels: top.map(p => excerpt(p.text, 48) || p.id),
+        datasets: [{ label: m.label, data: top.map(p => m.pct ? Math.round(numOf(p, m.key) * 100) : numOf(p, m.key)),
+          backgroundColor: m.color + 'BF', borderColor: m.color, borderWidth: 1, borderRadius: 4 }]
+      },
+      options: {
+        indexAxis: 'y', responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false }, tooltip: { callbacks: {
+          title: items => excerpt(top[items[0].dataIndex].text, 120),
+          label: item => m.label + ': ' + (m.pct ? item.raw + '%' : Number(item.raw).toLocaleString()) } } },
+        scales: {
+          x: { beginAtZero: true, max: m.pct ? 100 : undefined, ticks: { font: { size: 11 }, callback: v => m.pct ? v + '%' : v }, grid: { color: '#F1F5F9' } },
+          // Shorter labels on narrow screens, so they fit beside the bars
+          y: { ticks: { font: { size: 11 }, callback(v) { return excerpt(this.getLabelForValue(v), this.chart.width < 520 ? 20 : 48); } }, grid: { display: false } }
+        }
+      }
+    });
+  }
+
+  function redrawPosts() {
+    const card = document.getElementById('eng-posts');
+    if (!card) return;
+    card.innerHTML = postsSection(App.getState().posts.filter(hasNumbers));
+    buildTopPostsChart();
+  }
+  function sortPosts(key) {
+    if (!METRICS.some(m => m.key === key)) return;
+    postView.sort = key;
+    postView.shown = PAGE;
+    redrawPosts();
+  }
+  function morePosts(all) {
+    postView.shown = all ? Infinity : postView.shown + PAGE;
+    redrawPosts();
   }
 
   function buildCharts(posts, codebook, withEng) {
@@ -286,5 +435,5 @@ const EngagementViz = (() => {
     chartInstances.engHuman = buildEngChart('chart-eng-human', withEng, App.getState().codebook, dimId, 'human');
   }
 
-  return { render, updateDimAI, updateDimHuman, updateEngAI, updateEngHuman };
+  return { render, updateDimAI, updateDimHuman, updateEngAI, updateEngHuman, sortPosts, morePosts };
 })();

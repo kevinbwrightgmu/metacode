@@ -163,10 +163,35 @@ test('standard scrape: start → progress → results → filter → export → 
   assert.equal(byTitle(7).text, 'Post 7 in test\n\nBody of post 7');
   assert.equal(byTitle(8).text, 'Post 8 in test\n\nLink: https://example.com/8');
   assert.equal(typeof posts[0].engagement.likes, 'number');
+  // Each post's Reddit engagement goes with it (shown in Metrics)
+  assert.deepEqual(byTitle(7).engagement, { likes: 93, shares: null, comments: 3, views: null, upvoteRatio: 0.9, awards: null });
   // Adding again adds nothing new.
   await page.click('text=Add to project');
   await page.click('#modal-foot >> text=Add');
   assert.equal(await page.evaluate(() => App.getState().posts.length), 120);
+  // …but refreshes the engagement numbers of posts already there, keeping their codes and other numbers
+  await page.evaluate(() => App.setState({ posts: App.getState().posts.map(p => p.text.startsWith('Post 7 in ')
+    ? { ...p, engagement: { ...p.engagement, likes: 1, views: 50 }, humanCodes: { tone: 'pos' } } : p) }));
+  await page.click('text=Add to project');
+  await page.click('#modal-foot >> text=Add');
+  await page.waitForFunction(() => /updated the engagement numbers of 1 item/.test(document.getElementById('notif-stack').textContent));
+  const again = await page.evaluate(() => App.getState().posts.find(p => p.text.startsWith('Post 7 in ')));
+  assert.deepEqual([again.engagement.likes, again.engagement.views, again.humanCodes.tone], [93, 50, 'pos']);
+  assert.equal(await page.evaluate(() => App.getState().posts.length), 120);
+
+  // Metrics lists every post's engagement, no codebook needed
+  await page.evaluate(() => App.navigate('metrics'));
+  await page.waitForSelector('#eng-posts .eng-posts-table');
+  assert.equal(await page.locator('.eng-posts-table tbody tr').count(), 20);
+  assert.deepEqual(await page.$$eval('.eng-posts-table thead .eng-th', b => b.map(x => x.textContent.replace(' ▾', ''))), ['Likes', 'Comments', 'Views', 'Upvote ratio']);
+  assert.deepEqual(await page.$$eval('.eng-posts-table tbody tr:first-child td.num', t => t.map(x => x.textContent)), ['100', '3', '—', '90%']);
+  await page.click('#eng-posts >> text=Show all');
+  assert.equal(await page.locator('.eng-posts-table tbody tr').count(), 120);
+  await page.click('.eng-th:has-text("Views")');
+  assert.match(await page.textContent('#eng-posts .form-hint'), /sorted by views/);
+  assert.match(await page.textContent('.eng-posts-table tbody tr:first-child'), /Post 7 in test/);
+  assert.match(await page.textContent('#view-container'), /—\s*Avg Shares/, 'no shares data: a dash, not 0.0');
+  await page.evaluate(() => App.navigate('scraper'));
 
   // The job is listed and survives a reload (jobs live on the server).
   await page.reload();
