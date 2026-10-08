@@ -188,7 +188,7 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 - **Jobs** run in the background (queued → running → completed / failed / cancelled) with live progress over
   server-sent events. Results: table with search/filter/sort and record details, JSON, logs, metadata;
   export CSV/JSON/NDJSON or a reply-network edge list for Analyze CSV; **Add to project** turns posts and
-  comments into project posts (score → likes).
+  comments into project posts (the whole post — title, text, link/media, poll options — as the text; score → likes).
 - **Networking**: every Reddit request goes through MetaCode's own Wisp endpoint (`/wisp/`, wisp-js), which
   only connects to Reddit's hosts, using epoxy-tls (end-to-end TLS in WebAssembly). The **Browse Reddit**
   panel is built on Scramjet with epoxy-transport over the same endpoint.

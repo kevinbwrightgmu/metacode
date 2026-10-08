@@ -38,6 +38,42 @@ test('result formatting: full post fields, permalinks and media', () => {
   assert.equal(F.normalizePost({ thumbnail: 'self', url: 'javascript:alert(1)' }).url, null);
 });
 
+test('result formatting: the whole post — text from wherever it is, and full_text', () => {
+  // A title-only post: full_text is the title, selftext stays null
+  assert.equal(F.normalizePost({ id: 'abc', title: 'Hi' }).full_text, 'Hi');
+  assert.equal(F.normalizePost({}).full_text, null);
+
+  // Text only in selftext_html (plain HTML or entity-escaped, as without raw_json=1)
+  const html = '<!-- SC_OFF --><div class="md"><p>Hello &amp; welcome</p>\n\n<ul>\n<li>one</li>\n<li>two</li>\n</ul>\n\n<p>Line<br/>\nbreak &#39;q&#39;</p>\n</div><!-- SC_ON -->';
+  const fromHtml = F.normalizePost({ id: 'h', title: 'T', selftext: '', selftext_html: html, is_self: true });
+  assert.equal(fromHtml.selftext, 'Hello & welcome\n\n- one\n- two\n\nLine\nbreak \'q\'');
+  assert.equal(fromHtml.full_text, 'T\n\n' + fromHtml.selftext);
+  const escaped = html.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  assert.equal(F.normalizePost({ title: 'T', selftext_html: escaped }).selftext, fromHtml.selftext);
+  assert.equal(F.htmlToText('<p>a &lt;script&gt; b</p><script>alert(1)</script>'), 'a <script> b', 'markup in the text stays text; scripts are dropped');
+
+  // A crosspost: the text is the original's, and full_text says where it came from
+  const xpost = F.normalizePost({ id: 'x', title: 'Look', selftext: '', is_self: false, url: '/r/orig/comments/zz/t/',
+    crosspost_parent_list: [{ id: 'zz', title: 'Original', subreddit: 'orig', author: 'op', selftext: 'Original body', is_self: true }] });
+  assert.equal(xpost.selftext, 'Original body');
+  assert.equal(xpost.full_text, 'Look\n\nOriginal body\n\nCrossposted from r/orig (u/op): Original');
+
+  // Posts without text: their link, image, video, gallery captions or poll options
+  assert.equal(F.normalizePost({ id: 'l', title: 'News', selftext: '', is_self: false, url: 'https://example.com/a' }).full_text, 'News\n\nLink: https://example.com/a');
+  const image = F.normalizePost({ id: 'i', title: 'Pic', selftext: '', is_self: false, post_hint: 'image', url: 'https://i.redd.it/x.jpg' });
+  assert.equal(image.selftext, '', 'selftext is still what Reddit sent');
+  assert.equal(image.full_text, 'Pic\n\nImage: https://i.redd.it/x.jpg');
+  assert.equal(F.normalizePost({ id: 'v', title: 'Vid', is_video: true, media: { reddit_video: { fallback_url: 'https://v.redd.it/v/DASH_720.mp4' } } }).full_text, 'Vid\n\nVideo: https://v.redd.it/v/DASH_720.mp4');
+  assert.equal(F.normalizePost({ id: 'g', title: 'Gal', is_gallery: true, gallery_data: { items: [{ media_id: 'm1', caption: 'first' }, { media_id: 'm2' }] },
+    media_metadata: { m1: { s: { u: 'https://preview.redd.it/1.jpg' } }, m2: { s: { u: 'https://preview.redd.it/2.jpg' } } } }).full_text, 'Gal\n\nGallery (2 images):\n- first');
+  assert.equal(F.normalizePost({ id: 'p', title: 'Which?', selftext: 'Vote', is_self: true, poll_data: { options: [{ text: 'A' }, { text: 'B' }] } }).full_text, 'Which?\n\nVote\n\nPoll options:\n- A\n- B');
+
+  // Flat objects from another API: its text field; a link to the post itself isn't repeated
+  const flat = F.normalizePost({ id: 'f', title: 'Flat', text: 'Body from the API', url: 'https://www.reddit.com/r/x/comments/f/flat/' });
+  assert.equal(flat.selftext, 'Body from the API');
+  assert.equal(flat.full_text, 'Flat\n\nBody from the API');
+});
+
 test('result formatting: comment trees flatten in reading order and count "more" stubs', () => {
   const c = (id, parent, replies) => ({ kind: 't1', data: { id, name: 't1_' + id, link_id: 't3_p', parent_id: parent, body: id, created_utc: 5, replies: replies ? { kind: 'Listing', data: { children: replies } } : '' } });
   const tree = [c('a', 't3_p', [c('a1', 't1_a', [c('a1x', 't1_a1')])]), { kind: 'more', data: { count: 4 } }, c('b', 't3_p')];

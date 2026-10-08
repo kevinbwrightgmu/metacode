@@ -85,7 +85,7 @@ async def scrape(ctx):
     for sub in subs:
         result = await ctx.reddit.listing(f"/r/{sub}/new", max_pages=2)
         for post in result["items"]:
-            text = f"{post['title'] or ''} {post['selftext'] or ''}"
+            text = post.get("full_text") or f"{post['title'] or ''} {post['selftext'] or ''}"
             found = sorted({m.lower() for m in pattern.findall(text)})
             if found:
                 hits.update(found)
@@ -210,7 +210,7 @@ async function scrape(ctx) {
   for (const sub of subs) {
     const { items } = await ctx.reddit.listing('/r/' + sub + '/new', { maxPages: 2 });
     for (const post of items) {
-      const text = ((post.title || '') + ' ' + (post.selftext || '')).toLowerCase();
+      const text = (post.full_text || (post.title || '') + ' ' + (post.selftext || '')).toLowerCase();
       const matched = keywords.filter(k => text.includes(k));
       if (matched.length) ctx.emit({ ...post, matched_keywords: matched.join(';') });
     }
@@ -1520,8 +1520,23 @@ async def scrape(ctx):
     return by ? rows.slice().sort(by) : rows;
   }
 
+  // A post's content after its title: the body, or for a post without
+  // text what it links to. Older results (scraped before full_text) are
+  // pieced together from their fields.
+  function postRest(r) {
+    const title = (r.title || '').trim();
+    if (r.full_text) return title && r.full_text.startsWith(title) ? r.full_text.slice(title.length).trim() : r.full_text;
+    const own = u => u && (u === r.permalink || (r.post_id && u.includes('/comments/' + r.post_id)));
+    const media = r.media && r.media.url && !own(r.media.url) ? r.media.url : '';
+    return r.selftext || media || (r.url && !own(r.url) ? r.url : '');
+  }
+  // The whole post as text: title, body, link/media, poll options, crosspost.
+  function postText(r) {
+    return r.full_text || [r.title, postRest(r)].filter(Boolean).join('\n\n');
+  }
+
   function textOf(r) {
-    if (r.record_type === 'post') return r.title || '';
+    if (r.record_type === 'post') return postText(r);
     if (r.record_type === 'comment') return r.body || '';
     if (r.record_type === 'subreddit') return (r.name ? 'r/' + r.name : '') + (r.title ? ' — ' + r.title : '');
     if (r.record_type === 'user') return r.name ? 'u/' + r.name : '';
@@ -1577,7 +1592,10 @@ async def scrape(ctx):
           const i = index.get(r);
           return '<tr tabindex="0" onclick="RedditScraper.showRecord(' + i + ')" onkeydown="if(event.key===\'Enter\')RedditScraper.showRecord(' + i + ')">' +
             '<td><span class="badge ' + (TYPE_BADGE[r.record_type] || 'badge-gray') + '">' + esc(r.record_type || 'record') + '</span></td>' +
-            '<td><div class="sc-cell-text" title="' + esc(textOf(r).slice(0, 300)) + '">' + esc(textOf(r).slice(0, 300) || '—') + '</div></td>' +
+            '<td>' + (r.record_type === 'post'
+              ? '<div class="sc-cell-text" title="' + esc(textOf(r).slice(0, 500)) + '">' + esc((r.title || '').slice(0, 300) || '—') + '</div>' +
+                (postRest(r) ? '<div class="sc-cell-text sc-cell-sub">' + esc(postRest(r).slice(0, 300)) + '</div>' : '')
+              : '<div class="sc-cell-text" title="' + esc(textOf(r).slice(0, 300)) + '">' + esc(textOf(r).slice(0, 300) || '—') + '</div>') + '</td>' +
             '<td>' + esc(r.author || '—') + '</td>' +
             '<td>' + (r.subreddit ? 'r/' + esc(r.subreddit) : '—') + '</td>' +
             '<td class="sc-cell-num">' + fmtNum(r.score) + '</td>' +
@@ -1657,7 +1675,8 @@ async def scrape(ctx):
     let body = '';
     if (r.record_type === 'post') {
       body += '<div class="sc-body-text" style="font-weight:600;font-size:15px;margin-bottom:8px">' + esc(r.title || '') + '</div>';
-      if (r.selftext) body += '<div class="sc-body-text mb-4">' + esc(r.selftext) + '</div>';
+      const rest = postRest(r);
+      if (rest) body += '<div class="sc-body-text mb-4">' + esc(rest) + '</div>';
       const comments = records.filter(c => c.record_type === 'comment' && c.post_id === r.post_id);
       if (comments.length) {
         body += '<div class="card-title mt-4">Comments in these results (' + comments.length + ')</div>' + comments.slice(0, 200).map(c =>
@@ -1739,7 +1758,7 @@ async def scrape(ctx):
     if (r.record_type === 'post') {
       return {
         id: 'reddit_' + r.post_id,
-        text: [r.title, r.selftext].filter(Boolean).join('\n\n'),
+        text: postText(r),
         author: r.author || '',
         timestamp: r.created_at || '',
         engagement: { likes: r.score === undefined ? null : r.score, shares: r.num_crossposts === undefined ? null : r.num_crossposts, comments: r.num_comments === undefined ? null : r.num_comments, views: null },
@@ -1765,7 +1784,7 @@ async def scrape(ctx):
       <p style="font-size:13.5px;color:var(--tx-second);margin-bottom:14px">Scraped items become project posts you can code in AI Coding and Human Coding.
         Score becomes <em>likes</em> and comment count becomes <em>comments</em>. Items already in the project are skipped.</p>
       <div style="display:flex;flex-direction:column;gap:10px">
-        <label class="sc-check"><input type="checkbox" id="sc-add-posts" ${posts.length ? 'checked' : 'disabled'}> ${fmtNum(posts.length)} posts (title + text)</label>
+        <label class="sc-check"><input type="checkbox" id="sc-add-posts" ${posts.length ? 'checked' : 'disabled'}> ${fmtNum(posts.length)} posts (the whole post: title, text, and links, images or polls)</label>
         <label class="sc-check"><input type="checkbox" id="sc-add-comments" ${comments.length ? (posts.length ? '' : 'checked') : 'disabled'}> ${fmtNum(comments.length)} comments</label>
       </div>`,
       '<button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button><button class="btn btn-primary" onclick="RedditScraper.confirmAdd()">Add</button>');
