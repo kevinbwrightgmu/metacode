@@ -788,6 +788,8 @@ const App = (() => {
       let msg;
       try { msg = JSON.parse(line); } catch (e) { return; }
       if (msg.done) { finished = msg; return; }
+      // The batch paused because the AI service had a server problem (see /api/ai/batch)
+      if (msg.notice) { opts.onNotice && opts.onNotice(msg.notice); return; }
       if (msg.ok) {
         lastModelUsed = msg.fallback || (msg.data && msg.data.model) || model;
         if (msg.fallback) noteFallback(msg.requested, msg.fallback, msg.fallbackReason);

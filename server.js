@@ -373,13 +373,54 @@ function classifyLimit(key, model, quota, headers, now) {
   return onModelLimited(model, headers, now);
 }
 
+// Server errors (HTTP 5xx): EMIS can't run a model right now, or is having
+// problems overall. emisRequest has already retried by then. The model that
+// still failed rests a little (30 s, doubling while it keeps failing, up to
+// 5 minutes): requests for the server's default model go straight to the
+// closest similar model meanwhile, and failing models aren't picked as
+// substitutes. When 3 different models fail within a minute, it's EMIS
+// itself: trying other models won't help, so MetaCode stops switching and
+// says so (and AI Coding batches pause; see /api/ai/batch). Any answer
+// clears this.
+const MODEL_DOWN_MS = 30 * 1000;
+const MODEL_DOWN_MAX_MS = 5 * 60 * 1000;
+const SERVICE_TROUBLE_WINDOW_MS = 60 * 1000;
+const SERVICE_TROUBLE_MODELS = 3;
+const modelDown = new Map();       // model -> { until, hits, lastAt }
+let serverErrors = [];             // [{ model, at, status }], one per model, last minute
+
+function modelDownUntil(model, now) {
+  const st = modelDown.get(model);
+  return st && st.until > now ? st.until : 0;
+}
+function onModelServerError(model, status, now) {
+  if (!model) return;
+  const st = modelDown.get(model) || { until: 0, hits: 0, lastAt: 0 };
+  st.hits = now - st.lastAt < MODEL_DOWN_MAX_MS * 2 ? st.hits + 1 : 1;
+  st.lastAt = now;
+  st.until = now + Math.min(MODEL_DOWN_MAX_MS, MODEL_DOWN_MS * 2 ** Math.min(st.hits - 1, 6));
+  modelDown.set(model, st);
+  serverErrors = serverErrors.filter(e => now - e.at < SERVICE_TROUBLE_WINDOW_MS && e.model !== model);
+  serverErrors.push({ model, at: now, status: status || 502 });
+  if (st.hits === 1) console.warn('[ai] The AI service answered with a server error (HTTP ' + (status || 502) + ') for the model "' + model + '" after retries; it rests until ' + new Date(st.until).toLocaleTimeString() + '.');
+}
+function onModelAnswered(model) {
+  modelDown.delete(model);
+  serverErrors = [];
+}
+// → { models, status } while several models are failing with server errors, else null
+function serviceTrouble(now) {
+  const recent = serverErrors.filter(e => now - e.at < SERVICE_TROUBLE_WINDOW_MS);
+  return recent.length >= SERVICE_TROUBLE_MODELS ? { models: recent.map(e => e.model), status: recent[recent.length - 1].status } : null;
+}
+
 // The available model most like `target` that can take this request (not
-// rate-limited, not tried yet, supports what the request needs), or null.
+// rate-limited or failing, not tried yet, supports what the request needs), or null.
 async function closestModel(target, chatRequest, tried) {
   const list = await getModelList(false);
   if (!list.ok) return null;
   const now = Date.now();
-  const candidates = list.ids.filter(id => !tried.has(id) && !NOT_A_CHAT_MODEL.test(id) && !modelRestingUntil(id, now) &&
+  const candidates = list.ids.filter(id => !tried.has(id) && !NOT_A_CHAT_MODEL.test(id) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
     !capabilityProblem(chatRequest, list.info ? list.info.get(id) : null));
   return rankSimilar(target, candidates, list.info)[0] || null;
 }
@@ -579,7 +620,10 @@ function describeFailure(r, ctx) {
     return fail(504, 'timeout', 'The AI service didn\'t answer within ' + timeoutSeconds() + ' seconds. Try again; if this keeps ' +
       'happening, raise EMIS_TIMEOUT_MS in the server\'s .env file.');
   }
-  if (r.failed === 'network') return fail(502, 'network', networkMessage(r.code) + (r.detail ? ' (details: ' + redact(String(r.detail), 300) + ')' : ''), 'network error ' + (r.code || '(no code)') + (r.detail ? ' — ' + r.detail : ''));
+  if (r.failed === 'network') {
+    return Object.assign(fail(502, 'network', networkMessage(r.code) + (r.detail ? ' (details: ' + redact(String(r.detail), 300) + ')' : ''), 'network error ' + (r.code || '(no code)') + (r.detail ? ' — ' + r.detail : '')),
+      { transient: isTransient(r) });
+  }
 
   const status = r.status;
   const detail = providerMessage(r);
@@ -618,7 +662,7 @@ function describeFailure(r, ctx) {
   if (status === 408) return fail(504, 'timeout', 'The AI service took too long to answer. Try again.', log);
   if (status === 413) return fail(413, 'request_too_large', 'The request was too large for the AI service. Try a shorter text or a smaller sample.', log);
   if (status === 429) return fail(429, 'rate_limited', 'The AI service asked MetaCode to pause. Try again in a moment.', log);
-  if (status >= 500) return fail(502, 'upstream_error', 'The AI service had a temporary server problem (HTTP ' + status + '). Try again in a moment.', log);
+  if (status >= 500) return Object.assign(fail(502, 'upstream_error', 'The AI service had a temporary server problem (HTTP ' + status + '). Try again in a moment.', log), { upstreamStatus: status });
   if (status >= 400) {
     return fail(400, 'invalid_request', 'The AI service couldn\'t process the request' + (detail ? ': ' + detail : ' (HTTP ' + status + ').'), log);
   }
@@ -1568,14 +1612,22 @@ async function answerChat(prep, signal) {
     tried.add(model);
     const now = Date.now();
     const resting = modelRestingUntil(model, now);
+    // The server's default model is failing at the moment: a similar model answers, without waiting on it
+    if (!resting && model === ctx.model && !explicit && modelDownUntil(model, now) && !serviceTrouble(now)) {
+      const alt = await closestModel(ctx.model, chatRequest, tried);
+      if (alt) { otherSwitches++; noteSwitch(ctx.model, alt, 'failed'); model = alt; fallback = alt; fallbackReason = 'failed'; continue; }
+    }
     result = resting ? modelLimitedFailure(model, resting, now)
       : await completeChat(Object.assign({}, chatRequest, { model }), Object.assign({}, ctx, { model, verified: ctx.verified || model !== ctx.model }), signal);
     if (result.aborted) return { aborted: true };
-    if (result.ok) break;
+    if (result.ok) { onModelAnswered(model); break; }
+    if (result.type === 'upstream_error') onModelServerError(model, result.upstreamStatus, Date.now());
     let why = null;
     if (result.type === 'model_rate_limited' && prep.switchModels && rateSwitches < MAX_RATE_LIMIT_SWITCHES) why = 'rate_limited';
-    // (once switching for a rate limit, a similar model that fails another way is skipped too)
-    else if ((!explicit || fallbackReason === 'rate_limited') && MODEL_FALLBACK_TYPES.has(result.type) && otherSwitches < 2) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
+    // (once switching for a rate limit, a similar model that fails another way is skipped too;
+    // when EMIS as a whole is failing, other models would fail too)
+    else if ((!explicit || fallbackReason === 'rate_limited') && MODEL_FALLBACK_TYPES.has(result.type) && otherSwitches < 2 &&
+      !(result.type === 'upstream_error' && serviceTrouble(Date.now()))) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
     if (!why) break;
     const alt = await closestModel(ctx.model, chatRequest, tried);     // closest to what was asked for
     if (!alt) break;
@@ -1591,7 +1643,21 @@ async function answerChat(prep, signal) {
     if (!prep.switchModels) message += switchingAllowed() ? ' (Switching to a similar model is turned off in Settings → AI models.)' : ' (EMIS_MODEL_SWITCH=off in .env turns off switching to a similar model.)';
     result = Object.assign({}, result, { message, retryAfterSeconds: Number.isFinite(soonest) ? Math.max(1, Math.ceil((soonest - Date.now()) / 1000)) : result.retryAfterSeconds });
   }
-  if (!result.ok && explicit && MODEL_FALLBACK_TYPES.has(result.type) && result.type !== 'malformed_response') {
+  if (!result.ok && result.type === 'upstream_error') {
+    // Say which models failed, and whether it's EMIS as a whole
+    const trouble = serviceTrouble(Date.now());
+    const code = 'HTTP ' + (result.upstreamStatus || 502);
+    const others = Array.from(tried).filter(m => m !== ctx.model);
+    result = Object.assign({}, result, trouble ? {
+      message: 'The AI service is having server problems right now: ' + trouble.models.length + ' different models answered with server errors (' + code + ') in the last minute. ' +
+        'This is on the AI service\'s side, not MetaCode\'s — try again in a few minutes.',
+      retryAfterSeconds: 30, serviceTrouble: true
+    } : {
+      message: 'The AI service couldn\'t run the model "' + ctx.model + '"' + (others.length ? ' or the most similar model' + (others.length === 1 ? '' : 's') + ' (' + others.map(m => '"' + m + '"').join(', ') + ')' : '') +
+        ' right now: it answered with a server error (' + code + ') each time MetaCode tried. This is on the AI service\'s side and usually passes; try again in a moment.'
+    });
+  }
+  if (!result.ok && explicit && MODEL_FALLBACK_TYPES.has(result.type) && result.type !== 'malformed_response' && !result.serviceTrouble) {
     result = Object.assign({}, result, { message: result.message.replace(/\.?$/, '.') + ' This happened with the model "' + ctx.model +
       '" you picked — choose another one in Settings → AI models (or "Server default").' });
   }
@@ -1636,7 +1702,19 @@ app.post('/api/ai', async (req, res) => {
 // (fallback: the similar model that answered because the requested one was rate-limited or failing)
 // then { done: true, parallel } — parallel is how many ran at the end (it is
 // lowered when EMIS rate-limits). Closing the connection stops the batch.
+// When EMIS answers with server errors (or the connection drops), the batch pauses
+// (5 s — AI_BATCH_PAUSE_SECONDS — doubling up to 60 s), runs fewer at once and tries the request
+// again (up to 4 times); it goes back up as answers arrive. Each pause is
+// announced with a line { notice: { type, message, waitSeconds, parallel } }.
+// If EMIS keeps failing through 5 pauses (about 2 minutes) without a single
+// answer, the rest of the batch fails with type 'service_unavailable'
+// instead of being sent.
 const AI_BATCH_MAX_REQUESTS = 2000;
+// The first pause after a server error in a batch (AI_BATCH_PAUSE_SECONDS, default 5); it doubles up to 60 s.
+function aiBatchPauseSeconds() {
+  const n = parseFloat(process.env.AI_BATCH_PAUSE_SECONDS);
+  return Number.isFinite(n) && n >= 0.05 ? Math.min(60, n) : 5;
+}
 function aiMaxParallel() {
   const n = parseInt(process.env.AI_MAX_PARALLEL, 10);
   return Number.isFinite(n) && n >= 1 ? Math.min(n, 64) : 16;
@@ -1661,9 +1739,12 @@ app.post('/api/ai/batch', async (req, res) => {
   const send = obj => { if (!res.writableEnded && !client.signal.aborted) res.write(JSON.stringify(obj) + '\n'); };
   const wait = ms => new Promise(resolve => { const t = setTimeout(resolve, ms); client.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true }); });
 
-  const queue = list.map(r => ({ id: r.id === undefined ? null : r.id, body: r.body, tries: 0 }));
+  const queue = list.map(r => ({ id: r.id === undefined ? null : r.id, body: r.body, tries: 0, serverTries: 0 }));
   let active = 0, pausedUntil = 0;
+  let ceiling = parallel;          // how many may run at once (lowered for good only by rate limits)
+  let serverStreak = 0, okStreak = 0, gaveUp = null;
   async function one(item) {
+    if (gaveUp) return send({ id: item.id, ok: false, status: 503, error: { message: gaveUp, type: 'service_unavailable' } });
     let out;
     try {
       const prep = await prepareChat(item.body, 'openai', { switchModels });
@@ -1677,9 +1758,30 @@ app.post('/api/ai/batch', async (req, res) => {
       // EMIS asked us to slow down: fewer copies at once, a short pause, then this one again
       item.tries++;
       if (parallel > 1) { parallel = Math.max(1, Math.floor(parallel / 2)); console.warn('[ai] Rate-limited during a batch; running ' + parallel + ' at once now.'); }
+      ceiling = Math.min(ceiling, parallel);
       pausedUntil = Math.max(pausedUntil, Date.now() + Math.min(30, out.failure.retryAfterSeconds || 2 * item.tries) * 1000);
       queue.unshift(item);
       return;
+    }
+    if (out.failure && (BATCH_TRANSIENT.has(out.failure.type) || (out.failure.type === 'network' && out.failure.transient))) {
+      okStreak = 0;
+      const now = Date.now();
+      // Requests that were already running when the batch paused don't make the pause longer
+      if (pausedUntil <= now) {
+        if (serverStreak >= 5) {
+          gaveUp = 'MetaCode stopped sending requests: the AI service kept failing for about 2 minutes (last: ' + out.failure.message.replace(/\.$/, '') + '). ' +
+            'This is on the AI service\'s side. Try again later — what was already done is kept.';
+          console.error('[ai] The AI service kept failing during a batch; the rest of it was not sent.');
+        } else {
+          serverStreak++;
+          const waitSeconds = Math.round(10 * Math.min(60, Math.max(out.failure.retryAfterSeconds || 0, aiBatchPauseSeconds() * 2 ** (serverStreak - 1)))) / 10;
+          if (parallel > 1) parallel = Math.max(1, Math.floor(parallel / 2));
+          pausedUntil = now + waitSeconds * 1000;
+          console.warn('[ai] ' + out.failure.type + ' during a batch; pausing ' + waitSeconds + ' s, then ' + parallel + ' at once.');
+          send({ notice: { type: out.failure.type, message: out.failure.message, waitSeconds, parallel } });
+        }
+      }
+      if (!gaveUp && item.serverTries < 4) { item.serverTries++; queue.unshift(item); return; }
     }
     if (out.failure) {
       logFailure(out.failure);
@@ -1688,13 +1790,21 @@ app.post('/api/ai/batch', async (req, res) => {
       send({ id: item.id, ok: false, status: out.failure.status, error });
       return;
     }
+    serverStreak = 0;
+    // Answers are coming again: back up to full speed, one more at a time
+    if (++okStreak >= 3 && parallel < ceiling) { parallel++; okStreak = 0; }
     send(Object.assign({ id: item.id, ok: true, data: out.json }, out.fallback ? { fallback: out.fallback, fallbackReason: out.fallbackReason, requested: out.requested } : {}));
   }
   async function worker(slot) {
     let first = true;
     while (!client.signal.aborted) {
-      if (slot >= parallel) return;                    // the batch was scaled down
+      if (slot >= parallel) {                          // the batch was scaled down: wait in case it goes back up
+        if (slot >= ceiling || (!queue.length && !active)) return;
+        await wait(250);
+        continue;
+      }
       if (!queue.length) { if (!active) return; await wait(100); continue; }
+      if (gaveUp) { await one(queue.shift()); continue; }      // the rest fails at once, without calling EMIS
       const now = Date.now();
       if (pausedUntil > now) { await wait(pausedUntil - now); continue; }
       if (!first && delayMs) await wait(delayMs);
@@ -1707,13 +1817,16 @@ app.post('/api/ai/batch', async (req, res) => {
   }
   try {
     await Promise.all(Array.from({ length: parallel }, (_, i) => worker(i)));
-    send({ done: true, parallel });
+    send({ done: true, parallel: ceiling });
   } finally {
     client.release();
     if (!res.writableEnded) res.end();
   }
 });
 
+// Batch failures worth a pause and another try: EMIS server errors (and dropped connections, flagged `transient`).
+// Timeouts aren't: each one already took EMIS_TIMEOUT_MS.
+const BATCH_TRANSIENT = new Set(['upstream_error']);
 // Failures that a different model may not have (EMIS can't run one model right now).
 const MODEL_FALLBACK_TYPES = new Set(['upstream_error', 'malformed_response', 'model_not_found', 'not_found', 'permission_error']);
 
@@ -1909,8 +2022,13 @@ async function aiStatusCheck() {
     return { status: 'outage', note: r.type === 'timeout' || r.type === 'network' ? 'The AI provider can\'t be reached.' : 'The AI provider isn\'t accepting requests.' };
   }
   now = Date.now();
+  if (serviceTrouble(now)) return { status: 'outage', note: 'The AI provider is answering with server errors for several models; AI requests are failing.' };
+  const failing = Array.from(modelDown.keys()).filter(m => modelDownUntil(m, now)).length;
   const limited = restingModels(now).length;
-  if (limited) return { status: 'degraded', note: limited + ' model' + (limited === 1 ? ' is' : 's are') + ' rate-limited; requests use the closest similar model.' };
+  const parts = [];
+  if (failing) parts.push(failing + ' model' + (failing === 1 ? ' is' : 's are') + ' failing at the AI provider');
+  if (limited) parts.push(limited + ' model' + (limited === 1 ? ' is' : 's are') + ' rate-limited');
+  if (parts.length) return { status: 'degraded', note: parts.join(' and ') + '; requests use the closest similar model.' };
   return { status: 'operational', note: 'Responding normally.' };
 }
 let pyProbe = { at: 0, result: null };

@@ -20,7 +20,7 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 | **Reliability Analysis** | Cohen's Kappa, Krippendorff's Alpha, % agreement, confusion matrices |
 | **Analyze CSV (NetworkX)** | Upload *any* CSV — AI (or heuristics) detects source/target edge columns, then a real Python NetworkX backend computes density, centrality (degree/betweenness/closeness/eigenvector), components, and communities |
 | **Network Graph** | Interactive D3.js force-directed visualization — can be populated directly from the NetworkX analysis, with detected communities as node colors; export the full graph as PNG or SVG at any time, regardless of current zoom/pan |
-| **Metrics** | Engagement averages, code distributions, engagement by code, AI–human agreement and completion charts |
+| **Metrics** | Engagement averages, every post's engagement (sortable list and top-10 chart — posts from the Scraper bring theirs), code distributions, engagement by code, AI–human agreement and completion charts |
 | **Export** | Download coded data, reliability reports, and codebook as CSV |
 | **MetaCode Assistant** | Built-in help chat — click **Ask MetaCode** (top right) to ask how to use any feature, what a number means, or how to fix an error; answers come from the same AI as AI Coding and use a summary of your project's current state |
 
@@ -188,7 +188,8 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 - **Jobs** run in the background (queued → running → completed / failed / cancelled) with live progress over
   server-sent events. Results: table with search/filter/sort and record details, JSON, logs, metadata;
   export CSV/JSON/NDJSON or a reply-network edge list for Analyze CSV; **Add to project** turns posts and
-  comments into project posts (the whole post — title, text, link/media, poll options — as the text; score → likes).
+  comments into project posts (the whole post — title, text, link/media, poll options — as the text) and sends each one's
+  engagement to **Metrics** (score → likes, comments, crossposts → shares, upvote ratio, awards; adding again refreshes the numbers).
 - **Networking**: every Reddit request goes through MetaCode's own Wisp endpoint (`/wisp/`, wisp-js), which
   only connects to Reddit's hosts, using epoxy-tls (end-to-end TLS in WebAssembly). The **Browse Reddit**
   panel is built on Scramjet with epoxy-transport over the same endpoint.
@@ -340,6 +341,7 @@ Configuration lives only in the server's `.env` file:
 | `EMIS_PROXY` | no | Proxy for AI requests (`HTTPS_PROXY` / `NO_PROXY` are used too) |
 | `EMIS_MODEL_SWITCH` | no | `off` stops MetaCode from answering with the closest similar model when the AI service rate-limits the chosen one (on by default) |
 | `AI_MAX_PARALLEL` | no | The most copies of the model AI Coding may run at once (default 16, max 64); users choose up to this |
+| `AI_BATCH_PAUSE_SECONDS` | no | How long AI Coding first pauses when the AI service answers with a server error (default 5; doubles with each pause, up to 60) |
 | `EMIS_TIMEOUT_MS` | no | How long to wait for the AI service (default 120000 ms) |
 
 After changing `.env`, click **Settings → Reload .env** (AI settings apply at once; scraper and port settings
@@ -371,6 +373,16 @@ startup banner say when that happens.
   key rests instead. Turn switching off per browser in Settings → AI models (*If a model is rate-limited, use
   the closest similar model*) or for the whole server with `EMIS_MODEL_SWITCH=off`. A used-up budget applies
   to every model, so switching doesn't help there.
+- **Server errors (HTTP 5xx) from the AI service.** Each request is retried twice first. A model that still
+  fails rests briefly (30 seconds, doubling while it keeps failing, up to 5 minutes): requests for the server's
+  default model go straight to the closest similar model meanwhile (a model you picked is still asked), and
+  failing models aren't used as substitutes. When three different models fail within a minute, the AI service
+  itself is having problems: MetaCode stops trying other models and says so, and the status page shows the AI
+  service as down until an answer comes through. During AI Coding, a server error pauses the run (5 s, then
+  10, 20, 40, 60), halves how many posts are coded at once and tries those posts again — the status line says
+  so — then speeds back up as answers arrive. Posts that still fail are tried again after 15 and 30 seconds. If
+  the AI service keeps failing for about 2 minutes, the run stops instead of sending the rest; click
+  **Run AI Coding** again later (coded posts are kept).
 - **Security.** The key is sent only to the AI service address in `.env`: never to the browser, never logged,
   never returned by an endpoint or included in an error. The browser can't choose the AI service address or key.
   Other websites open in your browser can't use MetaCode's AI endpoints (they're same-origin only).
@@ -542,9 +554,13 @@ If you use MetaCode in your research, please acknowledge:
 `EMIS_API_KEY=your-key` in it (one setting per line), save, and click **Reload .env**. If it says no file was
 found, the file must be called `.env` (not `.env.example`) next to `server.js`.
 
-**HTTP 502 / "Couldn't reach the AI service" / "The AI service had a temporary server problem"**
-→ MetaCode already retries temporary AI service failures twice and, when the server's default model is the one
-failing, answers with another model. If it still fails: open **Settings → AI connection → Test connection**
+**HTTP 502 / "Couldn't reach the AI service" / "The AI service couldn't run the model … (HTTP 502)" / "The AI service is having server problems right now"**
+→ An HTTP 502 *from the AI service* (the message says "server error (HTTP 502)") is a problem on the AI
+service's side: MetaCode retries, pauses AI Coding and slows it down, and uses a similar model when the
+server's default model is the one failing (see *Server errors* above). When several models fail, wait a few
+minutes and click **Run AI Coding** again — coded posts are kept; the status page (`/status`) shows when the
+AI service is answering again. If a model you picked keeps failing on its own, choose another one in
+Settings → AI models. For other 502s: open **Settings → AI connection → Test connection**
 to see the exact message. On networks that only allow the internet through a proxy, add
 `HTTPS_PROXY=http://proxy:port` (or `EMIS_PROXY`) to `.env` and click **Reload .env** — Node.js doesn't use
 the system proxy by itself. If a model you picked keeps failing, choose another one in Settings → AI models.

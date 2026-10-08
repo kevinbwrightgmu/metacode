@@ -59,7 +59,7 @@
       text: '<p>An interactive picture of the network: drag nodes, search for an account, and click one to see its connections. Nodes are coloured by their group.</p>' },
     { before: page('metrics'), target: ['#chart-dist-ai', '#view-container .card', '#view-container .empty-state', '.view-header'],
       title: 'Metrics',
-      text: '<p>Charts of your results: how often each code was used (by AI and by people), engagement per code, and where coders agree.</p>' },
+      text: '<p>Charts of your results: every post\'s engagement (posts from the Scraper bring theirs), how often each code was used (by AI and by people), engagement per code, and where coders agree.</p>' },
     { before: page('export'), target: ['.export-grid', '#view-container .card', '.view-header'],
       title: 'Export Data',
       text: '<p>Download the coded posts, the reliability results, the codebook and the network as CSV or JSON for SPSS, R, Excel or a paper\'s appendix.</p>' },

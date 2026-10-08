@@ -261,7 +261,10 @@ The errors you may see map to:
 5. Results: search, filter by type, sort, click a row for all fields (and a post's comments), **Copy
    JSON**, **Export…** (CSV, JSON, JSON with comments nested under posts, NDJSON, reply-network edges
    for Analyze CSV), **Add to project** (posts/comments become project posts with the whole post as
-   their text; score → likes, comment count → comments; existing ids are skipped).
+   their text, and each one's engagement goes to **Metrics** → *Engagement by post*: score → likes,
+   comment count → comments, crossposts → shares, plus upvote ratio and awards — Reddit has no view
+   counts. Posts already in the project keep their text and codes; adding them again updates their
+   engagement numbers).
 
 Record fields (any may be `null`):
 
