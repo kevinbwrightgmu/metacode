@@ -305,7 +305,7 @@ class JobManager extends EventEmitter {
     if (q.type && q.type !== 'all') rows = rows.filter(r => r.record_type === q.type);
     if (q.search) {
       const needle = String(q.search).toLowerCase();
-      rows = rows.filter(r => ['title', 'body', 'selftext', 'author', 'subreddit', 'flair', 'name'].some(k => typeof r[k] === 'string' && r[k].toLowerCase().includes(needle)));
+      rows = rows.filter(r => ['title', 'body', 'selftext', 'full_text', 'author', 'subreddit', 'flair', 'name'].some(k => typeof r[k] === 'string' && r[k].toLowerCase().includes(needle)));
     }
     const total = rows.length;
     const offset = Math.max(0, Number(q.offset) || 0);

@@ -260,14 +260,19 @@ The errors you may see map to:
    time and duration; tabs show **Results**, **JSON**, **Logs** and **Metadata**.
 5. Results: search, filter by type, sort, click a row for all fields (and a post's comments), **Copy
    JSON**, **Export…** (CSV, JSON, JSON with comments nested under posts, NDJSON, reply-network edges
-   for Analyze CSV), **Add to project** (posts/comments become project posts; score → likes, comment
-   count → comments; existing ids are skipped).
+   for Analyze CSV), **Add to project** (posts/comments become project posts with the whole post as
+   their text; score → likes, comment count → comments; existing ids are skipped).
 
 Record fields (any may be `null`):
 
 - **post** — `post_id, fullname, title, author, subreddit, url, permalink, created_at, created_utc, edited_at,
-  score, upvote_ratio, num_comments, selftext, flair, author_flair, domain, is_self, over_18, spoiler,
+  score, upvote_ratio, num_comments, selftext, full_text, flair, author_flair, domain, is_self, over_18, spoiler,
   stickied, locked, archived, distinguished, num_crossposts, total_awards, media {type, url, thumbnail, items}`
+  - `selftext` is the post's text. When Reddit's `selftext` is empty it is read from `selftext_html`
+    (as plain text), from the field another API uses for it, or — for a crosspost — from the original post.
+  - `full_text` is the entire post as readable text: the title, the text, and for posts without text
+    what they consist of (the link, image or video URL, gallery captions, poll options), plus where a
+    crosspost came from. The results table, the detail view and **Add to project** use it.
 - **comment** — `comment_id, fullname, post_id, parent_id, parent_type, author, subreddit, body, score,
   created_at, created_utc, edited_at, permalink, depth, is_submitter, stickied, distinguished,
   controversiality, author_flair, post_title, post_permalink`

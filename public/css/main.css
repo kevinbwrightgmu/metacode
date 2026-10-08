@@ -1009,6 +1009,7 @@ svg { flex-shrink: 0; }
 .sc-table td { font-size: 13px; }
 .sc-table tbody tr { cursor: pointer; }
 .sc-cell-text { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sc-cell-sub { margin-top: 2px; font-size: 12px; color: var(--tx-muted); }
 .sc-cell-num { text-align: right; font-variant-numeric: tabular-nums; }
 .sc-logs { max-height: 360px; overflow: auto; font-family: var(--f-mono); font-size: 12px; line-height: 1.6; background: var(--bg-muted); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 8px 12px; }
 .sc-log { display: flex; gap: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }

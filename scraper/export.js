@@ -15,7 +15,7 @@ function csvCell(v) {
 // Column order: the union of record keys in first-seen order, with the
 // common identifying columns first.
 const PREFERRED = ['record_type', 'post_id', 'comment_id', 'title', 'author', 'subreddit', 'created_at', 'score',
-  'upvote_ratio', 'num_comments', 'url', 'permalink', 'selftext', 'body', 'flair'];
+  'upvote_ratio', 'num_comments', 'url', 'permalink', 'selftext', 'full_text', 'body', 'flair'];
 
 function columnsFor(records) {
   const seen = new Set();

@@ -74,8 +74,93 @@
     return null;
   }
 
+  // HTML (selftext_html and the like) → plain text: line breaks and block
+  // ends become newlines, list items get a dash, tags are dropped and
+  // entities decoded. Handles HTML that arrives entity-escaped
+  // (Reddit's JSON without raw_json=1).
+  var ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: '\'', nbsp: ' ' };
+  function decodeEntities(s) {
+    return s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, function (m, e) {
+      if (e.charAt(0) === '#') {
+        var code = e.charAt(1).toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+        try { return String.fromCodePoint(code); } catch (err) { return m; }
+      }
+      var named = ENTITIES[e.toLowerCase()];
+      return named === undefined ? m : named;
+    });
+  }
+  function htmlToText(html) {
+    if (typeof html !== 'string' || !html) return null;
+    var s = html.indexOf('<') === -1 && /&lt;/i.test(html) ? decodeEntities(html) : html;
+    s = s.replace(/<!--[\s\S]*?-->/g, '')
+      .replace(/<(script|style)\b[\s\S]*?<\/\1\s*>/gi, '')
+      .replace(/>[ \t]*\n\s*</g, '><')                      // layout newlines between tags
+      .replace(/<br\s*\/?>\n?/gi, '\n')
+      .replace(/<li\b[^>]*>/gi, '\n- ')
+      .replace(/<\/(p|div|h[1-6]|blockquote|pre|tr|table|ul|ol)\s*>|<hr\b[^>]*>/gi, '\n\n')
+      .replace(/<[^>]*>/g, '');
+    s = decodeEntities(s).replace(/[ \t ]+\n/g, '\n').replace(/\n{3,}/g, '\n\n').trim();
+    return s || null;
+  }
+
+  function nonEmpty(x) { return typeof x === 'string' && x.trim() ? x : null; }
+  function crosspostParent(d) {
+    var p = Array.isArray(d.crosspost_parent_list) ? d.crosspost_parent_list[0] : null;
+    return p && typeof p === 'object' ? p : null;
+  }
+
+  // A post's text, wherever it is: selftext, its HTML version, the names
+  // other APIs give it, and for a crosspost the original post's text.
+  // When there is none, selftext as Reddit sent it ('' or null).
+  function postBody(d, depth) {
+    var text = nonEmpty(d.selftext) || htmlToText(d.selftext_html) ||
+      nonEmpty(d.self_text) || nonEmpty(d.body) || nonEmpty(d.text) || nonEmpty(d.content) ||
+      htmlToText(d.body_html) || htmlToText(d.content_html);
+    if (text) return text;
+    var parent = crosspostParent(d);
+    if (parent && (depth || 0) < 3) {
+      var inherited = postBody(parent, (depth || 0) + 1);
+      if (inherited) return inherited;
+    }
+    return str(d.selftext);
+  }
+
+  // The whole post as readable text: title, body, and what a post without
+  // text consists of (its link, image, video, gallery captions, poll options)
+  // plus where a crosspost came from.
+  function postFullText(d, body, media) {
+    var parts = [];
+    var title = nonEmpty(d.title);
+    if (title) parts.push(title.trim());
+    if (nonEmpty(body)) parts.push(body.trim());
+    var parent = crosspostParent(d);
+    if (parent) {
+      var from = (str(parent.subreddit) ? 'r/' + parent.subreddit : 'another post') +
+        (str(parent.author) ? ' (u/' + parent.author + ')' : '');
+      var origTitle = nonEmpty(parent.title);
+      parts.push('Crossposted from ' + from + (origTitle && origTitle.trim() !== (title || '').trim() ? ': ' + origTitle.trim() : ''));
+    }
+    var poll = d.poll_data && Array.isArray(d.poll_data.options) ? d.poll_data.options : [];
+    var choices = poll.map(function (o) { return o && nonEmpty(o.text) ? o.text.trim() : null; }).filter(Boolean);
+    if (choices.length) parts.push('Poll options:\n' + choices.map(function (c) { return '- ' + c; }).join('\n'));
+    var m = media || (parent ? extractMedia(parent) : null);
+    if (m) {
+      var own = permalink(d.permalink);
+      if (m.type === 'gallery') {
+        var captions = m.items.map(function (it) { return nonEmpty(it.caption) ? it.caption.trim() : null; }).filter(Boolean);
+        parts.push('Gallery (' + m.items.length + ' image' + (m.items.length === 1 ? '' : 's') + ')' +
+          (captions.length ? ':\n' + captions.map(function (c) { return '- ' + c; }).join('\n') : ''));
+      } else if (m.url && m.url !== own && !(d.id && m.url.indexOf('/comments/' + d.id) !== -1)) {
+        parts.push((m.type === 'image' ? 'Image' : m.type === 'video' || m.type === 'embed' ? 'Video' : 'Link') + ': ' + m.url);
+      }
+    }
+    return parts.length ? parts.join('\n\n') : null;
+  }
+
   function normalizePost(d) {
     d = d || {};
+    var body = postBody(d);
+    var media = extractMedia(d);
     return {
       record_type:   'post',
       post_id:       str(d.id),
@@ -91,8 +176,9 @@
       score:         num(d.score),
       upvote_ratio:  num(d.upvote_ratio),
       num_comments:  num(d.num_comments),
-      selftext:      str(d.selftext),
-      flair:         str(d.link_flair_text),
+      selftext:      body,
+      full_text:     postFullText(d, body, media),
+      flair:        str(d.link_flair_text),
       author_flair:  str(d.author_flair_text),
       domain:        str(d.domain),
       is_self:       bool(d.is_self),
@@ -104,7 +190,7 @@
       distinguished: str(d.distinguished),
       num_crossposts: num(d.num_crossposts),
       total_awards:  num(d.total_awards_received),
-      media:         extractMedia(d)
+      media:         media
     };
   }
 
@@ -231,6 +317,6 @@
     toIso: toIso, normalizePost: normalizePost, normalizeComment: normalizeComment,
     normalizeSubreddit: normalizeSubreddit, normalizeUser: normalizeUser,
     normalizeThing: normalizeThing, flattenComments: flattenComments,
-    extractMedia: extractMedia, recordKey: recordKey
+    extractMedia: extractMedia, recordKey: recordKey, htmlToText: htmlToText
   };
 });

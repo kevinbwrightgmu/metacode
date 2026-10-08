@@ -112,6 +112,10 @@ test('standard scrape: start → progress → results → filter → export → 
   await page.waitForFunction(() => document.querySelectorAll('.sc-table tbody tr').length === 120);
   assert.equal(await page.textContent('#sc-count-badge'), '120');
   assert.match(await page.textContent('#sc-stats'), /120\s*Items/);
+  // The table shows each post's text (or link) under its title
+  const cells = await page.$$eval('.sc-table tbody tr td:nth-child(2)', tds => tds.map(td => td.innerText));
+  assert.ok(cells.some(t => /^Post \d+ in test\n+Body of post \d+$/.test(t)), 'text post');
+  assert.ok(cells.some(t => /^Post \d+ in test\n+Link: https:\/\/example\.com\/\d+$/.test(t)), 'link post');
 
   // Search / filter
   await page.fill('#sc-search', 'Post 7 in');
@@ -154,6 +158,10 @@ test('standard scrape: start → progress → results → filter → export → 
   assert.equal(posts.length, 120);
   assert.match(posts[0].id, /^reddit_/);
   assert.ok(posts[0].text.startsWith('Post '));
+  // The whole post, not just the title: text posts bring their text, link posts their link
+  const byTitle = n => posts.find(p => p.text.startsWith('Post ' + n + ' in '));
+  assert.equal(byTitle(7).text, 'Post 7 in test\n\nBody of post 7');
+  assert.equal(byTitle(8).text, 'Post 8 in test\n\nLink: https://example.com/8');
   assert.equal(typeof posts[0].engagement.likes, 'number');
   // Adding again adds nothing new.
   await page.click('text=Add to project');
