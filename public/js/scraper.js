@@ -1585,7 +1585,7 @@ async def scrape(ctx):
     }
     const visible = rows.slice(0, view.shown);
     const index = new Map(records.map((r, i) => [r, i]));
-    el.innerHTML = toolbar + `
+    el.innerHTML = toolbar + averagesOf(rows) + `
       <div class="table-wrap"><table class="table sc-table">
         <thead><tr><th>Type</th><th>Title / text</th><th>Author</th><th>Subreddit</th><th class="sc-cell-num">Score</th><th class="sc-cell-num">Comments</th><th>Created</th></tr></thead>
         <tbody>${visible.map(r => {
@@ -1607,6 +1607,28 @@ async def scrape(ctx):
         <span class="form-hint">Showing ${fmtNum(visible.length)} of ${fmtNum(rows.length)}${rows.length !== records.length ? ' (filtered from ' + fmtNum(records.length) + ')' : ''}</span>
         ${rows.length > visible.length ? '<button class="btn btn-secondary btn-sm" onclick="RedditScraper.showMore()">Show 200 more</button>' : ''}
       </div>`;
+  }
+
+  // Average likes, comments, shares and views of the posts in view (of the
+  // comments, when there are no posts) — the numbers Add to project sends to Metrics.
+  const AVERAGES = [['likes', 'Avg likes', 'score', '#EF4444'], ['comments', 'Avg comments', '', '#7C3AED'],
+    ['shares', 'Avg shares', 'crossposts', '#3B82F6'], ['views', 'Avg views', '', '#0D9488']];
+  function averagesOf(rows) {
+    const posts = rows.filter(r => r.record_type === 'post');
+    const base = posts.length ? posts : rows.filter(r => r.record_type === 'comment');
+    if (!base.length) return '';
+    const what = posts.length ? 'post' : 'comment';
+    const eng = base.map(engagementOf);
+    return '<div class="sc-avg" id="sc-avg">' + AVERAGES.map(([key, label, note, color]) => {
+      const vals = eng.map(e => e[key]).filter(v => v !== null);
+      const value = vals.length ? Number((vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1)).toLocaleString() : null;
+      return '<div class="sc-avg-tile" data-metric="' + key + '">' + (value === null
+        ? '<div class="sc-avg-value is-empty">' + (key === 'views' && what === 'post' ? 'Not provided by Reddit' : 'No data') + '</div>'
+        : '<div class="sc-avg-value" style="color:' + color + '">' + value + '</div>') +
+        '<div class="sc-avg-label">' + label + (note ? ' <span>(' + note + ')</span>' : '') + '</div></div>';
+    }).join('') + '</div>' +
+      '<div class="form-hint sc-avg-hint">Per ' + what + ', over ' + fmtNum(base.length) + ' ' + what + (base.length === 1 ? '' : 's') +
+      (rows.length !== records.length ? ' matching the search or filter' : '') + ' — the numbers <b>Add to project</b> sends to Metrics.</div>';
   }
 
   let searchTimer = null;
@@ -1755,12 +1777,12 @@ async def scrape(ctx):
 
   // Reddit's engagement numbers → the project's engagement fields, which
   // Metrics charts and lists per post: score → likes, comments → comments,
-  // crossposts → shares, plus upvote ratio and awards. Reddit doesn't
-  // publish view counts.
+  // crossposts → shares, view_count → views (Reddit rarely sends one), plus
+  // upvote ratio and awards.
   function engagementOf(r) {
     const n = x => (typeof x === 'number' && isFinite(x) ? x : null);
     if (r.record_type === 'post') {
-      return { likes: n(r.score), shares: n(r.num_crossposts), comments: n(r.num_comments), views: null,
+      return { likes: n(r.score), shares: n(r.num_crossposts), comments: n(r.num_comments), views: n(r.view_count),
         upvoteRatio: n(r.upvote_ratio), awards: n(r.total_awards) };
     }
     return { likes: n(r.score), shares: null, comments: null, views: null };

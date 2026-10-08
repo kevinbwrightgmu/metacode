@@ -116,10 +116,16 @@ test('standard scrape: start → progress → results → filter → export → 
   const cells = await page.$$eval('.sc-table tbody tr td:nth-child(2)', tds => tds.map(td => td.innerText));
   assert.ok(cells.some(t => /^Post \d+ in test\n+Body of post \d+$/.test(t)), 'text post');
   assert.ok(cells.some(t => /^Post \d+ in test\n+Link: https:\/\/example\.com\/\d+$/.test(t)), 'link post');
+  // Average engagement of the posts in view (scores 100…-19, 3 comments each, no crossposts or views)
+  const averages = () => page.$$eval('#sc-avg .sc-avg-tile', t => t.map(x => [x.dataset.metric, x.querySelector('.sc-avg-value').textContent]));
+  assert.deepEqual(await averages(), [['likes', '40.5'], ['comments', '3'], ['shares', 'No data'], ['views', 'Not provided by Reddit']]);
+  assert.match(await page.textContent('.sc-avg-hint'), /over 120 posts/);
 
-  // Search / filter
+  // Search / filter (the averages follow)
   await page.fill('#sc-search', 'Post 7 in');
   await page.waitForFunction(() => document.querySelectorAll('.sc-table tbody tr').length === 1);
+  assert.deepEqual((await averages()).slice(0, 2), [['likes', '93'], ['comments', '3']]);
+  assert.match(await page.textContent('.sc-avg-hint'), /over 1 post matching the search or filter/);
 
   // Record detail
   await page.click('.sc-table tbody tr');
@@ -190,7 +196,8 @@ test('standard scrape: start → progress → results → filter → export → 
   await page.click('.eng-th:has-text("Views")');
   assert.match(await page.textContent('#eng-posts .form-hint'), /sorted by views/);
   assert.match(await page.textContent('.eng-posts-table tbody tr:first-child'), /Post 7 in test/);
-  assert.match(await page.textContent('#view-container'), /—\s*Avg Shares/, 'no shares data: a dash, not 0.0');
+  assert.match(await page.textContent('#view-container'), /No data\s*Avg Shares/, 'no shares data: "No data", not 0.0');
+  assert.equal(await page.locator('#eng-posts canvas').count(), 0, 'no bar chart');
   await page.evaluate(() => App.navigate('scraper'));
 
   // The job is listed and survives a reload (jobs live on the server).
