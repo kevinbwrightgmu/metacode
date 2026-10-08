@@ -258,19 +258,21 @@ The errors you may see map to:
      Needs Reddit API access; in other modes the log says it was skipped.
 4. **Start scrape**. The job card shows status, items, pages, requests, skipped duplicates, errors, start
    time and duration; tabs show **Results**, **JSON**, **Logs** and **Metadata**.
-5. Results: search, filter by type, sort, click a row for all fields (and a post's comments), **Copy
-   JSON**, **Export…** (CSV, JSON, JSON with comments nested under posts, NDJSON, reply-network edges
-   for Analyze CSV), **Add to project** (posts/comments become project posts with the whole post as
-   their text, and each one's engagement goes to **Metrics** → *Engagement by post*: score → likes,
-   comment count → comments, crossposts → shares, plus upvote ratio and awards — Reddit has no view
-   counts. Posts already in the project keep their text and codes; adding them again updates their
-   engagement numbers).
+5. Results: the average likes (score), comments, shares (crossposts) and views of the posts in view
+   (following the search and type filter; views show "Not provided by Reddit" unless Reddit sent a
+   `view_count`, which it almost never does), then search, filter by type, sort, click a row for all
+   fields (and a post's comments), **Copy JSON**, **Export…** (CSV, JSON, JSON with comments nested
+   under posts, NDJSON, reply-network edges for Analyze CSV), **Add to project** (posts/comments become
+   project posts with the whole post as their text, and each one's engagement goes to **Metrics** →
+   *Engagement by post*: score → likes, comment count → comments, crossposts → shares, `view_count` →
+   views, plus upvote ratio and awards. Posts already in the project keep their text and codes; adding
+   them again updates their engagement numbers).
 
 Record fields (any may be `null`):
 
 - **post** — `post_id, fullname, title, author, subreddit, url, permalink, created_at, created_utc, edited_at,
   score, upvote_ratio, num_comments, selftext, full_text, flair, author_flair, domain, is_self, over_18, spoiler,
-  stickied, locked, archived, distinguished, num_crossposts, total_awards, media {type, url, thumbnail, items}`
+  stickied, locked, archived, distinguished, num_crossposts, view_count, total_awards, media {type, url, thumbnail, items}`
   - `selftext` is the post's text. When Reddit's `selftext` is empty it is read from `selftext_html`
     (as plain text), from the field another API uses for it, or — for a crosspost — from the original post.
   - `full_text` is the entire post as readable text: the title, the text, and for posts without text

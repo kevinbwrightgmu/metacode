@@ -189,6 +189,7 @@
       archived:      bool(d.archived),
       distinguished: str(d.distinguished),
       num_crossposts: num(d.num_crossposts),
+      view_count:    num(d.view_count),       // Reddit almost never sends it (null)
       total_awards:  num(d.total_awards_received),
       media:         media
     };

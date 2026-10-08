@@ -2,9 +2,9 @@
    engagement.js — Metrics section: engagement & coding charts via Chart.js
    (route id "metrics"; module keeps its original EngagementViz name)
 
-   "Engagement by post" lists every post's numbers (sortable, with a top-10
-   chart) and needs no codebook — posts added from the Reddit scraper show
-   up there with their score, comments, crossposts, upvote ratio and awards.
+   "Engagement by post" lists every post's numbers (sortable) and needs no
+   codebook — posts added from the Reddit scraper show up there with their
+   score, comments, crossposts, upvote ratio and awards.
    ══════════════════════════════════════════════ */
 
 const EngagementViz = (() => {
@@ -13,12 +13,12 @@ const EngagementViz = (() => {
 
   // Engagement fields a post can have (Reddit posts add upvoteRatio and awards)
   const METRICS = [
-    { key: 'likes',       label: 'Likes',        color: '#EF4444' },
-    { key: 'comments',    label: 'Comments',     color: '#7C3AED' },
-    { key: 'shares',      label: 'Shares',       color: '#3B82F6' },
-    { key: 'views',       label: 'Views',        color: '#0D9488' },
-    { key: 'upvoteRatio', label: 'Upvote ratio', color: '#F97316', pct: true },
-    { key: 'awards',      label: 'Awards',       color: '#CA8A04' }
+    { key: 'likes',       label: 'Likes' },
+    { key: 'comments',    label: 'Comments' },
+    { key: 'shares',      label: 'Shares' },
+    { key: 'views',       label: 'Views' },
+    { key: 'upvoteRatio', label: 'Upvote ratio', pct: true },
+    { key: 'awards',      label: 'Awards' }
   ];
   const PAGE = 20;
   const postView = { sort: 'likes', shown: PAGE };
@@ -133,15 +133,15 @@ const EngagementViz = (() => {
     `;
 
     // Build charts after DOM is ready
-    setTimeout(() => { buildTopPostsChart(); buildCharts(posts, codebook, withEng); }, 50);
+    setTimeout(() => buildCharts(posts, codebook, withEng), 50);
   }
 
   function summaryStats(withEng) {
-    // Averaged over the posts that have the number ("—" when none do, e.g.
-    // views for Reddit posts), so a missing number doesn't count as 0.
+    // Averaged over the posts that have the number ("No data" when none do,
+    // e.g. views for Reddit posts), so a missing number doesn't count as 0.
     const avg = (arr, key) => {
       const vals = arr.map(p => numOf(p, key)).filter(v => v !== null);
-      return vals.length ? (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1) : '—';
+      return vals.length ? (vals.reduce((s, v) => s + v, 0) / vals.length).toFixed(1) : null;
     };
     return [
       ['Avg Likes',    avg(withEng,'likes'),   '#EF4444', 'M0,10 C5,-5 15,25 20,10'],
@@ -152,7 +152,8 @@ const EngagementViz = (() => {
       <div style="background:var(--bg-surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:16px 20px;box-shadow:var(--sh-sm)">
         <div style="display:flex;justify-content:space-between;align-items:flex-start">
           <div>
-            <div style="font-family:var(--f-display);font-weight:700;font-size:26px;color:${color}">${val}</div>
+            ${val === null ? '<div style="font-size:15px;font-weight:600;color:var(--tx-muted);line-height:31px">No data</div>'
+              : `<div style="font-family:var(--f-display);font-weight:700;font-size:26px;color:${color}">${val}</div>`}
             <div style="font-size:12.5px;color:var(--tx-muted);margin-top:2px">${label}</div>
           </div>
           <svg width="40" height="20" viewBox="0 0 20 20" style="opacity:.4">
@@ -206,9 +207,7 @@ const EngagementViz = (() => {
           <div class="form-hint">${list.length} post${list.length === 1 ? '' : 's'} · sorted by ${sortBy.label.toLowerCase()} · click a column to sort${reddit ? ' · Reddit: likes = score, shares = crossposts' : ''}</div>
         </div>
       </div>
-      <div class="eng-top-title">Top ${Math.min(10, rows.length)} by ${sortBy.label.toLowerCase()}</div>
-      <div class="chart-wrap" id="eng-top-wrap" style="height:${Math.max(120, Math.min(10, rows.length) * 30 + 30)}px"><canvas id="chart-top-posts" aria-label="Top posts by ${App.esc(sortBy.label.toLowerCase())}" role="img"></canvas></div>
-      <div class="table-wrap" style="margin-top:14px">
+      <div class="table-wrap">
         <table class="table eng-posts-table">
           <thead><tr><th scope="col">#</th><th scope="col">Post</th>${cols.map(m => `
             <th scope="col" class="num${m.key === sortBy.key ? ' is-sorted' : ''}" aria-sort="${m.key === sortBy.key ? 'descending' : 'none'}">
@@ -232,41 +231,10 @@ const EngagementViz = (() => {
         <button class="btn btn-secondary btn-sm" onclick="EngagementViz.morePosts(true)">Show all</button></div>` : ''}`;
   }
 
-  function buildTopPostsChart() {
-    chartInstances.topPosts?.destroy();
-    chartInstances.topPosts = null;
-    const canvas = document.getElementById('chart-top-posts');
-    if (!canvas) return;
-    if (typeof Chart === 'undefined') { document.getElementById('eng-top-wrap')?.remove(); document.querySelector('.eng-top-title')?.remove(); return; }
-    const list = App.getState().posts.filter(hasNumbers);
-    const m = METRICS.find(x => x.key === postView.sort) || METRICS[0];
-    const top = sortedPosts(list, m.key).filter(p => numOf(p, m.key) !== null).slice(0, 10);
-    chartInstances.topPosts = new Chart(canvas, {
-      type: 'bar',
-      data: {
-        labels: top.map(p => excerpt(p.text, 48) || p.id),
-        datasets: [{ label: m.label, data: top.map(p => m.pct ? Math.round(numOf(p, m.key) * 100) : numOf(p, m.key)),
-          backgroundColor: m.color + 'BF', borderColor: m.color, borderWidth: 1, borderRadius: 4 }]
-      },
-      options: {
-        indexAxis: 'y', responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false }, tooltip: { callbacks: {
-          title: items => excerpt(top[items[0].dataIndex].text, 120),
-          label: item => m.label + ': ' + (m.pct ? item.raw + '%' : Number(item.raw).toLocaleString()) } } },
-        scales: {
-          x: { beginAtZero: true, max: m.pct ? 100 : undefined, ticks: { font: { size: 11 }, callback: v => m.pct ? v + '%' : v }, grid: { color: '#F1F5F9' } },
-          // Shorter labels on narrow screens, so they fit beside the bars
-          y: { ticks: { font: { size: 11 }, callback(v) { return excerpt(this.getLabelForValue(v), this.chart.width < 520 ? 20 : 48); } }, grid: { display: false } }
-        }
-      }
-    });
-  }
-
   function redrawPosts() {
     const card = document.getElementById('eng-posts');
     if (!card) return;
     card.innerHTML = postsSection(App.getState().posts.filter(hasNumbers));
-    buildTopPostsChart();
   }
   function sortPosts(key) {
     if (!METRICS.some(m => m.key === key)) return;

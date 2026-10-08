@@ -582,7 +582,6 @@ svg { flex-shrink: 0; }
 .chart-wrap { position: relative; }
 /* Engagement by post */
 .eng-posts-head { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; justify-content: space-between; margin-bottom: 14px; }
-.eng-top-title { font-size: 12.5px; font-weight: 600; color: var(--tx-second); margin-bottom: 6px; }
 .eng-posts-table td.num, .eng-posts-table th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .eng-th { border: 0; background: none; padding: 0; font: inherit; color: inherit; cursor: pointer; }
 .eng-th:hover { color: var(--tx-primary); }
@@ -1023,6 +1022,14 @@ svg { flex-shrink: 0; }
 .sc-table tbody tr { cursor: pointer; }
 .sc-cell-text { max-width: 420px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .sc-cell-sub { margin-top: 2px; font-size: 12px; color: var(--tx-muted); }
+.sc-avg { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin-bottom: 6px; }
+.sc-avg-tile { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px 14px; min-width: 0; }
+.sc-avg-value { font-family: var(--f-display); font-weight: 700; font-size: 20px; line-height: 28px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.sc-avg-value.is-empty { font-family: var(--f-body); font-size: 13px; font-weight: 600; color: var(--tx-muted); line-height: 18px; min-height: 28px; display: flex; align-items: center; }
+.sc-avg-label { font-size: 12px; color: var(--tx-second); }
+.sc-avg-label span { color: var(--tx-muted); }
+.sc-avg-hint { margin-bottom: 12px; }
+@media (max-width: 640px) { .sc-avg { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 .sc-cell-num { text-align: right; font-variant-numeric: tabular-nums; }
 .sc-logs { max-height: 360px; overflow: auto; font-family: var(--f-mono); font-size: 12px; line-height: 1.6; background: var(--bg-muted); border: 1px solid var(--border); border-radius: var(--r-sm); padding: 8px 12px; }
 .sc-log { display: flex; gap: 10px; white-space: pre-wrap; overflow-wrap: anywhere; }

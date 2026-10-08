@@ -9,7 +9,7 @@ test('result formatting: posts with missing fields become nulls, not errors', ()
   assert.equal(r.record_type, 'post');
   assert.equal(r.post_id, 'abc');
   assert.equal(r.created_at, '2023-11-14T22:13:20.000Z');
-  for (const k of ['author', 'subreddit', 'url', 'permalink', 'score', 'upvote_ratio', 'num_comments', 'selftext', 'flair', 'media']) {
+  for (const k of ['author', 'subreddit', 'url', 'permalink', 'score', 'upvote_ratio', 'num_comments', 'view_count', 'selftext', 'flair', 'media']) {
     assert.equal(r[k], null, k);
   }
   const empty = F.normalizePost(undefined);
