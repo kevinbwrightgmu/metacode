@@ -48,7 +48,8 @@ const App = (() => {
     'projects':     () => ProjectsView.render(),
     'settings':     renderSettings,
     'import':       () => DataManager.render(),
-    'scraper':      () => RedditScraper.render(),
+    'scraper':      () => CollectorView.render(),        // the Reddit Collector (collector/)
+    'scraper-api':  () => RedditScraper.render(),        // the server-side scraper (API keys, custom code)
     'codebook':     () => Codebook.render(),
     'ai-coding':    () => AICoder.render(),
     'human-coding': () => HumanCoder.render(),
@@ -62,7 +63,7 @@ const App = (() => {
   };
 
   const TITLES = {
-    'dashboard':'Dashboard','projects':'Projects','settings':'Settings','import':'Import Data','scraper':'Reddit Scraper',
+    'dashboard':'Dashboard','projects':'Projects','settings':'Settings','import':'Import Data','scraper':'Reddit Scraper','scraper-api':'Reddit API Scraper',
     'codebook':'Codebook','ai-coding':'AI Coding','human-coding':'Human Coding',
     'reliability':'Reliability Analysis','csv-analyzer':'Analyze CSV (NetworkX)',
     'network':'Network Graph',
@@ -96,7 +97,7 @@ const App = (() => {
 
     // Sidebar active state
     document.querySelectorAll('.nav-item').forEach(el => {
-      el.classList.toggle('active', el.dataset.view === view);
+      el.classList.toggle('active', el.dataset.view === (view === 'scraper-api' ? 'scraper' : view));
     });
 
     // Topbar title

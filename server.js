@@ -2016,6 +2016,7 @@ app.post('/api/network/analyze', async (req, res) => {
 const scraper = createScraper();
 app.use('/api/scraper', scraper.router);
 app.use('/scramjet', scraper.scramjetRouter);
+app.get('/wisp/', scraper.wispPlainHttp);         // only reached when a proxy dropped the WebSocket upgrade
 
 // ── Status page (status.metac0.de, /status) ───────────────────────────────────
 // Public: says whether each part works, never how it's configured.

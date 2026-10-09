@@ -20,12 +20,13 @@ const express = require('express');
 const path = require('path');
 const { loadScraperConfig } = require('./config');
 const { ScraperError, isScraperError, sanitize } = require('./errors');
-const { createUpgradeHandler, WISP_PATH } = require('./network/wisp-server');
+const { createUpgradeHandler, plainHttpHandler, WISP_PATH } = require('./network/wisp-server');
 const { EpoxyWispTransport, transportAvailable } = require('./network/epoxy-transport');
 const { PythonTransport, AutoTransport } = require('./network/python-transport');
 const { HostRateLimiter } = require('./network/rate-limiter');
 const { RedditHttpClient } = require('./network/reddit-http');
 const { RelayHub } = require('./network/browser-relay');
+const { createHttpRelay } = require('./network/http-relay');
 const credentials = require('./credentials');
 const { RedditApisClient, balanceOf, DASHBOARD_URL } = require('./network/redditapis-client');
 const { DEFAULT_USER_AGENT } = require('./config');
@@ -296,6 +297,9 @@ function createScraper(opts) {
   });
 
   router.get('/status', (req, res) => res.json(status(req)));
+
+  // The Reddit Collector's fallback when the Wisp WebSocket can't get through (see network/http-relay.js)
+  router.post('/fetch', createHttpRelay(config));
 
   router.post('/resolve', (req, res) => {
     try {
@@ -569,7 +573,7 @@ function createScraper(opts) {
   });
 
   return {
-    config, http, jobs, relay, router, scramjetRouter, onUpgrade, status,
+    config, http, jobs, relay, router, scramjetRouter, onUpgrade, status, wispPlainHttp: plainHttpHandler,
     setPort(p) {
       port = p;
       if (typeof transport.choose === 'function') transport.choose().catch(() => {});

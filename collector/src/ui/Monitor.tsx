@@ -1,5 +1,5 @@
 // Live job monitor: what the bot is doing, counts, controls, and its log.
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { JobProgress, JobRecord, LogEntry } from '../types';
 import { describeJob } from '../bot/validate';
 import { Notice, Stat, StateChip, fmtDate, fmtDuration, fmtNum } from './common';
@@ -12,10 +12,15 @@ interface Props {
   onResume: () => void;
   onStop: () => void;
   onNewJob: () => void;
+  /** Inside MetaCode: send this job's records to the project. */
+  onAddToProject?: () => Promise<string>;
 }
 
-export function Monitor({ progress, job, logs, onPause, onResume, onStop, onNewJob }: Props) {
+export function Monitor({ progress, job, logs, onPause, onResume, onStop, onNewJob, onAddToProject }: Props) {
   const logRef = useRef<HTMLOListElement>(null);
+  const [added, setAdded] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
+  const [adding, setAdding] = useState(false);
+  useEffect(() => { setAdded(null); }, [job && job.id]);
   useEffect(() => {
     const el = logRef.current;
     if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 80) el.scrollTop = el.scrollHeight;
@@ -90,7 +95,16 @@ export function Monitor({ progress, job, logs, onPause, onResume, onStop, onNewJ
       ) : (
         <>
           {job.outcome ? <Notice tone={progress.state === 'failed' ? 'error' : progress.state === 'stopped' ? 'warn' : 'ok'}><span id="monitor-outcome">{job.outcome}</span></Notice> : null}
-          <div className="actions"><button className="btn btn-primary" onClick={onNewJob}>New job</button></div>
+          <div className="actions">
+            {onAddToProject && (s.postsCollected || s.commentsCollected) ? (
+              <button className="btn btn-primary" id="job-add-to-project" disabled={adding} onClick={async () => {
+                setAdding(true);
+                try { setAdded({ tone: 'ok', text: await onAddToProject() }); } catch (err) { setAdded({ tone: 'error', text: (err as Error).message }); } finally { setAdding(false); }
+              }}>Add this job's {collectsPosts ? 'posts' : 'comments'}{collectsPosts && job.config.mode === 'both' ? ' and comments' : ''} to project</button>
+            ) : null}
+            <button className={'btn' + (onAddToProject ? '' : ' btn-primary')} onClick={onNewJob}>New job</button>
+          </div>
+          {added ? <Notice tone={added.tone}><span id="job-added">{added.text}</span></Notice> : null}
         </>
       )}
 

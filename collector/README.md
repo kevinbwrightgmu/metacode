@@ -9,6 +9,14 @@ The collector is part of MetaCode. The MetaCode server serves it at **`/collecto
 together with the Scramjet files and the proxy endpoint it needs. All collection, storage and
 export happen in your browser.
 
+**In MetaCode it is the sidebar's Scraper page** (`app.html#scraper`, the collector in a frame).
+There, **Add to project** (in the Monitor after a job, and in Data for the records shown) sends
+posts and comments to the open project. Score and comment count go with them as engagement, so
+they show up in Metrics. Adding them again updates those numbers. The older server-side scraper
+(Reddit API keys, custom code) is linked at the top of that page.
+
+Running MetaCode on a server behind nginx with pm2: see [docs/deploy-vps.md](../docs/deploy-vps.md).
+
 - [Quick start](#quick-start)
 - [How it works](#how-it-works)
 - [Using it](#using-it)
@@ -35,7 +43,7 @@ npm install                    # MetaCode server
 npm run collector:install      # collector dependencies (collector/node_modules)
 npm run collector:build        # type-check + production build → collector/dist
 npm start                      # MetaCode at http://localhost:3000
-# open http://localhost:3000/collector/
+# open http://localhost:3000/app.html#scraper (inside MetaCode) or http://localhost:3000/collector/
 ```
 
 | Command (MetaCode folder) | What it does |
@@ -59,6 +67,8 @@ npm start                      # MetaCode at http://localhost:3000
        ▼                                              ▼
  IndexedDB ── export Web Worker ── files      service worker → controller → epoxy-tls
                                               → wss://<MetaCode>/wisp/ → reddit.com only
+                                                (or POST /api/scraper/fetch, the HTTP relay,
+                                                 when the WebSocket can't open)
 ```
 
 | Part | Files | Role |
@@ -87,6 +97,20 @@ API (`ScramjetController`, bare-mux) is different and isn't used here. The MetaC
 The app sets `$scramjetController.config` (prefix `/scramjet/~/`, file paths), creates a
 `Controller({ serviceworker, transport })`, awaits `controller.wait()`, and calls
 `controller.createFrame(iframe, { plugins: [bridge] })` and `frame.go(url)`.
+
+**Connection to Reddit.** Normally epoxy-tls reaches Reddit through MetaCode's Wisp WebSocket
+(`/wisp/`), with TLS from the browser to Reddit. At start-up the collector checks that the
+WebSocket opens. If it doesn't, usually because a reverse proxy doesn't forward WebSockets,
+**Automatic** (Settings → Connection to Reddit) switches to MetaCode's **HTTP relay**
+(`src/browser/http-transport.ts`). The relay is `POST /api/scraper/fetch`: the server fetches
+GET/HEAD requests for the allowed Reddit hosts and ports and streams the answers back. TLS then
+ends on the MetaCode server, and the relay carries no WebSockets. The line under the browser
+says which connection is in use and why. **Wisp only** shows the error instead of falling back.
+
+epoxy-tls reuses kept-alive connections, but it doesn't notice when the server closes one
+during a pause of about 2 s or more. The next request on it never gets an answer. So after a
+pause of a second with nothing in flight, requests go through a fresh epoxy client
+(`src/browser/fresh-after-idle.ts`), while requests within a page load still share connections.
 
 **The bridge.** A normal page can't script a cross-origin iframe. Scramjet, however, serves
 each proxied page from the app's own origin (under its prefix), so the page in the frame is
@@ -153,7 +177,8 @@ file and the fixtures in `test/fixtures/`.
 4. **Data.** Search titles, text, subreddits and usernames, and filter by subreddit, job,
    collection date and type. Sort by collection time, creation time, score or subreddit. Click
    a row to see the record, a post's collected comment thread, and an **Open on Reddit** link.
-   Delete selected or all matching records.
+   Delete selected or all matching records. Inside MetaCode, **Add these N to project** sends
+   the records shown to the project.
 5. **Export.** Export everything, or only the records the current filter shows, as JSON, JSON
    Lines or CSV.
 
@@ -185,8 +210,8 @@ its Data API. So with **Obey**, jobs on reddit.com don't run unless that has cha
 the intended behaviour, not a bug. The other policy, **Warn and continue**
 (Settings → robots.txt), records the decision and runs the job anyway. It exists only for
 collection Reddit has permitted, for example under its research program, or for your own
-content. For API-based collection, MetaCode's own Scraper page supports Reddit's Data API
-with credentials.
+content. For API-based collection, MetaCode's **Reddit API scraper** (linked at the top of the
+Scraper page) supports Reddit's Data API with credentials.
 
 ## Configuration
 
@@ -200,6 +225,7 @@ with credentials.
 | Page load timeout | 30000 ms | 5000–120000 ms |
 | Retries per page | 3 | 0–6 |
 | robots.txt policy | Obey | Obey / Warn and continue |
+| Connection to Reddit | Automatic | Automatic (Wisp, else the HTTP relay) / Wisp only / HTTP relay only. Read when the browser starts: reload after changing it. |
 | Default limits for new jobs | 50 posts, 50 comments | 1–1000 / 0–500 |
 | Retention | 0 (keep) | records not seen for N days are deleted at start-up or on demand |
 | Export format, CSV byte-order mark | JSON, on | |
@@ -212,6 +238,8 @@ uses the same settings as MetaCode's Reddit browser.
 
 - `SCRAPER_BROWSER_ENABLED=false` turns Scramjet off (the collector then says so).
 - `PORT` sets the server port.
+- `PUBLIC_URL` (behind a reverse proxy) is the site's address, e.g. `https://metac0.de`. WebSockets
+  to `/wisp/` from pages on it are accepted even when the proxy doesn't pass the original host name.
 - `REDDIT_BASE_URL` (testing) adds a mirror host the proxy may reach. With it,
   `SCRAPER_ALLOW_PRIVATE_NETWORK=true` lets the proxy reach a local mock; use that only for tests.
 
@@ -259,6 +287,13 @@ The collector itself never stores passwords, cookies or tokens.
 - **No code execution.** There are no user-supplied scripts and no JavaScript evaluation
   controls in the dashboard. Job definitions are validated and bounded before they run.
 - **No secrets.** Nothing secret is needed: the collector uses no API keys or credentials.
+- **HTTP relay.** `/api/scraper/fetch` only reads (GET/HEAD) from the same Reddit host and port
+  allow-list as Wisp. It refuses IP addresses, URLs with credentials and addresses that resolve
+  to private networks. It answers only pages of MetaCode's own site (`Sec-Fetch-Site`/`Origin`)
+  and limits size, time and concurrency.
+- **Add to project.** The collector frame talks to MetaCode with `postMessage`, same origin
+  only. MetaCode accepts messages only from its own frame and copies known fields with checked
+  types. Ids must look like Reddit ids, and links must point to reddit.com.
 
 ## Tests
 
@@ -269,7 +304,9 @@ The collector itself never stores passwords, cookies or tokens.
 | URL rules, robots.txt, retry/backoff, cancellation, pause, settings and job validation, error messages | `test/lib.test.ts` | no |
 | IndexedDB (dedupe, merge, query, delete, retention, interrupted jobs) and JSON/JSONL/CSV exports | `test/store-export.test.ts` (fake-indexeddb) | no |
 | Bot: infinite scroll, pagination, limits, dedupe, comments, retries, refusals, robots policy, pause/resume/stop, run-time limit, events | `test/bot.test.ts` (fake page driver) | no |
-| **End to end through real Scramjet** in Chromium: service worker, rewriter, Wisp proxy, the plugin bridge, a page's own infinite-scroll script, post pages, IndexedDB, Data view, exports, robots policy, block page, dropped-connection retries, pause/resume/stop, navigation rules, "Scramjet unavailable" state | `../test/collector.test.js` (stand-in Reddit: `../test/helpers/collector-mock.js`) | no: local stand-in |
+| **End to end through real Scramjet** in Chromium: service worker, rewriter, Wisp proxy, the plugin bridge, a page's own infinite-scroll script, post pages, IndexedDB, Data view, exports, robots policy, block page, dropped-connection retries, pause/resume/stop, navigation rules, "Scramjet unavailable" state, a blocked WebSocket (HTTP relay fallback, "Wisp only"), a server closing idle connections between pages, and MetaCode's Scraper page with **Add to project** | `../test/collector.test.js` (stand-in Reddit: `../test/helpers/collector-mock.js`) | no: local stand-in |
+| MetaCode posts from records, fresh connections after a pause | `test/metacode.test.ts`, `test/fresh-after-idle.test.ts` | no |
+| Wisp origin check behind proxies, the HTTP relay's limits | `../test/wisp-relay.test.js` | no |
 
 **Manual live check.** `npm run collector:live-check -- --subreddit=science --posts=3`
 (options `--base=https://old.reddit.com`, `--robots=warn`, `--headed`). It starts MetaCode,
@@ -291,6 +328,15 @@ this was built. If the live check finds markup the selectors don't read, update
 `selectors.ts` and add a fixture.
 
 ## Troubleshooting
+
+**"Wisp WebSocket failed to connect: websocket did not open" / "The WebSocket to MetaCode's proxy (/wisp/) didn't open"**
+A reverse proxy or CDN in front of MetaCode isn't forwarding WebSockets. With Settings →
+Connection to Reddit on **Automatic**, the collector uses the HTTP relay meanwhile. To fix the
+proxy, see [docs/deploy-vps.md](../docs/deploy-vps.md#10-troubleshooting).
+
+**"Open the collector from MetaCode's Scraper page to add records to a project"**
+Add to project needs the MetaCode page around the collector: use sidebar → **Scraper**, not
+`/collector/` on its own.
 
 **"The MetaCode server couldn't be reached" / "Couldn't load /scramjet/…"**
 Start MetaCode (`npm start`) and open the collector from it (`http://localhost:3000/collector/`),

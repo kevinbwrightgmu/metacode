@@ -82,6 +82,13 @@ export function SettingsView({ settings, allowedHosts, minPageDelayMs, store, co
           </select>
         </label>
         {usingOther ? <label className="field">Address<input className="input" id="set-base-other" value={other} onChange={e => setOther(e.target.value)} placeholder="http://localhost:4000" /></label> : null}
+        <label className="field">Connection to Reddit <span className="muted">(applies when the page is reloaded)</span>
+          <select className="input" id="set-connection" value={form.connection} onChange={e => set('connection', e.target.value as Settings['connection'])}>
+            <option value="auto">Automatic — Wisp (WebSocket), or MetaCode's HTTP relay if the WebSocket can't open</option>
+            <option value="wisp">Wisp only (WebSocket at /wisp/, end-to-end TLS)</option>
+            <option value="http">HTTP relay only (through MetaCode's server)</option>
+          </select>
+        </label>
         <div className="row">
           {numberField('pageDelayMs', 'Delay between page loads (ms)', '— at least ' + Math.max(SETTING_LIMITS.pageDelayMs[0], minPageDelayMs))}
           {numberField('scrollDelayMs', 'Wait after each scroll (ms)')}

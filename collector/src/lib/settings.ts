@@ -13,7 +13,8 @@ export const DEFAULT_SETTINGS: Settings = {
   defaultMaxPosts: 50,
   defaultMaxComments: 50,
   exportFormat: 'json',
-  csvBom: true
+  csvBom: true,
+  connection: 'auto'
 };
 
 /** [min, max] for each number setting. The page delay has a floor so the bot stays slow. */
@@ -49,7 +50,8 @@ export function cleanSettings(input: Partial<Settings> | null | undefined, allow
     defaultMaxPosts: clampInt(s.defaultMaxPosts, SETTING_LIMITS.defaultMaxPosts, DEFAULT_SETTINGS.defaultMaxPosts),
     defaultMaxComments: clampInt(s.defaultMaxComments, SETTING_LIMITS.defaultMaxComments, DEFAULT_SETTINGS.defaultMaxComments),
     exportFormat: s.exportFormat === 'jsonl' || s.exportFormat === 'csv' ? s.exportFormat : 'json',
-    csvBom: s.csvBom !== false
+    csvBom: s.csvBom !== false,
+    connection: s.connection === 'wisp' || s.connection === 'http' ? s.connection : 'auto'
   };
 }
 

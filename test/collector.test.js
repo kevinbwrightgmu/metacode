@@ -58,7 +58,7 @@ async function openCollector(settings) {
   await page.waitForSelector('#set-base');
   await page.selectOption('#set-base', 'other');
   await page.fill('#set-base-other', mirror);
-  await page.fill('#set-pageDelayMs', '1000');
+  await page.fill('#set-pageDelayMs', String((settings && settings.pageDelayMs) || 1000));
   await page.fill('#set-scrollDelayMs', '500');
   if (settings && settings.robots === 'warn') await page.check('#set-robots-warn');
   await page.click('#settings-save');
@@ -160,7 +160,10 @@ test('robots.txt: "obey" stops a disallowed job before any page loads; "warn" ru
     const outcome = await runJob(page, { subreddits: 'beta', maxPosts: 3 });
     assert.match(outcome, /robots\.txt disallows automated access to \/r\/beta\/new\/ \(Disallow: \/\)/);
     assert.match(await page.textContent('.chip'), /Failed/);
-    assert.deepEqual(mock.state.requests.slice(before).map(r => r.path), ['/robots.txt'], 'no Reddit page was opened');
+    const sent = mock.state.requests.slice(before).map(r => r.path);
+    assert.ok(sent.includes('/robots.txt'), 'robots.txt was read');
+    // (the browser panel may still be loading the home page it opened when the settings were saved)
+    assert.deepEqual(sent.filter(p => p !== '/robots.txt' && p !== '/'), [], 'the job opened no Reddit page');
     await context.close();
 
     ({ context, page } = await openCollector({ robots: 'warn' }));
@@ -243,5 +246,113 @@ test('the dashboard says what is wrong when Scramjet can\'t be used', { skip, ti
   await page.waitForSelector('#job-start');
   assert.equal(await page.isDisabled('#job-start'), true);
   assert.match(await page.textContent('.browser'), /Reddit browser is turned off \(SCRAPER_BROWSER_ENABLED=false\)/);
+  await context.close();
+});
+
+test('a Reddit server that closes idle connections sooner than the pause between pages doesn\'t stall the next page', { skip, timeout: 120000 }, async () => {
+  // After ~2 s idle, epoxy-tls reuses a keep-alive connection the server has closed and waits forever
+  // (each page "didn't load within 30 s"). On Reddit the pause between pages is 6 s or more.
+  const { context, page, errors } = await openCollector({ pageDelayMs: 3000 });
+  mock.server.keepAliveTimeout = 300;
+  try {
+    const started = Date.now();
+    assert.equal(await runJob(page, { subreddits: 'idle', mode: 'Posts and comments', maxPosts: 3, maxComments: 2 }), 'Reached the limit of 3 posts.');
+    assert.ok(Date.now() - started < 40000, 'no page waited for a dead connection (took ' + (Date.now() - started) + ' ms)');
+    assert.doesNotMatch(await page.textContent('ol.log'), /didn't load/);
+    assert.equal(await page.textContent('#browser-connection'), 'Connected through Wisp (WebSocket, end-to-end TLS).');
+  } finally { mock.server.keepAliveTimeout = 5000; }
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('when the /wisp/ WebSocket can\'t open (e.g. a reverse proxy drops it), pages load through MetaCode\'s HTTP relay', { skip, timeout: 120000 }, async () => {
+  const context = await browser.newContext({ viewport: { width: 1400, height: 1000 } });
+  await context.routeWebSocket(/\/wisp\//, ws => ws.close({ code: 1006 }));
+  const page = await context.newPage();
+  const errors = [];
+  page.on('pageerror', e => errors.push(e.message));
+  await page.goto(base + '/collector/#settings');
+  await page.waitForSelector('#set-base');
+  await page.selectOption('#set-base', 'other');
+  await page.fill('#set-base-other', mirror);
+  await page.fill('#set-pageDelayMs', '1000');
+  await page.click('#settings-save');
+  await page.waitForSelector('.notice-ok');
+  assert.match(await runJob(page, { subreddits: 'relayed', mode: 'Posts and comments', maxPosts: 6, maxComments: 2 }), /Reached the limit of 6 posts/);
+  const conn = await page.textContent('#browser-connection');
+  assert.match(conn, /HTTP relay/);
+  assert.match(conn, /WebSocket to MetaCode's proxy \(\/wisp\/\) didn't open/);
+  assert.ok(mock.state.requests.some(r => r.path.startsWith('/svc/more?sub=relayed')), 'the page\'s own scripts ran and fetched through the relay');
+  assert.deepEqual(errors, []);
+
+  // "Wisp only" says what is wrong instead of falling back
+  await page.click('nav a[href="#settings"]');
+  await page.selectOption('#set-connection', 'wisp');
+  await page.click('#settings-save');
+  await page.reload();
+  await page.waitForFunction(() => /didn't open/.test(document.querySelector('.browser').textContent), null, { timeout: 30000 });
+  assert.match(await page.textContent('.browser'), /set Settings → Connection to Automatic/);
+  await context.close();
+});
+
+test('inside MetaCode: the Scraper page shows the collector, and "Add to project" puts posts and comments (with engagement) in the project', { skip, timeout: 180000 }, async () => {
+  const { context, page, errors } = await openCollector();
+  await page.route(/^https?:\/\/(?!localhost)/, route => route.abort());   // no CDN in tests
+  await page.goto(base + '/app.html#scraper');
+  await page.waitForSelector('#cv-frame');
+  assert.equal(await page.textContent('#topbar-title'), 'Reddit Scraper');
+  const frame = page.frameLocator('#cv-frame');
+  await frame.locator('.app.is-embedded').waitFor();
+  assert.equal(await frame.locator('.brand').isVisible(), false, 'MetaCode already shows its own header');
+
+  await frame.locator('nav a[href="#new"]').click();
+  await frame.locator('#job-start:not([disabled])').waitFor({ timeout: 30000 });
+  await frame.locator('#job-subreddits').fill('embedded');
+  await frame.locator('label:has-text("Posts and comments")').click();
+  await frame.locator('#job-max-posts').fill('4');
+  await frame.locator('#job-max-comments').fill('2');
+  await frame.locator('#job-start').click();
+  await frame.locator('#monitor-outcome').waitFor({ timeout: 90000 });
+  assert.equal(await frame.locator('#monitor-outcome').textContent(), 'Reached the limit of 4 posts.');
+
+  // Monitor → add this job's posts and comments
+  await frame.locator('#job-add-to-project').click();
+  await frame.locator('#job-added').waitFor();
+  assert.match(await frame.locator('#job-added').textContent(), /^Added 12 to the project \(12 posts in the project\)\. Their engagement shows in Metrics\.$/);
+  let posts = await page.evaluate(() => App.getState().posts);
+  assert.equal(posts.length, 12);
+  const post = posts.find(p => p.id === 'reddit_qem1');
+  assert.equal(post.text, 'Post 1 in r/embedded\n\nFull text of qem1.\n\nSecond paragraph.', 'the whole post, not only its title');
+  assert.deepEqual(post.engagement, { likes: 99, shares: null, comments: 3, views: null });
+  assert.equal(post.source.permalink, 'https://www.reddit.com/r/embedded/comments/qem1/post_qem1/');
+  const reply = posts.find(p => p.id === 'reddit_c_qem1b');
+  assert.equal(reply.text, 'Reply to qem1a');
+  assert.deepEqual([reply.engagement.likes, reply.source.type, reply.source.post_id, reply.source.parent_id], [2, 'comment', 'qem1', 't1_qem1a']);
+
+  // Data → "Add these 4 to project": already there; a changed number is refreshed, codes and other numbers kept
+  await frame.locator('nav a[href="#data"]').click();
+  await frame.locator('#add-to-project:has-text("Add these 4 to project")').click();
+  await frame.locator('.notice-ok:has-text("already in the project")').waitFor();
+  await page.evaluate(() => App.setState({ posts: App.getState().posts.map(p => p.id === 'reddit_qem1'
+    ? { ...p, engagement: { ...p.engagement, likes: 1, views: 50 }, humanCodes: { tone: 'pos' } } : p) }));
+  await frame.locator('#add-to-project').click();
+  await frame.locator('.notice-ok:has-text("updated the engagement numbers of 1")').waitFor();
+  posts = await page.evaluate(() => App.getState().posts);
+  assert.equal(posts.length, 12);
+  const again = posts.find(p => p.id === 'reddit_qem1');
+  assert.deepEqual(again.engagement, { likes: 99, shares: null, comments: 3, views: 50 });
+  assert.deepEqual(again.humanCodes, { tone: 'pos' });
+
+  // Metrics shows them
+  await page.click('.nav-item[data-view="metrics"]');
+  await page.waitForSelector('#eng-posts');
+  assert.match(await page.textContent('#view-container'), /Avg Likes/);
+
+  // Someone else's page can't add posts: only the collector frame, same origin
+  const before = (await page.evaluate(() => App.getState().posts)).length;
+  await page.evaluate(() => window.postMessage({ type: 'metacode-collector:add-to-project', id: 1, posts: [{ id: 'reddit_zzz', text: 'x', engagement: {} }] }, '*'));
+  await page.waitForTimeout(200);
+  assert.equal((await page.evaluate(() => App.getState().posts)).length, before);
+  assert.deepEqual(errors.filter(e => !/is not defined/.test(e)), []);
   await context.close();
 });

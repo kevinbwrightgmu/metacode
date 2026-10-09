@@ -7,6 +7,8 @@ import { CollectorJob } from '../bot/bot';
 import { DEFAULT_SETTINGS, cleanSettings, fetchServerInfo, type ServerInfo } from '../lib/settings';
 import { navigationProblem, parseRedditBase, type Site } from '../lib/urls';
 import { stopExportWorker } from '../export/client';
+import { isEmbedded, sendToProject, toMetaCodePost, type MetaCodePost } from '../lib/metacode';
+import type { RecordFilter } from '../store/db';
 import { BrowserPanel } from './BrowserPanel';
 import { Overview } from './Overview';
 import { NewJob } from './NewJob';
@@ -26,6 +28,7 @@ function viewFromHash(): View {
 
 export function App() {
   const browser = useMemo(() => new ScramjetBrowser(), []);
+  const embedded = useMemo(() => isEmbedded(), []);
   const [store, setStore] = useState<CollectorStore | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   const [server, setServer] = useState<ServerInfo | null>(null);
@@ -58,6 +61,7 @@ export function App() {
       const info = await fetchServerInfo();
       const saved = await s.loadSettings();
       const clean = cleanSettings(saved, info.allowedHosts, info.minDelayMs);
+      browser.connection = clean.connection;
       if (clean.retentionDays) await s.applyRetention(clean.retentionDays);
       if (cancelled) return;
       setServer(info);
@@ -157,6 +161,18 @@ export function App() {
     go('monitor');
   }
 
+  /** Sends the matching records to the MetaCode project around the collector → a message for the user. */
+  async function addToProject(filters: Partial<RecordFilter>[]): Promise<string> {
+    if (!store) return '';
+    const posts: MetaCodePost[] = [];
+    for (const f of filters) await store.each(f.type || 'post', f, r => { posts.push(toMetaCodePost(r)); });
+    if (!posts.length) return 'Nothing to add.';
+    const r = await sendToProject(posts);
+    if (!r.added && !r.updated) return 'All ' + posts.length.toLocaleString() + ' are already in the project, with the same numbers.';
+    return 'Added ' + r.added.toLocaleString() + ' to the project' + (r.updated ? '; updated the engagement numbers of ' + r.updated.toLocaleString() + ' already there' : '') +
+      ' (' + r.total.toLocaleString() + ' posts in the project). Their engagement shows in Metrics.';
+  }
+
   async function saveSettings(s: Settings) {
     if (!store) return;
     await store.saveSettings(s);
@@ -164,7 +180,7 @@ export function App() {
   }
 
   return (
-    <div className="app">
+    <div className={'app' + (embedded ? ' is-embedded' : '')}>
       <header className="top">
         <div className="brand">
           <span className="logo" aria-hidden="true">RC</span>
@@ -188,8 +204,11 @@ export function App() {
               {view === 'overview' ? <Overview counts={counts} jobs={jobs} errors={errors} onOpenJob={openJob} onNewJob={() => go('new')} /> : null}
               {view === 'new' ? <NewJob settings={settings} canStart={!startProblem} startProblem={startProblem} onStart={startJob} /> : null}
               {view === 'monitor' ? <Monitor progress={progress} job={shownJob} logs={logs} onPause={() => jobRef.current?.pause()} onResume={() => jobRef.current?.resume()}
-                onStop={() => jobRef.current?.stop()} onNewJob={() => go('new')} /> : null}
-              {view === 'data' ? <Explorer store={store} jobs={jobs} defaultFormat={settings.exportFormat} bom={settings.csvBom} version={dataVersion} onChanged={refresh} /> : null}
+                onStop={() => jobRef.current?.stop()} onNewJob={() => go('new')}
+                onAddToProject={embedded && shownJob ? () => addToProject(shownJob.config.mode === 'posts' ? [{ type: 'post', jobId: shownJob.id }]
+                  : shownJob.config.mode === 'comments' ? [{ type: 'comment', jobId: shownJob.id }] : [{ type: 'post', jobId: shownJob.id }, { type: 'comment', jobId: shownJob.id }]) : undefined} /> : null}
+              {view === 'data' ? <Explorer store={store} jobs={jobs} defaultFormat={settings.exportFormat} bom={settings.csvBom} version={dataVersion} onChanged={refresh}
+                onAddToProject={embedded ? f => addToProject([f]) : undefined} /> : null}
               {view === 'settings' ? <SettingsView settings={settings} allowedHosts={server?.allowedHosts || []} minPageDelayMs={server?.minDelayMs || 0} store={store}
                 counts={counts} jobRunning={jobActive} onSave={saveSettings} onDataChanged={refresh} /> : null}
             </>
