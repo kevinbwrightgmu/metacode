@@ -223,8 +223,8 @@ link at the top of the Scraper page (sidebar → **Scraper**, which is the [Redd
 | Variable | Default | What it does |
 |---|---|---|
 | `SCRAPER_USER_AGENT` | generic MetaCode UA | Identify your client: `nodejs:metacode-scraper:1.0 (by /u/you)` |
-| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Optional: run jobs on the server through Reddit's API. Or paste them on the Reddit API scraper page (**Reddit API access**) — needed when Reddit blocks logged-out access from your network (HTTP 403) |
-| `REDDITAPIS_KEY` | — | Optional: key from [RedditAPIs.com](https://www.redditapis.com/dashboard/api-keys), a third-party paid (per-request) Reddit data API. Or paste it on the Reddit API scraper page (**Reddit API access → RedditAPIs.com key**) |
+| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Optional: the server's Reddit API keys, for users who haven't added their own. Each user can add their own on the Reddit API scraper page (**Reddit API access**): they stay in that browser and give that user their own API limit. Needed when Reddit blocks logged-out access from your network (HTTP 403, "blocked by network security") |
+| `REDDITAPIS_KEY` | — | Optional: the server's key for [RedditAPIs.com](https://www.redditapis.com/dashboard/api-keys), a third-party paid (per-request) Reddit data API. Users can add their own instead (kept in their browser) |
 | `SCRAPER_RESPECT_ROBOTS_TXT` | `true` | Check robots.txt in public mode |
 | `SCRAPER_MIN_DELAY_MS` / `SCRAPER_PUBLIC_MIN_DELAY_MS` | `1000` / `6000` | Minimum delay between requests per host |
 | `SCRAPER_MAX_ITEMS` / `SCRAPER_MAX_PAGES` | `5000` / `50` | Hard per-job caps |
@@ -619,7 +619,7 @@ If the model is listed in `emis-models.json` but the AI service no longer serves
 **Scraper: "Wisp WebSocket failed to connect: websocket did not open" / "The proxy couldn't fetch the page"**
 → A reverse proxy (nginx, Caddy, Cloudflare) in front of MetaCode isn't forwarding WebSockets to `/wisp/`. The
 Scraper falls back to MetaCode's HTTP relay by itself (the line under its browser says so), and `pm2 logs`
-says what the proxy is missing. To fix the proxy, see [docs/deploy-vps.md](docs/deploy-vps.md#10-troubleshooting).
+says what the proxy is missing. To fix the proxy, see [docs/deploy-vps.md](docs/deploy-vps.md#11-troubleshooting).
 
 **Scraper page: "The scraper isn't built yet"**
 → Run `npm run collector:install && npm run collector:build`, then restart MetaCode (`pm2 reload metacode` on a server).

@@ -1,4 +1,4 @@
-// The RedditAPIs.com engine: key check/save, endpoint mapping, response
+// The RedditAPIs.com engine: key check, a user's own key, endpoint mapping, response
 // translation, errors and custom code — against a local stand-in for
 // api.redditapis.com, through the real Wisp + epoxy-tls transport.
 const test = require('node:test');
@@ -31,8 +31,9 @@ test.after(async () => {
   try { fs.unlinkSync(keyFile); } catch (e) { /* removed by a test */ }
 });
 
+// Jobs carry the user's own key (kept in their browser; the server never stores it).
 const run = async body => {
-  const r = await postJson(app.api + '/jobs', Object.assign({ engine: 'redditapis' }, body));
+  const r = await postJson(app.api + '/jobs', Object.assign({ engine: 'redditapis', redditApisKey: KEY }, body));
   assert.equal(r.status, 202, JSON.stringify(r.json));
   return waitForJob(app.api, r.json.job.id, 30000);
 };
@@ -68,30 +69,29 @@ test('response translation handles each documented envelope', () => {
   assert.equal(balanceOf({}), null);
 });
 
-test('API key: checked with /account/me, saved (mode 600, never echoed), becomes the default engine', async () => {
+test('API key: checked with /account/me, never saved or echoed; jobs need one (yours, or the server\'s from .env)', async () => {
   let st = (await getJson(app.api + '/status')).json;
   assert.equal(st.redditApis.configured, false);
   assert.notEqual(st.defaultEngine, 'redditapis');
-  assert.equal((await postJson(app.api + '/jobs', { engine: 'redditapis', target: { type: 'subreddit', subreddit: 'test' } })).status, 400);
+  const noKey = await postJson(app.api + '/jobs', { engine: 'redditapis', target: { type: 'subreddit', subreddit: 'test' } });
+  assert.equal(noKey.status, 400);
+  assert.match(noKey.json.error.message, /Add your RedditAPIs\.com API key first/);
 
-  const bad = await postJson(app.api + '/redditapis-key', { key: 'rapi_wrong_key_000000' });
+  const bad = await postJson(app.api + '/redditapis-key/check', { key: 'rapi_wrong_key_000000' });
   assert.equal(bad.status, 400);
-  assert.match(bad.json.error.message, /wasn't saved: RedditAPIs\.com rejected the API key/);
-  assert.equal(fs.existsSync(keyFile), false);
-  assert.equal((await postJson(app.api + '/redditapis-key', { key: 'x' })).status, 400);
+  assert.match(bad.json.error.message, /didn't work: RedditAPIs\.com rejected the API key/);
+  assert.equal((await postJson(app.api + '/redditapis-key/check', { key: 'x' })).status, 400);
 
-  const ok = await postJson(app.api + '/redditapis-key', { key: 'Bearer ' + KEY });    // pasted with "Bearer" is fine
+  const ok = await postJson(app.api + '/redditapis-key/check', { key: 'Bearer ' + KEY });    // pasted with "Bearer" is fine
   assert.equal(ok.status, 200, JSON.stringify(ok.json));
-  assert.equal(ok.json.redditApis.configured, true);
-  assert.equal(ok.json.redditApis.source, 'saved');
-  assert.equal(ok.json.redditApis.keyHint, '…3456');
-  assert.deepEqual(ok.json.redditApis.balance, { field: 'balance', value: 4.5 });
-  assert.equal(ok.json.defaultEngine, 'redditapis');
-  assert.equal(ok.json.engines.redditapis.available, true);
-  assert.ok(!JSON.stringify(ok.json).includes(KEY), 'key never returned');
-  if (process.platform !== 'win32') assert.equal(fs.statSync(keyFile).mode & 0o777, 0o600);
-  assert.equal(JSON.parse(fs.readFileSync(keyFile, 'utf8')).key, KEY);
+  assert.deepEqual(ok.json, { ok: true, keyHint: '…3456', balance: { field: 'balance', value: 4.5 } });
   assert.ok(rapi.state.requests.some(q => q.path === '/account/me'));
+  assert.equal(fs.existsSync(keyFile), false, 'nothing is saved on the server');
+  st = (await getJson(app.api + '/status')).json;
+  assert.equal(st.redditApis.configured, false, 'the server\'s own key is unchanged');
+  for (const method of ['POST', 'DELETE']) assert.equal((await fetch(app.api + '/redditapis-key', { method })).status, 410);
+  const malformed = await postJson(app.api + '/jobs', { engine: 'redditapis', redditApisKey: 'x', target: { type: 'subreddit', subreddit: 'test' } });
+  assert.match(malformed.json.error.message, /^Your RedditAPIs\.com key: /);
 });
 
 test('subreddit scrape through RedditAPIs.com: mapping, paging, normalized records', async () => {
@@ -177,7 +177,7 @@ test('custom code uses RedditAPIs.com through ctx.reddit; ctx.fetch explains it 
   assert.match(job.error.message, /ctx\.fetch\(\) isn't available/);
 });
 
-test('a wrong saved key fails jobs clearly; removing the key works; .env key wins', async () => {
+test('a rotated key fails jobs clearly; the server\'s .env key is the fallback for jobs without one', async () => {
   const saved = rapi.state.key;
   rapi.state.key = 'rapi_rotated_key_999999';
   try {
@@ -187,17 +187,18 @@ test('a wrong saved key fails jobs clearly; removing the key works; .env key win
   } finally {
     rapi.state.key = saved;
   }
-  const del = await fetch(app.api + '/redditapis-key', { method: 'DELETE' });
-  const st = await del.json();
-  assert.equal(st.redditApis.configured, false);
-  assert.equal(fs.existsSync(keyFile), false);
 
   const envApp = await startScraperApp({ REDDITAPIS_KEY: KEY, REDDITAPIS_BASE_URL: 'http://localhost:' + rapi.server.address().port });
   try {
     const s2 = (await getJson(envApp.api + '/status')).json;
     assert.equal(s2.redditApis.source, 'env');
-    assert.equal((await postJson(envApp.api + '/redditapis-key', { key: KEY })).status, 409);
-    assert.equal((await fetch(envApp.api + '/redditapis-key', { method: 'DELETE' })).status, 409);
+    assert.equal(s2.defaultEngine, 'redditapis');
+    const r = await postJson(envApp.api + '/jobs', { engine: 'redditapis', target: { type: 'subreddit', subreddit: 'WeirdSideHustles' }, options: { maxItems: 5, includeMetadata: false } });
+    const job = await waitForJob(envApp.api, r.json.job.id, 30000);
+    assert.equal(job.status, 'completed', JSON.stringify(job.error));
+    assert.ok(job.logs.some(l => /Mode: RedditAPIs\.com \(API key, billed per request\)/.test(l.message)));
+    assert.equal((await postJson(envApp.api + '/redditapis-key', { key: KEY })).status, 410);
+    assert.equal((await fetch(envApp.api + '/redditapis-key', { method: 'DELETE' })).status, 410);
   } finally {
     await envApp.close();
     require('../scraper/network/wisp-server').configureWisp(app.config);

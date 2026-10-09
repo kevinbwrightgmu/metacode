@@ -332,7 +332,7 @@ this was built. If the live check finds markup the selectors don't read, update
 **"Wisp WebSocket failed to connect: websocket did not open" / "The WebSocket to MetaCode's proxy (/wisp/) didn't open"**
 A reverse proxy or CDN in front of MetaCode isn't forwarding WebSockets. With Settings →
 Connection to Reddit on **Automatic**, the collector uses the HTTP relay meanwhile. To fix the
-proxy, see [docs/deploy-vps.md](../docs/deploy-vps.md#10-troubleshooting).
+proxy, see [docs/deploy-vps.md](../docs/deploy-vps.md#11-troubleshooting).
 
 **"Open the collector from MetaCode's Scraper page to add records to a project"**
 Add to project needs the MetaCode page around the collector: use sidebar → **Scraper**, not

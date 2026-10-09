@@ -40,7 +40,7 @@ pm2 save
 ```
 
 Then compare your reverse proxy with [step 6](#6-nginx-and-https): its three WebSocket lines fix the error
-above. Run the checks in [step 8](#8-check-that-it-works).
+above. Run the checks in [step 9](#9-check-that-it-works).
 
 ---
 
@@ -222,7 +222,23 @@ metac0.de, www.metac0.de, status.metac0.de {
 and set **SSL/TLS → Full (strict)**. With "Flexible", the browser uses https but Cloudflare talks http to
 nginx, which causes redirect loops after certbot's redirect.
 
-## 7. Firewall
+## 7. A public server: Reddit API keys and limits
+
+If your VPS's IP is blocked by Reddit ("You've been blocked by network security"), the page-based Scraper
+can't reach Reddit from it. The **Reddit API scraper** works through Reddit's official API instead.
+
+- **Each user adds their own keys** (Reddit API scraper → Reddit API access → Add your keys). They stay in
+  that user's browser, are sent only with their jobs, and give each user their own Reddit API limit (about
+  100 requests a minute per app). Nobody can see, change or remove anyone else's keys.
+- **Optionally, give the server its own keys** in `.env` (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`,
+  `SCRAPER_USER_AGENT`) for users who haven't added theirs. All of them share that one limit. These can't be
+  changed from the web.
+- Don't register several Reddit apps yourself and spread users across them: that's against Reddit's
+  developer terms.
+- At most `SCRAPER_MAX_CONCURRENT_JOBS` jobs run at once on the server (default 2, up to 16); others wait
+  their turn. With many users bringing their own keys, raise it, e.g. `SCRAPER_MAX_CONCURRENT_JOBS=8`.
+
+## 8. Firewall
 
 Only nginx should be reachable from outside. Port 3000 should stay closed:
 
@@ -235,7 +251,7 @@ sudo ufw status
 
 If your VPS provider has its own firewall (security groups), allow 22, 80 and 443 there as well.
 
-## 8. Check that it works
+## 9. Check that it works
 
 From your own computer:
 
@@ -261,7 +277,7 @@ Then open `https://metac0.de/app.html#scraper` and start a small job. The line u
 *"Connected through Wisp (WebSocket, end-to-end TLS)"* when the WebSocket works. It says *"Connected through
 MetaCode's HTTP relay"*, with the reason, when the Scraper had to fall back.
 
-## 9. Updating
+## 10. Updating
 
 ```bash
 cd ~/metacode
@@ -276,7 +292,7 @@ Do the reload when no scraping is running. Jobs of the Reddit API scraper live i
 Scraper (collector) job running in a browser loses its connection for a moment. Projects, codebooks and
 collected Scraper data are stored in each user's browser, so they survive restarts.
 
-## 10. Troubleshooting
+## 11. Troubleshooting
 
 **"Wisp WebSocket failed to connect: websocket did not open" / `WebSocketConnectFailed`**
 The WebSocket to `/wisp/` doesn't reach MetaCode. Run `pm2 logs metacode` and look for one of these:
@@ -293,6 +309,11 @@ The WebSocket to `/wisp/` doesn't reach MetaCode. Run `pm2 logs metacode` and lo
 
 While this is broken, the Scraper uses the HTTP relay by itself (**Settings → Connection to Reddit:
 Automatic**). "Wisp only" shows the error instead of falling back.
+
+**"You've been blocked by network security" / "Reddit blocked this browser's requests"**
+Reddit is blocking your server's IP address, which it often does for data-centre addresses. MetaCode doesn't
+work around that. Use the Reddit API scraper with Reddit API keys ([step 7](#7-a-public-server-reddit-api-keys-and-limits)),
+or ask Reddit to review the block with the "File a ticket" link on that page.
 
 **The Scraper page says "The scraper isn't built yet" (or `/collector/` answers 503)**
 Run `npm run collector:install && npm run collector:build` in `~/metacode`, then `pm2 reload metacode`.

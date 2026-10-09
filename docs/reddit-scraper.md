@@ -125,7 +125,7 @@ Invalid values are ignored with a warning in the start-up banner.
 |---|---|---|
 | `SCRAPER_ENABLED` | `true` | Turns the scraper (API, Wisp endpoint, browser files) on or off |
 | `SCRAPER_USER_AGENT` | `nodejs:metacode-reddit-scraper:1.0 (self-hosted research tool)` | Sent with every request. Reddit asks for `<platform>:<app id>:<version> (by /u/<username>)` — set your own |
-| `SCRAPER_CREDENTIALS_FILE` | `reddit-credentials.json` next to `server.js` | Where keys saved from the Reddit API scraper page are stored |
+| `SCRAPER_CREDENTIALS_FILE` | `reddit-credentials.json` next to `server.js` | Server keys saved by an earlier MetaCode version (read only; keys added on the page now stay in each browser) |
 | `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Optional. Reddit app credentials → server engine uses the Reddit Data API (and becomes the default). Never sent to the browser, the sandbox, or logs |
 | `SCRAPER_RESPECT_ROBOTS_TXT` | `true` | In public mode, check Reddit's robots.txt before each path |
 | `SCRAPER_MIN_DELAY_MS` | `1000` | Minimum delay between two requests to the same host (all jobs combined) |
@@ -159,24 +159,37 @@ page). That refusal applies to everything you request logged out, whichever subr
 to get around it. Reddit's API with a free app's keys is the supported way in. Also useful to scrape without
 keeping a tab open.
 
-**From the Reddit API scraper page (no restart, no `.env`):**
+There are two kinds of keys:
+
+- **Your own keys** (each user adds theirs on the page). They're kept **in your browser only** and sent to
+  MetaCode only with your jobs. The server uses them for those jobs and never stores them. Your jobs then run on
+  **your own Reddit API limit** (about 100 requests a minute per Reddit app), paced separately from everyone
+  else's. On a public MetaCode server this is how users avoid sharing one limit.
+- **The server's keys** (set by whoever runs the server, in `.env`). Jobs from users without their own keys
+  use them, so everyone without keys shares their limit. Nobody can change or remove them from the page.
+
+**Adding your own keys (no restart, no `.env`):**
 
 1. Sign in to Reddit and open <https://www.reddit.com/prefs/apps>. Read Reddit's
    [Data API Terms](https://www.redditinc.com/policies/data-api-terms) and
    [Developer Terms](https://www.redditinc.com/policies/developer-terms); research use may need
-   Reddit's approval.
-2. **create another app…** → name it, type **script**, redirect URI `http://localhost:3000` → create.
-3. On the Reddit API scraper page open **Reddit API access → Set up** (or click **Set up Reddit API access** on the failed
-   job), paste the ID shown under the app's name and the **secret**, optionally your username, and click
-   **Check & save**. MetaCode asks Reddit for a token with them; only keys that work are saved.
-4. **Fetch Reddit through** switches to **MetaCode server (Reddit API)**. Run the job again.
+   Reddit's approval. Use one app per person: registering several apps to multiply the limit is against
+   Reddit's terms.
+2. **create another app…** → name it, type **script**, redirect URI `http://localhost:8080` (required, not
+   used) → create.
+3. On the Reddit API scraper page open **Reddit API access → Add your keys** (or click **Add your Reddit API
+   keys** on the failed job), paste the ID shown under the app's name and the **secret**, optionally your
+   username, and click **Check & save**. MetaCode asks Reddit for a token with them; only keys that work are kept.
+4. **Fetch Reddit through** switches to **MetaCode server (Reddit API, your keys)**. Run the job again.
 
-The keys are saved on the server in `reddit-credentials.json` (next to `server.js`, file mode 600, git-ignored;
-another path can be set with `SCRAPER_CREDENTIALS_FILE`). The secret is never sent back to the browser,
-logged, or given to custom code. **Disconnect** deletes the file.
+**Remove** deletes them from your browser. Clearing the browser's site data does too. The secret is never
+sent back to the page, logged, or given to custom code. Checking keys is limited to 5 times a minute per browser (30 for the
+whole server), so a public server can't be used to try out lots of keys. Keys saved on the server by an earlier MetaCode
+version (`reddit-credentials.json`) are still used as the server's keys, but can only be removed by deleting that
+file.
 
-**Or in `.env`** (takes precedence; the page then can't change them): `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`
-and `SCRAPER_USER_AGENT`, e.g. `nodejs:metacode-scraper:1.0 (by /u/your_username)`, then restart.
+**The server's keys, in `.env`:** `REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET` and `SCRAPER_USER_AGENT`, e.g.
+`nodejs:metacode-scraper:1.0 (by /u/your_username)`, then restart.
 
 Subreddits that are **private**, **quarantined** or **Premium-only** can't be read with app keys either; the
 error says which it is.
@@ -193,15 +206,16 @@ Pricing, terms and how it sources its data are between you and that vendor. Read
 using it fits your research ethics/IRB requirements.
 
 1. Create a key at <https://www.redditapis.com/dashboard/api-keys>.
-2. On the Reddit API scraper page open **Reddit API access → RedditAPIs.com key**, paste the key and click
-   **Check & save**. MetaCode checks the key against `GET /account/me`, which costs nothing, and saves it only if
+2. On the Reddit API scraper page open **RedditAPIs.com key → Add your key**, paste the key and click
+   **Check & save**. MetaCode checks the key against `GET /account/me`, which costs nothing, and keeps it only if
    it works. The card shows the last four characters and your balance.
-   Or set `REDDITAPIS_KEY` in `.env` (this takes precedence). `REDDITAPIS_BASE_URL` overrides the API origin.
 3. The engine switches to RedditAPIs.com. Run the job.
 
-The key is saved in `redditapis-key.json` next to `server.js` (file mode 600, git-ignored). Set
-`SCRAPER_REDDITAPIS_KEY_FILE` to store it somewhere else. It is never sent back to the browser, logged, or
-given to custom code. **Remove** deletes the file.
+Like Reddit keys, your key is kept **in your browser only** and sent with your jobs, which are billed to your
+RedditAPIs.com account. It is never stored on the server, sent back to the page, logged, or given to custom
+code. **Remove** deletes it from your browser. The server's own key, used for jobs from users without one, can
+only be set as `REDDITAPIS_KEY` in `.env` (or is a `redditapis-key.json` saved by an earlier version).
+`REDDITAPIS_BASE_URL` overrides the API origin.
 
 Every request is a billed call, so keep **Maximum items/pages** modest. The rate limiter still applies
 (`SCRAPER_MIN_DELAY_MS`).

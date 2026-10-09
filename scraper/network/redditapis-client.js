@@ -118,9 +118,10 @@ function commentNodes(body) {
 }
 
 class RedditApisClient extends RedditHttpClient {
-  // opts: { config, transport, limiter, getKey: () => key|null, baseUrl }
+  // opts: { config, transport, limiter, getKey: () => key|null, baseUrl, limitScope }
   constructor(opts) {
-    super({ config: Object.assign({}, opts.config, { oauth: null, respectRobotsTxt: false }), transport: opts.transport, limiter: opts.limiter });
+    super({ config: Object.assign({}, opts.config, { oauth: null, respectRobotsTxt: false }), transport: opts.transport, limiter: opts.limiter,
+      limitScope: opts.limitScope });
     this.getKey = opts.getKey;
     this.base = new URL(opts.baseUrl);
     this.label = 'RedditAPIs.com (API key, billed per request)';

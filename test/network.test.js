@@ -165,6 +165,27 @@ test('HTTP client: rate-limit headers pause the host until reset', async () => {
   assert.ok(limiter.pausedUntil('www.reddit.com') > Date.now() + 1000);
 });
 
+test('HTTP client: a user\'s own keys have their own rate limit (pacing and pauses), separate from everyone else\'s', async () => {
+  const config = testConfig({ REDDIT_CLIENT_ID: 'server-client-id', REDDIT_CLIENT_SECRET: 'server-secret' });
+  const limiter = new HostRateLimiter({ maxConcurrent: config.maxConcurrentRequests });
+  const handler = req => (req.url.endsWith('/access_token') ? json({ access_token: 'tok', expires_in: 3600 })
+    : json(listing([]), req.headers.authorization === 'bearer tok' && /alice/.test(req.url) ? { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': '30' } : {}));
+  const own = (scope, id) => new RedditHttpClient({ config: Object.assign({}, config, { oauth: { clientId: id, clientSecret: 'secret-' + id } }),
+    transport: new FakeTransport(handler), limiter, limitScope: scope });
+  const alice = own('k-alice', 'alice-id');
+  const bob = own('k-bob', 'bob-id');
+  const shared = new RedditHttpClient({ config, transport: new FakeTransport(handler), limiter });
+
+  await alice.getJson('/r/alice/new');                       // alice's window is used up for 30 s
+  assert.ok(limiter.pausedUntil('oauth.reddit.com#k-alice') > Date.now() + 20000);
+  assert.equal(limiter.pausedUntil('oauth.reddit.com#k-bob'), 0);
+  assert.equal(limiter.pausedUntil('oauth.reddit.com'), 0, 'the server\'s own keys aren\'t paused either');
+  const t0 = Date.now();
+  await bob.getJson('/r/bob/new', { delayMs: 1000 });
+  await shared.getJson('/r/server/new', { delayMs: 1000 });
+  assert.ok(Date.now() - t0 < 1500, 'nobody else waited for alice\'s pause or shared her pacing');
+});
+
 test('HTTP client: transient network errors and 5xx are retried with backoff, then reported', async () => {
   let n = 0;
   const { http } = client(req => {

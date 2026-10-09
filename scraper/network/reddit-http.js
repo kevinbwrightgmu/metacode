@@ -28,6 +28,10 @@ class RedditHttpClient {
     this.config    = opts.config;
     this.transport = opts.transport;
     this.limiter   = opts.limiter;
+    // Requests made with someone's own API keys count against their own Reddit
+    // rate limit, so they're paced (and paused on 429) separately from
+    // everyone else's: the limiter key is host + scope.
+    this.limitScope = opts.limitScope || null;
     this.now       = opts.now || Date.now;
     this.token     = null;      // { value, expiresAt }
     this.tokenPromise = null;
@@ -36,6 +40,8 @@ class RedditHttpClient {
   }
 
   get mode() { return this.config.oauth ? 'oauth' : 'public'; }
+
+  limitKey(host) { return this.limitScope ? host + '#' + this.limitScope : host; }
 
   get apiBase() { return this.mode === 'oauth' ? this.config.redditOAuthBaseUrl : this.config.redditBaseUrl; }
 
@@ -213,7 +219,7 @@ class RedditHttpClient {
         headers.authorization = 'bearer ' + await this.getToken(opts);
       }
 
-      const host = url.host;
+      const host = this.limitKey(url.host);
       const release = await this.limiter.acquire(host, interval, signal, opts.concurrency);
       const started = this.now();
       let res;

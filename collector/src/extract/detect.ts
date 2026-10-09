@@ -26,7 +26,7 @@ export interface PageStatus {
 const MESSAGES: Record<Exclude<PageKind, 'content' | 'empty'>, [string, boolean, boolean]> = {
   proxy_error:    ['The page couldn\'t be loaded through the MetaCode proxy.', false, true],
   captcha:        ['Reddit asked for a CAPTCHA / human check. The collector doesn\'t solve or bypass these, so the job stopped. Try again later, or use Reddit\'s API instead.', true, false],
-  blocked:        ['Reddit blocked this browser\'s requests (block page). The job stopped; the collector doesn\'t work around blocks. Try again later, or use Reddit\'s API with credentials.', true, false],
+  blocked:        ['Reddit blocked this browser\'s requests (block page). The job stopped; the collector doesn\'t work around blocks. Reddit often blocks server and data-centre addresses this way: use the Reddit API scraper (link at the top of MetaCode\'s Scraper page) with your own Reddit API keys.', true, false],
   rate_limited:   ['Reddit says there were too many requests. The job stopped; raise the page delay in Settings before trying again.', true, false],
   login_required: ['Reddit requires logging in to see this page. The collector only reads public pages and doesn\'t log in, so it was skipped.', false, false],
   age_gate:       ['This page is behind Reddit\'s 18+ check. The collector doesn\'t confirm age checks, so it was skipped.', false, false],
