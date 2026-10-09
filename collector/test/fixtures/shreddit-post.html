@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<!-- Modelled on a www.reddit.com post page: <shreddit-post> plus a <shreddit-comment-tree>
+     of nested <shreddit-comment> elements; each comment's text is in its own slot="comment". -->
+<html lang="en-US"><head><meta charset="utf-8"><title>Ask: what laptop for students? : r/technology</title></head>
+<body>
+<shreddit-app pagetype="post_detail">
+  <main>
+    <shreddit-post id="t3_1abc24" permalink="/r/technology/comments/1abc24/ask_what_laptop_for_students/"
+      content-href="https://www.reddit.com/r/technology/comments/1abc24/ask_what_laptop_for_students/" comment-count="4" score="12"
+      author="bob" subreddit-prefixed-name="r/technology" post-title="Ask: what laptop for students?"
+      created-timestamp="2026-09-30T08:00:00.000000+0000" post-type="text" domain="self.technology">
+      <h1 slot="title">Ask: what laptop for students?</h1>
+      <div slot="text-body"><div class="md"><p>My budget is <strong>$800</strong>.</p><p>Requirements:</p><ul><li>Light</li><li>Long battery</li></ul><pre><code>  keep   spacing</code></pre></div></div>
+    </shreddit-post>
+    <shreddit-comment-tree post-id="t3_1abc24" totalcomments="4">
+      <shreddit-comment thingid="t1_c001" depth="0" permalink="/r/technology/comments/1abc24/comment/c001/" postid="t3_1abc24" parentid="t3_1abc24" author="carol" score="45">
+        <div slot="commentMeta"><faceplate-timeago ts="2026-09-30T09:15:00.000Z"><time datetime="2026-09-30T09:15:00.000Z">1 day ago</time></faceplate-timeago></div>
+        <div slot="comment" id="t1_c001-comment-rtjson-content"><p>Get a used ThinkPad.</p></div>
+        <shreddit-comment thingid="t1_c002" depth="1" permalink="/r/technology/comments/1abc24/comment/c002/" postid="t3_1abc24" parentid="t1_c001" author="dave" score="0">
+          <div slot="commentMeta"><faceplate-timeago ts="2026-09-30T10:00:00.000Z"></faceplate-timeago></div>
+          <div slot="comment"><p>Agreed — <a href="https://example.com/x">this one</a>.</p></div>
+          <shreddit-comment thingid="t1_c003" depth="2" permalink="/r/technology/comments/1abc24/comment/c003/" postid="t3_1abc24" parentid="t1_c002" author="[deleted]" score="">
+            <div slot="comment"><p>[removed]</p></div>
+          </shreddit-comment>
+        </shreddit-comment>
+      </shreddit-comment>
+      <shreddit-comment thingid="t1_c004" depth="0" permalink="/r/technology/comments/1abc24/comment/c004/" postid="t3_1abc24" parentid="t3_1abc24" author="erin" score="2.5k">
+        <div slot="commentMeta"><faceplate-timeago ts="2026-09-30T11:00:00.000Z"></faceplate-timeago></div>
+        <div slot="comment"><p>Second option: <script>alert(1)</script>a MacBook Air.</p></div>
+      </shreddit-comment>
+      <faceplate-partial loading="lazy" src="/svc/shreddit/more-comments/technology/t3_1abc24?top-level=1"></faceplate-partial>
+    </shreddit-comment-tree>
+  </main>
+</shreddit-app>
+</body></html>

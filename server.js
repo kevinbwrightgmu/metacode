@@ -58,6 +58,19 @@ app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders(res, file) { if (/\.(html|js|css|mjs)$/i.test(file)) res.setHeader('Cache-Control', 'no-cache'); }
 }));
 
+// Reddit Collector (collector/): a client-side app (React + Vite) that runs a
+// collection bot on Reddit pages loaded through Scramjet. It's built into
+// collector/dist (npm run collector:build) and served here, on the same
+// origin as Scramjet's files and the Wisp endpoint it relies on.
+const COLLECTOR_DIST = path.join(__dirname, 'collector', 'dist');
+app.get('/collector', (req, res, next) => (req.path.endsWith('/') ? next() : res.redirect(301, '/collector/')));
+app.use('/collector', express.static(COLLECTOR_DIST, {
+  setHeaders(res, file) { res.setHeader('Cache-Control', /[\\/]assets[\\/]/.test(file) ? 'public, max-age=31536000, immutable' : 'no-cache'); }
+}));
+app.get('/collector/*', (req, res) => {
+  res.status(503).type('text/plain').send('The Reddit Collector isn\'t built yet. In the MetaCode folder run:\n\n  npm run collector:install\n  npm run collector:build\n\nthen reload this page.');
+});
+
 // ── AI provider: EMIS ─────────────────────────────────────────────────────────
 // Every AI feature (AI Coding, the MetaCode Assistant, column detection in
 // Import Data and Analyze CSV, Test Connection) posts to /api/ai on this
