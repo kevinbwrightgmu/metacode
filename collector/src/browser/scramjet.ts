@@ -24,6 +24,9 @@ import type { PageDriver, PageHandle, RobotsFetch } from '../bot/driver';
 import { NavigationError } from '../bot/driver';
 import { AbortError } from '../lib/timing';
 import { samePage } from '../lib/urls';
+import { HttpRelayTransport, probeWebSocket } from './http-transport';
+import { freshAfterIdle } from './fresh-after-idle';
+import type { ConnectionMode } from '../types';
 
 // ── The parts of Scramjet's runtime API this file uses (see scramjet-controller/src) ──
 interface ScramjetHook { readonly __hook?: never }
@@ -57,7 +60,8 @@ interface ScramjetControllerApi {
 interface EpoxyTransportLike {
   ready?: boolean;
   init(): Promise<void>;
-  request(url: URL, method: string, body: BodyInit | null, headers: [string, string][], signal?: AbortSignal): Promise<{ status: number; statusText?: string; headers?: [string, string][]; body?: ReadableStream<Uint8Array> | null }>;
+  connect?: unknown;
+  request(url: URL, method: string, body: BodyInit | null, headers: [string, string][], signal?: AbortSignal): Promise<{ status: number; statusText?: string; headers?: [string, string][]; body?: ReadableStream<Uint8Array> | ArrayBuffer | Blob | string | null }>;
 }
 interface InitContext { window: Window; client: { url?: URL } | null; isTopLevel: boolean }
 interface ErrorContext { rawrequest: { rawUrl: string; destination: string }; error: unknown }
@@ -89,6 +93,10 @@ export interface BrowserStatus {
   message: string | null;
   /** Subresource requests (images, scripts…) that failed through the proxy since the last page load. */
   failedRequests: number;
+  /** How pages reach Reddit: Wisp (WebSocket, end-to-end TLS) or MetaCode's HTTP relay. */
+  connection: 'wisp' | 'http' | null;
+  /** Why the HTTP relay is used, when it's the automatic fallback. */
+  connectionNote: string | null;
 }
 
 /** Why Scramjet can't run in this browser, or null. */
@@ -145,8 +153,10 @@ function errorPage(url: string, message: string): string {
 
 /** A failed proxied request → a readable reason (the transport's own text is kept short, in brackets). */
 export function errorText(err: unknown): string {
+  if (err instanceof Error && (err as Error & { readable?: boolean }).readable) return err.message;     // already explained
   const raw = err instanceof Error ? err.message : String(err || 'unknown error');
   const detail = raw.length > 160 ? raw.slice(0, 160) + '…' : raw;
+  if (/WebSocketConnectFailed|websocket did not open|Wisp WebSocket/i.test(raw)) return 'the WebSocket to MetaCode\'s proxy (/wisp/) didn\'t open — usually a reverse proxy that doesn\'t forward WebSockets (docs/deploy-vps.md); with Settings → Connection on Automatic the collector uses its HTTP relay instead [' + detail + ']';
   if (/InvalidCertificate|UnknownIssuer|certificate|CERT_/i.test(raw)) return 'a secure connection couldn\'t be made because the site\'s certificate wasn\'t trusted — a proxy, firewall or antivirus on this network may be intercepting HTTPS [' + detail + ']';
   if (/refused|ECONNREFUSED/i.test(raw)) return 'the connection was refused [' + detail + ']';
   if (/timed? ?out|timeout/i.test(raw)) return 'the connection timed out [' + detail + ']';
@@ -167,7 +177,9 @@ export class ScramjetBrowser {
   private pageWaiters = new Set<(e: PageEvent | Error) => void>();
   private navSeq = 0;
   private page: PageEvent | null = null;
-  private status: BrowserStatus = { state: 'idle', url: null, title: null, message: null, failedRequests: 0 };
+  private status: BrowserStatus = { state: 'idle', url: null, title: null, message: null, failedRequests: 0, connection: null, connectionNote: null };
+  /** Settings → Connection: automatic (Wisp, else the HTTP relay), Wisp only, or the HTTP relay only. Read when Scramjet starts. */
+  connection: ConnectionMode = 'auto';
   /** Called for every page shown; returning a reason blocks the page (e.g. a login page reached by clicking). */
   guard: ((url: URL) => string | null) | null = null;
 
@@ -213,7 +225,7 @@ export class ScramjetBrowser {
     const sw = await registerServiceWorker();
     await loadScript(FILES.scramjet);
     await loadScript(FILES.controller);
-    this.transport = await this.getTransport();
+    this.transport = await this.chooseTransport();
     const api = window.$scramjetController;
     if (!api || !api.Controller || !api.ManagedPlugin) throw new Error('The Scramjet controller didn\'t load correctly.');
     api.config.prefix = PREFIX;
@@ -225,8 +237,27 @@ export class ScramjetBrowser {
     await this.controller.wait();
   }
 
-  private async getTransport(): Promise<EpoxyTransportLike> {
-    if (this.transport) return this.transport;
+  /** Wisp when its WebSocket opens; otherwise (Automatic) MetaCode's HTTP relay. */
+  private async chooseTransport(): Promise<EpoxyTransportLike> {
+    if (this.connection === 'http') {
+      this.setStatus({ connection: 'http', connectionNote: 'Settings → Connection is set to the HTTP relay.' });
+      return new HttpRelayTransport();
+    }
+    const wisp = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/wisp/';
+    this.setStatus({ message: 'Checking the connection to MetaCode\'s proxy (WebSocket /wisp/)…' });
+    const problem = await probeWebSocket(wisp);
+    if (!problem) {
+      const t = await this.getEpoxy();
+      this.setStatus({ connection: 'wisp', connectionNote: null });
+      return t;
+    }
+    const why = 'The WebSocket to MetaCode\'s proxy (/wisp/) didn\'t open: ' + problem + '. This usually means a reverse proxy (nginx, a CDN) in front of MetaCode isn\'t forwarding WebSockets — see docs/deploy-vps.md.';
+    if (this.connection === 'wisp') throw Object.assign(new Error(why + ' Or set Settings → Connection to Automatic to use the HTTP relay.'), { readable: true });
+    this.setStatus({ connection: 'http', connectionNote: why + ' Pages load through MetaCode\'s HTTP relay instead.' });
+    return new HttpRelayTransport();
+  }
+
+  private async getEpoxy(): Promise<EpoxyTransportLike> {
     await loadScript(FILES.transport);
     const mod = window.EpoxyTransport as Record<string, unknown> | undefined;
     const Transport = (mod && (mod.default || mod.EpoxyTransport || mod.EpoxyClient)) || mod;
@@ -234,8 +265,7 @@ export class ScramjetBrowser {
     const wisp = (location.protocol === 'https:' ? 'wss:' : 'ws:') + '//' + location.host + '/wisp/';
     const t = new (Transport as new (o: { wisp: string }) => EpoxyTransportLike)({ wisp });
     if (!t.ready) await t.init();
-    this.transport = t;
-    return t;
+    return freshAfterIdle(t);   // never reuse a connection the server closed during the pause between pages
   }
 
   // ── The bridge plugin ───────────────────────────────────────────────────
@@ -395,10 +425,13 @@ export class ScramjetBrowser {
 
   /** A GET through the same Scramjet transport (epoxy-tls over Wisp) — used for robots.txt. */
   async fetchText(url: URL, signal?: AbortSignal): Promise<RobotsFetch> {
-    const transport = await this.getTransport();
+    const transport = this.transport;
+    if (!transport) throw new Error('The browser isn\'t ready yet.');
     const res = await transport.request(url, 'GET', null, [['accept', 'text/plain,*/*']], signal);
     let text = '';
-    if (res.body) {
+    if (typeof res.body === 'string') text = res.body.slice(0, MAX_ROBOTS_BYTES);
+    else if (res.body instanceof Blob || res.body instanceof ArrayBuffer) text = new TextDecoder().decode(res.body instanceof Blob ? await res.body.arrayBuffer() : res.body).slice(0, MAX_ROBOTS_BYTES);
+    else if (res.body) {
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let total = 0;

@@ -162,9 +162,13 @@ export interface Settings {
   exportFormat: ExportFormat;
   /** Byte-order mark at the start of CSV files (helps Excel read UTF-8). */
   csvBom: boolean;
+  /** How the browser panel reaches Reddit (applies when the page loads). */
+  connection: ConnectionMode;
 }
 
 export type ExportFormat = 'json' | 'jsonl' | 'csv';
+/** auto: Wisp (WebSocket) when it opens, else MetaCode's HTTP relay · wisp: Wisp only · http: HTTP relay only */
+export type ConnectionMode = 'auto' | 'wisp' | 'http';
 
 // ── Bot events ────────────────────────────────────────────────────────────────
 export interface JobProgress {

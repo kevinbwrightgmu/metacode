@@ -48,14 +48,39 @@ function isLoopback(address) {
   return /^(127\.|::1$|::ffff:127\.)/.test(String(address || ''));
 }
 
+/** Hosts of PUBLIC_URL in .env (comma-separated), e.g. https://metac0.de → "metac0.de". */
+function publicHosts() {
+  return String(process.env.PUBLIC_URL || '').split(',').map(s => {
+    try { return new URL(s.trim()).host.toLowerCase(); } catch (e) { return null; }
+  }).filter(Boolean);
+}
+
 // A browser always sends Origin on a WebSocket handshake; it must be this
-// server. Without Origin, only local processes (the scraper itself) may connect.
+// server: the Host header, or — behind a reverse proxy that rewrites Host —
+// the host it forwards (X-Forwarded-Host) or one named in PUBLIC_URL.
+// Without Origin, only local processes (the scraper itself) may connect.
 function originAllowed(req) {
   const origin = req.headers.origin;
   if (!origin) return isLoopback(req.socket && req.socket.remoteAddress);
   let parsed;
   try { parsed = new URL(origin); } catch (e) { return false; }
-  return parsed.host === String(req.headers.host || '');
+  const host = parsed.host.toLowerCase();
+  const hostname = parsed.hostname.toLowerCase();
+  const served = [req.headers.host].concat(String(req.headers['x-forwarded-host'] || '').split(','))
+    .map(h => String(h || '').trim().toLowerCase()).filter(Boolean);
+  // nginx's $host has no port: then the name alone must match (a site on e.g. :8443)
+  return served.some(h => h === host || (!/:\d+$/.test(h) && h === hostname)) || publicHosts().includes(host);
+}
+
+// Explains refusals in the server log (once a minute per reason), so a
+// misconfigured reverse proxy shows up in `pm2 logs`.
+const logged = new Map();
+function logOnce(key, message) {
+  const now = Date.now();
+  if (now - (logged.get(key) || 0) < 60000) return;
+  logged.set(key, now);
+  if (logged.size > 100) logged.clear();
+  console.warn('[wisp] ' + message);
 }
 
 function rejectUpgrade(socket, status, text) {
@@ -74,7 +99,12 @@ function createUpgradeHandler(config) {
     // or "/wisp/host:port") as the older wsproxy protocol.
     if (req.url !== WISP_PATH) return rejectUpgrade(socket, 404, 'Not Found');
     if (!config.enabled) return rejectUpgrade(socket, 503, 'Service Unavailable');
-    if (!originAllowed(req)) return rejectUpgrade(socket, 403, 'Forbidden');
+    if (!originAllowed(req)) {
+      const from = String(req.headers.origin).slice(0, 200);
+      logOnce('origin:' + from, 'Refused a WebSocket from ' + from + ' (Host: ' + String(req.headers.host || 'none').slice(0, 200) + '). If that is this site\'s own address ' +
+        'and MetaCode runs behind a reverse proxy, pass the site\'s host (nginx: proxy_set_header Host $host;) or set PUBLIC_URL=' + from + ' in .env. See docs/deploy-vps.md.');
+      return rejectUpgrade(socket, 403, 'Forbidden');
+    }
     socket.on('error', () => {});
     sockets.add(socket);
     socket.on('close', () => sockets.delete(socket));
@@ -85,4 +115,14 @@ function createUpgradeHandler(config) {
   return onUpgrade;
 }
 
-module.exports = { createUpgradeHandler, configureWisp, originAllowed, WISP_PATH };
+// /wisp/ reached as a plain HTTP request: something in front of MetaCode (a
+// reverse proxy or CDN) didn't pass the WebSocket upgrade on. Say so.
+function plainHttpHandler(req, res) {
+  logOnce('plain', 'The Wisp endpoint (/wisp/) was requested without a WebSocket upgrade: the reverse proxy in front of MetaCode isn\'t forwarding WebSockets ' +
+    '(nginx needs "proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection $connection_upgrade;"). ' +
+    'The Scraper falls back to its HTTP relay meanwhile. See docs/deploy-vps.md.');
+  res.status(426).set('Upgrade', 'websocket').type('text/plain')
+    .send('This is MetaCode\'s Wisp endpoint: it only accepts WebSocket connections. If you see this from a browser page, a reverse proxy is not forwarding WebSockets — see docs/deploy-vps.md.');
+}
+
+module.exports = { createUpgradeHandler, configureWisp, originAllowed, plainHttpHandler, WISP_PATH };

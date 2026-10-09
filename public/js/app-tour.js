@@ -33,10 +33,10 @@
     { before: page('import'), target: ['#posts-drop', '#tab-content', '.view-header'],
       title: 'Import Data',
       text: '<p>Drop in a CSV of posts — MetaCode works out which column is the text, the author, the date and the engagement. Other tabs add engagement numbers and network data (who replies to whom).</p>' },
-    { before: page('scraper'), target: ['.sc-modes', '.view-header'],
+    { before: page('scraper'), target: ['.cv-frame', '.cv-wrap', '.view-header'],
       title: 'Scraper — collect posts from Reddit',
-      text: '<p><b>Standard scraper</b>: pick a subreddit, search, post or user, set limits, and start. <b>Custom code</b>: write a small Python or JavaScript scraper that runs in a safe sandbox.</p>' +
-            '<p>When a job finishes, <b>Add to project</b> turns the results into posts ready to code.</p>' },
+      text: '<p>A bot reads public subreddits or a search in a built-in Reddit browser, scrolling for more posts and opening posts for their comments. You watch it work and can pause or stop it.</p>' +
+            '<p>In <b>Data</b>, <b>Add to project</b> turns what it collected into posts ready to code — with their engagement for Metrics. (<b>Reddit API scraper</b>, top right, is the server-side scraper for API keys and custom code.)</p>' },
     { before: page('codebook'), target: ['#codebook-list', '#view-container .empty-state', '.view-header'],
       title: 'Codebook',
       text: '<p>Your coding scheme: <b>dimensions</b> (e.g. “Sentiment”) each with <b>codes</b> (“Positive”, “Negative”…) and descriptions. Clear descriptions make AI coding far more accurate.</p>' +

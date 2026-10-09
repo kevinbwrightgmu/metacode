@@ -1,7 +1,9 @@
 # Reddit Scraper
 
-The **Scraper** page (sidebar → Data → **Scraper**) collects Reddit posts, comments, subreddit and
-profile information so you can code them in MetaCode like any imported posts. It has two modes:
+The **Reddit API scraper** collects Reddit posts, comments, subreddit and profile information so you
+can code them in MetaCode like any imported posts. Open it with the **Reddit API scraper** link at the
+top of the Scraper page (sidebar → **Scraper**, which is the browser-based
+[Reddit Collector](../collector/README.md)), or at `app.html#scraper-api`. It has two modes:
 
 - **Standard scraper** — pick a target and limits; MetaCode fetches, paginates and normalizes the data.
 - **Custom code** — write your own `scrape(ctx)` in JavaScript or TypeScript; it runs in an isolated
@@ -22,8 +24,8 @@ Contents: [How it works](#1-how-it-works) · [MercuryWorkshop components](#2-how
 ## 1. How it works
 
 ```
-Browser (Scraper page)                          MetaCode server (Node.js)
-──────────────────────                          ─────────────────────────────────────────────
+Browser (Reddit API scraper)                    MetaCode server (Node.js)
+────────────────────────────                    ─────────────────────────────────────────────
 POST /api/scraper/jobs ───────────────────────▶ JobManager (queue, status, logs, results)
 GET  /api/scraper/jobs/:id/events  ◀── SSE ───        │
 GET  /api/scraper/jobs/:id/results                    ├─ standard scraper ─┐
@@ -123,7 +125,7 @@ Invalid values are ignored with a warning in the start-up banner.
 |---|---|---|
 | `SCRAPER_ENABLED` | `true` | Turns the scraper (API, Wisp endpoint, browser files) on or off |
 | `SCRAPER_USER_AGENT` | `nodejs:metacode-reddit-scraper:1.0 (self-hosted research tool)` | Sent with every request. Reddit asks for `<platform>:<app id>:<version> (by /u/<username>)` — set your own |
-| `SCRAPER_CREDENTIALS_FILE` | `reddit-credentials.json` next to `server.js` | Where keys saved from the Scraper page are stored |
+| `SCRAPER_CREDENTIALS_FILE` | `reddit-credentials.json` next to `server.js` | Where keys saved from the Reddit API scraper page are stored |
 | `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Optional. Reddit app credentials → server engine uses the Reddit Data API (and becomes the default). Never sent to the browser, the sandbox, or logs |
 | `SCRAPER_RESPECT_ROBOTS_TXT` | `true` | In public mode, check Reddit's robots.txt before each path |
 | `SCRAPER_MIN_DELAY_MS` | `1000` | Minimum delay between two requests to the same host (all jobs combined) |
@@ -146,7 +148,7 @@ Invalid values are ignored with a warning in the start-up banner.
 | `SCRAPER_ALLOW_PRIVATE_NETWORK` | `false` | Lets the Wisp proxy connect to private/loopback addresses. **Testing only** |
 
 Requirements: **Node.js 22 or newer** for the scraper (WebSocket client for epoxy-tls, `--permission`
-for the sandbox; TypeScript needs 22.13+). The rest of MetaCode still runs on Node 18; the Scraper page
+for the sandbox; TypeScript needs 22.13+). The rest of MetaCode still runs on Node 18; the Reddit API scraper page
 then explains what's missing.
 
 ### Reddit API credentials
@@ -157,14 +159,14 @@ page). That refusal applies to everything you request logged out, whichever subr
 to get around it. Reddit's API with a free app's keys is the supported way in. Also useful to scrape without
 keeping a tab open.
 
-**From the Scraper page (no restart, no `.env`):**
+**From the Reddit API scraper page (no restart, no `.env`):**
 
 1. Sign in to Reddit and open <https://www.reddit.com/prefs/apps>. Read Reddit's
    [Data API Terms](https://www.redditinc.com/policies/data-api-terms) and
    [Developer Terms](https://www.redditinc.com/policies/developer-terms); research use may need
    Reddit's approval.
 2. **create another app…** → name it, type **script**, redirect URI `http://localhost:3000` → create.
-3. On the Scraper page open **Reddit API access → Set up** (or click **Set up Reddit API access** on the failed
+3. On the Reddit API scraper page open **Reddit API access → Set up** (or click **Set up Reddit API access** on the failed
    job), paste the ID shown under the app's name and the **secret**, optionally your username, and click
    **Check & save**. MetaCode asks Reddit for a token with them; only keys that work are saved.
 4. **Fetch Reddit through** switches to **MetaCode server (Reddit API)**. Run the job again.
@@ -191,7 +193,7 @@ Pricing, terms and how it sources its data are between you and that vendor. Read
 using it fits your research ethics/IRB requirements.
 
 1. Create a key at <https://www.redditapis.com/dashboard/api-keys>.
-2. On the Scraper page open **Reddit API access → RedditAPIs.com key**, paste the key and click
+2. On the Reddit API scraper page open **Reddit API access → RedditAPIs.com key**, paste the key and click
    **Check & save**. MetaCode checks the key against `GET /account/me`, which costs nothing, and saves it only if
    it works. The card shows the last four characters and your balance.
    Or set `REDDITAPIS_KEY` in `.env` (this takes precedence). `REDDITAPIS_BASE_URL` overrides the API origin.
@@ -232,7 +234,7 @@ The errors you may see map to:
 
 ## 4. Running a standard scrape
 
-1. Sidebar → **Scraper**. Leave **Standard scraper** selected. **Fetch Reddit through** is *This browser
+1. Sidebar → **Scraper** → **Reddit API scraper**. Leave **Standard scraper** selected. **Fetch Reddit through** is *This browser
    (Scramjet)* unless API credentials are configured — nothing else to set up.
 2. **What to scrape**:
    - **Subreddit** — name (combine with `+`, e.g. `science+askscience`), sort (hot/new/top/rising/
@@ -516,7 +518,7 @@ API (same-origin; errors are `{ error: { message, type } }`):
 | "Couldn't verify Reddit's TLS certificate …" | A proxy, firewall or antivirus intercepts HTTPS. epoxy-tls verifies certificates end-to-end and won't accept an interception certificate; run MetaCode on a network without HTTPS inspection |
 | "The Wisp proxy closed the connection before TLS started …" | The host isn't allowed, resolved to a private address, or is unreachable from the server. Check internet access; don't point `REDDIT_BASE_URL` at private hosts without `SCRAPER_ALLOW_PRIVATE_NETWORK` |
 | "MetaCode couldn't reach its Wisp proxy endpoint" | The server's own `/wisp/` WebSocket failed — restart MetaCode; check that a reverse proxy forwards WebSocket upgrades |
-| "Reddit refused this request because it was made without a Reddit login or API key …" | Reddit blocks logged-out access from your network (all subreddits, not just this one). Connect [Reddit API access](#reddit-api-credentials) on the Scraper page and run with *MetaCode server (Reddit API)* |
+| "Reddit refused this request because it was made without a Reddit login or API key …" | Reddit blocks logged-out access from your network (all subreddits, not just this one). Connect [Reddit API access](#reddit-api-credentials) on the Reddit API scraper page and run with *MetaCode server (Reddit API)* |
 | "r/… is private" / "is quarantined" / "only available to Reddit Premium members" | Reddit restricts that community; it can't be scraped |
 | "Reddit refused the API sign-in request with a block page …" | Reddit blocks this network even for the API; MetaCode can't reach Reddit from here |
 | "The keys weren't saved: Reddit rejected the API client ID / secret" | Re-copy the ID (under the app name) and secret; the app type must be **script** |

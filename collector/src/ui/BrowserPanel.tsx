@@ -75,6 +75,12 @@ export function BrowserPanel({ browser, site, busy, blocker }: Props) {
       <div className={'browser-status' + (status.state === 'error' || blocker ? ' is-error' : '')} role="status" aria-live="polite">
         {busy ? <strong>The bot is using this browser. </strong> : null}{stateText}
       </div>
+      {status.connection ? (
+        <div className={'browser-conn' + (status.connection === 'http' ? ' is-relay' : '')} id="browser-connection">
+          {status.connection === 'wisp' ? 'Connected through Wisp (WebSocket, end-to-end TLS).' : 'Connected through MetaCode\'s HTTP relay.'}
+          {status.connectionNote ? <span className="muted"> {status.connectionNote}</span> : null}
+        </div>
+      ) : null}
       <div className="frame-wrap">
         <iframe ref={frameRef} id="collector-frame" title="Reddit through Scramjet" referrerPolicy="no-referrer" />
         {blocker ? <div className="frame-overlay">{blocker}</div> : null}

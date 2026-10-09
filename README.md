@@ -11,8 +11,8 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 | Module | Description |
 |---|---|
 | **Import Data** | Upload CSVs for posts, engagement metrics, and social network data. The `text` column is optional — if no text-like column is found by name, AI reads the file's structure and maps it for you |
-| **Reddit Scraper** | Collect subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed Python, JavaScript or TypeScript (custom code mode); live progress, results table/JSON, CSV/JSON export, and **Add to project** to code the posts. Server requests go through a Python worker (or epoxy-tls over Wisp without Python); an in-app Reddit browser uses Scramjet. See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
-| **Reddit Collector** | A separate client-side app at `/collector/` (React + TypeScript): a bot reads public posts and comments from Reddit pages loaded through Scramjet, follows robots.txt by default, stores records in this browser (IndexedDB), and exports JSON, JSON Lines or CSV. See [collector/README.md](collector/README.md) |
+| **Scraper** | Sidebar → **Scraper** is the Reddit Collector (`collector/`, React + TypeScript): a bot reads public posts and comments from Reddit pages loaded through Scramjet, follows robots.txt by default, stores records in this browser (IndexedDB) and exports JSON, JSON Lines or CSV. **Add to project** sends them to the project with their engagement for Metrics. Pages load through MetaCode's own Wisp proxy, or its HTTP relay when a reverse proxy blocks WebSockets. See [collector/README.md](collector/README.md) |
+| **Reddit API Scraper** | Linked from the top of the Scraper page (`#scraper-api`). Collects subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed Python, JavaScript or TypeScript (custom code mode), with Reddit API keys or without. Live progress, results table/JSON, CSV/JSON export, and **Add to project**. Server requests go through a Python worker (or epoxy-tls over Wisp without Python). See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
 | **Projects** | Save the open project and keep as many as you like (in your browser — private to you, even on a shared MetaCode server): reopen an earlier one, rename, duplicate, export/import as JSON, delete. A project that's open is saved automatically (Autosave) |
 | **Survey Studio** | Its own page, opened from the front page (**Open Survey Studio**). Build surveys on a freeform canvas where every part — down to a single answer choice — can be moved, resized, rotated, scaled, distorted and styled; 30+ element types, layers, groups, components, a theme with per-element overrides, Scratch-style block logic (show/hide, skip, branching, variables, formulas, scores, conditional styling, randomization blocks for assigning participants to conditions or messages), device preview, versioned publishing to a public link, and response collection with CSV/JSON export. Open-text answers can be added to the project for coding. See [docs/survey-studio.md](docs/survey-studio.md) |
 | **Codebook Builder** | Define custom coding dimensions and codes; each code has an optional AI Fine-Tuning Notes field the model reads during Auto-Coding, separate from the Description shown to human coders; import/export as CSV |
@@ -64,8 +64,11 @@ npm start
 
 Then open **http://localhost:3000** in your browser. The top bar and the "Analyze CSV" page both show a live status indicator so you always know whether the AI and Python/NetworkX are ready.
 
-**Reddit Scraper** works with no extra setup: by default your open MetaCode tab fetches Reddit through Scramjet.
-Reddit API credentials are optional — see [Reddit Scraper](#reddit-scraper).
+The **Scraper** page needs one build step first (see [Scraper (Reddit Collector)](#scraper-reddit-collector) below).
+The **Reddit API scraper** works with no extra setup, and Reddit API credentials are optional: see [Reddit Scraper](#reddit-scraper).
+
+**Running MetaCode on a server** (a VPS with pm2, nginx and HTTPS): follow **[docs/deploy-vps.md](docs/deploy-vps.md)**.
+It includes `ecosystem.config.cjs` for pm2 and an nginx config that forwards the Scraper's WebSocket.
 
 ### Tests
 ```bash
@@ -73,13 +76,15 @@ npm test          # all tests (browser tests need Chromium: set CHROMIUM_PATH, o
 npm run test:unit # without the server/browser tests
 ```
 
-### Reddit Collector (optional)
+### Scraper (Reddit Collector)
+The sidebar's **Scraper** page is a separate app in `collector/`. Build it once, and again after each update:
 ```bash
 npm run collector:install   # its own dependencies, in collector/
-npm run collector:build     # build into collector/dist, served at http://localhost:3000/collector/
+npm run collector:build     # build into collector/dist; MetaCode shows it on the Scraper page (and at /collector/)
 npm run collector:test      # its unit tests (end-to-end tests run in npm test once it is built)
 ```
-See [collector/README.md](collector/README.md) for the development server, the live check and troubleshooting.
+Until it is built, the Scraper page shows these commands. See [collector/README.md](collector/README.md) for the
+development server, the live check and troubleshooting.
 
 ---
 
@@ -174,7 +179,9 @@ plainly — just run `pip install -r requirements.txt` and refresh.
 
 ## Reddit Scraper
 
-Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/reddit-scraper.md](docs/reddit-scraper.md)**
+The **Reddit API scraper** collects Reddit data on the MetaCode server. Open it with the **Reddit API scraper**
+link at the top of the Scraper page (sidebar → **Scraper**, which is the [Reddit Collector](collector/README.md)), or at
+`app.html#scraper-api`. Full guide: **[docs/reddit-scraper.md](docs/reddit-scraper.md)**
 (how it works, configuration, custom-code API, security model, rate limiting, troubleshooting, licenses).
 
 - **Standard scraper** — subreddit listings, search, a post with its comments, user profiles, any Reddit URL
@@ -216,8 +223,8 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 | Variable | Default | What it does |
 |---|---|---|
 | `SCRAPER_USER_AGENT` | generic MetaCode UA | Identify your client: `nodejs:metacode-scraper:1.0 (by /u/you)` |
-| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Optional: run jobs on the server through Reddit's API. Or paste them on the Scraper page (**Reddit API access**) — needed when Reddit blocks logged-out access from your network (HTTP 403) |
-| `REDDITAPIS_KEY` | — | Optional: key from [RedditAPIs.com](https://www.redditapis.com/dashboard/api-keys), a third-party paid (per-request) Reddit data API. Or paste it on the Scraper page (**Reddit API access → RedditAPIs.com key**) |
+| `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET` | — | Optional: run jobs on the server through Reddit's API. Or paste them on the Reddit API scraper page (**Reddit API access**) — needed when Reddit blocks logged-out access from your network (HTTP 403) |
+| `REDDITAPIS_KEY` | — | Optional: key from [RedditAPIs.com](https://www.redditapis.com/dashboard/api-keys), a third-party paid (per-request) Reddit data API. Or paste it on the Reddit API scraper page (**Reddit API access → RedditAPIs.com key**) |
 | `SCRAPER_RESPECT_ROBOTS_TXT` | `true` | Check robots.txt in public mode |
 | `SCRAPER_MIN_DELAY_MS` / `SCRAPER_PUBLIC_MIN_DELAY_MS` | `1000` / `6000` | Minimum delay between requests per host |
 | `SCRAPER_MAX_ITEMS` / `SCRAPER_MAX_PAGES` | `5000` / `50` | Hard per-job caps |
@@ -507,7 +514,9 @@ metacode/
 ├── owner.js                    Which browser a request comes from (mc_owner cookie) — published surveys, scraper jobs
 ├── projects/                   Import of projects older versions saved on the server (this computer only)
 ├── surveys/                    Survey Studio server side: API routes, publishing, responses, JSON-file store
-├── docs/reddit-scraper.md      Scraper guide
+├── docs/reddit-scraper.md      Reddit API scraper guide
+├── docs/deploy-vps.md         Running MetaCode on a server: pm2, nginx, HTTPS, troubleshooting
+├── ecosystem.config.cjs        pm2 process file (one process, fork mode)
 ├── docs/survey-studio.md       Survey Studio guide
 ├── test/                       node:test suites (+ Playwright browser tests) and a mock Reddit
 ├── python/
@@ -539,7 +548,8 @@ metacode/
 │       ├── csv-analyzer.js      AI edge detection + NetworkX analysis UI
 │       ├── network.js           D3.js network visualization
 │       ├── engagement.js        Chart.js charts for the Metrics section
-│       ├── scraper.js           Reddit Scraper page (forms, editor, job progress, results, export)
+│       ├── collector-view.js    Scraper page: the Reddit Collector in a frame; Add to project (postMessage)
+│       ├── scraper.js           Reddit API Scraper page (forms, editor, job progress, results, export)
 │       ├── scraper-browser.js   In-app Reddit browser (Scramjet controller + epoxy-transport)
 │       ├── survey/              Survey Studio: model, logic engine, renderer, runtime, editor (see docs/survey-studio.md)
 │       ├── assistant.js         MetaCode Assistant panel (chat UI, prompt, app-state summary)
@@ -606,7 +616,15 @@ If the model is listed in `emis-models.json` but the AI service no longer serves
 **Network graph not rendering**
 → Check that your nodes CSV has an `id` column and edges CSV has `source` and `target` columns matching node IDs — or use "Analyze CSV" instead, which detects this automatically
 
-**Reddit Scraper errors** ("robots.txt doesn't allow…", TLS certificate, 403, 429, sandbox limits)
+**Scraper: "Wisp WebSocket failed to connect: websocket did not open" / "The proxy couldn't fetch the page"**
+→ A reverse proxy (nginx, Caddy, Cloudflare) in front of MetaCode isn't forwarding WebSockets to `/wisp/`. The
+Scraper falls back to MetaCode's HTTP relay by itself (the line under its browser says so), and `pm2 logs`
+says what the proxy is missing. To fix the proxy, see [docs/deploy-vps.md](docs/deploy-vps.md#10-troubleshooting).
+
+**Scraper page: "The scraper isn't built yet"**
+→ Run `npm run collector:install && npm run collector:build`, then restart MetaCode (`pm2 reload metacode` on a server).
+
+**Reddit API scraper errors** ("robots.txt doesn't allow…", TLS certificate, 403, 429, sandbox limits)
 → See the troubleshooting table in [docs/reddit-scraper.md](docs/reddit-scraper.md#10-troubleshooting)
 
 **All data disappeared**

@@ -381,10 +381,11 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     container.innerHTML = `
       <div class="view-header">
         <div>
-          <div class="view-title">Reddit Scraper</div>
-          <div class="view-subtitle">Collect Reddit posts and comments, then code them like any other posts</div>
+          <div class="view-title">Reddit API Scraper</div>
+          <div class="view-subtitle">The server-side scraper: Reddit API keys, RedditAPIs.com and custom code. The main Scraper is the Reddit Collector.</div>
         </div>
         <div class="view-actions">
+          <a class="btn btn-ghost" href="#scraper">← Scraper</a>
           <button class="btn btn-secondary" id="sc-browser-toggle" onclick="RedditScraper.toggleBrowser()">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
             Browse Reddit

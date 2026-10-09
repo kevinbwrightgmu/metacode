@@ -16,11 +16,13 @@ interface Props {
   /** Changes when records change (a job saved more), to refresh the list. */
   version: number;
   onChanged: () => void;
+  /** Inside MetaCode: send the matching records to the project → a message. */
+  onAddToProject?: (filter: RecordFilter) => Promise<string>;
 }
 
 type Row = PostRecord | CommentRecord;
 
-export function Explorer({ store, jobs, defaultFormat, bom, version, onChanged }: Props) {
+export function Explorer({ store, jobs, defaultFormat, bom, version, onChanged, onAddToProject }: Props) {
   const [filter, setFilter] = useState<RecordFilter>(EMPTY_FILTER);
   const [sort, setSort] = useState<RecordSort>('collected_desc');
   const [page, setPage] = useState(0);
@@ -119,6 +121,12 @@ export function Explorer({ store, jobs, defaultFormat, bom, version, onChanged }
           <select className="input" value={format} onChange={e => setFormat(e.target.value as ExportFormat)} aria-label="Export format">
             <option value="json">JSON</option><option value="jsonl">JSON Lines</option><option value="csv">CSV (posts and comments files)</option>
           </select>
+          {onAddToProject ? (
+            <button className="btn btn-primary" id="add-to-project" disabled={exporting || !total} onClick={async () => {
+              setExporting(true);
+              try { setMessage({ tone: 'ok', text: await onAddToProject(filter) }); } catch (err) { setMessage({ tone: 'error', text: (err as Error).message }); } finally { setExporting(false); }
+            }}>Add these {fmtNum(total)} to project</button>
+          ) : null}
           <button className="btn" id="export-all" onClick={() => doExport('all')} disabled={exporting}>Export all data</button>
           <button className="btn" id="export-filtered" onClick={() => doExport('filtered')} disabled={exporting || !total}>Export these {fmtNum(total)}</button>
           <button className="btn btn-danger" onClick={() => remove(Array.from(selected), selected.size + ' selected ' + filter.type + (selected.size === 1 ? '' : 's'))} disabled={!selected.size}>Delete selected</button>
