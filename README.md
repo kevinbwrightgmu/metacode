@@ -12,6 +12,7 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 |---|---|
 | **Import Data** | Upload CSVs for posts, engagement metrics, and social network data. The `text` column is optional — if no text-like column is found by name, AI reads the file's structure and maps it for you |
 | **Reddit Scraper** | Collect subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed Python, JavaScript or TypeScript (custom code mode); live progress, results table/JSON, CSV/JSON export, and **Add to project** to code the posts. Server requests go through a Python worker (or epoxy-tls over Wisp without Python); an in-app Reddit browser uses Scramjet. See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
+| **Reddit Collector** | A separate client-side app at `/collector/` (React + TypeScript): a bot reads public posts and comments from Reddit pages loaded through Scramjet, follows robots.txt by default, stores records in this browser (IndexedDB), and exports JSON, JSON Lines or CSV. See [collector/README.md](collector/README.md) |
 | **Projects** | Save the open project and keep as many as you like (in your browser — private to you, even on a shared MetaCode server): reopen an earlier one, rename, duplicate, export/import as JSON, delete. A project that's open is saved automatically (Autosave) |
 | **Survey Studio** | Its own page, opened from the front page (**Open Survey Studio**). Build surveys on a freeform canvas where every part — down to a single answer choice — can be moved, resized, rotated, scaled, distorted and styled; 30+ element types, layers, groups, components, a theme with per-element overrides, Scratch-style block logic (show/hide, skip, branching, variables, formulas, scores, conditional styling, randomization blocks for assigning participants to conditions or messages), device preview, versioned publishing to a public link, and response collection with CSV/JSON export. Open-text answers can be added to the project for coding. See [docs/survey-studio.md](docs/survey-studio.md) |
 | **Codebook Builder** | Define custom coding dimensions and codes; each code has an optional AI Fine-Tuning Notes field the model reads during Auto-Coding, separate from the Description shown to human coders; import/export as CSV |
@@ -71,6 +72,14 @@ Reddit API credentials are optional — see [Reddit Scraper](#reddit-scraper).
 npm test          # all tests (browser tests need Chromium: set CHROMIUM_PATH, or they are skipped)
 npm run test:unit # without the server/browser tests
 ```
+
+### Reddit Collector (optional)
+```bash
+npm run collector:install   # its own dependencies, in collector/
+npm run collector:build     # build into collector/dist, served at http://localhost:3000/collector/
+npm run collector:test      # its unit tests (end-to-end tests run in npm test once it is built)
+```
+See [collector/README.md](collector/README.md) for the development server, the live check and troubleshooting.
 
 ---
 
@@ -479,6 +488,10 @@ metacode/
 ├── requirements.txt            Python dependency (networkx) for the NetworkX feature
 ├── .env.example                Copy to .env and add your AI key
 ├── emis-models.json            The AI models offered in Settings (OpenCode config format)
+├── collector/                  Reddit Collector: client-side bot over Scramjet (React + Vite + TypeScript) — see collector/README.md
+│   ├── src/                    browser/ (Scramjet + bridge), bot/, extract/ (selectors, parsing), store/ (IndexedDB), export/, ui/
+│   ├── test/                   Vitest unit tests and Reddit page fixtures
+│   └── SCHEMA.md               Record schema and export formats
 ├── scraper/                    Reddit scraper (server side) — see docs/reddit-scraper.md
 │   ├── index.js                /api/scraper routes, SSE, exports, Scramjet file serving
 │   ├── config.js               SCRAPER_* / REDDIT_* settings

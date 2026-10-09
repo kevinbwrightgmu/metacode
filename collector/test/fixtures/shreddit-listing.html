@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<!-- Modelled on www.reddit.com's server-rendered subreddit feed (shreddit web components).
+     Data lives in the components' attributes; promoted posts are <shreddit-ad-post>. -->
+<html lang="en-US"><head><meta charset="utf-8"><title>r/technology</title></head>
+<body>
+<shreddit-app pagetype="community" routename="community">
+  <main id="main-content">
+    <shreddit-feed>
+      <article class="w-full m-0" aria-label="Chip makers announce new standard">
+        <shreddit-post id="t3_1abc23" permalink="/r/technology/comments/1abc23/chip_makers_announce_new_standard/"
+          content-href="https://example.com/news/chips?ref=a&amp;b=1" comment-count="1,204" score="15432"
+          author="alice_w" author-id="t2_aa" subreddit-id="t5_2qh16" subreddit-prefixed-name="r/technology"
+          post-title="Chip makers announce new standard" created-timestamp="2026-10-01T12:34:56.123000+0000"
+          post-type="link" domain="example.com" view-context="CommunityFeed">
+          <a slot="full-post-link" href="/r/technology/comments/1abc23/chip_makers_announce_new_standard/">
+            <faceplate-screen-reader-content>Chip makers announce new standard</faceplate-screen-reader-content></a>
+          <shreddit-post-flair slot="post-flair"><a href="/r/technology/?f=flair_name%3A%22Hardware%22"><flair-tag>Hardware</flair-tag></a></shreddit-post-flair>
+          <div slot="credit-bar"><faceplate-timeago ts="2026-10-01T12:34:56.123Z"><time datetime="2026-10-01T12:34:56.123Z">2 hr. ago</time></faceplate-timeago></div>
+        </shreddit-post>
+      </article>
+      <hr>
+      <article class="w-full m-0" aria-label="Ask: what laptop for students?">
+        <shreddit-post id="t3_1abc24" permalink="/r/technology/comments/1abc24/ask_what_laptop_for_students/"
+          content-href="https://www.reddit.com/r/technology/comments/1abc24/ask_what_laptop_for_students/" comment-count="0" score="0"
+          author="bob" subreddit-prefixed-name="r/technology" post-title="Ask: what laptop for students?"
+          created-timestamp="2026-09-30T08:00:00.000000+0000" post-type="text" domain="self.technology" nsfw>
+          <div slot="text-body"><div class="md"><p>My budget is <strong>$800</strong>.</p><ul><li>Light</li><li>Long battery</li></ul></div></div>
+        </shreddit-post>
+      </article>
+      <hr>
+      <shreddit-ad-post id="t3_promo1" permalink="/r/u_brand/comments/promo1/buy_now/" post-title="Buy now" author="brand"></shreddit-ad-post>
+      <article class="w-full m-0" aria-label="Photo of the new rover">
+        <shreddit-post id="t3_1abc25" permalink="/r/technology/comments/1abc25/photo_of_the_new_rover/"
+          content-href="https://i.redd.it/abcdef.jpg" comment-count="1.2k" score="Vote"
+          author="[deleted]" subreddit-prefixed-name="r/technology" post-title="Photo of the new rover"
+          created-timestamp="2026-09-29T23:59:59.000000+0000" post-type="image" domain="i.redd.it">
+        </shreddit-post>
+      </article>
+      <faceplate-partial loading="lazy" src="/svc/shreddit/community-more-posts/new/?after=dDNfMWFiYzI1&amp;name=technology"></faceplate-partial>
+    </shreddit-feed>
+  </main>
+</shreddit-app>
+</body></html>
