@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fromServerRecord, mergeRecords } from '../src/lib/records';
-import { accessOptions, cleanSettings, readOwnKeys, OWN_KEYS_STORAGE, type ServerInfo } from '../src/lib/settings';
+import { ACCESS_STORAGE, accessOptions, cleanSettings, initialAccess, readOwnKeys, saveAccess, OWN_KEYS_STORAGE, type ServerInfo } from '../src/lib/settings';
 import { jobRequest, outcomeOf, stateOf, watchJob, type ServerJob } from '../src/lib/ai-jobs';
 import { AiJobSession, newJobRecord, type SessionStore } from '../src/lib/session';
 import { describeJob } from '../src/lib/jobs';
@@ -61,17 +61,38 @@ describe('settings and your own keys', () => {
     expect(readOwnKeys(null)).toEqual({ reddit: null, redditapis: null });
   });
 
-  it('offers the ways to reach Reddit, best first', () => {
-    const server: ServerInfo = { problem: null, serverMode: 'public', serverRedditApis: false };
+  it('offers RedditAPIs.com first (with a key, or asking for one), then your keys, then the server', () => {
+    const server: ServerInfo = { problem: null, serverMode: 'public', serverRedditApis: false, defaultEngine: 'redditapis' };
     const none = { reddit: null, redditapis: null };
-    expect(accessOptions(none, server).map(a => a.value)).toEqual(['server']);
-    expect(accessOptions(none, server)[0].note).toMatch(/blocked by network security/);
+    const bare = accessOptions(none, server);
+    expect(bare.map(a => [a.value, a.ready])).toEqual([['redditapis', false], ['server', true]]);
+    expect(bare[0].label).toBe('RedditAPIs.com (add your API key)');
+    expect(bare[0].note).toMatch(/Reddit Scraper page → RedditAPIs\.com key/);
+    expect(bare[1].note).toMatch(/blocked by network security/);
     const mine = { reddit: { clientId: 'i', clientSecret: 's', username: null, hint: '…abcd' }, redditapis: null };
     const opts = accessOptions(mine, { ...server, serverMode: 'oauth', serverRedditApis: true });
-    expect(opts.map(a => a.value)).toEqual(['own', 'redditapis', 'server']);
-    expect(opts[0].label).toBe('Your Reddit API keys (…abcd)');
-    expect(opts[1].label).toMatch(/the server's key/);
+    expect(opts.map(a => a.value)).toEqual(['redditapis', 'own', 'server']);
+    expect(opts.every(a => a.ready)).toBe(true);
+    expect(opts[0].label).toBe('RedditAPIs.com (the server\'s key, paid per request)');
+    expect(opts[1].label).toBe('Your Reddit API keys (…abcd)');
     expect(opts[2].label).toBe('This MetaCode server\'s Reddit API keys');
+    expect(accessOptions({ reddit: null, redditapis: { key: 'k', hint: '…k' } }, server)[0].label).toBe('RedditAPIs.com (your key, paid per request)');
+  });
+
+  it('starts on this browser\'s last choice, else the server\'s default (RedditAPIs.com)', () => {
+    const server: ServerInfo = { problem: null, serverMode: 'public', serverRedditApis: false, defaultEngine: 'redditapis' };
+    const mine = { reddit: { clientId: 'i', clientSecret: 's', username: null, hint: '' }, redditapis: null };
+    const opts = accessOptions(mine, server);
+    const stored = (v: string | null) => ({ getItem: (k: string) => (k === ACCESS_STORAGE ? v : null) });
+    expect(initialAccess(opts, server, stored(null))).toBe('redditapis');
+    expect(initialAccess(opts, server, stored('own'))).toBe('own');
+    expect(initialAccess(accessOptions({ reddit: null, redditapis: null }, server), server, stored('own'))).toBe('redditapis');   // keys removed since
+    expect(initialAccess(opts, { ...server, defaultEngine: 'server' }, stored(null))).toBe('own');
+    expect(initialAccess(opts, { ...server, defaultEngine: 'browser' }, { getItem: () => { throw new Error('blocked'); } })).toBe('own');
+    const saved: Record<string, string> = {};
+    saveAccess('server', { setItem: (k: string, v: string) => { saved[k] = v; } });
+    expect(saved).toEqual({ [ACCESS_STORAGE]: 'server' });
+    expect(() => saveAccess('server', { setItem: () => { throw new Error('full'); } })).not.toThrow();
   });
 });
 

@@ -325,7 +325,7 @@ test('browser engine: requests are fetched by the tab — no robots.txt, no cred
   try {
     await new Promise(r => setTimeout(r, 100));
     const status = (await getJson(app.api + '/status')).json;
-    assert.equal(status.defaultEngine, 'browser');
+    assert.equal(status.defaultEngine, 'redditapis');
     assert.equal(status.engines.browser.connectedTabs, 1);
     const before = mock.state.requests.length;
     const r = await start({ engine: 'browser', target: { type: 'subreddit', subreddit: 'test', sort: 'new' }, options: { maxItems: 120 } });
@@ -386,7 +386,7 @@ test('Reddit API access: a user\'s own keys are checked (never saved or echoed) 
   try {
     let st = (await getJson(a.api + '/status')).json;
     assert.equal(st.credentials.configured, false);
-    assert.equal(st.defaultEngine, 'browser');
+    assert.equal(st.defaultEngine, 'redditapis');
     assert.deepEqual(st.ownKeys, { reddit: true, redditapis: true, apiMinDelayMs: a.config.minDelayMs });
 
     // Logged-out: Reddit's block page → a clear, specific error.

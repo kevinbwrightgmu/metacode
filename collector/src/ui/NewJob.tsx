@@ -1,7 +1,7 @@
 // New AI job: say what you want; the AI on the MetaCode server finds and picks the posts.
 import { useState, type FormEvent } from 'react';
 import type { AiJobConfig, RedditAccess, Settings } from '../types';
-import { SETTING_LIMITS, clampInt, type AccessOption } from '../lib/settings';
+import { SETTING_LIMITS, clampInt, saveAccess, type AccessOption } from '../lib/settings';
 import { Notice } from './common';
 
 const EXAMPLES = [
@@ -13,6 +13,8 @@ const EXAMPLES = [
 interface Props {
   settings: Settings;
   access: AccessOption[];
+  /** The option to start on: this browser's last choice, else the server's default (RedditAPIs.com). */
+  defaultAccess: RedditAccess;
   /** The AI model MetaCode uses for the AI Scraper ("" = the server's default). */
   model: string;
   canStart: boolean;
@@ -20,13 +22,13 @@ interface Props {
   onStart: (config: AiJobConfig) => Promise<void>;
 }
 
-export function NewJob({ settings, access, model, canStart, startProblem, onStart }: Props) {
+export function NewJob({ settings, access, defaultAccess, model, canStart, startProblem, onStart }: Props) {
   const [goal, setGoal] = useState('');
   const [maxPosts, setMaxPosts] = useState(settings.defaultMaxPosts);
   const [comments, setComments] = useState(settings.defaultCommentsPerPost);
   const [steps, setSteps] = useState(settings.defaultMaxSteps);
   const [minutes, setMinutes] = useState(settings.defaultMaxMinutes);
-  const [via, setVia] = useState<RedditAccess>(access[0] ? access[0].value : 'server');
+  const [via, setVia] = useState<RedditAccess>(defaultAccess);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const chosen = access.find(a => a.value === via) || access[0];
@@ -36,6 +38,7 @@ export function NewJob({ settings, access, model, canStart, startProblem, onStar
     const g = goal.replace(/\s+/g, ' ').trim();
     if (g.length < 10) { setError('Describe what to collect in a sentence or two.'); return; }
     if (!canStart) return;
+    if (chosen && !chosen.ready) { setError(chosen.note); return; }
     setError(null);
     setBusy(true);
     try {
@@ -89,7 +92,7 @@ export function NewJob({ settings, access, model, canStart, startProblem, onStar
       <fieldset>
         <legend>Reaching Reddit</legend>
         <label className="field">Through
-          <select className="input" id="job-access" value={chosen ? chosen.value : ''} onChange={e => setVia(e.target.value as RedditAccess)}>
+          <select className="input" id="job-access" value={chosen ? chosen.value : ''} onChange={e => { const v = e.target.value as RedditAccess; setVia(v); saveAccess(v); }}>
             {access.map(a => <option key={a.value} value={a.value}>{a.label}</option>)}
           </select>
         </label>
@@ -104,7 +107,7 @@ export function NewJob({ settings, access, model, canStart, startProblem, onStar
       {error ? <Notice tone="error"><span id="job-error">{error}</span></Notice> : null}
       {startProblem ? <Notice tone="warn"><span id="job-start-problem">{startProblem}</span></Notice> : null}
       <div className="actions">
-        <button className="btn btn-primary" id="job-start" type="submit" disabled={!canStart || busy}>{busy ? 'Starting…' : 'Start'}</button>
+        <button className="btn btn-primary" id="job-start" type="submit" disabled={!canStart || busy || (!!chosen && !chosen.ready)}>{busy ? 'Starting…' : 'Start'}</button>
       </div>
     </form>
   );

@@ -47,19 +47,22 @@ export interface ServerInfo {
   serverMode: 'oauth' | 'public';
   /** The server has its own RedditAPIs.com key. */
   serverRedditApis: boolean;
+  /** The way the server's pages reach Reddit unless the user picks another (SCRAPER_DEFAULT_ENGINE). */
+  defaultEngine: 'redditapis' | 'browser' | 'server';
 }
 
 /** Reads /api/scraper/status from the MetaCode server that serves the app. */
 export async function fetchServerInfo(fetchFn: typeof fetch = fetch): Promise<ServerInfo> {
-  const none = (problem: string): ServerInfo => ({ problem, serverMode: 'public', serverRedditApis: false });
+  const none = (problem: string): ServerInfo => ({ problem, serverMode: 'public', serverRedditApis: false, defaultEngine: 'redditapis' });
   try {
     const res = await fetchFn('/api/scraper/status', { headers: { accept: 'application/json' }, credentials: 'same-origin' });
     if (!res.ok) return none(res.status === 404 ? 'This MetaCode server has no scraper (an older version, or SCRAPER_ENABLED=false).' : 'The MetaCode server answered HTTP ' + res.status + '.');
-    const j = await res.json() as { enabled?: boolean; mode?: string; aiScraper?: { available?: boolean; reason?: string | null }; redditApis?: { configured?: boolean } };
+    const j = await res.json() as { enabled?: boolean; mode?: string; defaultEngine?: string; aiScraper?: { available?: boolean; reason?: string | null }; redditApis?: { configured?: boolean } };
     const problem = j.enabled === false ? 'The Reddit scraper is turned off on this server (SCRAPER_ENABLED=false).'
       : !j.aiScraper ? 'This MetaCode server is from before the AI Scraper. Update it (git pull, then restart).'
       : j.aiScraper.available ? null : (j.aiScraper.reason || 'The AI Scraper isn\'t available on this server.');
-    return { problem, serverMode: j.mode === 'oauth' ? 'oauth' : 'public', serverRedditApis: !!(j.redditApis && j.redditApis.configured) };
+    const defaultEngine = j.defaultEngine === 'browser' || j.defaultEngine === 'server' ? j.defaultEngine : 'redditapis';
+    return { problem, serverMode: j.mode === 'oauth' ? 'oauth' : 'public', serverRedditApis: !!(j.redditApis && j.redditApis.configured), defaultEngine };
   } catch {
     return none('The MetaCode server couldn\'t be reached. Start it with npm start (this app is served at /collector/).');
   }
@@ -89,17 +92,44 @@ export function readOwnKeys(storage: Pick<Storage, 'getItem'> | null = typeof lo
   };
 }
 
-export interface AccessOption { value: RedditAccess; label: string; note: string }
+export interface AccessOption {
+  value: RedditAccess;
+  label: string;
+  note: string;
+  /** Usable now (RedditAPIs.com needs a key: yours or the server's). */
+  ready: boolean;
+}
 
-/** The ways this browser's jobs can reach Reddit, best first. */
+/** The ways this browser's jobs can reach Reddit: RedditAPIs.com first, always offered. */
 export function accessOptions(keys: OwnKeys, server: ServerInfo): AccessOption[] {
   const out: AccessOption[] = [];
-  if (keys.reddit) out.push({ value: 'own', label: 'Your Reddit API keys (' + (keys.reddit.hint || 'saved in this browser') + ')',
+  const rapiKey = keys.redditapis ? 'your' : server.serverRedditApis ? 'the server\'s' : null;
+  out.push(rapiKey
+    ? { value: 'redditapis', label: 'RedditAPIs.com (' + rapiKey + ' key, paid per request)', ready: true,
+        note: 'A third-party paid service; every request is billed to ' + rapiKey + ' RedditAPIs.com account.' }
+    : { value: 'redditapis', label: 'RedditAPIs.com (add your API key)', ready: false,
+        note: 'A third-party service that sells Reddit data per request. Add your key on MetaCode\'s Reddit Scraper page → RedditAPIs.com key (it stays in this browser), or choose another way below.' });
+  if (keys.reddit) out.push({ value: 'own', label: 'Your Reddit API keys (' + (keys.reddit.hint || 'saved in this browser') + ')', ready: true,
     note: 'Reddit\'s official API with your own limit (about 100 requests a minute). Works even when Reddit blocks the server\'s address.' });
-  if (keys.redditapis || server.serverRedditApis) out.push({ value: 'redditapis', label: 'RedditAPIs.com (' + (keys.redditapis ? 'your key' : 'the server\'s key') + ', paid per request)',
-    note: 'A third-party paid service; every request is billed to ' + (keys.redditapis ? 'your' : 'the server\'s') + ' RedditAPIs.com account.' });
   out.push(server.serverMode === 'oauth'
-    ? { value: 'server', label: 'This MetaCode server\'s Reddit API keys', note: 'Shared by everyone using this server, so jobs may be slower.' }
-    : { value: 'server', label: 'This MetaCode server, without API keys', note: 'Public Reddit pages. Reddit often blocks servers this way ("blocked by network security") — add your own Reddit API keys if it does.' });
+    ? { value: 'server', label: 'This MetaCode server\'s Reddit API keys', ready: true, note: 'Shared by everyone using this server, so jobs may be slower.' }
+    : { value: 'server', label: 'This MetaCode server, without API keys', ready: true, note: 'Public Reddit pages. Reddit often blocks servers this way ("blocked by network security") — add your own Reddit API keys if it does.' });
   return out;
+}
+
+// The way to reach Reddit this browser picked last (the New job form remembers it).
+export const ACCESS_STORAGE = 'metacode.aiScraper.access';
+
+/** The option the New job form starts on: this browser's last choice, else the server's default (RedditAPIs.com). */
+export function initialAccess(options: AccessOption[], server: ServerInfo | null,
+  storage: Pick<Storage, 'getItem'> | null = typeof localStorage === 'undefined' ? null : localStorage): RedditAccess {
+  let saved: string | null = null;
+  try { saved = storage ? storage.getItem(ACCESS_STORAGE) : null; } catch { saved = null; }
+  if (saved && options.some(o => o.value === saved)) return saved as RedditAccess;
+  const want: RedditAccess = !server || server.defaultEngine === 'redditapis' ? 'redditapis' : options.some(o => o.value === 'own') ? 'own' : 'server';
+  return options.some(o => o.value === want) ? want : (options[0] ? options[0].value : 'server');
+}
+
+export function saveAccess(value: RedditAccess, storage: Pick<Storage, 'setItem'> | null = typeof localStorage === 'undefined' ? null : localStorage): void {
+  try { if (storage) storage.setItem(ACCESS_STORAGE, value); } catch { /* private window: not remembered */ }
 }

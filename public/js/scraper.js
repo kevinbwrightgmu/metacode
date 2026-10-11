@@ -527,6 +527,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const mine = ownRedditApis();
     const badge = mine ? '<span class="badge badge-green" style="margin-left:8px">Your key</span>'
       : r.configured ? '<span class="badge badge-blue" style="margin-left:8px">Server key</span>'
+      : currentEngine() === 'redditapis' ? '<span class="badge badge-amber" style="margin-left:8px">Needed · paid</span>'
       : '<span class="badge badge-gray" style="margin-left:8px">Optional · paid</span>';
     const title = '<div class="card-title" style="display:flex;align-items:center;justify-content:space-between;margin:0"><span>RedditAPIs.com key ' + badge + '</span>';
     const dashboard = '<a href="' + esc(r.dashboardUrl || 'https://www.redditapis.com/dashboard/api-keys') + '" target="_blank" rel="noopener noreferrer" style="color:var(--blue)">redditapis.com</a>';
@@ -553,7 +554,11 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       <div class="form-error mt-2" id="sc-rapi-error" role="alert"></div>` : '');
   }
 
-  function toggleRedditApis() { rapiOpen = !rapiOpen; renderApiAccess(); }
+  function toggleRedditApis(open) {
+    rapiOpen = open === undefined ? !rapiOpen : !!open;
+    renderApiAccess();
+    if (rapiOpen) { const el = $('sc-api'); if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
+  }
 
   function keysChanged() { renderEngine(); renderStatus(); renderApiAccess(); renderOptions(); }
 
@@ -669,18 +674,24 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
   }
 
   /* ── Engine: where Reddit requests are made ── */
+  // "redditapis" (the default, SCRAPER_DEFAULT_ENGINE): the third-party
+  // RedditAPIs.com service, with your key (kept in this browser) or the server's.
   // "browser": this tab fetches them through Scramjet's transport (epoxy-tls
   // over MetaCode's Wisp endpoint) — no API credentials or .env setup.
   // "server": the MetaCode server fetches them (Reddit API credentials, or
   // public pages subject to robots.txt).
-  // An engine can be used when the server offers it, or (RedditAPIs.com) with your own key.
+  // The choice is remembered in this browser (form.engine).
   function engineAvailable(e) {
     if (!status || !status.engines) return true;
     if (e === 'redditapis' && ownRedditApis()) return !!status.enabled;
     return !!(status.engines[e] && status.engines[e].available);
   }
   function defaultEngine() {
-    return ownRedditApis() ? 'redditapis' : ownReddit() ? 'server' : (status && status.defaultEngine);
+    return ownRedditApis() ? 'redditapis' : ownReddit() ? 'server' : ((status && status.defaultEngine) || 'redditapis');
+  }
+  // Is there a RedditAPIs.com key to use (yours, or this server's)?
+  function redditApisKeyReady() {
+    return !!(ownRedditApis() || (status && status.redditApis && status.redditApis.configured));
   }
   function currentEngine() {
     let chosen = form.engine || defaultEngine() || 'browser';
@@ -698,7 +709,8 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const browserOk = engineAvailable('browser');
     const mode = serverMode();
     const serverLabel = mode === 'own' ? 'MetaCode server (Reddit API, your keys)' : mode === 'oauth' ? 'MetaCode server (Reddit API)' : 'MetaCode server (needs Reddit API keys)';
-    const rapiLabel = ownRedditApis() ? 'RedditAPIs.com (your key, paid per request)' : 'RedditAPIs.com (API key, paid per request)';
+    const rapiLabel = ownRedditApis() ? 'RedditAPIs.com (your key, paid per request)'
+      : redditApisKeyReady() ? 'RedditAPIs.com (paid per request)' : 'RedditAPIs.com (add your API key)';
     sel.innerHTML = (engineAvailable('redditapis') && status ? '<option value="redditapis"' + (engine === 'redditapis' ? ' selected' : '') + '>' + esc(rapiLabel) + '</option>' : '') +
       (browserOk ? '<option value="browser"' + (engine === 'browser' ? ' selected' : '') + '>This browser (Scramjet) — no setup</option>' : '') +
       '<option value="server"' + (engine === 'server' ? ' selected' : '') + '>' + esc(serverLabel) + '</option>';
@@ -709,6 +721,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     saveForm();
     renderEngine();
     renderStatus();
+    renderApiAccess();
     renderOptions();
   }
 
@@ -732,7 +745,12 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     const parts = [];
     const engine = currentEngine();
     const lim = engineLimits();
-    if (engine === 'redditapis') {
+    if (engine === 'redditapis' && !redditApisKeyReady()) {
+      parts.push('<span class="badge badge-amber">RedditAPIs.com · needs an API key</span>');
+      parts.push('<span class="text-second">RedditAPIs.com is a third-party service that sells Reddit data per request. ' +
+        'Add your API key to use it (it stays in this browser), or choose another way under "Fetch Reddit through".</span>');
+      parts.push('<button class="btn btn-secondary btn-sm" type="button" id="sc-rapi-add" onclick="RedditScraper.toggleRedditApis(true)">Add your RedditAPIs.com key</button>');
+    } else if (engine === 'redditapis') {
       const mine = ownRedditApis();
       const bal = mine && mine.balance;
       parts.push('<span class="badge badge-green">RedditAPIs.com' + (mine ? ' · your key' : ' · server key') + '</span>');
@@ -1329,6 +1347,11 @@ async def scrape(ctx):
       }
     } catch (e) {
       setFormError(e.message);
+      return;
+    }
+    if (body.engine === 'redditapis' && !redditApisKeyReady()) {
+      setFormError('Add your RedditAPIs.com API key first (under "RedditAPIs.com key"), or choose another way under "Fetch Reddit through".');
+      toggleRedditApis(true);
       return;
     }
     // Your own keys go with the job (the server uses them for this job only).

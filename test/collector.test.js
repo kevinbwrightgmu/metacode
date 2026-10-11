@@ -90,8 +90,10 @@ async function openPage(url, init) {
   return { context, page, errors };
 }
 
+// The tests reach the mock Reddit through the server (there is no RedditAPIs.com key here).
 async function startJob(scope, goal, maxPosts) {
   await scope.locator('nav a[href="#new"]').click();
+  await scope.locator('#job-access').selectOption('server');
   await scope.locator('#job-goal').fill(goal);
   if (maxPosts) await scope.locator('#job-max-posts').fill(String(maxPosts));
   await scope.locator('#job-start:not([disabled])').click();
@@ -103,8 +105,15 @@ test('the AI Scraper on its own: describe the goal, watch the AI\'s steps, find 
   try {
     await page.waitForSelector('#overview-stats');
     await page.click('nav a[href="#new"]');
-    assert.equal(await page.inputValue('#job-access'), 'server');
+    // RedditAPIs.com is the default; without a key, Start waits for one (or another choice)
+    assert.equal(await page.inputValue('#job-access'), 'redditapis');
+    assert.match(await page.textContent('#job-access option[value="redditapis"]'), /RedditAPIs\.com \(add your API key\)/);
+    assert.match(await page.textContent('#job-access-note'), /Add your key on MetaCode's Reddit Scraper page/);
+    await page.fill('#job-goal', 'Posts about testing in r/test');
+    assert.equal(await page.isDisabled('#job-start'), true);
+    await page.selectOption('#job-access', 'server');
     assert.match(await page.textContent('#job-access-note'), /Reddit often blocks servers/);
+    assert.equal(await page.isDisabled('#job-start'), false);
     const before = ai.requests.length;
     await startJob(page, 'Posts about testing in r/test', 5);
     await page.waitForSelector('#monitor-outcome', { timeout: 60000 });
@@ -207,14 +216,19 @@ test('jobs saved by the earlier in-browser bot still open in the Monitor', { ski
   }
 });
 
-test('your own Reddit API keys (from the Reddit Scraper page) are offered first', { skip, timeout: 60000 }, async () => {
+test('RedditAPIs.com first; your own Reddit API keys (from the Reddit Scraper page) are offered; the choice is remembered', { skip, timeout: 60000 }, async () => {
   const keys = { reddit: { clientId: 'cid-1234', clientSecret: 'sec', username: 'me', hint: '…1234' } };
   const { context, page } = await openPage('/collector/#new', `localStorage.setItem('metacode.scraper.ownKeys', ${JSON.stringify(JSON.stringify(keys))})`);
   try {
     await page.waitForSelector('#job-access');
-    assert.equal(await page.inputValue('#job-access'), 'own');
-    assert.match(await page.textContent('#job-access'), /Your Reddit API keys \(…1234\)/);
+    assert.deepEqual(await page.$$eval('#job-access option', o => o.map(x => x.value)), ['redditapis', 'own', 'server']);
+    assert.equal(await page.inputValue('#job-access'), 'redditapis');
+    await page.selectOption('#job-access', 'own');
+    assert.match(await page.textContent('#job-access option[value="own"]'), /Your Reddit API keys \(…1234\)/);
     assert.match(await page.textContent('#job-access-note'), /Works even when Reddit blocks the server's address/);
+    await page.reload();
+    await page.waitForSelector('#job-access');
+    assert.equal(await page.inputValue('#job-access'), 'own');
   } finally {
     await context.close();
   }

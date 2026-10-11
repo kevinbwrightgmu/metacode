@@ -105,12 +105,14 @@ The AI model is chosen in MetaCode's **Settings → AI models → AI Scraper** (
 
 ## Reaching Reddit
 
-The job's Reddit requests are made by the MetaCode server, in one of three ways (**New job → Reaching Reddit**):
+The job's Reddit requests are made by the MetaCode server, in one of three ways (**New job → Reaching Reddit**).
+The form starts on **RedditAPIs.com** (the server's `SCRAPER_DEFAULT_ENGINE`) and remembers your last choice in
+this browser.
 
 | Choice | Needs | Notes |
 |---|---|---|
+| **RedditAPIs.com** (default) | Your key (Reddit Scraper page → RedditAPIs.com key) or the server's | A third-party paid service, billed per request. `find_subreddits` isn't available through it. Without a key the option reads *RedditAPIs.com (add your API key)* and **Start** stays off. |
 | **Your Reddit API keys** | Keys added on the Reddit Scraper page → Reddit API access | They stay in this browser and are sent only with your jobs. They give your own limit (about 100 requests a minute per app) and work when Reddit blocks the server's address. |
-| **RedditAPIs.com** | Your key (added on the same card) or the server's | A third-party paid service, billed per request. `find_subreddits` isn't available through it. |
 | **This MetaCode server** | — | The server's Reddit API keys if it has them (a limit shared by everyone), otherwise public pages. Reddit often blocks servers' public requests ("You've been blocked by network security"), and robots.txt applies to public pages. |
 
 The AI doesn't change what Reddit allows. It can't log in, solve CAPTCHAs, or get past blocks. If Reddit

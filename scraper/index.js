@@ -251,9 +251,11 @@ function createScraper(opts) {
       engines: {
         browser: { available: config.enabled && config.browserEnabled, minDelayMs: Math.max(config.minDelayMs, config.publicMinDelayMs), connectedTabs: req ? relay.tabsFor(ownerOf(req)) : relay.subscribers },
         server: { available: config.enabled, mode: http.mode, minDelayMs: floor },
-        redditapis: { available: config.enabled && !!config.redditApisKey, minDelayMs: config.minDelayMs }
+        // Offered to everyone: with this server's key, or with the user's own (kept in their browser).
+        redditapis: { available: config.enabled, serverKey: !!config.redditApisKey, minDelayMs: config.minDelayMs }
       },
-      defaultEngine: config.redditApisKey ? 'redditapis' : (config.oauth || !config.browserEnabled ? 'server' : 'browser'),
+      // The engine the pages pick until the user chooses another (SCRAPER_DEFAULT_ENGINE).
+      defaultEngine: config.defaultEngine === 'browser' && !config.browserEnabled ? 'server' : config.defaultEngine,
       // AI Scraper (beta): AI jobs (mode "ai"), run by the server or RedditAPIs.com engine
       aiScraper: { available: config.enabled && !aiProblem(), reason: aiProblem() },
       // Users can add their own keys (kept in their browser, sent with their jobs).
@@ -316,7 +318,7 @@ function createScraper(opts) {
       own = ownRedditApisClient(key);
     }
     if (engine === 'redditapis' && !own && !config.redditApisKey) {
-      throw new ScraperError('not_available', 'Add your RedditAPIs.com API key first (Reddit API scraper → Reddit API access).', { status: 400 });
+      throw new ScraperError('not_available', 'Add your RedditAPIs.com API key first (Reddit Scraper → RedditAPIs.com key), or choose another way under "Fetch Reddit through".', { status: 400 });
     }
     if (engine === 'browser' && !config.browserEnabled) {
       throw new ScraperError('not_available', 'Browser mode needs the in-app browser, which is turned off (SCRAPER_BROWSER_ENABLED=false).', { status: 403 });

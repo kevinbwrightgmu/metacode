@@ -72,10 +72,12 @@ test('response translation handles each documented envelope', () => {
 test('API key: checked with /account/me, never saved or echoed; jobs need one (yours, or the server\'s from .env)', async () => {
   let st = (await getJson(app.api + '/status')).json;
   assert.equal(st.redditApis.configured, false);
-  assert.notEqual(st.defaultEngine, 'redditapis');
+  // RedditAPIs.com is the default and always offered; without a key (yours or the server's) a job asks for one
+  assert.equal(st.defaultEngine, 'redditapis');
+  assert.deepEqual(st.engines.redditapis, { available: true, serverKey: false, minDelayMs: app.config.minDelayMs });
   const noKey = await postJson(app.api + '/jobs', { engine: 'redditapis', target: { type: 'subreddit', subreddit: 'test' } });
   assert.equal(noKey.status, 400);
-  assert.match(noKey.json.error.message, /Add your RedditAPIs\.com API key first/);
+  assert.match(noKey.json.error.message, /Add your RedditAPIs\.com API key first \(Reddit Scraper → RedditAPIs\.com key\)/);
 
   const bad = await postJson(app.api + '/redditapis-key/check', { key: 'rapi_wrong_key_000000' });
   assert.equal(bad.status, 400);
@@ -193,6 +195,7 @@ test('a rotated key fails jobs clearly; the server\'s .env key is the fallback f
     const s2 = (await getJson(envApp.api + '/status')).json;
     assert.equal(s2.redditApis.source, 'env');
     assert.equal(s2.defaultEngine, 'redditapis');
+    assert.equal(s2.engines.redditapis.serverKey, true);
     const r = await postJson(envApp.api + '/jobs', { engine: 'redditapis', target: { type: 'subreddit', subreddit: 'WeirdSideHustles' }, options: { maxItems: 5, includeMetadata: false } });
     const job = await waitForJob(envApp.api, r.json.job.id, 30000);
     assert.equal(job.status, 'completed', JSON.stringify(job.error));
@@ -203,4 +206,14 @@ test('a rotated key fails jobs clearly; the server\'s .env key is the fallback f
     await envApp.close();
     require('../scraper/network/wisp-server').configureWisp(app.config);
   }
+});
+
+test('SCRAPER_DEFAULT_ENGINE: RedditAPIs.com unless the server picks another', () => {
+  const { loadScraperConfig } = require('../scraper/config');
+  assert.equal(loadScraperConfig({}).defaultEngine, 'redditapis');
+  assert.equal(loadScraperConfig({ SCRAPER_DEFAULT_ENGINE: ' Browser ' }).defaultEngine, 'browser');
+  assert.equal(loadScraperConfig({ SCRAPER_DEFAULT_ENGINE: 'server' }).defaultEngine, 'server');
+  const bad = loadScraperConfig({ SCRAPER_DEFAULT_ENGINE: 'vpn' });
+  assert.equal(bad.defaultEngine, 'redditapis');
+  assert.ok(bad.warnings.some(w => /SCRAPER_DEFAULT_ENGINE must be redditapis, browser or server/.test(w)));
 });

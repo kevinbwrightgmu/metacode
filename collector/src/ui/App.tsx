@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { AiJobConfig, CollectionError, JobRecord, LogEntry, Settings } from '../types';
 import { CollectorStore, type Counts, type RecordFilter } from '../store/db';
-import { DEFAULT_SETTINGS, accessOptions, cleanSettings, fetchServerInfo, readOwnKeys, type ServerInfo } from '../lib/settings';
+import { DEFAULT_SETTINGS, accessOptions, cleanSettings, fetchServerInfo, initialAccess, readOwnKeys, type ServerInfo } from '../lib/settings';
 import { jobRequest, startAiJob } from '../lib/ai-jobs';
 import { AiJobSession, newJobRecord } from '../lib/session';
 import { stopExportWorker } from '../export/client';
@@ -127,6 +127,7 @@ export function App() {
   const startProblem = fatal || (server && server.problem) || (active ? 'A job is running (one at a time). Stop it in the Monitor, or wait for it to finish.' : null);
   const ownKeys = useMemo(() => readOwnKeys(), [view]);
   const access = server ? accessOptions(ownKeys, server) : [];
+  const defaultAccess = initialAccess(access, server);
 
   async function startJob(config: AiJobConfig) {
     if (!store || startProblem) return;
@@ -188,7 +189,7 @@ export function App() {
         {store ? (
           <>
             {view === 'overview' ? <Overview counts={counts} jobs={jobs} errors={errors} onOpenJob={openJob} onNewJob={() => go('new')} /> : null}
-            {view === 'new' ? <NewJob settings={settings} access={access} model={metaCodeModel()} canStart={!startProblem} startProblem={startProblem} onStart={startJob} /> : null}
+            {view === 'new' ? <NewJob settings={settings} access={access} defaultAccess={defaultAccess} model={metaCodeModel()} canStart={!startProblem} startProblem={startProblem} onStart={startJob} /> : null}
             {view === 'monitor' ? <Monitor job={shownJob} logs={logs} onStop={() => { if (shownSession) void shownSession.stop().catch(err => setLogs(l => l.concat({ at: new Date().toISOString(), level: 'error', message: (err as Error).message }))); }}
               onNewJob={() => go('new')}
               onAddToProject={embedded && shownJob ? () => addToProject([{ type: 'post', jobId: shownJob.id }, { type: 'comment', jobId: shownJob.id }]) : undefined} /> : null}

@@ -61,11 +61,15 @@ GET  /api/scraper/jobs/:id/export                     └─ custom code ──�
    `SCRAPER_JOB_RETENTION_MINUTES`. Export them, or click **Add to project** to store them in the
    project (browser localStorage) as posts.
 
-Where requests are made — **Fetch Reddit through** (next to *Start scrape*):
+Where requests are made — **Fetch Reddit through** (next to *Start scrape*). The choice is remembered in each
+browser; until someone picks, it is the server's default, `SCRAPER_DEFAULT_ENGINE` (**RedditAPIs.com** unless
+changed). Your own saved keys win over the server's default: a RedditAPIs.com key picks RedditAPIs.com, Reddit
+API keys pick the MetaCode server.
 
 | Engine | Default when | How | Notes |
 |---|---|---|---|
-| **This browser (Scramjet)** | no Reddit API credentials | The job runs on the server, but each Reddit request is handed to your open MetaCode tab, which fetches it through the same Scramjet transport as **Browse Reddit** (epoxy-tls over MetaCode's Wisp endpoint) and sends the answer back | **No setup.** Requests carry your browser's own User-Agent; no credentials are used; the server's robots.txt check doesn't apply (these are your browser's requests). Rate limiting, retries, caps and the Reddit-only allow-list still apply. Keep MetaCode open until the job finishes |
+| **RedditAPIs.com** | always, unless `SCRAPER_DEFAULT_ENGINE` says otherwise | The third-party [RedditAPIs.com](#redditapiscom-api-key-third-party-paid) API, with your key (kept in your browser) or the server's `REDDITAPIS_KEY` | Paid per request. Without a key the option reads *RedditAPIs.com (add your API key)* and **Start** opens the key form instead of starting |
+| **This browser (Scramjet)** | `SCRAPER_DEFAULT_ENGINE=browser` | The job runs on the server, but each Reddit request is handed to your open MetaCode tab, which fetches it through the same Scramjet transport as **Browse Reddit** (epoxy-tls over MetaCode's Wisp endpoint) and sends the answer back | **No setup.** Requests carry your browser's own User-Agent; no credentials are used; the server's robots.txt check doesn't apply (these are your browser's requests). Rate limiting, retries, caps and the Reddit-only allow-list still apply. Keep MetaCode open until the job finishes |
 | **MetaCode server – Reddit Data API** | `REDDIT_CLIENT_ID` + `REDDIT_CLIENT_SECRET` set | `oauth.reddit.com` | Application-only OAuth token; Reddit's documented API and limits apply. Works without a tab open |
 | **MetaCode server – public pages** | (choose it explicitly) | `www.reddit.com/….json` | Checks Reddit's robots.txt before each path, which currently refuses most of Reddit |
 
@@ -146,6 +150,7 @@ Invalid values are ignored with a warning in the start-up banner.
 | `SCRAPER_SERVER_TRANSPORT` | `auto` | Who makes the server's HTTPS requests: `python` (python/reddit_fetch.py), `epoxy` (epoxy-tls over Wisp), or `auto` (Python when found, else epoxy-tls) |
 | `SCRAPER_PYTHON` | — | Python command for the server engine (default: `python3`, then `python`, then `py -3` on Windows) |
 | `SCRAPER_BROWSER_ENABLED` | `true` | Serve the in-app Reddit browser (Scramjet) and allow the browser engine |
+| `SCRAPER_DEFAULT_ENGINE` | `redditapis` | What **Fetch Reddit through** (and the AI Scraper's **Reaching Reddit**) starts on until a user picks another: `redditapis`, `browser` or `server`. Each browser remembers its own choice |
 | `REDDIT_BASE_URL` / `REDDIT_OAUTH_BASE_URL` | `https://www.reddit.com` / `https://oauth.reddit.com` | Where Reddit is reached. Change only for testing against a mock |
 | `SCRAPER_ALLOW_PRIVATE_NETWORK` | `false` | Lets the Wisp proxy connect to private/loopback addresses. **Testing only** |
 
@@ -203,7 +208,7 @@ in as a user.
 
 [RedditAPIs.com](https://www.redditapis.com) is a **third-party commercial service, not Reddit**. It sells
 Reddit data through its own REST API (`https://api.redditapis.com`) and charges per request. MetaCode can use
-it as a third way to fetch data: **Fetch Reddit through → RedditAPIs.com (API key, paid per request)**.
+it to fetch data, and it is the default: **Fetch Reddit through → RedditAPIs.com**.
 Pricing, terms and how it sources its data are between you and that vendor. Read its terms and check that
 using it fits your research ethics/IRB requirements.
 
@@ -250,8 +255,9 @@ The errors you may see map to:
 
 ## 4. Running a standard scrape
 
-1. Sidebar → **Scraper**. Leave **Standard scraper** selected. **Fetch Reddit through** is *This browser
-   (Scramjet)* unless API credentials are configured — nothing else to set up.
+1. Sidebar → **Scraper**. Leave **Standard scraper** selected. **Fetch Reddit through** starts on
+   *RedditAPIs.com*: add your key under **RedditAPIs.com key**, or pick *This browser (Scramjet)* (no setup)
+   or the MetaCode server.
 2. **What to scrape**:
    - **Subreddit** — name (combine with `+`, e.g. `science+askscience`), sort (hot/new/top/rising/
      controversial), time range for top/controversial.

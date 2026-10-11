@@ -64,8 +64,9 @@ npm start
 
 Then open **http://localhost:3000** in your browser. The top bar and the "Analyze CSV" page both show a live status indicator so you always know whether the AI and Python/NetworkX are ready.
 
-**Reddit Scraper** works with no extra setup: by default your open MetaCode tab fetches Reddit through Scramjet.
-Reddit API credentials are optional — see [Reddit Scraper](#reddit-scraper). The **AI Scraper (beta)** needs one build
+**Reddit Scraper** fetches Reddit through **RedditAPIs.com** by default (add a RedditAPIs.com API key on the
+Scraper page; it stays in your browser). You can switch to your open MetaCode tab (Scramjet, no setup) or the
+MetaCode server under **Fetch Reddit through** — see [Reddit Scraper](#reddit-scraper). The **AI Scraper (beta)** needs one build
 step, Python 3 and the AI key — see [AI Scraper (beta)](#ai-scraper-beta) below.
 
 **Running MetaCode on a server** (a VPS with pm2, nginx and HTTPS): follow **[docs/deploy-vps.md](docs/deploy-vps.md)**.
@@ -211,10 +212,12 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 - **Networking**: every Reddit request goes through MetaCode's own Wisp endpoint (`/wisp/`, wisp-js), which
   only connects to Reddit's hosts, using epoxy-tls (end-to-end TLS in WebAssembly). The **Browse Reddit**
   panel is built on Scramjet with epoxy-transport over the same endpoint.
-- **No setup by default — "This browser (Scramjet)"**: jobs run on the server, but your open MetaCode tab makes
-  the Reddit requests through the same Scramjet/epoxy connection as Browse Reddit, so no API keys or `.env`
-  changes are needed. Keep MetaCode open until a job finishes. With `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`
-  you can instead run jobs entirely on the server through Reddit's API, or with a `REDDITAPIS_KEY` through the third-party RedditAPIs.com service (paid per request).
+- **Fetch Reddit through** (next to *Start scrape*, remembered in each browser): **RedditAPIs.com** is the default
+  (`SCRAPER_DEFAULT_ENGINE`) — a third-party service, paid per request, with your key (kept in your browser) or the
+  server's `REDDITAPIS_KEY`; without a key, Start asks for one. **This browser (Scramjet)** needs no setup: jobs run on
+  the server, but your open MetaCode tab makes the Reddit requests through the same Scramjet/epoxy connection as
+  Browse Reddit (keep MetaCode open until a job finishes). **MetaCode server** uses Reddit's API with your keys or
+  `REDDIT_CLIENT_ID` / `REDDIT_CLIENT_SECRET`. The AI Scraper (beta) has the same choice under **Reaching Reddit**.
 - **Responsible use**: shared per-host rate limiter with a server-enforced minimum delay, Reddit rate-limit
   headers and `Retry-After` honoured, caps on items/pages, no login/CAPTCHA/age-gate circumvention. The server
   engine checks robots.txt when it reads public pages without credentials.
