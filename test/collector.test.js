@@ -180,6 +180,33 @@ test('a job keeps running on the server when the page reloads, and the page pick
   }
 });
 
+test('jobs saved by the earlier in-browser bot still open in the Monitor', { skip, timeout: 60000 }, async () => {
+  const { context, page, errors } = await openPage('/collector/#overview');
+  try {
+    await page.waitForSelector('#overview-stats');
+    await page.evaluate(() => new Promise((resolve, reject) => {
+      const open = indexedDB.open('metacode-reddit-collector');
+      open.onsuccess = () => {
+        const tx = open.result.transaction('jobs', 'readwrite');
+        tx.objectStore('jobs').put({ id: 'old-bot-job', config: { targetType: 'subreddit', subreddits: ['alpha', 'beta'], maxPosts: 5 }, state: 'completed',
+          outcome: 'Reached the limit of 5 posts.', startedAt: '2026-10-01T00:00:00.000Z', finishedAt: '2026-10-01T00:05:00.000Z',
+          stats: { postsCollected: 5, commentsCollected: 0, postsSkipped: 0, pagesVisited: 3, errors: 0, retries: 0 }, robots: null });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      };
+      open.onerror = () => reject(open.error);
+    }));
+    await page.reload();
+    await page.click('tr:has-text("r/alpha, r/beta")');
+    await page.waitForSelector('#monitor-goal');
+    assert.equal(await page.textContent('#monitor-goal'), 'r/alpha, r/beta');
+    assert.equal(await page.textContent('#monitor-outcome'), 'Reached the limit of 5 posts.');
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
+
 test('your own Reddit API keys (from the Reddit Scraper page) are offered first', { skip, timeout: 60000 }, async () => {
   const keys = { reddit: { clientId: 'cid-1234', clientSecret: 'sec', username: 'me', hint: '…1234' } };
   const { context, page } = await openPage('/collector/#new', `localStorage.setItem('metacode.scraper.ownKeys', ${JSON.stringify(JSON.stringify(keys))})`);
