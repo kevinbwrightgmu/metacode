@@ -1,7 +1,7 @@
-// Overview: totals, jobs, recent activity.
+// Overview: totals, jobs, recent problems.
 import type { CollectionError, JobRecord } from '../types';
 import type { Counts } from '../store/db';
-import { describeJob } from '../bot/validate';
+import { describeJob } from '../lib/jobs';
 import { Stat, StateChip, fmtDate, fmtDuration, fmtNum } from './common';
 
 interface Props {
@@ -17,7 +17,7 @@ export function Overview({ counts, jobs, errors, onOpenJob, onNewJob }: Props) {
   const completed = jobs.filter(j => j.state === 'completed').length;
   const failed = jobs.filter(j => j.state === 'failed').length;
   const stopped = jobs.filter(j => j.state === 'stopped').length;
-  const pagesOk = jobs.reduce((n, j) => n + j.stats.pagesVisited, 0);
+  const requests = jobs.reduce((n, j) => n + ((j.stats && j.stats.requests) || 0), 0);
 
   return (
     <>
@@ -26,7 +26,7 @@ export function Overview({ counts, jobs, errors, onOpenJob, onNewJob }: Props) {
           <Stat label="Posts collected" value={fmtNum(counts.posts)} />
           <Stat label="Comments collected" value={fmtNum(counts.comments)} />
           <Stat label="Jobs" value={fmtNum(jobs.length)} sub={active + ' active · ' + completed + ' completed · ' + failed + ' failed · ' + stopped + ' stopped'} />
-          <Stat label="Collection errors" value={fmtNum(counts.errors)} sub={fmtNum(pagesOk) + ' pages loaded in all'} tone={counts.errors ? 'bad' : undefined} />
+          <Stat label="Reddit requests" value={fmtNum(requests)} sub="made by the AI's jobs" />
         </div>
       </section>
 
@@ -38,7 +38,7 @@ export function Overview({ counts, jobs, errors, onOpenJob, onNewJob }: Props) {
         {jobs.length ? (
           <div className="table-wrap">
             <table className="table">
-              <thead><tr><th>State</th><th>Job</th><th>Started</th><th>Duration</th><th className="num">Posts</th><th className="num">Comments</th><th>Outcome</th></tr></thead>
+              <thead><tr><th>State</th><th>Goal</th><th>Started</th><th>Duration</th><th className="num">Posts</th><th className="num">Comments</th><th>Outcome</th></tr></thead>
               <tbody>
                 {jobs.slice(0, 15).map(j => (
                   <tr key={j.id} className="clickable" tabIndex={0} onClick={() => onOpenJob(j)} onKeyDown={e => { if (e.key === 'Enter') onOpenJob(j); }}>
@@ -54,7 +54,7 @@ export function Overview({ counts, jobs, errors, onOpenJob, onNewJob }: Props) {
               </tbody>
             </table>
           </div>
-        ) : <p className="muted">No jobs yet. Start one to collect posts and comments from public subreddits or a search.</p>}
+        ) : <p className="muted">No jobs yet. Tell the AI what posts you need, and it finds and collects them.</p>}
       </section>
 
       {errors.length ? (

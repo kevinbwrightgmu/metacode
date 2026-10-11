@@ -11,6 +11,7 @@ const envLoader = createEnvLoader(__dirname);
 envLoader.load();
 
 const { createScraper } = require('./scraper');
+const { ScraperError, cancelledError } = require('./scraper/errors');
 const { createSurveys } = require('./surveys');
 const { createProjects } = require('./projects');
 const { rankSimilar } = require('./model-match');
@@ -58,17 +59,16 @@ app.use(express.static(path.join(__dirname, 'public'), {
   setHeaders(res, file) { if (/\.(html|js|css|mjs)$/i.test(file)) res.setHeader('Cache-Control', 'no-cache'); }
 }));
 
-// Reddit Collector (collector/): a client-side app (React + Vite) that runs a
-// collection bot on Reddit pages loaded through Scramjet. It's built into
-// collector/dist (npm run collector:build) and served here, on the same
-// origin as Scramjet's files and the Wisp endpoint it relies on.
+// AI Scraper (beta) (collector/): a React + Vite app that starts AI jobs
+// (/api/scraper, mode "ai") and keeps what they collect in the browser. It's
+// built into collector/dist (npm run collector:build) and served here.
 const COLLECTOR_DIST = path.join(__dirname, 'collector', 'dist');
 app.get('/collector', (req, res, next) => (req.path.endsWith('/') ? next() : res.redirect(301, '/collector/')));
 app.use('/collector', express.static(COLLECTOR_DIST, {
   setHeaders(res, file) { res.setHeader('Cache-Control', /[\\/]assets[\\/]/.test(file) ? 'public, max-age=31536000, immutable' : 'no-cache'); }
 }));
 app.get('/collector/*', (req, res) => {
-  res.status(503).type('text/plain').send('The Reddit Collector isn\'t built yet. In the MetaCode folder run:\n\n  npm run collector:install\n  npm run collector:build\n\nthen reload this page.');
+  res.status(503).type('text/plain').send('The AI Scraper isn\'t built yet. In the MetaCode folder run:\n\n  npm run collector:install\n  npm run collector:build\n\nthen reload this page.');
 });
 
 // ── AI provider: EMIS ─────────────────────────────────────────────────────────
@@ -2013,7 +2013,26 @@ app.post('/api/network/analyze', async (req, res) => {
 // scraper/ (see docs/reddit-scraper.md). /api/scraper/* is the API;
 // /scramjet/* serves the in-app Reddit browser's Scramjet files; the Wisp
 // WebSocket endpoint (/wisp/) is attached to the HTTP server in start().
-const scraper = createScraper();
+// The AI Scraper (beta) asks MetaCode's AI service like the other AI features
+// (same key, models, fallbacks and quota handling). Its agent
+// (python/ai_scraper.py) never sees the key.
+const scraperAi = {
+  problem() {
+    const f = notConfigured();
+    return f ? f.message : null;
+  },
+  async chat(messages, opts) {
+    const aiError = f => new ScraperError('ai_error', 'MetaCode\'s AI service: ' + f.message, { status: f.status || 502 });
+    const prep = await prepareChat({ model: (opts && opts.model) || undefined, messages, temperature: 0.2, max_tokens: 1000 }, 'emis');
+    if (prep.failure) throw aiError(prep.failure);
+    const out = await answerChat(prep, opts && opts.signal);
+    if (out.aborted) throw cancelledError();
+    if (out.failure) throw aiError(out.failure);
+    const c = out.json && out.json.choices && out.json.choices[0];
+    return { text: String((c && c.message && c.message.content) || ''), model: out.fallback || out.requested };
+  }
+};
+const scraper = createScraper({ ai: scraperAi });
 app.use('/api/scraper', scraper.router);
 app.use('/scramjet', scraper.scramjetRouter);
 app.get('/wisp/', scraper.wispPlainHttp);         // only reached when a proxy dropped the WebSocket upgrade

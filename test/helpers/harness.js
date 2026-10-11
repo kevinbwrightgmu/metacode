@@ -34,7 +34,7 @@ function testConfig(extra) {
 async function startScraperApp(env, opts) {
   const config = loadScraperConfig(testEnv(env));
   const scraper = createScraper({ config, logToConsole: false, credentialsFile: (opts && opts.credentialsFile) || TEST_CREDENTIALS_FILE,
-    redditApisKeyFile: (opts && opts.redditApisKeyFile) || TEST_REDDITAPIS_KEY_FILE });
+    redditApisKeyFile: (opts && opts.redditApisKeyFile) || TEST_REDDITAPIS_KEY_FILE, ai: (opts && opts.ai) || null });
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   app.use('/api/scraper', scraper.router);

@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { CommentRecord, ExportFormat, JobRecord, PostRecord } from '../types';
 import { EMPTY_FILTER, type CollectorStore, type RecordFilter, type RecordSort } from '../store/db';
-import { describeJob } from '../bot/validate';
+import { describeJob } from '../lib/jobs';
 import { download, runExport } from '../export/client';
 import { ExternalLink, Notice, RedditLink, fmtDate, fmtNum } from './common';
 
@@ -185,7 +185,7 @@ function RecordDetail({ store, record, onClose, onDelete }: { store: CollectorSt
 
   const fields: [string, React.ReactNode][] = record.record_type === 'post' ? [
     ['Post ID', record.id], ['Type', record.post_type || '—'], ['Flair', record.flair || '—'], ['NSFW', record.over_18 === null ? '—' : record.over_18 ? 'yes' : 'no'],
-    ['Links to', <ExternalLink key="l" href={record.link_url} />], ['Full details read', record.details_collected ? 'yes (post page)' : 'no (listing only)'],
+    ['Links to', <ExternalLink key="l" href={record.link_url} />], ['Full details read', record.details_collected ? 'yes' : 'no (only a listing was read)'],
     ['Collected', fmtDate(record.collected_at)], ['First collected', fmtDate(record.first_collected_at)], ['Read from', record.source_url]
   ] : [
     ['Comment ID', record.id], ['Post ID', record.post_id], ['Parent comment', record.parent_comment_id || '— (top level)'], ['Depth', fmtNum(record.depth)],

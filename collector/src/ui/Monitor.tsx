@@ -1,106 +1,99 @@
-// Live job monitor: what the bot is doing, counts, controls, and its log.
+// Live view of an AI job: what the AI is doing, step by step, and what it kept.
 import { useEffect, useRef, useState } from 'react';
-import type { JobProgress, JobRecord, LogEntry } from '../types';
-import { describeJob } from '../bot/validate';
+import type { JobRecord, LogEntry } from '../types';
+import { describeJob, ACCESS_LABEL } from '../lib/jobs';
 import { Notice, Stat, StateChip, fmtDate, fmtDuration, fmtNum } from './common';
 
+const TOOL_LABEL: Record<string, string> = {
+  find_subreddits: 'Find communities', search_posts: 'Search', list_posts: 'Browse subreddit', read_post: 'Read post',
+  keep: 'Keep posts', finish: 'Finish'
+};
+
 interface Props {
-  progress: JobProgress | null;
-  job: JobRecord | null;            // the active job's config (or the last finished job)
+  job: JobRecord | null;
   logs: LogEntry[];
-  onPause: () => void;
-  onResume: () => void;
   onStop: () => void;
   onNewJob: () => void;
   /** Inside MetaCode: send this job's records to the project. */
   onAddToProject?: () => Promise<string>;
 }
 
-export function Monitor({ progress, job, logs, onPause, onResume, onStop, onNewJob, onAddToProject }: Props) {
-  const logRef = useRef<HTMLOListElement>(null);
+export function Monitor({ job, logs, onStop, onNewJob, onAddToProject }: Props) {
+  const stepsRef = useRef<HTMLOListElement>(null);
   const [added, setAdded] = useState<{ tone: 'ok' | 'error'; text: string } | null>(null);
   const [adding, setAdding] = useState(false);
+  const [now, setNow] = useState(Date.now());
+  const active = !!job && (job.state === 'running' || job.state === 'stopping');
+  // (jobs of the earlier in-browser bot, still in this browser, have no steps)
+  const steps = (job && Array.isArray(job.steps) ? job.steps : []);
   useEffect(() => { setAdded(null); }, [job && job.id]);
   useEffect(() => {
-    const el = logRef.current;
-    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 80) el.scrollTop = el.scrollHeight;
-  }, [logs.length]);
+    if (!active) return;
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, [active]);
+  useEffect(() => {
+    const el = stepsRef.current;
+    if (el && el.scrollHeight - el.scrollTop - el.clientHeight < 120) el.scrollTop = el.scrollHeight;
+  }, [steps.length]);
 
-  if (!progress || !job) {
+  if (!job) {
     return (
       <section className="card">
-        <h2>Job monitor</h2>
-        <p className="muted">No job has run in this window yet.</p>
+        <h2>Monitor</h2>
+        <p className="muted">No job is open. Ask the AI for posts and follow it here.</p>
         <button className="btn btn-primary" onClick={onNewJob}>New job</button>
       </section>
     );
   }
 
-  const active = progress.state === 'running' || progress.state === 'paused' || progress.state === 'stopping';
-  const s = progress.stats;
-  const postShare = Math.min(1, s.postsCollected / Math.max(1, progress.limits.maxPosts));
-  const timeShare = Math.min(1, progress.elapsedMs / Math.max(1, progress.limits.maxRuntimeMs));
-  const collectsPosts = job.config.mode !== 'comments';
+  const s = job.stats;
+  const c = job.config;
+  const elapsed = (job.finishedAt ? Date.parse(job.finishedAt) : now) - Date.parse(job.startedAt);
+  const current = active && steps.length ? steps[steps.length - 1] : null;
+  const legacy = !c || typeof c.goal !== 'string';
 
   return (
     <section className="card monitor" aria-label="Job monitor">
       <div className="monitor-head">
         <div>
-          <h2>{describeJob(job.config)}</h2>
-          <div className="muted small">Started {fmtDate(progress.startedAt)} · {fmtDuration(progress.elapsedMs)}</div>
+          <h2 id="monitor-goal">{describeJob(c)}</h2>
+          <div className="muted small">Started {fmtDate(job.startedAt)} · {fmtDuration(elapsed)}
+            {!legacy ? ' · through ' + ACCESS_LABEL[c.access] + ' · model ' + (c.model || 'server default') : ''}</div>
         </div>
-        <StateChip state={progress.state} />
+        <StateChip state={job.state} />
       </div>
 
-      <div className="op" role="status" aria-live="polite">
-        <div className="op-main" id="monitor-operation">{progress.operation}</div>
-        {progress.target ? <div className="muted small">Working on {progress.target}</div> : null}
-        {progress.currentUrl ? <div className="op-url" title={progress.currentUrl}>{progress.currentUrl}</div> : null}
-      </div>
-
-      <div className="bars">
-        {collectsPosts ? (
-          <div className="bar-block">
-            <div className="bar-label"><span>Posts saved: <b id="monitor-posts">{fmtNum(s.postsCollected)}</b></span><span className="muted">limit {fmtNum(progress.limits.maxPosts)}</span></div>
-            <div className={'bar' + (active ? ' is-active' : '')} role="progressbar" aria-label="Posts saved toward the limit" aria-valuemin={0} aria-valuemax={progress.limits.maxPosts} aria-valuenow={s.postsCollected}>
-              <span style={{ width: postShare * 100 + '%' }} />
-            </div>
-          </div>
-        ) : null}
-        <div className="bar-block">
-          <div className="bar-label"><span>Run time</span><span className="muted">limit {fmtDuration(progress.limits.maxRuntimeMs)}</span></div>
-          <div className="bar bar-time" role="progressbar" aria-label="Run time toward the limit" aria-valuemin={0} aria-valuemax={progress.limits.maxRuntimeMs} aria-valuenow={progress.elapsedMs}>
-            <span style={{ width: timeShare * 100 + '%' }} />
-          </div>
+      {active ? (
+        <div className="op" role="status" aria-live="polite">
+          <div className="op-main" id="monitor-operation">{job.state === 'stopping' ? 'Stopping…' : current ? (TOOL_LABEL[current.tool] || current.tool) + (current.args ? ': ' + current.args : '') : 'The AI is planning…'}</div>
+          {current && current.thought ? <div className="muted small">{current.thought}</div> : null}
         </div>
-        <p className="hint">How many posts exist isn't known in advance, so these bars show progress toward your limits, not toward the end of the data. A job can finish early when a listing runs out.</p>
-      </div>
+      ) : null}
 
       <div className="stats stats-6">
-        <Stat label="Posts saved" value={fmtNum(s.postsCollected)} />
-        <Stat label="Comments saved" value={fmtNum(s.commentsCollected)} />
-        <Stat label="Posts skipped" value={fmtNum(s.postsSkipped)} sub="date range, unreadable" />
-        <Stat label="Pages loaded" value={fmtNum(s.pagesVisited)} />
+        <Stat label="Posts kept" value={<span id="monitor-posts">{fmtNum(s.postsCollected)}</span>} sub={legacy ? undefined : 'limit ' + fmtNum(c.maxPosts)} />
+        <Stat label="Comments" value={fmtNum(s.commentsCollected)} />
+        <Stat label="AI steps" value={fmtNum(s.steps)} sub={legacy ? undefined : 'limit ' + fmtNum(c.maxSteps)} />
+        <Stat label="AI requests" value={fmtNum(s.aiCalls)} />
+        <Stat label="Reddit requests" value={fmtNum(s.requests)} />
         <Stat label="Errors" value={fmtNum(s.errors)} tone={s.errors ? 'bad' : undefined} />
-        <Stat label="Retries" value={fmtNum(s.retries)} />
       </div>
 
       {active ? (
         <div className="actions">
-          {progress.state === 'paused'
-            ? <button className="btn btn-primary" id="job-resume" onClick={onResume}>Resume</button>
-            : <button className="btn" id="job-pause" onClick={onPause} disabled={progress.state === 'stopping'}>Pause</button>}
-          <button className="btn btn-danger" id="job-stop" onClick={onStop} disabled={progress.state === 'stopping'}>Stop</button>
+          <button className="btn btn-danger" id="job-stop" onClick={onStop} disabled={job.state === 'stopping'}>Stop</button>
         </div>
       ) : (
         <>
-          {job.outcome ? <Notice tone={progress.state === 'failed' ? 'error' : progress.state === 'stopped' ? 'warn' : 'ok'}><span id="monitor-outcome">{job.outcome}</span></Notice> : null}
+          {job.outcome ? <Notice tone={job.state === 'failed' ? 'error' : job.state === 'stopped' ? 'warn' : 'ok'}><span id="monitor-outcome">{job.outcome}</span></Notice> : null}
+          {job.summary ? <p className="summary" id="monitor-summary"><b>The AI's summary:</b> {job.summary}</p> : null}
           <div className="actions">
             {onAddToProject && (s.postsCollected || s.commentsCollected) ? (
               <button className="btn btn-primary" id="job-add-to-project" disabled={adding} onClick={async () => {
                 setAdding(true);
                 try { setAdded({ tone: 'ok', text: await onAddToProject() }); } catch (err) { setAdded({ tone: 'error', text: (err as Error).message }); } finally { setAdding(false); }
-              }}>Add this job's {collectsPosts ? 'posts' : 'comments'}{collectsPosts && job.config.mode === 'both' ? ' and comments' : ''} to project</button>
+              }}>Add this job's posts{s.commentsCollected ? ' and comments' : ''} to project</button>
             ) : null}
             <button className={'btn' + (onAddToProject ? '' : ' btn-primary')} onClick={onNewJob}>New job</button>
           </div>
@@ -108,15 +101,28 @@ export function Monitor({ progress, job, logs, onPause, onResume, onStop, onNewJ
         </>
       )}
 
-      {job.robots ? <p className="hint">robots.txt: {job.robots.note}</p> : null}
+      <h3>What the AI did</h3>
+      {steps.length ? (
+        <ol className="steps" id="monitor-steps" ref={stepsRef} aria-label="The AI's steps">
+          {steps.map(st => (
+            <li key={st.step} className={st.error ? 'step-error' : ''}>
+              <div className="step-head"><span className="step-n">{st.step}</span><b>{TOOL_LABEL[st.tool] || st.tool}</b>{st.args ? <span className="step-args"> {st.args}</span> : null}</div>
+              {st.thought ? <div className="step-thought">{st.thought}</div> : null}
+              {st.result ? <div className="step-result">→ {st.result}</div> : null}
+            </li>
+          ))}
+        </ol>
+      ) : <p className="muted">{active ? 'Waiting for the AI\'s first step…' : 'No steps recorded.'}</p>}
 
-      <h3>Log</h3>
-      <ol className="log" ref={logRef} aria-label="Job log">
-        {logs.map((l, i) => (
-          <li key={i} className={'log-' + l.level}><time>{new Date(l.at).toLocaleTimeString()}</time> <span>{l.message}</span></li>
-        ))}
-        {!logs.length ? <li className="muted">No log for this job in this window.</li> : null}
-      </ol>
+      <details className="log-wrap">
+        <summary>Log</summary>
+        <ol className="log" aria-label="Job log">
+          {logs.map((l, i) => (
+            <li key={i} className={'log-' + l.level}><time>{new Date(l.at).toLocaleTimeString()}</time> <span>{l.message}</span></li>
+          ))}
+          {!logs.length ? <li className="muted">No log for this job in this window.</li> : null}
+        </ol>
+      </details>
     </section>
   );
 }

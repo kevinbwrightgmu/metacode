@@ -1,13 +1,13 @@
 /* ══════════════════════════════════════════════
-   collector-view.js — the Scraper page: the Reddit Collector inside MetaCode
+   collector-view.js — the AI Scraper (beta) page
 
-   Shows the Reddit Collector (collector/, served at /collector/) in the main
-   area. Its bot reads public Reddit pages loaded through Scramjet and keeps
-   what it collects in this browser. "Add to project" in the collector sends
-   posts here (postMessage, same origin only): new ones are added to the
-   project, posts already in it get their engagement numbers updated — the
-   numbers Metrics shows. The older server-side scraper (Reddit API keys,
-   custom code) stays available at #scraper-api.
+   Shows the AI Scraper app (collector/, served at /collector/) in the main
+   area. You describe the posts you need; an AI agent on the MetaCode server
+   (python/ai_scraper.py) finds and picks them through Reddit's API, and the
+   app keeps them in this browser. "Add to project" in the app sends posts
+   here (postMessage, same origin only): new ones are added to the project,
+   posts already in it get their engagement numbers updated — the numbers
+   Metrics shows. The Reddit Scraper (#scraper) is the regular scraper.
    ══════════════════════════════════════════════ */
 
 const CollectorView = (() => {
@@ -89,22 +89,26 @@ const CollectorView = (() => {
     container.innerHTML = `
       <div class="cv-wrap">
         <div class="cv-bar">
-          <div class="cv-intro">Collect public posts and comments: a bot reads subreddits or a search in the built-in Reddit browser (Scramjet).
-            In <b>Data</b>, <b>Add to project</b> sends them here for coding — with their engagement for Metrics.</div>
-          <a class="btn btn-ghost btn-sm" href="#scraper-api" title="The server-side scraper: Reddit API keys, RedditAPIs.com and custom code">Reddit API scraper</a>
+          <div class="cv-intro"><b>Beta.</b> Describe the posts you need; an AI finds where they're discussed, searches, and keeps the ones that fit.
+            <b>Add to project</b> sends them here for coding — with their engagement for Metrics.</div>
+          <a class="btn btn-ghost btn-sm" href="#scraper" title="The regular scraper: subreddits, searches, posts, users and custom code">Reddit Scraper</a>
         </div>
         <iframe id="cv-frame" class="cv-frame" src="/collector/?embed=1" title="Reddit Collector"></iframe>
         <div id="cv-missing" class="card cv-missing" hidden>
-          <div class="card-title">The scraper isn't built yet</div>
-          <p>The scraper is a separate app in the <code>collector/</code> folder. Build it once on the server, then reload this page:</p>
+          <div class="card-title">The AI Scraper isn't built yet</div>
+          <p>The AI Scraper is a separate app in the <code>collector/</code> folder. Build it once on the server, then reload this page:</p>
           <pre class="sc-pre">npm run collector:install
 npm run collector:build</pre>
           <p class="form-hint">On a server managed by pm2, run these in the MetaCode folder and then <code>pm2 reload metacode</code> — see docs/deploy-vps.md.</p>
         </div>
       </div>`;
     window.addEventListener('message', onMessage);
+    // What the AI Scraper app in the frame may ask this page (same origin): the
+    // AI model chosen for it in Settings → AI models.
+    window.MetaCodeHost = { aiScraperModel: () => App.modelFor('scraper') };
     App.setViewCleanup(() => {
       window.removeEventListener('message', onMessage);
+      delete window.MetaCodeHost;
       container.classList.remove('view-container-flush');
     });
     // Not built yet: say how to build it instead of showing an error page

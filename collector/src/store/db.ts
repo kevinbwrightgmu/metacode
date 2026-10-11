@@ -1,6 +1,7 @@
 // ── Local storage (IndexedDB) ─────────────────────────────────────────────────
-// Posts, comments, jobs and collection errors live in this browser's
-// IndexedDB — nothing is sent to a server. Reddit ids are the keys, so a post
+// Posts, comments, jobs and errors live in this browser's IndexedDB: the
+// records AI jobs keep are copied here from the MetaCode server, and stay here
+// after the server forgets the job. Reddit ids are the keys, so a post
 // seen twice is one record (merged, see mergeRecords). All operations are
 // asynchronous; long scans use cursors so large collections aren't loaded
 // into memory at once. Works in the page and in Web Workers.
@@ -8,8 +9,8 @@
 // Never stored: passwords, cookies, tokens or any other credentials.
 
 import type { CollectionError, CommentRecord, JobRecord, PostRecord, Settings } from '../types';
-import { mergeRecords } from '../extract/normalize';
-import type { BotStore } from '../bot/bot';
+import { mergeRecords } from '../lib/records';
+import type { SessionStore } from '../lib/session';
 
 export const DB_NAME = 'metacode-reddit-collector';
 const DB_VERSION = 1;
@@ -71,7 +72,7 @@ function sortKey(r: PostRecord | CommentRecord, sort: RecordSort): string | numb
   }
 }
 
-export class CollectorStore implements BotStore {
+export class CollectorStore implements SessionStore {
   private constructor(private db: IDBDatabase) {}
 
   static async open(factory: IDBFactory = indexedDB): Promise<CollectorStore> {
@@ -258,10 +259,14 @@ export class CollectorStore implements BotStore {
     return rows.sort((a, b) => (a.at < b.at ? 1 : -1)).slice(0, limit);
   }
 
-  /** Jobs still marked as running when the page was closed: finish them as stopped. */
+  /**
+   * Jobs of the earlier in-browser bot still marked as running when the page
+   * was closed: finish them as stopped. (AI jobs run on the server and are
+   * picked up again when the page opens.)
+   */
   async closeInterruptedJobs(): Promise<number> {
     const jobs = await this.listJobs();
-    const open = jobs.filter(j => j.state === 'running' || j.state === 'paused' || j.state === 'stopping');
+    const open = jobs.filter(j => (j.state === 'running' || j.state === 'paused' || j.state === 'stopping') && !(j.config && typeof j.config.goal === 'string'));
     for (const j of open) await this.saveJob({ ...j, state: 'stopped', outcome: 'Interrupted: the collector page was closed or reloaded while this job ran. Records saved before that are kept.', finishedAt: j.finishedAt || new Date().toISOString() });
     return open.length;
   }

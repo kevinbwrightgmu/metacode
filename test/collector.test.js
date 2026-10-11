@@ -1,20 +1,22 @@
-// Reddit Collector (collector/), end to end in Chromium: the built app served
-// by MetaCode at /collector/, Reddit pages loaded through real Scramjet (service
-// worker + rewriter + epoxy-tls over MetaCode's Wisp endpoint), the bot reading
-// them through the Scramjet plugin bridge, IndexedDB, the dashboard and exports.
+// AI Scraper (beta), end to end in Chromium: the app (collector/, served by
+// MetaCode at /collector/ and shown on the "AI Scraper" page) starts an AI job;
+// MetaCode's server runs the agent (python/ai_scraper.py), which asks a stand-in
+// for MetaCode's AI service what to do and calls Reddit through the server
+// (a stand-in for Reddit here); the app follows the job live, copies the posts
+// the AI kept into IndexedDB, shows them in Data and adds them to the project.
 //
-// "Reddit" here is a local stand-in (helpers/collector-mock.js) that MetaCode's
-// proxy is allowed to reach (REDDIT_BASE_URL). It proves the Scramjet
-// integration and the bot; it does not prove that live reddit.com pages work —
-// see collector/README.md "Manual live check".
+// This proves the pieces work together. It doesn't prove what a real AI model
+// does with a real goal, or that live Reddit answers this server.
 //
-// Skipped when the collector hasn't been built (npm run collector:build) or no
-// Chromium is available.
+// Skipped when the app hasn't been built (npm run collector:build), or when
+// Chromium or Python 3 isn't available.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
+const http = require('http');
 const path = require('path');
-const { createCollectorMock } = require('./helpers/collector-mock');
+const { spawnSync } = require('child_process');
+const { createMockReddit } = require('./helpers/mock-reddit');
 const { testEnv } = require('./helpers/harness');
 
 function findChromium() {
@@ -27,15 +29,43 @@ function findChromium() {
 }
 const chromiumPath = findChromium();
 const built = fs.existsSync(path.join(__dirname, '..', 'collector', 'dist', 'index.html'));
-const skip = !built ? 'collector not built (npm run collector:install && npm run collector:build)' : !chromiumPath ? 'no Chromium found (set CHROMIUM_PATH)' : false;
+const python = ['python3', 'python'].some(cmd => { try { return spawnSync(cmd, ['--version']).status === 0; } catch (e) { return false; } });
+const skip = !built ? 'the AI Scraper app isn\'t built (npm run collector:install && npm run collector:build)'
+  : !chromiumPath ? 'no Chromium found (set CHROMIUM_PATH)' : !python ? 'Python 3 not found' : false;
 
-let mock, mirror, server, base, browser;
+// A stand-in for MetaCode's AI service (OpenAI-style API). It plays a simple
+// agent: search r/test, keep three of the posts found, finish.
+const ai = { requests: [], delayMs: 0 };
+function scriptedReply(messages) {
+  const done = messages.filter(m => m.role === 'assistant').length;
+  const last = String(messages[messages.length - 1].content);
+  if (done === 0) return { thought: 'Look in r/test first.', tool: 'search_posts', args: { query: 'post', subreddit: 'test', limit: 4 } };
+  if (done === 1) return { thought: 'These three fit.', tool: 'keep', args: { post_ids: Array.from(last.matchAll(/\[([a-z0-9]{3,12})\]/g), m => m[1]).slice(0, 3), reason: 'on topic' } };
+  return { thought: 'Enough.', tool: 'finish', args: { summary: 'Three posts from r/test.' } };
+}
+const aiService = http.createServer((req, res) => {
+  let body = '';
+  req.on('data', d => { body += d; });
+  req.on('end', () => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'scraper-model' }, { id: 'other-model' }] }));
+    if (req.url !== '/v1/chat/completions') { res.statusCode = 404; return res.end('{}'); }
+    const j = JSON.parse(body || '{}');
+    ai.requests.push({ model: j.model, messages: j.messages });
+    const content = JSON.stringify(scriptedReply(j.messages));
+    setTimeout(() => res.end(JSON.stringify({ id: 'x', object: 'chat.completion', model: j.model, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }] })), ai.delayMs);
+  });
+});
+
+let reddit, server, base, browser;
 
 test.before(async () => {
   if (skip) return;
-  mock = createCollectorMock();
-  mirror = await mock.listen();
-  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: mirror, EMIS_API_KEY: '' }));
+  reddit = createMockReddit();
+  const redditBase = await reddit.listen();
+  await new Promise(r => aiService.listen(0, '127.0.0.1', r));
+  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: redditBase, EMIS_API_KEY: 'emis-test-key-123456', EMIS_TRANSPORT: 'node',
+    EMIS_BASE_URL: 'http://127.0.0.1:' + aiService.address().port + '/v1', EMIS_MODELS_FILE: 'none' }));
   const { start } = require('../server');
   server = await start(0);
   base = 'http://localhost:' + server.address().port;
@@ -45,314 +75,161 @@ test.before(async () => {
 test.after(async () => {
   if (browser) await browser.close();
   if (server) { server.closeAllConnections(); await new Promise(r => server.close(r)); }
-  if (mock) await mock.close();
+  if (reddit) await reddit.close();
+  aiService.close();
 });
 
-/** A fresh browser profile with the collector pointed at the mock Reddit. */
-async function openCollector(settings) {
-  const context = await browser.newContext({ viewport: { width: 1400, height: 1000 }, acceptDownloads: true });
+async function openPage(url, init) {
+  const context = await browser.newContext({ viewport: { width: 1300, height: 1000 } });
+  if (init) await context.addInitScript(init);
   const page = await context.newPage();
   const errors = [];
   page.on('pageerror', e => errors.push(e.message));
-  await page.goto(base + '/collector/#settings');
-  await page.waitForSelector('#set-base');
-  await page.selectOption('#set-base', 'other');
-  await page.fill('#set-base-other', mirror);
-  await page.fill('#set-pageDelayMs', String((settings && settings.pageDelayMs) || 1000));
-  await page.fill('#set-scrollDelayMs', '500');
-  if (settings && settings.robots === 'warn') await page.check('#set-robots-warn');
-  await page.click('#settings-save');
-  await page.waitForSelector('.notice-ok');
+  await page.route(/^https?:\/\/(?!localhost)/, route => route.abort());     // no CDN in tests
+  await page.goto(base + url);
   return { context, page, errors };
 }
 
-async function runJob(page, { subreddits, mode, maxPosts, maxComments }) {
-  await page.click('nav a[href="#new"]');
-  await page.waitForFunction(() => !document.querySelector('#job-start').disabled, null, { timeout: 30000 });
-  await page.fill('#job-subreddits', subreddits);
-  if (mode) await page.click('label:has-text("' + mode + '")');
-  await page.fill('#job-max-posts', String(maxPosts || 5));
-  if (maxComments !== undefined) await page.fill('#job-max-comments', String(maxComments));
-  await page.click('#job-start');
-  await page.waitForSelector('#monitor-outcome', { timeout: 90000 });
-  return page.textContent('#monitor-outcome');
+// The tests reach the mock Reddit through the server (there is no RedditAPIs.com key here).
+async function startJob(scope, goal, maxPosts) {
+  await scope.locator('nav a[href="#new"]').click();
+  await scope.locator('#job-access').selectOption('server');
+  await scope.locator('#job-goal').fill(goal);
+  if (maxPosts) await scope.locator('#job-max-posts').fill(String(maxPosts));
+  await scope.locator('#job-start:not([disabled])').click();
+  await scope.locator('#monitor-goal').waitFor();
 }
 
-const read = async download => fs.readFileSync(await download.path(), 'utf8');
-
-test('collects posts (infinite scroll) and comments through Scramjet, shows and exports them', { skip, timeout: 180000 }, async () => {
-  const { context, page, errors } = await openCollector();
-  const before = mock.state.requests.length;
-  const outcome = await runJob(page, { subreddits: 'alpha', mode: 'Posts and comments', maxPosts: 7, maxComments: 2 });
-  assert.equal(outcome, 'Reached the limit of 7 posts.');
-  assert.equal(await page.textContent('#monitor-posts'), '7');
-  const sent = mock.state.requests.slice(before).map(r => r.path);
-  assert.ok(sent.includes('/robots.txt'), 'robots.txt was read first');
-  assert.ok(sent.some(p => p.startsWith('/svc/more?sub=alpha')), 'scrolling made the page load more posts');
-  assert.equal(sent.filter(p => /^\/r\/alpha\/comments\//.test(p)).length, 7, 'each post page opened once');
-  assert.ok(mock.state.requests.slice(before).every(r => /Chrome/.test(r.ua)), 'requests came from the browser, through the proxy');
-
-  // Explorer: posts, a post's details and its comment thread; text is shown as text
-  await page.click('nav a[href="#data"]');
-  await page.waitForFunction(() => /^7 posts/.test(document.querySelector('#explorer-count').textContent));
-  assert.equal(await page.locator('#explorer-table tbody tr').count(), 7);
-  assert.equal(await page.locator('#explorer-table b').count(), 0, 'markup in a title is not rendered');
-  await page.click('#explorer-table tbody tr:has-text("Post 3 in r/alpha")');
-  await page.waitForSelector('#record-detail');
-  const detail = await page.textContent('#record-detail');
-  assert.match(detail, /score 0/, 'a real zero score');
-  assert.match(detail, /Full text of qal3\.\s*Second paragraph\./);
-  assert.match(detail, /Collected comments \(2\)/);
-  assert.match(detail, /Top comment on qal3/);
-  assert.equal(await page.getAttribute('#record-detail a:has-text("Open on Reddit")', 'href'), 'https://www.reddit.com/r/alpha/comments/qal3/post_qal3/');
-  await page.fill('#explorer-search', 'post 2');
-  await page.waitForFunction(() => /^1 post/.test(document.querySelector('#explorer-count').textContent));
-  await page.fill('#explorer-search', '');
-  await page.click('label:has-text("Comments")');
-  await page.waitForFunction(() => /^14 comments/.test(document.querySelector('#explorer-count').textContent));
-
-  // Exports: JSON (everything), JSONL, CSV (two files)
-  await page.selectOption('select[aria-label="Export format"]', 'json');
-  const [json] = await Promise.all([page.waitForEvent('download'), page.click('#export-all')]);
-  const doc = JSON.parse(await read(json));
-  assert.equal(doc.schema_version, 1);
-  assert.deepEqual([doc.posts.length, doc.comments.length], [7, 14]);
-  const p2 = doc.posts.find(p => p.id === 'qal2');
-  assert.equal(p2.title, 'Post 2 in r/alpha — <b>not bold</b> & "quoted"');
-  assert.equal(p2.url, 'https://www.reddit.com/r/alpha/comments/qal2/post_qal2/');
-  assert.equal(p2.details_collected, true);
-  assert.equal(doc.posts.find(p => p.id === 'qal3').score, 0);
-  const c = doc.comments.find(x => x.id === 'qal2b');
-  assert.deepEqual([c.post_id, c.parent_comment_id, c.depth], ['qal2', 'qal2a', 1]);
-
-  await page.selectOption('select[aria-label="Export format"]', 'jsonl');
-  const [jsonl] = await Promise.all([page.waitForEvent('download'), page.click('#export-filtered')]);
-  const lines = (await read(jsonl)).trim().split('\n').map(l => JSON.parse(l));
-  assert.equal(lines.length, 14, 'the filtered export holds only the comments shown');
-  assert.ok(lines.every(l => l.record_type === 'comment'));
-
-  await page.selectOption('select[aria-label="Export format"]', 'csv');
-  const files = [];
-  page.on('download', d => files.push(d));
-  await page.click('#export-all');
-  await page.waitForFunction(() => /Exported 7 posts and 14 comments/.test(document.body.textContent));
-  for (let i = 0; i < 50 && files.length < 2; i++) await page.waitForTimeout(100);
-  const names = files.map(f => f.suggestedFilename()).sort();
-  assert.match(names[0], /^reddit-collector-\d{8}-\d{4}-comments\.csv$/);
-  assert.match(names[1], /-posts\.csv$/);
-  const postsCsv = await read(files.find(f => /posts\.csv$/.test(f.suggestedFilename())));
-  assert.ok(postsCsv.startsWith('﻿record_type,id,fullname,url,subreddit,title,body,author,created_at,score,num_comments,'));
-  assert.equal(postsCsv.trim().split('\r\n').length, 8);
-
-  // Everything survives a reload (IndexedDB)
-  await page.goto(base + '/collector/#overview');
-  await page.waitForFunction(() => /7\s*Posts collected/.test(document.querySelector('#overview-stats').textContent));
-  assert.match(await page.textContent('#overview-stats'), /14\s*Comments collected/);
-  assert.deepEqual(errors, []);
-  await context.close();
-});
-
-test('robots.txt: "obey" stops a disallowed job before any page loads; "warn" runs it and records why', { skip, timeout: 120000 }, async () => {
-  mock.state.robots = 'User-agent: *\nDisallow: /\n';
+test('the AI Scraper on its own: describe the goal, watch the AI\'s steps, find the posts in Data', { skip, timeout: 120000 }, async () => {
+  const { context, page, errors } = await openPage('/collector/#overview');
   try {
-    let { context, page } = await openCollector();
-    const before = mock.state.requests.length;
-    const outcome = await runJob(page, { subreddits: 'beta', maxPosts: 3 });
-    assert.match(outcome, /robots\.txt disallows automated access to \/r\/beta\/new\/ \(Disallow: \/\)/);
-    assert.match(await page.textContent('.chip'), /Failed/);
-    const sent = mock.state.requests.slice(before).map(r => r.path);
-    assert.ok(sent.includes('/robots.txt'), 'robots.txt was read');
-    // (the browser panel may still be loading the home page it opened when the settings were saved)
-    assert.deepEqual(sent.filter(p => p !== '/robots.txt' && p !== '/'), [], 'the job opened no Reddit page');
-    await context.close();
-
-    ({ context, page } = await openCollector({ robots: 'warn' }));
-    assert.match(await runJob(page, { subreddits: 'beta', maxPosts: 3 }), /Reached the limit of 3 posts/);
-    assert.match(await page.textContent('.monitor'), /Continuing because Settings/);
-    await context.close();
-  } finally {
-    mock.state.robots = 'User-agent: *\nAllow: /\n';
-  }
-});
-
-test('Reddit refusing (block page) stops the job; a dropped connection is retried, then recorded', { skip, timeout: 180000 }, async () => {
-  const { context, page } = await openCollector();
-  await page.click('nav a[href="#settings"]');
-  await page.fill('#set-maxRetries', '1');
-  await page.click('#settings-save');
-  await page.waitForSelector('.notice-ok');
-
-  mock.state.brokenHits = 0;
-  const outcome = await runJob(page, { subreddits: 'broken gamma', maxPosts: 3 });
-  assert.match(outcome, /Reached the limit of 3 posts/, 'the job went on to the next subreddit');
-  assert.equal(mock.state.brokenHits, 2, 'the dropped page was tried twice (1 retry)');
-  assert.match(await page.textContent('.log'), /Couldn't load r\/broken after 2 tries/);
-  assert.match(await page.textContent('.monitor'), /1\s*Retries/);
-
-  assert.match(await runJob(page, { subreddits: 'blocked', maxPosts: 3 }), /Reddit blocked this browser's requests/);
-  await page.click('nav a[href="#overview"]');
-  await page.waitForSelector('.errors');
-  assert.match(await page.textContent('.errors'), /blocked/);
-  await context.close();
-});
-
-test('pause, resume and stop from the monitor; the browser panel only opens public Reddit pages', { skip, timeout: 180000 }, async () => {
-  const prev = { total: mock.state.total, pageSize: mock.state.pageSize };
-  Object.assign(mock.state, { total: 400, pageSize: 3 });
-  const { context, page } = await openCollector();
-  try {
+    await page.waitForSelector('#overview-stats');
     await page.click('nav a[href="#new"]');
-    await page.waitForFunction(() => !document.querySelector('#job-start').disabled, null, { timeout: 30000 });
-    await page.fill('#job-subreddits', 'delta');
-    await page.fill('#job-max-posts', '300');
-    await page.fill('#job-max-depth', '100');
-    await page.click('#job-start');
-    await page.waitForFunction(() => Number(document.querySelector('#monitor-posts').textContent) >= 3, null, { timeout: 60000 });
-    await page.click('#job-pause');
-    await page.waitForFunction(() => /Paused/.test(document.querySelector('.chip').textContent));
-    await page.waitForTimeout(1500);                       // a step that was running finishes
-    const paused = mock.state.requests.length;
-    await page.waitForTimeout(2500);
-    assert.equal(mock.state.requests.length, paused, 'nothing new is loaded while paused');
-    await page.click('#job-resume');
-    await page.waitForFunction(n => Number(document.querySelector('#monitor-posts').textContent) > n, Number(await page.textContent('#monitor-posts')), { timeout: 60000 });
-    await page.click('#job-stop');
-    await page.waitForSelector('#monitor-outcome', { timeout: 30000 });
-    assert.equal(await page.textContent('#monitor-outcome'), 'Stopped by you.');
-    const saved = Number(await page.textContent('#monitor-posts'));
-    assert.ok(saved > 3 && saved < 300);
+    // RedditAPIs.com is the default; without a key, Start waits for one (or another choice)
+    assert.equal(await page.inputValue('#job-access'), 'redditapis');
+    assert.match(await page.textContent('#job-access option[value="redditapis"]'), /RedditAPIs\.com \(add your API key\)/);
+    assert.match(await page.textContent('#job-access-note'), /Add your key on MetaCode's Reddit Scraper page/);
+    await page.fill('#job-goal', 'Posts about testing in r/test');
+    assert.equal(await page.isDisabled('#job-start'), true);
+    await page.selectOption('#job-access', 'server');
+    assert.match(await page.textContent('#job-access-note'), /Reddit often blocks servers/);
+    assert.equal(await page.isDisabled('#job-start'), false);
+    const before = ai.requests.length;
+    await startJob(page, 'Posts about testing in r/test', 5);
+    await page.waitForSelector('#monitor-outcome', { timeout: 60000 });
+    assert.equal(await page.textContent('#monitor-outcome'), 'The AI finished: 3 posts kept.');
+    assert.equal(await page.textContent('#monitor-summary'), 'The AI\'s summary: Three posts from r/test.');
+    assert.equal(await page.textContent('#monitor-posts'), '3');
+    const steps = await page.$$eval('#monitor-steps li', li => li.map(x => x.innerText.replace(/\s+/g, ' ').trim()));
+    assert.equal(steps.length, 3);
+    assert.match(steps[0], /^1 Search "post" · r\/test · relevance all Look in r\/test first\. → search_posts "post" in r\/test \(relevance, all\) → 4 posts$/);
+    assert.match(steps[1], /^2 Keep posts 3 posts These three fit\. → keep → 3 new$/);
+    assert.match(steps[2], /^3 Finish/);
+    // The AI service got the goal; MetaCode's AI key never reached the page
+    const first = ai.requests[before];
+    assert.match(first.messages[1].content, /^Goal: Posts about testing in r\/test/);
+    assert.ok(!(await page.content()).includes('emis-test-key'));
 
-    // The browser panel: Reddit's public pages only
-    await page.fill('input[aria-label="Reddit address"]', 'https://www.reddit.com/login/');
-    await page.click('.browser-bar button[type=submit]');
-    assert.match(await page.textContent('.field-error'), /Login, account, message and moderation pages aren't opened/);
-    await page.fill('input[aria-label="Reddit address"]', 'https://example.com/');
-    await page.click('.browser-bar button[type=submit]');
-    assert.match(await page.textContent('.field-error'), /Only Reddit pages/);
-    await page.fill('input[aria-label="Reddit address"]', 'r/epsilon');
-    await page.click('.browser-bar button[type=submit]');
-    await page.frameLocator('#collector-frame').locator('h1:has-text("r/epsilon")').waitFor({ timeout: 30000 });
+    await page.click('nav a[href="#data"]');
+    await page.waitForFunction(() => /^3 posts/.test(document.querySelector('#explorer-count').textContent));
+    await page.click('#explorer-table tbody tr');
+    await page.waitForSelector('#record-detail');
+    assert.match(await page.getAttribute('#record-detail a:has-text("Open on Reddit")', 'href'), /^https:\/\/www\.reddit\.com\/r\/test\/comments\/[a-z0-9]+\/post_\d+\/$/);
+    await page.click('nav a[href="#overview"]');
+    await page.waitForFunction(() => /3\s*Posts collected/.test(document.querySelector('#overview-stats').textContent));
+    assert.match(await page.textContent('table'), /Posts about testing in r\/test/);
+    assert.deepEqual(errors, []);
   } finally {
-    Object.assign(mock.state, prev);
     await context.close();
   }
 });
 
-test('the dashboard says what is wrong when Scramjet can\'t be used', { skip, timeout: 60000 }, async () => {
-  const context = await browser.newContext();
-  const page = await context.newPage();
-  await page.route('**/api/scraper/status', r => r.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ allowedHosts: [], browser: { enabled: false } }) }));
-  await page.goto(base + '/collector/#new');
-  await page.waitForSelector('#job-start');
-  assert.equal(await page.isDisabled('#job-start'), true);
-  assert.match(await page.textContent('.browser'), /Reddit browser is turned off \(SCRAPER_BROWSER_ENABLED=false\)/);
-  await context.close();
-});
-
-test('a Reddit server that closes idle connections sooner than the pause between pages doesn\'t stall the next page', { skip, timeout: 120000 }, async () => {
-  // After ~2 s idle, epoxy-tls reuses a keep-alive connection the server has closed and waits forever
-  // (each page "didn't load within 30 s"). On Reddit the pause between pages is 6 s or more.
-  const { context, page, errors } = await openCollector({ pageDelayMs: 3000 });
-  mock.server.keepAliveTimeout = 300;
+test('inside MetaCode: the AI Scraper (beta) page runs a job with the AI Scraper\'s model and adds the posts to the project', { skip, timeout: 120000 }, async () => {
+  const { context, page, errors } = await openPage('/app.html#dashboard');
   try {
-    const started = Date.now();
-    assert.equal(await runJob(page, { subreddits: 'idle', mode: 'Posts and comments', maxPosts: 3, maxComments: 2 }), 'Reached the limit of 3 posts.');
-    assert.ok(Date.now() - started < 40000, 'no page waited for a dead connection (took ' + (Date.now() - started) + ' ms)');
-    assert.doesNotMatch(await page.textContent('ol.log'), /didn't load/);
-    assert.equal(await page.textContent('#browser-connection'), 'Connected through Wisp (WebSocket, end-to-end TLS).');
-  } finally { mock.server.keepAliveTimeout = 5000; }
-  assert.deepEqual(errors, []);
-  await context.close();
+    await page.waitForFunction(() => typeof App !== 'undefined' && App.getState);
+    await page.evaluate(() => { const s = App.getState(); App.setState({ settings: Object.assign({}, s.settings, { models: { scraper: 'other-model' } }) }); });
+    await page.click('.nav-item[data-view="scraper-beta"]');
+    const frame = page.frameLocator('#cv-frame');
+    await frame.locator('.app.is-embedded').waitFor();
+    await frame.locator('nav a[href="#new"]').click();
+    assert.match(await frame.locator('form').textContent(), /AI model: other-model/);
+    const before = ai.requests.length;
+    await startJob(frame, 'Posts about testing in r/test', 5);
+    await frame.locator('#monitor-outcome').waitFor({ timeout: 60000 });
+    assert.ok(ai.requests.slice(before).every(r => r.model === 'other-model'), 'the model picked for the AI Scraper was used');
+
+    await frame.locator('#job-add-to-project').click();
+    await frame.locator('#job-added').waitFor();
+    assert.match(await frame.locator('#job-added').textContent(), /^Added 3 to the project/);
+    const posts = await page.evaluate(() => App.getState().posts);
+    assert.equal(posts.length, 3);
+    assert.ok(posts.every(p => /^reddit_[a-z0-9]+$/.test(p.id) && typeof p.engagement.likes === 'number' && p.source.subreddit === 'test'));
+    assert.deepEqual(errors.filter(e => !/is not defined/.test(e)), []);
+  } finally {
+    await context.close();
+  }
 });
 
-test('when the /wisp/ WebSocket can\'t open (e.g. a reverse proxy drops it), pages load through MetaCode\'s HTTP relay', { skip, timeout: 120000 }, async () => {
-  const context = await browser.newContext({ viewport: { width: 1400, height: 1000 } });
-  await context.routeWebSocket(/\/wisp\//, ws => ws.close({ code: 1006 }));
-  const page = await context.newPage();
-  const errors = [];
-  page.on('pageerror', e => errors.push(e.message));
-  await page.goto(base + '/collector/#settings');
-  await page.waitForSelector('#set-base');
-  await page.selectOption('#set-base', 'other');
-  await page.fill('#set-base-other', mirror);
-  await page.fill('#set-pageDelayMs', '1000');
-  await page.click('#settings-save');
-  await page.waitForSelector('.notice-ok');
-  assert.match(await runJob(page, { subreddits: 'relayed', mode: 'Posts and comments', maxPosts: 6, maxComments: 2 }), /Reached the limit of 6 posts/);
-  const conn = await page.textContent('#browser-connection');
-  assert.match(conn, /HTTP relay/);
-  assert.match(conn, /WebSocket to MetaCode's proxy \(\/wisp\/\) didn't open/);
-  assert.ok(mock.state.requests.some(r => r.path.startsWith('/svc/more?sub=relayed')), 'the page\'s own scripts ran and fetched through the relay');
-  assert.deepEqual(errors, []);
-
-  // "Wisp only" says what is wrong instead of falling back
-  await page.click('nav a[href="#settings"]');
-  await page.selectOption('#set-connection', 'wisp');
-  await page.click('#settings-save');
-  await page.reload();
-  await page.waitForFunction(() => /didn't open/.test(document.querySelector('.browser').textContent), null, { timeout: 30000 });
-  assert.match(await page.textContent('.browser'), /set Settings → Connection to Automatic/);
-  await context.close();
+test('a job keeps running on the server when the page reloads, and the page picks it up again', { skip, timeout: 120000 }, async () => {
+  ai.delayMs = 1500;
+  const { context, page, errors } = await openPage('/collector/#overview');
+  try {
+    await page.waitForSelector('#overview-stats');
+    await startJob(page, 'Posts about testing in r/test, again', 5);
+    await page.reload();
+    await page.click('nav a[href="#monitor"]');
+    await page.waitForSelector('#monitor-outcome', { timeout: 60000 });
+    assert.equal(await page.textContent('#monitor-outcome'), 'The AI finished: 3 posts kept.');
+    assert.equal(await page.textContent('#monitor-posts'), '3');
+    assert.deepEqual(errors, []);
+  } finally {
+    ai.delayMs = 0;
+    await context.close();
+  }
 });
 
-test('inside MetaCode: the Scraper page shows the collector, and "Add to project" puts posts and comments (with engagement) in the project', { skip, timeout: 180000 }, async () => {
-  const { context, page, errors } = await openCollector();
-  await page.route(/^https?:\/\/(?!localhost)/, route => route.abort());   // no CDN in tests
-  await page.goto(base + '/app.html#scraper');
-  await page.waitForSelector('#cv-frame');
-  assert.equal(await page.textContent('#topbar-title'), 'Reddit Scraper');
-  const frame = page.frameLocator('#cv-frame');
-  await frame.locator('.app.is-embedded').waitFor();
-  assert.equal(await frame.locator('.brand').isVisible(), false, 'MetaCode already shows its own header');
+test('jobs saved by the earlier in-browser bot still open in the Monitor', { skip, timeout: 60000 }, async () => {
+  const { context, page, errors } = await openPage('/collector/#overview');
+  try {
+    await page.waitForSelector('#overview-stats');
+    await page.evaluate(() => new Promise((resolve, reject) => {
+      const open = indexedDB.open('metacode-reddit-collector');
+      open.onsuccess = () => {
+        const tx = open.result.transaction('jobs', 'readwrite');
+        tx.objectStore('jobs').put({ id: 'old-bot-job', config: { targetType: 'subreddit', subreddits: ['alpha', 'beta'], maxPosts: 5 }, state: 'completed',
+          outcome: 'Reached the limit of 5 posts.', startedAt: '2026-10-01T00:00:00.000Z', finishedAt: '2026-10-01T00:05:00.000Z',
+          stats: { postsCollected: 5, commentsCollected: 0, postsSkipped: 0, pagesVisited: 3, errors: 0, retries: 0 }, robots: null });
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      };
+      open.onerror = () => reject(open.error);
+    }));
+    await page.reload();
+    await page.click('tr:has-text("r/alpha, r/beta")');
+    await page.waitForSelector('#monitor-goal');
+    assert.equal(await page.textContent('#monitor-goal'), 'r/alpha, r/beta');
+    assert.equal(await page.textContent('#monitor-outcome'), 'Reached the limit of 5 posts.');
+    assert.deepEqual(errors, []);
+  } finally {
+    await context.close();
+  }
+});
 
-  await frame.locator('nav a[href="#new"]').click();
-  await frame.locator('#job-start:not([disabled])').waitFor({ timeout: 30000 });
-  await frame.locator('#job-subreddits').fill('embedded');
-  await frame.locator('label:has-text("Posts and comments")').click();
-  await frame.locator('#job-max-posts').fill('4');
-  await frame.locator('#job-max-comments').fill('2');
-  await frame.locator('#job-start').click();
-  await frame.locator('#monitor-outcome').waitFor({ timeout: 90000 });
-  assert.equal(await frame.locator('#monitor-outcome').textContent(), 'Reached the limit of 4 posts.');
-
-  // Monitor → add this job's posts and comments
-  await frame.locator('#job-add-to-project').click();
-  await frame.locator('#job-added').waitFor();
-  assert.match(await frame.locator('#job-added').textContent(), /^Added 12 to the project \(12 posts in the project\)\. Their engagement shows in Metrics\.$/);
-  let posts = await page.evaluate(() => App.getState().posts);
-  assert.equal(posts.length, 12);
-  const post = posts.find(p => p.id === 'reddit_qem1');
-  assert.equal(post.text, 'Post 1 in r/embedded\n\nFull text of qem1.\n\nSecond paragraph.', 'the whole post, not only its title');
-  assert.deepEqual(post.engagement, { likes: 99, shares: null, comments: 3, views: null });
-  assert.equal(post.source.permalink, 'https://www.reddit.com/r/embedded/comments/qem1/post_qem1/');
-  const reply = posts.find(p => p.id === 'reddit_c_qem1b');
-  assert.equal(reply.text, 'Reply to qem1a');
-  assert.deepEqual([reply.engagement.likes, reply.source.type, reply.source.post_id, reply.source.parent_id], [2, 'comment', 'qem1', 't1_qem1a']);
-
-  // Data → "Add these 4 to project": already there; a changed number is refreshed, codes and other numbers kept
-  await frame.locator('nav a[href="#data"]').click();
-  await frame.locator('#add-to-project:has-text("Add these 4 to project")').click();
-  await frame.locator('.notice-ok:has-text("already in the project")').waitFor();
-  await page.evaluate(() => App.setState({ posts: App.getState().posts.map(p => p.id === 'reddit_qem1'
-    ? { ...p, engagement: { ...p.engagement, likes: 1, views: 50 }, humanCodes: { tone: 'pos' } } : p) }));
-  await frame.locator('#add-to-project').click();
-  await frame.locator('.notice-ok:has-text("updated the engagement numbers of 1")').waitFor();
-  posts = await page.evaluate(() => App.getState().posts);
-  assert.equal(posts.length, 12);
-  const again = posts.find(p => p.id === 'reddit_qem1');
-  assert.deepEqual(again.engagement, { likes: 99, shares: null, comments: 3, views: 50 });
-  assert.deepEqual(again.humanCodes, { tone: 'pos' });
-
-  // Metrics shows them
-  await page.click('.nav-item[data-view="metrics"]');
-  await page.waitForSelector('#eng-posts');
-  assert.match(await page.textContent('#view-container'), /Avg Likes/);
-
-  // Someone else's page can't add posts: only the collector frame, same origin
-  const before = (await page.evaluate(() => App.getState().posts)).length;
-  await page.evaluate(() => window.postMessage({ type: 'metacode-collector:add-to-project', id: 1, posts: [{ id: 'reddit_zzz', text: 'x', engagement: {} }] }, '*'));
-  await page.waitForTimeout(200);
-  assert.equal((await page.evaluate(() => App.getState().posts)).length, before);
-  assert.deepEqual(errors.filter(e => !/is not defined/.test(e)), []);
-  await context.close();
+test('RedditAPIs.com first; your own Reddit API keys (from the Reddit Scraper page) are offered; the choice is remembered', { skip, timeout: 60000 }, async () => {
+  const keys = { reddit: { clientId: 'cid-1234', clientSecret: 'sec', username: 'me', hint: '…1234' } };
+  const { context, page } = await openPage('/collector/#new', `localStorage.setItem('metacode.scraper.ownKeys', ${JSON.stringify(JSON.stringify(keys))})`);
+  try {
+    await page.waitForSelector('#job-access');
+    assert.deepEqual(await page.$$eval('#job-access option', o => o.map(x => x.value)), ['redditapis', 'own', 'server']);
+    assert.equal(await page.inputValue('#job-access'), 'redditapis');
+    await page.selectOption('#job-access', 'own');
+    assert.match(await page.textContent('#job-access option[value="own"]'), /Your Reddit API keys \(…1234\)/);
+    assert.match(await page.textContent('#job-access-note'), /Works even when Reddit blocks the server's address/);
+    await page.reload();
+    await page.waitForSelector('#job-access');
+    assert.equal(await page.inputValue('#job-access'), 'own');
+  } finally {
+    await context.close();
+  }
 });

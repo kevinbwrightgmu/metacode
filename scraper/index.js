@@ -26,7 +26,6 @@ const { PythonTransport, AutoTransport } = require('./network/python-transport')
 const { HostRateLimiter } = require('./network/rate-limiter');
 const { RedditHttpClient } = require('./network/reddit-http');
 const { RelayHub } = require('./network/browser-relay');
-const { createHttpRelay } = require('./network/http-relay');
 const credentials = require('./credentials');
 const { RedditApisClient, balanceOf, DASHBOARD_URL } = require('./network/redditapis-client');
 const { DEFAULT_USER_AGENT } = require('./config');
@@ -37,6 +36,7 @@ const { createCustomRunner, sandboxSupported, validateCode } = require('./sandbo
 const PYODIDE_VERSION = (() => { try { return require('pyodide/package.json').version; } catch (e) { return 'not installed'; } })();
 const exporter = require('./export');
 const { ownerOf } = require('../owner');
+const { createAiRunner, normalizeAiOptions, normalizeGoal } = require('./ai/agent-runner');
 
 const SCRAMJET_FILES = {
   'scramjet.js':          ['@mercuryworkshop/scramjet', 'dist/scramjet.js'],
@@ -86,31 +86,31 @@ function createScraper(opts) {
   opts = opts || {};
   const config = opts.config || loadScraperConfig(process.env);
 
-  // Reddit API keys: .env wins; otherwise keys saved from the Scraper page.
+  // The server's own Reddit API keys (shared by everyone on this server): .env,
+  // or a file saved by an earlier version (read only; see credentials.js).
+  // Each user's own keys come with their jobs instead (ownRedditClient below).
   const credFile = opts.credentialsFile || credentials.credentialsFile(process.env);
   const uaFromEnv = !!String(process.env.SCRAPER_USER_AGENT || '').trim();
   config.oauthSource = config.oauth ? 'env' : null;
   config.oauthUsername = null;
-  function applySaved(saved) {
-    config.oauth = saved ? { clientId: saved.clientId, clientSecret: saved.clientSecret } : null;
-    config.oauthSource = saved ? 'saved' : null;
-    config.oauthUsername = saved ? saved.username : null;
-    if (!uaFromEnv) config.userAgent = saved ? credentials.userAgentFor(saved.username) : DEFAULT_USER_AGENT;
-  }
   if (!config.oauth) {
     const saved = credentials.loadSaved(credFile);
-    if (saved) applySaved(saved);
+    if (saved) {
+      config.oauth = { clientId: saved.clientId, clientSecret: saved.clientSecret };
+      config.oauthSource = 'saved';
+      config.oauthUsername = saved.username;
+      if (!uaFromEnv) config.userAgent = credentials.userAgentFor(saved.username);
+    }
   }
 
-  // RedditAPIs.com key: REDDITAPIS_KEY in .env wins; otherwise the one saved
-  // from the Scraper page. Never sent to the browser or to custom code.
+  // The server's RedditAPIs.com key: REDDITAPIS_KEY in .env, or a file saved by
+  // an earlier version (read only). Never sent to the browser or to custom code.
   const rapiFile = opts.redditApisKeyFile || credentials.redditApisKeyFile(process.env);
   config.redditApisSource = config.redditApisKey ? 'env' : null;
   if (!config.redditApisKey) {
     const savedKey = credentials.loadRedditApisKey(rapiFile);
     if (savedKey) { config.redditApisKey = savedKey; config.redditApisSource = 'saved'; }
   }
-  let redditApisBalance = null;
   let port = null;
   const getWispUrl = () => (port ? 'ws://127.0.0.1:' + port + WISP_PATH : null);
 
@@ -141,17 +141,59 @@ function createScraper(opts) {
   const redditApis = new RedditApisClient({ config, transport, limiter, getKey: () => config.redditApisKey, baseUrl: config.redditApisBaseUrl });
   const redditApisOptionsConfig = Object.assign({}, config, { oauth: null, publicMinDelayMs: config.minDelayMs });
 
+  // ── A user's own keys ──
+  // Sent by their browser with each job, never stored. One client per set of
+  // keys, so that user's jobs share one token and one rate limit (separate
+  // from everyone else's: limitScope); unused clients are dropped after an hour.
+  const ownClients = new Map();     // keyId → { client, usedAt }
+  const OWN_CLIENT_IDLE_MS = 60 * 60 * 1000;
+  function ownClient(id, make) {
+    const now = Date.now();
+    for (const [k, v] of ownClients) if (now - v.usedAt > OWN_CLIENT_IDLE_MS) ownClients.delete(k);
+    let entry = ownClients.get(id);
+    if (!entry) {
+      if (ownClients.size >= 1000) ownClients.delete(ownClients.keys().next().value);
+      entry = { client: make() };
+      ownClients.set(id, entry);
+    }
+    entry.usedAt = now;
+    return entry.client;
+  }
+  function ownRedditClient(creds) {
+    const id = credentials.keyId('reddit', creds.clientId, creds.clientSecret, creds.username || '');
+    return ownClient(id, () => {
+      const own = Object.assign({}, config, { oauth: { clientId: creds.clientId, clientSecret: creds.clientSecret },
+        userAgent: uaFromEnv ? config.userAgent : credentials.userAgentFor(creds.username) });
+      const client = new RedditHttpClient({ config: own, transport, limiter, limitScope: id });
+      client.label = 'Reddit Data API with your own keys' + (creds.username ? ' (u/' + creds.username + ')' : '');
+      return client;
+    });
+  }
+  function ownRedditApisClient(key) {
+    const id = credentials.keyId('redditapis', key);
+    return ownClient(id, () => {
+      const client = new RedditApisClient({ config, transport, limiter, getKey: () => key, baseUrl: config.redditApisBaseUrl, limitScope: id });
+      client.label = 'RedditAPIs.com with your own key (billed per request)';
+      return client;
+    });
+  }
+
   const browserHttpFor = jobId => {
     const client = new RedditHttpClient({ config: browserConfig, transport: relay.transportFor(jobId), limiter });
     client.label = 'your browser (Scramjet) — keep MetaCode open until the job finishes';
     return client;
   };
   const runCustom = createCustomRunner({ config });
+  // AI Scraper (beta): python/ai_scraper.py plans with MetaCode's AI service (opts.ai)
+  const ai = opts.ai || null;
+  const aiProblem = () => (!ai ? 'The AI Scraper isn\'t available on this server.' : ai.problem());
+  const runAi = createAiRunner({ ai, env: process.env });
   const jobs = new JobManager({
     config, http,
     runners: {
       standard: (job, ctx) => runStandardScrape(job.target, job.options, ctx),
-      custom: runCustom
+      custom: runCustom,
+      ai: runAi
     },
     logToConsole: opts.logToConsole
   });
@@ -209,15 +251,20 @@ function createScraper(opts) {
       engines: {
         browser: { available: config.enabled && config.browserEnabled, minDelayMs: Math.max(config.minDelayMs, config.publicMinDelayMs), connectedTabs: req ? relay.tabsFor(ownerOf(req)) : relay.subscribers },
         server: { available: config.enabled, mode: http.mode, minDelayMs: floor },
-        redditapis: { available: config.enabled && !!config.redditApisKey, minDelayMs: config.minDelayMs }
+        // Offered to everyone: with this server's key, or with the user's own (kept in their browser).
+        redditapis: { available: config.enabled, serverKey: !!config.redditApisKey, minDelayMs: config.minDelayMs }
       },
-      defaultEngine: config.redditApisKey ? 'redditapis' : (config.oauth || !config.browserEnabled ? 'server' : 'browser'),
+      // The engine the pages pick until the user chooses another (SCRAPER_DEFAULT_ENGINE).
+      defaultEngine: config.defaultEngine === 'browser' && !config.browserEnabled ? 'server' : config.defaultEngine,
+      // AI Scraper (beta): AI jobs (mode "ai"), run by the server or RedditAPIs.com engine
+      aiScraper: { available: config.enabled && !aiProblem(), reason: aiProblem() },
+      // Users can add their own keys (kept in their browser, sent with their jobs).
+      ownKeys: { reddit: true, redditapis: true, apiMinDelayMs: config.minDelayMs },
       // Never the key itself.
       redditApis: {
         configured: !!config.redditApisKey,
         source: config.redditApisSource,
         keyHint: config.redditApisKey ? '…' + config.redditApisKey.slice(-4) : null,
-        balance: redditApisBalance,
         dashboardUrl: DASHBOARD_URL
       },
       limits: {
@@ -254,19 +301,42 @@ function createScraper(opts) {
 
   function parseSpec(body) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ScraperError('invalid_request', 'The request body must be a JSON object.', { status: 400 });
-    const mode = body.mode === 'custom' ? 'custom' : (body.mode === undefined || body.mode === 'standard' ? 'standard' : null);
-    if (!mode) throw new ScraperError('invalid_request', 'mode must be "standard" or "custom".', { status: 400 });
+    const mode = ['custom', 'ai'].includes(body.mode) ? body.mode : (body.mode === undefined || body.mode === 'standard' ? 'standard' : null);
+    if (!mode) throw new ScraperError('invalid_request', 'mode must be "standard", "custom" or "ai".', { status: 400 });
     const engine = body.engine === undefined || body.engine === 'server' ? 'server' : (['browser', 'redditapis'].includes(body.engine) ? body.engine : null);
     if (!engine) throw new ScraperError('invalid_request', 'engine must be "browser", "server" or "redditapis".', { status: 400 });
-    if (engine === 'redditapis' && !config.redditApisKey) {
-      throw new ScraperError('not_available', 'Add your RedditAPIs.com API key first (Scraper page → Reddit API access).', { status: 400 });
+    // The user's own keys, when sent: the job runs on their own API limit.
+    let own = null;
+    if (engine === 'server' && body.credentials !== undefined && body.credentials !== null) {
+      let creds;
+      try { creds = credentials.validate(body.credentials); } catch (e) { throw new ScraperError('invalid_request', 'Your Reddit API keys: ' + e.message, { status: 400 }); }
+      own = ownRedditClient(creds);
+    }
+    if (engine === 'redditapis' && body.redditApisKey !== undefined && body.redditApisKey !== null) {
+      let key;
+      try { key = credentials.validateRedditApisKey(body.redditApisKey); } catch (e) { throw new ScraperError('invalid_request', 'Your RedditAPIs.com key: ' + e.message, { status: 400 }); }
+      own = ownRedditApisClient(key);
+    }
+    if (engine === 'redditapis' && !own && !config.redditApisKey) {
+      throw new ScraperError('not_available', 'Add your RedditAPIs.com API key first (Reddit Scraper → RedditAPIs.com key), or choose another way under "Fetch Reddit through".', { status: 400 });
     }
     if (engine === 'browser' && !config.browserEnabled) {
       throw new ScraperError('not_available', 'Browser mode needs the in-app browser, which is turned off (SCRAPER_BROWSER_ENABLED=false).', { status: 403 });
     }
-    const options = normalizeOptions(body.options, engine === 'browser' ? browserConfig : (engine === 'redditapis' ? redditApisOptionsConfig : config));
+    const options = normalizeOptions(body.options, engine === 'browser' ? browserConfig
+      : (engine === 'redditapis' ? redditApisOptionsConfig : (own ? own.config : config)));
     const engineSpec = engine === 'browser' ? { engine, httpFor: browserHttpFor }
+      : own ? { engine, httpFor: () => own }
       : engine === 'redditapis' ? { engine, httpFor: () => redditApis } : { engine };
+    if (mode === 'ai') {
+      const problem = aiProblem();
+      if (problem) throw new ScraperError('not_available', problem, { status: 503 });
+      if (engine === 'browser') throw new ScraperError('invalid_request', 'The AI Scraper fetches Reddit on the server (API keys or public pages) or through RedditAPIs.com, not through a browser tab.', { status: 400 });
+      const goal = normalizeGoal(body.goal);
+      options.ai = Object.assign(normalizeAiOptions(body.ai), { goal });
+      const capacity = Math.min(config.maxItems, options.ai.maxPosts * (1 + options.ai.commentsPerPost));
+      return Object.assign({ mode, target: null, options, capacity, label: 'AI: ' + (goal.length > 70 ? goal.slice(0, 69) + '…' : goal) }, engineSpec);
+    }
     if (mode === 'standard') {
       const target = normalizeTarget(body.target);
       return Object.assign({ mode, target, options, capacity: capacityFor(target, options) }, engineSpec);
@@ -298,8 +368,6 @@ function createScraper(opts) {
 
   router.get('/status', (req, res) => res.json(status(req)));
 
-  // The Reddit Collector's fallback when the Wisp WebSocket can't get through (see network/http-relay.js)
-  router.post('/fetch', createHttpRelay(config));
 
   router.post('/resolve', (req, res) => {
     try {
@@ -307,89 +375,72 @@ function createScraper(opts) {
     } catch (err) { sendError(res, err); }
   });
 
-  // ── Reddit API access (Scraper page form) ──
-  // Saves a Reddit app's ID/secret after checking them with Reddit (a token
-  // request through the normal epoxy-tls/Wisp path). Keys in .env can't be
-  // changed here.
-  router.post('/credentials', async (req, res) => {
+  // ── Reddit API access: checking a user's own keys ──
+  // The page keeps keys in the user's browser and sends them with that
+  // browser's jobs; these routes only ask Reddit (or RedditAPIs.com) whether
+  // they work. Nothing is saved on the server, and the server's own keys can
+  // only be set in .env.
+  // Each check reaches out to Reddit / RedditAPIs.com, so they're capped: this
+  // server shouldn't be usable to try out lots of keys, or to hammer Reddit's
+  // sign-in endpoint from its address. Per browser and for the whole server.
+  const CHECKS_PER_BROWSER = 5, CHECKS_PER_SERVER = 30, CHECK_WINDOW_MS = 60000;
+  let recentChecks = [];
+  const checksByBrowser = new Map();
+  function allowCheck(req) {
+    const now = Date.now();
+    const recent = list => list.filter(t => now - t < CHECK_WINDOW_MS);
+    recentChecks = recent(recentChecks);
+    const who = ownerOf(req) || 'no-cookie';
+    const mine = recent(checksByBrowser.get(who) || []);
+    if (recentChecks.length >= CHECKS_PER_SERVER || mine.length >= CHECKS_PER_BROWSER) {
+      throw new ScraperError('rate_limited', 'Too many key checks in the last minute. Wait a minute and try again.', { status: 429 });
+    }
+    recentChecks.push(now);
+    mine.push(now);
+    if (checksByBrowser.size > 5000) checksByBrowser.clear();
+    checksByBrowser.set(who, mine);
+  }
+
+  router.post('/credentials/check', async (req, res) => {
     try {
-      if (config.oauthSource === 'env') {
-        throw new ScraperError('invalid_state', 'Reddit API keys are set in the server\'s .env file; change them there.', { status: 409 });
-      }
       let creds;
       try { creds = credentials.validate(req.body); } catch (e) { throw new ScraperError('invalid_request', e.message, { status: 400 }); }
-      const probeConfig = Object.assign({}, config, { oauth: { clientId: creds.clientId, clientSecret: creds.clientSecret },
-        userAgent: uaFromEnv ? config.userAgent : credentials.userAgentFor(creds.username) });
-      const probe = new RedditHttpClient({ config: probeConfig, transport, limiter });
+      allowCheck(req);
       try {
-        await probe.getToken({ retries: 1 });
+        await ownRedditClient(creds).getToken({ retries: 1 });   // the token is reused by this user's jobs
       } catch (err) {
         const e = isScraperError(err) ? err : new ScraperError('network', 'Couldn\'t reach Reddit to check the keys.', { status: 502 });
-        throw new ScraperError(e.type, 'The keys weren\'t saved: ' + e.message, { status: e.type === 'auth_error' ? 400 : 502 });
+        throw new ScraperError(e.type, 'Reddit didn\'t accept these keys: ' + e.message, { status: e.type === 'auth_error' ? 400 : 502 });
       }
-      try {
-        credentials.save(credFile, creds);
-      } catch (err) {
-        throw new ScraperError('internal_error', 'The keys work, but MetaCode couldn\'t save them next to server.js (check folder permissions).', { status: 500, detail: err.message });
-      }
-      applySaved(creds);
-      http.token = probe.token;      // reuse the token just obtained
-      res.json(status(req));
+      res.json({ ok: true, clientIdHint: '…' + creds.clientId.slice(-4), username: creds.username });
     } catch (err) { sendError(res, err); }
   });
 
-  // RedditAPIs.com key: checked with the free GET /account/me before saving.
-  router.post('/redditapis-key', async (req, res) => {
+  router.post('/redditapis-key/check', async (req, res) => {
     try {
-      if (config.redditApisSource === 'env') {
-        throw new ScraperError('invalid_state', 'The RedditAPIs.com key is set in the server\'s .env file (REDDITAPIS_KEY); change it there.', { status: 409 });
-      }
       let key;
       try { key = credentials.validateRedditApisKey(req.body && req.body.key); } catch (e) { throw new ScraperError('invalid_request', e.message, { status: 400 }); }
-      const probe = new RedditApisClient({ config, transport, limiter, getKey: () => key, baseUrl: config.redditApisBaseUrl });
+      allowCheck(req);
       let account;
       try {
-        account = await probe.account();
+        account = await ownRedditApisClient(key).account();
       } catch (err) {
         const e = isScraperError(err) ? err : new ScraperError('network', 'Couldn\'t reach RedditAPIs.com to check the key.', { status: 502 });
-        throw new ScraperError(e.type, 'The key wasn\'t saved: ' + e.message, { status: e.type === 'auth_error' ? 400 : 502 });
+        throw new ScraperError(e.type, 'The key didn\'t work: ' + e.message, { status: e.type === 'auth_error' ? 400 : 502 });
       }
-      try {
-        credentials.saveRedditApisKey(rapiFile, key);
-      } catch (err) {
-        throw new ScraperError('internal_error', 'The key works, but MetaCode couldn\'t save it next to server.js (check folder permissions).', { status: 500, detail: err.message });
-      }
-      config.redditApisKey = key;
-      config.redditApisSource = 'saved';
-      redditApisBalance = balanceOf(account);
-      res.json(status(req));
+      res.json({ ok: true, keyHint: '…' + key.slice(-4), balance: balanceOf(account) });
     } catch (err) { sendError(res, err); }
   });
 
-  router.delete('/redditapis-key', (req, res) => {
-    try {
-      if (config.redditApisSource === 'env') {
-        throw new ScraperError('invalid_state', 'The RedditAPIs.com key is set in the server\'s .env file (REDDITAPIS_KEY); remove it there.', { status: 409 });
-      }
-      credentials.remove(rapiFile);
-      config.redditApisKey = null;
-      config.redditApisSource = null;
-      redditApisBalance = null;
-      res.json(status(req));
-    } catch (err) { sendError(res, err); }
-  });
-
-  router.delete('/credentials', (req, res) => {
-    try {
-      if (config.oauthSource === 'env') {
-        throw new ScraperError('invalid_state', 'Reddit API keys are set in the server\'s .env file; remove them there.', { status: 409 });
-      }
-      credentials.remove(credFile);
-      applySaved(null);
-      http.token = null;
-      res.json(status(req));
-    } catch (err) { sendError(res, err); }
-  });
+  // Earlier versions saved keys on the server from the page, where on a public
+  // server any visitor could replace or remove them. A page from before the
+  // update gets told to reload.
+  const keysMoved = (req, res) => sendError(res, new ScraperError('invalid_state',
+    'Reddit API keys are now kept in each browser, not on the server. Reload the page and add them under Reddit API access.', { status: 410 }));
+  router.post('/credentials', keysMoved);
+  router.delete('/credentials', keysMoved);
+  router.post('/redditapis-key', keysMoved);
+  router.delete('/redditapis-key', keysMoved);
 
   router.get('/jobs', (req, res) => {
     const owner = ownerOf(req);

@@ -64,33 +64,39 @@ async function openApp(hash) {
   return { page, context, errors };
 }
 
-test('sidebar navigation opens the Scraper page (the Reddit Collector); its link opens the Reddit API scraper', { skip }, async () => {
+test('sidebar: Scraper opens the Reddit scraper; AI Scraper (beta) opens the collector; old #scraper-api links still work', { skip }, async () => {
   const { page, context, errors } = await openApp('#dashboard');
   const nav = page.locator('.nav-item[data-view="scraper"]');
   await assert.doesNotReject(nav.waitFor());
   assert.equal((await nav.textContent()).trim(), 'Scraper');
   await nav.click();
-  await page.waitForSelector('.cv-wrap');
+  await page.waitForSelector('#sc-target-type');
   assert.equal(new URL(page.url()).hash, '#scraper');
   assert.equal(await page.textContent('#topbar-title'), 'Reddit Scraper');
-  assert.equal(await page.getAttribute('#cv-frame', 'src'), '/collector/?embed=1');
   assert.ok(await nav.evaluate(el => el.classList.contains('active')));
-
-  await page.click('.cv-bar a[href="#scraper-api"]');
-  await page.waitForSelector('#sc-target-type');
-  assert.equal(new URL(page.url()).hash, '#scraper-api');
-  assert.equal(await page.textContent('#topbar-title'), 'Reddit API Scraper');
-  assert.ok(await nav.evaluate(el => el.classList.contains('active')), 'the Scraper item stays highlighted');
-  assert.equal(await page.locator('.view-container-flush').count(), 0, 'the collector page cleaned up after itself');
-  await page.waitForFunction(() => /This browser|Public pages|Reddit Data API/.test(document.querySelector('#sc-status').textContent));
+  await page.waitForFunction(() => /RedditAPIs\.com|This browser|Public pages|Reddit Data API/.test(document.querySelector('#sc-status').textContent));
   assert.deepEqual(await page.$$eval('#sc-target-type option', o => o.map(x => x.value)),
     ['subreddit', 'search', 'post', 'user', 'url', 'listing', 'subreddit_about', 'user_about']);
+
+  const beta = page.locator('.nav-item[data-view="scraper-beta"]');
+  assert.match((await beta.textContent()).replace(/\s+/g, ' ').trim(), /^AI Scraper BETA$/);
+  await page.click('a[href="#scraper-beta"].btn');           // "Try the AI Scraper (beta)" on the scraper page
+  await page.waitForSelector('#cv-frame');
+  assert.equal(await page.textContent('#topbar-title'), 'AI Scraper (beta)');
+  assert.equal(await page.getAttribute('#cv-frame', 'src'), '/collector/?embed=1');
+  assert.ok(await beta.evaluate(el => el.classList.contains('active')));
+  assert.ok(!(await nav.evaluate(el => el.classList.contains('active'))));
+
+  await page.goto(baseUrl + '/app.html#scraper-api');
+  await page.waitForSelector('#sc-target-type');
+  assert.equal(new URL(page.url()).hash, '#scraper');
+  assert.equal(await page.locator('.view-container-flush').count(), 0, 'the beta page cleaned up after itself');
   assert.deepEqual(errors.filter(e => !/is not defined/.test(e)), []);
   await context.close();
 });
 
 test('target validation in the form', { skip }, async () => {
-  const { page, context } = await openApp('#scraper-api');
+  const { page, context } = await openApp('#scraper');
   await page.waitForSelector('#sc-f-subreddit');
   await page.fill('#sc-f-subreddit', 'not valid!');
   await page.click('#sc-start');
@@ -109,7 +115,8 @@ test('target validation in the form', { skip }, async () => {
 });
 
 test('standard scrape: start → progress → results → filter → export → add to project', { skip }, async () => {
-  const { page, context } = await openApp('#scraper-api');
+  const { page, context } = await openApp('#scraper');
+  await page.selectOption('#sc-engine', 'browser');
   await page.selectOption('#sc-target-type', 'subreddit');
   await page.fill('#sc-f-subreddit', 'test');
   await page.selectOption('#sc-f-sort', 'new');
@@ -206,7 +213,7 @@ test('standard scrape: start → progress → results → filter → export → 
   assert.match(await page.textContent('.eng-posts-table tbody tr:first-child'), /Post 7 in test/);
   assert.match(await page.textContent('#view-container'), /No data\s*Avg Shares/, 'no shares data: "No data", not 0.0');
   assert.equal(await page.locator('#eng-posts canvas').count(), 0, 'no bar chart');
-  await page.evaluate(() => App.navigate('scraper-api'));
+  await page.evaluate(() => App.navigate('scraper'));
 
   // The job is listed and survives a reload (jobs live on the server).
   await page.reload();
@@ -216,7 +223,7 @@ test('standard scrape: start → progress → results → filter → export → 
 });
 
 test('custom code: write a scraper, run it in the sandbox, see results', { skip }, async () => {
-  const { page, context } = await openApp('#scraper-api');
+  const { page, context } = await openApp('#scraper');
   await page.click('.sc-mode[data-mode="custom"]');
   await page.waitForSelector('#sc-code');
   assert.equal(await page.isVisible('#sc-custom'), true);
@@ -235,6 +242,7 @@ test('custom code: write a scraper, run it in the sandbox, see results', { skip 
   ].join('\n'));
   await page.fill('#sc-params', '{ "sub": "test" }');
   await page.selectOption('#sc-target-type', 'none');
+  await page.selectOption('#sc-engine', 'browser');
   await page.click('#sc-start');
   await page.waitForFunction(() => document.querySelector('#sc-job-status') && document.querySelector('#sc-job-status').textContent === 'Completed', null, { timeout: 30000 });
   await page.waitForFunction(() => document.querySelectorAll('.sc-table tbody tr').length === 5);
@@ -252,8 +260,9 @@ test('custom code: write a scraper, run it in the sandbox, see results', { skip 
 });
 
 test('cancel a running job from the UI', { skip }, async () => {
-  const { page, context } = await openApp('#scraper-api');
+  const { page, context } = await openApp('#scraper');
   await page.click('.sc-mode[data-mode="standard"]');
+  await page.selectOption('#sc-engine', 'browser');
   await page.selectOption('#sc-target-type', 'subreddit');
   await page.fill('#sc-f-subreddit', 'slowui');
   await page.fill('#sc-o-maxItems', '400');
@@ -267,8 +276,8 @@ test('cancel a running job from the UI', { skip }, async () => {
 });
 
 test('in-app Reddit browser (Scramjet) loads pages through Wisp and sets the target', { skip }, async () => {
-  const { page, context } = await openApp('#scraper-api');
-  await page.waitForFunction(() => /This browser|Public pages|Reddit Data API/.test(document.querySelector('#sc-status').textContent));
+  const { page, context } = await openApp('#scraper');
+  await page.waitForFunction(() => /RedditAPIs\.com|This browser|Public pages|Reddit Data API/.test(document.querySelector('#sc-status').textContent));
   await page.click('#sc-browser-toggle');
   const redditBase = 'http://localhost:' + mock.server.address().port;
   await page.fill('#sc-browser-url', redditBase + '/r/test/');
@@ -286,13 +295,14 @@ test('in-app Reddit browser (Scramjet) loads pages through Wisp and sets the tar
   await context.close();
 });
 
-test('browser mode (default without API keys): the tab fetches Reddit through Scramjet', { skip }, async () => {
+test('browser mode: the tab fetches Reddit through Scramjet', { skip }, async () => {
   const prev = mock.state.robots;
   mock.state.robots = 'User-agent: *\nDisallow: /\n';     // irrelevant in browser mode
-  const { page, context } = await openApp('#scraper-api');
+  const { page, context } = await openApp('#scraper');
   try {
+    await page.waitForFunction(() => /RedditAPIs\.com/.test(document.querySelector('#sc-status').textContent));
+    await page.selectOption('#sc-engine', 'browser');
     await page.waitForFunction(() => /This browser \(Scramjet\)/.test(document.querySelector('#sc-status').textContent));
-    assert.equal(await page.inputValue('#sc-engine'), 'browser');
     await page.click('.sc-mode[data-mode="standard"]');
     await page.selectOption('#sc-target-type', 'subreddit');
     await page.fill('#sc-f-subreddit', 'browsermode');
@@ -312,10 +322,10 @@ test('browser mode (default without API keys): the tab fetches Reddit through Sc
   }
 });
 
-test('Reddit API access card: a blocked subreddit offers setup; keys are checked, saved and fix it', { skip }, async () => {
-  const { page, context } = await openApp('#scraper-api');
+test('Reddit API access: a blocked subreddit offers setup; your keys are checked, kept in this browser only and fix it', { skip }, async () => {
+  const { page, context } = await openApp('#scraper');
   try {
-    await page.waitForFunction(() => /This browser/.test(document.querySelector('#sc-status').textContent));
+    await page.waitForFunction(() => /RedditAPIs\.com/.test(document.querySelector('#sc-status').textContent));
     await page.click('.sc-mode[data-mode="standard"]');
     await page.selectOption('#sc-target-type', 'subreddit');
     await page.fill('#sc-f-subreddit', 'netblock');
@@ -324,19 +334,24 @@ test('Reddit API access card: a blocked subreddit offers setup; keys are checked
     await page.waitForFunction(() => { const s = document.querySelector('#sc-job-status'); return s && s.textContent === 'Failed'; }, null, { timeout: 30000 });
     assert.match(await page.textContent('.sc-error-box'), /without a Reddit login or API key/);
 
-    await page.click('.sc-error-box >> text=Set up Reddit API access');
+    await page.click('.sc-error-box >> text=Add your Reddit API keys');
     await page.waitForSelector('#sc-api-id');
     await page.fill('#sc-api-id', 'test-client-id');
     await page.fill('#sc-api-secret', 'definitely-wrong');
     await page.click('#sc-api-save');
-    await page.waitForFunction(() => /weren't saved/.test(document.querySelector('#sc-api-error').textContent), null, { timeout: 20000 });
+    await page.waitForFunction(() => /didn't accept these keys/.test(document.querySelector('#sc-api-error').textContent), null, { timeout: 20000 });
 
     await page.fill('#sc-api-secret', 'test-client-secret');
     await page.fill('#sc-api-user', 'metacode_user');
     await page.click('#sc-api-save');
-    await page.waitForFunction(() => /Connected/.test(document.querySelector('#sc-api').textContent), null, { timeout: 20000 });
+    await page.waitForFunction(() => /Your keys/.test(document.querySelector('#sc-api').textContent), null, { timeout: 20000 });
     assert.equal(await page.inputValue('#sc-engine'), 'server');
+    assert.match(await page.textContent('#sc-engine'), /Reddit API, your keys/);
+    assert.match(await page.textContent('#sc-api'), /…t-id · u\/metacode_user\. Your jobs run on your own Reddit API limit\. Kept in this browser only/);
     assert.ok(!(await page.content()).includes('test-client-secret'));
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('metacode.scraper.ownKeys')).reddit.clientSecret), 'test-client-secret');
+    const st = await page.evaluate(() => fetch('/api/scraper/status').then(r => r.json()));
+    assert.equal(st.credentials.configured, false, 'nothing was saved on the server');
 
     const failedJobId = await page.evaluate(() => JSON.parse(localStorage.getItem('metacode_scraper_form_v1')).lastJobId);
     await page.click('#sc-start');
@@ -348,20 +363,33 @@ test('Reddit API access card: a blocked subreddit offers setup; keys are checked
     assert.equal(await page.textContent('#sc-job-status'), 'Completed', await page.textContent('#sc-job'));
     assert.ok(apiMock.state.requests.some(q => q.path.startsWith('/r/netblock/') && q.headers.authorization === 'bearer test-token-123'));
 
+    // Still there after a reload; another browser doesn't have them
+    await page.reload();
+    await page.waitForFunction(() => /Your keys/.test((document.querySelector('#sc-api') || {}).textContent || ''), null, { timeout: 20000 });
+    const other = await openApp('#scraper');
+    try {
+      await other.page.waitForFunction(() => /Reddit API access/.test((document.querySelector('#sc-api') || {}).textContent || ''), null, { timeout: 20000 });
+      assert.doesNotMatch(await other.page.textContent('#sc-api'), /Your keys/);
+      assert.match(await other.page.textContent('#sc-engine'), /needs Reddit API keys/);
+    } finally {
+      await other.context.close();
+    }
+
     page.once('dialog', d => d.accept());
-    await page.click('#sc-api >> text=Disconnect');
-    await page.waitForFunction(() => /Set up/.test(document.querySelector('#sc-api').textContent));
+    await page.click('#sc-api-remove');
+    await page.waitForSelector('#sc-api-toggle');
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('metacode.scraper.ownKeys')).reddit), undefined);
   } finally {
     await context.close();
   }
 });
 
-test('RedditAPIs.com key: checked, saved, selected as the engine and used for a job', { skip }, async () => {
-  const { page, context, errors } = await openApp('#scraper-api');
+test('RedditAPIs.com key: checked, kept in this browser, selected as the engine and used for a job', { skip }, async () => {
+  const { page, context, errors } = await openApp('#scraper');
   try {
     await page.waitForFunction(() => document.querySelector('#sc-status').textContent.trim().length > 0);
     await page.click('.sc-mode[data-mode="standard"]');
-    await page.click('#sc-api >> text=Add key');
+    await page.click('#sc-rapi-toggle');
     await page.fill('#sc-rapi-key', 'wrong_key_000000');
     await page.click('#sc-rapi-save');
     await page.waitForFunction(() => document.querySelector('#sc-rapi-error').textContent.length > 0, null, { timeout: 20000 });
@@ -369,9 +397,9 @@ test('RedditAPIs.com key: checked, saved, selected as the engine and used for a 
 
     await page.fill('#sc-rapi-key', 'rapi_test_key_123456');
     await page.click('#sc-rapi-save');
-    await page.waitForFunction(() => /Connected/.test(document.querySelector('#sc-api').textContent) && /3456/.test(document.querySelector('#sc-api').textContent), null, { timeout: 20000 });
+    await page.waitForFunction(() => /Your key …3456/.test(document.querySelector('#sc-api').textContent), null, { timeout: 20000 });
     assert.equal(await page.inputValue('#sc-engine'), 'redditapis');
-    assert.match(await page.textContent('#sc-api'), /balance at last check: 4\.5/);
+    assert.match(await page.textContent('#sc-api'), /balance when checked: 4\.5/);
     assert.ok(!(await page.content()).includes('rapi_test_key_123456'));
 
     const before = await page.evaluate(() => JSON.parse(localStorage.getItem('metacode_scraper_form_v1')).lastJobId);
@@ -388,9 +416,44 @@ test('RedditAPIs.com key: checked, saved, selected as the engine and used for a 
     assert.ok(rapiMock.state.requests.some(q => q.path === '/api/reddit/posts' && q.query.subreddit === 'science' && q.headers.authorization === 'Bearer rapi_test_key_123456'));
 
     page.once('dialog', d => d.accept());
-    await page.click('#sc-api >> text=Remove');
-    await page.waitForFunction(() => /Add key/.test(document.querySelector('#sc-api').textContent));
-    assert.notEqual(await page.inputValue('#sc-engine'), 'redditapis');
+    await page.click('#sc-rapi-remove');
+    await page.waitForSelector('#sc-rapi-toggle');
+    assert.equal(await page.inputValue('#sc-engine'), 'redditapis', 'still the default, now asking for a key');
+    assert.match(await page.textContent('#sc-engine option[value="redditapis"]'), /add your API key/);
+    assert.deepEqual(errors.filter(e => !/is not defined/.test(e)), []);
+  } finally {
+    await context.close();
+  }
+});
+
+test('RedditAPIs.com is the default; without a key Start asks for one; the choice can be changed and is remembered', { skip }, async () => {
+  const { page, context, errors } = await openApp('#scraper');
+  try {
+    await page.waitForFunction(() => /RedditAPIs\.com · needs an API key/.test(document.querySelector('#sc-status').textContent));
+    assert.equal(await page.inputValue('#sc-engine'), 'redditapis');
+    assert.deepEqual(await page.$$eval('#sc-engine option', o => o.map(x => x.value)), ['redditapis', 'browser', 'server']);
+    assert.match(await page.textContent('#sc-engine option[value="redditapis"]'), /RedditAPIs\.com \(add your API key\)/);
+    assert.match(await page.textContent('#sc-api'), /Needed · paid/);
+
+    await page.click('.sc-mode[data-mode="standard"]');
+    await page.selectOption('#sc-target-type', 'subreddit');
+    await page.fill('#sc-f-subreddit', 'test');
+    const before = rapiMock.state.requests.length;
+    await page.click('#sc-start');
+    await page.waitForFunction(() => /Add your RedditAPIs\.com API key first/.test(document.querySelector('#sc-form-error').textContent));
+    await page.waitForSelector('#sc-rapi-key');                 // the key form opened
+    assert.equal(await page.isVisible('#sc-job'), false);
+    assert.equal(rapiMock.state.requests.length, before, 'nothing was sent');
+
+    // Choose another way; it's remembered after a reload
+    await page.selectOption('#sc-engine', 'browser');
+    await page.waitForFunction(() => /This browser \(Scramjet\)/.test(document.querySelector('#sc-status').textContent));
+    await page.reload();
+    await page.waitForFunction(() => /This browser \(Scramjet\)/.test((document.querySelector('#sc-status') || {}).textContent || ''));
+    assert.equal(await page.inputValue('#sc-engine'), 'browser');
+    await page.selectOption('#sc-engine', 'redditapis');
+    await page.reload();
+    await page.waitForFunction(() => /RedditAPIs\.com · needs an API key/.test((document.querySelector('#sc-status') || {}).textContent || ''));
     assert.deepEqual(errors.filter(e => !/is not defined/.test(e)), []);
   } finally {
     await context.close();
