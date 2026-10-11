@@ -48,8 +48,8 @@ const App = (() => {
     'projects':     () => ProjectsView.render(),
     'settings':     renderSettings,
     'import':       () => DataManager.render(),
-    'scraper':      () => CollectorView.render(),        // the Reddit Collector (collector/)
-    'scraper-api':  () => RedditScraper.render(),        // the server-side scraper (API keys, custom code)
+    'scraper':      () => RedditScraper.render(),
+    'scraper-beta': () => CollectorView.render(),        // AI Scraper (beta): the collector/ app, an AI agent collects
     'codebook':     () => Codebook.render(),
     'ai-coding':    () => AICoder.render(),
     'human-coding': () => HumanCoder.render(),
@@ -63,7 +63,7 @@ const App = (() => {
   };
 
   const TITLES = {
-    'dashboard':'Dashboard','projects':'Projects','settings':'Settings','import':'Import Data','scraper':'Reddit Scraper','scraper-api':'Reddit API Scraper',
+    'dashboard':'Dashboard','projects':'Projects','settings':'Settings','import':'Import Data','scraper':'Reddit Scraper','scraper-beta':'AI Scraper (beta)',
     'codebook':'Codebook','ai-coding':'AI Coding','human-coding':'Human Coding',
     'reliability':'Reliability Analysis','csv-analyzer':'Analyze CSV (NetworkX)',
     'network':'Network Graph',
@@ -71,8 +71,9 @@ const App = (() => {
   };
 
   // Former route ids that must keep working (bookmarks, browser history).
-  // The Metrics section used to live at #engagement.
-  const ROUTE_ALIASES = { 'engagement': 'metrics' };
+  // The Metrics section used to live at #engagement; the Reddit scraper was
+  // briefly at #scraper-api.
+  const ROUTE_ALIASES = { 'engagement': 'metrics', 'scraper-api': 'scraper' };
 
   let currentView = '';
   let viewCleanup = null;
@@ -97,7 +98,7 @@ const App = (() => {
 
     // Sidebar active state
     document.querySelectorAll('.nav-item').forEach(el => {
-      el.classList.toggle('active', el.dataset.view === (view === 'scraper-api' ? 'scraper' : view));
+      el.classList.toggle('active', el.dataset.view === view);
     });
 
     // Topbar title
@@ -352,7 +353,8 @@ const App = (() => {
     ['coding', 'AI Coding', 'codes posts with your codebook'],
     ['assistant', 'Ask MetaCode', 'the help assistant'],
     ['import', 'Import Data', 'works out the columns of a CSV'],
-    ['csv', 'Analyze CSV', 'finds the source/target columns']
+    ['csv', 'Analyze CSV', 'finds the source/target columns'],
+    ['scraper', 'AI Scraper (beta)', 'plans searches and picks the relevant Reddit posts']
   ];
 
   /* ── Backup of everything kept in this browser (local-db.js) ── */

@@ -120,7 +120,7 @@ function createUpgradeHandler(config) {
 function plainHttpHandler(req, res) {
   logOnce('plain', 'The Wisp endpoint (/wisp/) was requested without a WebSocket upgrade: the reverse proxy in front of MetaCode isn\'t forwarding WebSockets ' +
     '(nginx needs "proxy_http_version 1.1; proxy_set_header Upgrade $http_upgrade; proxy_set_header Connection $connection_upgrade;"). ' +
-    'The Scraper falls back to its HTTP relay meanwhile. See docs/deploy-vps.md.');
+    'The Reddit Scraper\'s in-app browser (Browse Reddit) needs it. See docs/deploy-vps.md.');
   res.status(426).set('Upgrade', 'websocket').type('text/plain')
     .send('This is MetaCode\'s Wisp endpoint: it only accepts WebSocket connections. If you see this from a browser page, a reverse proxy is not forwarding WebSockets — see docs/deploy-vps.md.');
 }

@@ -26,7 +26,6 @@ const { PythonTransport, AutoTransport } = require('./network/python-transport')
 const { HostRateLimiter } = require('./network/rate-limiter');
 const { RedditHttpClient } = require('./network/reddit-http');
 const { RelayHub } = require('./network/browser-relay');
-const { createHttpRelay } = require('./network/http-relay');
 const credentials = require('./credentials');
 const { RedditApisClient, balanceOf, DASHBOARD_URL } = require('./network/redditapis-client');
 const { DEFAULT_USER_AGENT } = require('./config');
@@ -37,6 +36,7 @@ const { createCustomRunner, sandboxSupported, validateCode } = require('./sandbo
 const PYODIDE_VERSION = (() => { try { return require('pyodide/package.json').version; } catch (e) { return 'not installed'; } })();
 const exporter = require('./export');
 const { ownerOf } = require('../owner');
+const { createAiRunner, normalizeAiOptions, normalizeGoal } = require('./ai/agent-runner');
 
 const SCRAMJET_FILES = {
   'scramjet.js':          ['@mercuryworkshop/scramjet', 'dist/scramjet.js'],
@@ -184,11 +184,16 @@ function createScraper(opts) {
     return client;
   };
   const runCustom = createCustomRunner({ config });
+  // AI Scraper (beta): python/ai_scraper.py plans with MetaCode's AI service (opts.ai)
+  const ai = opts.ai || null;
+  const aiProblem = () => (!ai ? 'The AI Scraper isn\'t available on this server.' : ai.problem());
+  const runAi = createAiRunner({ ai, env: process.env });
   const jobs = new JobManager({
     config, http,
     runners: {
       standard: (job, ctx) => runStandardScrape(job.target, job.options, ctx),
-      custom: runCustom
+      custom: runCustom,
+      ai: runAi
     },
     logToConsole: opts.logToConsole
   });
@@ -249,6 +254,8 @@ function createScraper(opts) {
         redditapis: { available: config.enabled && !!config.redditApisKey, minDelayMs: config.minDelayMs }
       },
       defaultEngine: config.redditApisKey ? 'redditapis' : (config.oauth || !config.browserEnabled ? 'server' : 'browser'),
+      // AI Scraper (beta): AI jobs (mode "ai"), run by the server or RedditAPIs.com engine
+      aiScraper: { available: config.enabled && !aiProblem(), reason: aiProblem() },
       // Users can add their own keys (kept in their browser, sent with their jobs).
       ownKeys: { reddit: true, redditapis: true, apiMinDelayMs: config.minDelayMs },
       // Never the key itself.
@@ -292,8 +299,8 @@ function createScraper(opts) {
 
   function parseSpec(body) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ScraperError('invalid_request', 'The request body must be a JSON object.', { status: 400 });
-    const mode = body.mode === 'custom' ? 'custom' : (body.mode === undefined || body.mode === 'standard' ? 'standard' : null);
-    if (!mode) throw new ScraperError('invalid_request', 'mode must be "standard" or "custom".', { status: 400 });
+    const mode = ['custom', 'ai'].includes(body.mode) ? body.mode : (body.mode === undefined || body.mode === 'standard' ? 'standard' : null);
+    if (!mode) throw new ScraperError('invalid_request', 'mode must be "standard", "custom" or "ai".', { status: 400 });
     const engine = body.engine === undefined || body.engine === 'server' ? 'server' : (['browser', 'redditapis'].includes(body.engine) ? body.engine : null);
     if (!engine) throw new ScraperError('invalid_request', 'engine must be "browser", "server" or "redditapis".', { status: 400 });
     // The user's own keys, when sent: the job runs on their own API limit.
@@ -319,6 +326,15 @@ function createScraper(opts) {
     const engineSpec = engine === 'browser' ? { engine, httpFor: browserHttpFor }
       : own ? { engine, httpFor: () => own }
       : engine === 'redditapis' ? { engine, httpFor: () => redditApis } : { engine };
+    if (mode === 'ai') {
+      const problem = aiProblem();
+      if (problem) throw new ScraperError('not_available', problem, { status: 503 });
+      if (engine === 'browser') throw new ScraperError('invalid_request', 'The AI Scraper fetches Reddit on the server (API keys or public pages) or through RedditAPIs.com, not through a browser tab.', { status: 400 });
+      const goal = normalizeGoal(body.goal);
+      options.ai = Object.assign(normalizeAiOptions(body.ai), { goal });
+      const capacity = Math.min(config.maxItems, options.ai.maxPosts * (1 + options.ai.commentsPerPost));
+      return Object.assign({ mode, target: null, options, capacity, label: 'AI: ' + (goal.length > 70 ? goal.slice(0, 69) + '…' : goal) }, engineSpec);
+    }
     if (mode === 'standard') {
       const target = normalizeTarget(body.target);
       return Object.assign({ mode, target, options, capacity: capacityFor(target, options) }, engineSpec);
@@ -350,8 +366,6 @@ function createScraper(opts) {
 
   router.get('/status', (req, res) => res.json(status(req)));
 
-  // The Reddit Collector's fallback when the Wisp WebSocket can't get through (see network/http-relay.js)
-  router.post('/fetch', createHttpRelay(config));
 
   router.post('/resolve', (req, res) => {
     try {

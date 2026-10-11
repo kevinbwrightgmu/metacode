@@ -1,19 +1,23 @@
-# Reddit Collector — data schema (version 1)
+# AI Scraper — data schema (version 1)
 
 Every record is stored in the browser's IndexedDB (database `metacode-reddit-collector`) and
-exported with exactly these fields. The TypeScript definitions are in `src/types.ts`.
+exported with exactly these fields. The TypeScript definitions are in `src/types.ts`. The AI
+Scraper's jobs run on the MetaCode server, which gets the data from Reddit's API (or
+RedditAPIs.com); the app copies the records each job keeps into this schema
+(`src/lib/records.ts`). Records collected by the earlier in-browser bot (same database) use the
+same schema.
 
 **Conventions**
 
-- A value Reddit didn't show is `null`. It is never guessed, and never turned into `0`: a
-  score of `0` means the page showed 0, and `null` means no score was shown (for example, a
-  hidden score or "Vote").
+- A value Reddit didn't give is `null`. It is never guessed, and never turned into `0`: a
+  score of `0` means Reddit said 0, and `null` means no score was given (for example, a
+  hidden score).
 - Timestamps are ISO 8601 in UTC (`2026-10-01T12:34:56.123Z`).
 - Ids are Reddit's base-36 ids without the `t3_`/`t1_` prefix. They are the deduplication
   keys: a post or comment seen again updates the same record.
-- When a record is seen again, newer values replace older ones. A value the newer page
-  didn't show (`null`) never erases one collected earlier. A post's full text read from its
-  own page isn't replaced by a listing's shorter preview.
+- When a record is seen again (another job kept it too), newer values replace older ones. A
+  value the newer record doesn't have (`null`) never erases one collected earlier, and the
+  record lists every job that kept it (`job_ids`).
 - Text is plain text (paragraphs separated by a blank line, list items as `- …`), up to
   100,000 characters. It is never HTML.
 
@@ -32,13 +36,13 @@ exported with exactly these fields. The TypeScript definitions are in `src/types
 | `created_at` | string \| null | When the post was made |
 | `score` | number \| null | Displayed score |
 | `num_comments` | number \| null | Displayed comment count |
-| `counts_approximate` | boolean | `true` when score or comment count came from a rounded display such as "1.2k" |
+| `counts_approximate` | boolean | `true` when score or comment count came from a rounded display such as "1.2k" (only the earlier bot read displays; AI Scraper records have exact numbers: `false`) |
 | `link_url` | string \| null | Where the post links (http/https only); `null` for text posts |
 | `post_type` | string \| null | `text`, `link`, `image`, `video`, `gallery`, `poll`, `crosspost` or `other` |
 | `flair` | string \| null | Post flair text |
 | `over_18` | boolean \| null | `true` when marked NSFW; `null` when the page doesn't say |
-| `details_collected` | boolean | Whether the post's own page was read (full text, exact details), not only a listing |
-| `source_url` | string | The page the latest values were read from (shown on reddit.com, also when a test mirror was used) |
+| `details_collected` | boolean | Whether the post's full details were read, not only a listing preview (always `true` for AI Scraper records: Reddit's API gives the full text) |
+| `source_url` | string | Where the latest values came from: for AI Scraper records, the post's address on Reddit (the data came from Reddit's API) |
 | `first_collected_at` | string | First time the collector saw the post |
 | `collected_at` | string | Last time the collector saw the post |
 | `job_ids` | string[] | Jobs that saw it |
@@ -60,18 +64,20 @@ exported with exactly these fields. The TypeScript definitions are in `src/types
 | `counts_approximate` | boolean | `true` when the score was a rounded display |
 | `depth` | number \| null | `0` for top-level comments |
 | `url` | string \| null | Canonical comment address, `https://www.reddit.com/r/<sub>/comments/<post>/comment/<id>/` |
-| `source_url` | string | The post page it was read from |
+| `source_url` | string | The comment's (or its post's) address on Reddit |
 | `first_collected_at` | string | |
 | `collected_at` | string | |
 | `job_ids` | string[] | |
 
 ## Jobs and errors (stored, not exported)
 
-A job record keeps its definition (`config`), its final `state` (`completed`, `stopped` or
-`failed`), its `outcome` message, start/finish times, counts (`stats`), and the robots.txt
-decision made before it ran (`robots`: `checked`, `allowed`, `rule`, `policy`, `note`).
-Collection errors are stored with their job id, time, page URL, kind (for example
-`load_failed`, `private`, `blocked`) and message.
+A job record keeps its definition (`config`: `goal`, `maxPosts`, `commentsPerPost`, `maxSteps`,
+`maxMinutes`, `access`, `model`), its `state` (`running`, `completed`, `stopped` or `failed`),
+its `outcome` message, the AI's `summary`, start/finish times, counts (`stats`: posts, comments,
+AI steps, AI requests, Reddit requests, errors), the AI's `steps` (each with `tool`, `args`,
+`thought`, `result`), and `synced`: how many of the job's records have been copied from the
+server. The job's id is the MetaCode server's job id. Errors (from the earlier bot) are stored
+with their job id, time, page URL, kind and message.
 
 ## Export files
 

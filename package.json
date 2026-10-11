@@ -11,8 +11,7 @@
     "collector:install": "npm --prefix collector install",
     "collector:dev": "npm --prefix collector run dev",
     "collector:build": "npm --prefix collector run build",
-    "collector:test": "npm --prefix collector test",
-    "collector:live-check": "node collector/scripts/live-check.cjs"
+    "collector:test": "npm --prefix collector test"
   },
   "dependencies": {
     "@mercuryworkshop/epoxy-tls": "2.1.19-1",

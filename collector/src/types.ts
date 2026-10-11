@@ -1,7 +1,7 @@
 // ── Data schema ───────────────────────────────────────────────────────────────
-// Every record the collector stores and exports. Values that Reddit didn't
-// show are `null` — never guessed — so a missing number is never confused
-// with a real 0. Timestamps are ISO 8601 in UTC. See SCHEMA.md.
+// Every record the AI Scraper stores and exports. Values Reddit didn't give
+// are `null` — never guessed — so a missing number is never confused with a
+// real 0. Timestamps are ISO 8601 in UTC. See SCHEMA.md.
 
 export const SCHEMA_VERSION = 1;
 
@@ -71,31 +71,23 @@ export interface CommentRecord {
 
 export type CollectedRecord = PostRecord | CommentRecord;
 
-// ── Jobs ──────────────────────────────────────────────────────────────────────
-export type CollectMode = 'posts' | 'comments' | 'both';
-export type ListingSort = 'hot' | 'new' | 'top' | 'rising';
-export type TopTime = 'hour' | 'day' | 'week' | 'month' | 'year' | 'all';
+// ── Jobs (the AI Scraper) ─────────────────────────────────────────────────────
+/** How the server reaches Reddit for a job: your own Reddit API keys, the server (its keys, or public pages), or RedditAPIs.com. */
+export type RedditAccess = 'own' | 'server' | 'redditapis';
 
-export interface JobConfig {
-  targetType: 'subreddit' | 'search';
-  /** Subreddit names (without "r/") for targetType "subreddit". */
-  subreddits: string[];
-  sort: ListingSort;
-  time: TopTime;
-  /** Search text for targetType "search". */
-  query: string;
-  /** Limit a search to one subreddit (optional). */
-  searchSubreddit: string;
-  /** posts: listing data only · comments: comments only (opens each post) · both: posts with full details + comments */
-  mode: CollectMode;
+/** What the user asked for. The AI agent on the MetaCode server does the rest. */
+export interface AiJobConfig {
+  /** The goal, in the user's words. */
+  goal: string;
   maxPosts: number;
-  maxCommentsPerPost: number;
-  /** Optional YYYY-MM-DD bounds (inclusive, UTC) on the post's creation date. */
-  dateFrom: string;
-  dateTo: string;
-  /** Pages or scroll steps per listing (and per post page, for comments). */
-  maxDepth: number;
-  maxRuntimeMinutes: number;
+  /** Comments saved with each kept post (0 = none). */
+  commentsPerPost: number;
+  /** Tool calls the AI may make. */
+  maxSteps: number;
+  maxMinutes: number;
+  access: RedditAccess;
+  /** The AI model ("" = the server's default). */
+  model: string;
 }
 
 export type JobState = 'running' | 'paused' | 'stopping' | 'completed' | 'stopped' | 'failed';
@@ -103,23 +95,41 @@ export type JobState = 'running' | 'paused' | 'stopping' | 'completed' | 'stoppe
 export interface JobStats {
   postsCollected: number;
   commentsCollected: number;
-  postsSkipped: number;
-  pagesVisited: number;
+  /** Tool calls the AI made. */
+  steps: number;
+  aiCalls: number;
+  /** Requests to Reddit (or RedditAPIs.com). */
+  requests: number;
   errors: number;
-  retries: number;
+}
+
+/** One thing the AI did, as shown in the job's timeline. */
+export interface AiStep {
+  step: number;
+  tool: string;
+  /** The call's arguments, summarized ("climate" · r/science · top week). */
+  args: string;
+  thought: string;
+  /** What came back, summarized; null while it runs. */
+  result: string | null;
+  error: boolean;
 }
 
 export interface JobRecord {
+  /** The MetaCode server's job id. */
   id: string;
-  config: JobConfig;
+  config: AiJobConfig;
   state: JobState;
-  /** Why the job ended (limit reached, stopped, Reddit refused…). */
+  /** Why the job ended (finished, limit, stopped, an error…). */
   outcome: string | null;
+  /** The AI's own summary of what it collected. */
+  summary: string | null;
   startedAt: string;
   finishedAt: string | null;
   stats: JobStats;
-  /** The robots.txt check made before the job, as shown to the user. */
-  robots: RobotsDecision | null;
+  steps: AiStep[];
+  /** How many of the job's records have been copied into this browser. */
+  synced: number;
 }
 
 export interface CollectionError {
@@ -131,57 +141,20 @@ export interface CollectionError {
   message: string;
 }
 
-export interface RobotsDecision {
-  checked: boolean;
-  allowed: boolean;
-  /** The rule that decided it, e.g. "Disallow: /"; null when no rule matched. */
-  rule: string | null;
-  policy: RobotsPolicy;
-  note: string;
-}
-
-export type RobotsPolicy = 'obey' | 'warn';
-
 // ── Settings ──────────────────────────────────────────────────────────────────
 export interface Settings {
-  /** Base address the bot opens: https://www.reddit.com, https://old.reddit.com, or a mirror the server allows. */
-  redditBase: string;
-  /** Wait between page loads (ms). */
-  pageDelayMs: number;
-  /** Wait after each scroll for new content (ms). */
-  scrollDelayMs: number;
-  /** How long a page may take to load (ms). */
-  pageTimeoutMs: number;
-  /** Retries of a failed page load, with exponential backoff. */
-  maxRetries: number;
-  robotsPolicy: RobotsPolicy;
   /** Delete records not seen for this many days (0 = keep). */
   retentionDays: number;
   defaultMaxPosts: number;
-  defaultMaxComments: number;
+  defaultCommentsPerPost: number;
+  defaultMaxSteps: number;
+  defaultMaxMinutes: number;
   exportFormat: ExportFormat;
   /** Byte-order mark at the start of CSV files (helps Excel read UTF-8). */
   csvBom: boolean;
-  /** How the browser panel reaches Reddit (applies when the page loads). */
-  connection: ConnectionMode;
 }
 
 export type ExportFormat = 'json' | 'jsonl' | 'csv';
-/** auto: Wisp (WebSocket) when it opens, else MetaCode's HTTP relay · wisp: Wisp only · http: HTTP relay only */
-export type ConnectionMode = 'auto' | 'wisp' | 'http';
-
-// ── Bot events ────────────────────────────────────────────────────────────────
-export interface JobProgress {
-  jobId: string;
-  state: JobState;
-  operation: string;
-  currentUrl: string | null;
-  target: string | null;
-  stats: JobStats;
-  limits: { maxPosts: number; maxRuntimeMs: number };
-  startedAt: string;
-  elapsedMs: number;
-}
 
 export type LogLevel = 'info' | 'warn' | 'error';
 export interface LogEntry { at: string; level: LogLevel; message: string }

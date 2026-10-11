@@ -100,6 +100,12 @@ function createMockReddit(opts) {
       });
       return send(res, 200, { json: { errors: [], data: { things } } });
     }
+    if (p === '/subreddits/search') {
+      const q = String(url.searchParams.get('q') || '').toLowerCase().replace(/[^a-z0-9]/g, '') || 'sub';
+      const subs = [q, q + 'talk', 'ask' + q].slice(0, Math.min(3, Number(url.searchParams.get('limit')) || 3));
+      return send(res, 200, listing(subs.map((name, i) => ({ kind: 't5', data: { id: 's' + i, display_name: name, title: 'All about ' + name,
+        public_description: 'A community for ' + name, subscribers: 1000 * (3 - i), created_utc: 1500000000, over18: false, subreddit_type: 'public' } }))));
+    }
     if ((m = p.match(/^\/r\/([^/]+)\/about$/))) {
       const sub = m[1];
       if (sub === 'missing') return send(res, 404, { error: 404 });

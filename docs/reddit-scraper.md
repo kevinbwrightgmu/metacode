@@ -1,9 +1,7 @@
 # Reddit Scraper
 
-The **Reddit API scraper** collects Reddit posts, comments, subreddit and profile information so you
-can code them in MetaCode like any imported posts. Open it with the **Reddit API scraper** link at the
-top of the Scraper page (sidebar → **Scraper**, which is the browser-based
-[Reddit Collector](../collector/README.md)), or at `app.html#scraper-api`. It has two modes:
+The **Scraper** page (sidebar → **Scraper**) collects Reddit posts, comments, subreddit and profile
+information so you can code them in MetaCode like any imported posts. It has two modes:
 
 - **Standard scraper** — pick a target and limits; MetaCode fetches, paginates and normalizes the data.
 - **Custom code** — write your own `scrape(ctx)` in JavaScript or TypeScript; it runs in an isolated
@@ -12,6 +10,10 @@ top of the Scraper page (sidebar → **Scraper**, which is the browser-based
 Jobs run on the MetaCode server in the background. The page follows their progress live, shows the
 results (table, JSON, logs, metadata) and exports them (CSV, JSON, NDJSON, reply-network edges) or adds
 them to the project as posts.
+
+The **AI Scraper (beta)** (sidebar → **AI Scraper**) runs a third kind of job on the same server
+machinery: you describe the posts you need and an AI agent picks the searches and the posts. See
+[collector/README.md](../collector/README.md) and [AI jobs](#ai-jobs-the-ai-scraper-beta) below.
 
 Contents: [How it works](#1-how-it-works) · [MercuryWorkshop components](#2-how-the-mercuryworkshop-components-are-used) ·
 [Configuration](#3-configuration) · [Standard scrape](#4-running-a-standard-scrape) ·
@@ -24,7 +26,7 @@ Contents: [How it works](#1-how-it-works) · [MercuryWorkshop components](#2-how
 ## 1. How it works
 
 ```
-Browser (Reddit API scraper)                    MetaCode server (Node.js)
+Browser (Scraper page)                          MetaCode server (Node.js)
 ────────────────────────────                    ─────────────────────────────────────────────
 POST /api/scraper/jobs ───────────────────────▶ JobManager (queue, status, logs, results)
 GET  /api/scraper/jobs/:id/events  ◀── SSE ───        │
@@ -148,7 +150,7 @@ Invalid values are ignored with a warning in the start-up banner.
 | `SCRAPER_ALLOW_PRIVATE_NETWORK` | `false` | Lets the Wisp proxy connect to private/loopback addresses. **Testing only** |
 
 Requirements: **Node.js 22 or newer** for the scraper (WebSocket client for epoxy-tls, `--permission`
-for the sandbox; TypeScript needs 22.13+). The rest of MetaCode still runs on Node 18; the Reddit API scraper page
+for the sandbox; TypeScript needs 22.13+). The rest of MetaCode still runs on Node 18; the Scraper page
 then explains what's missing.
 
 ### Reddit API credentials
@@ -177,7 +179,7 @@ There are two kinds of keys:
    Reddit's terms.
 2. **create another app…** → name it, type **script**, redirect URI `http://localhost:8080` (required, not
    used) → create.
-3. On the Reddit API scraper page open **Reddit API access → Add your keys** (or click **Add your Reddit API
+3. On the Scraper page open **Reddit API access → Add your keys** (or click **Add your Reddit API
    keys** on the failed job), paste the ID shown under the app's name and the **secret**, optionally your
    username, and click **Check & save**. MetaCode asks Reddit for a token with them; only keys that work are kept.
 4. **Fetch Reddit through** switches to **MetaCode server (Reddit API, your keys)**. Run the job again.
@@ -206,7 +208,7 @@ Pricing, terms and how it sources its data are between you and that vendor. Read
 using it fits your research ethics/IRB requirements.
 
 1. Create a key at <https://www.redditapis.com/dashboard/api-keys>.
-2. On the Reddit API scraper page open **RedditAPIs.com key → Add your key**, paste the key and click
+2. On the Scraper page open **RedditAPIs.com key → Add your key**, paste the key and click
    **Check & save**. MetaCode checks the key against `GET /account/me`, which costs nothing, and keeps it only if
    it works. The card shows the last four characters and your balance.
 3. The engine switches to RedditAPIs.com. Run the job.
@@ -248,7 +250,7 @@ The errors you may see map to:
 
 ## 4. Running a standard scrape
 
-1. Sidebar → **Scraper** → **Reddit API scraper**. Leave **Standard scraper** selected. **Fetch Reddit through** is *This browser
+1. Sidebar → **Scraper**. Leave **Standard scraper** selected. **Fetch Reddit through** is *This browser
    (Scramjet)* unless API credentials are configured — nothing else to set up.
 2. **What to scrape**:
    - **Subreddit** — name (combine with `+`, e.g. `science+askscience`), sort (hot/new/top/rising/
@@ -513,7 +515,9 @@ API (same-origin; errors are `{ error: { message, type } }`):
 |---|---|
 | `GET /api/scraper/status` | Mode, transport, limits, sandbox availability |
 | `POST /api/scraper/resolve` | `{ target }` → normalized target (validation) |
-| `POST /api/scraper/jobs` | `{ mode: "standard"\|"custom", target, options, code?, language?, params? }` → `202 { job }` |
+| `POST /api/scraper/jobs` | `{ mode: "standard"\|"custom"\|"ai", engine?, target, options, code?, language?, params?, goal?, ai?, credentials?, redditApisKey? }` → `202 { job }` |
+| `POST /api/scraper/credentials/check` | `{ clientId, clientSecret, username? }` → `{ ok, clientIdHint, username }` (asks Reddit; saves nothing) |
+| `POST /api/scraper/redditapis-key/check` | `{ key }` → `{ ok, keyHint, balance }` (asks RedditAPIs.com; saves nothing) |
 | `GET /api/scraper/jobs` | Recent jobs |
 | `GET /api/scraper/jobs/:id` | Job detail incl. logs |
 | `GET /api/scraper/jobs/:id/events` | Server-sent events: `snapshot`, `status`, `progress`, `log`, `records`, `meta`; ends when the job finishes |
@@ -522,6 +526,40 @@ API (same-origin; errors are `{ error: { message, type } }`):
 | `GET /api/scraper/jobs/:id/export?format=csv\|json\|ndjson&type=&nested=1` | Download |
 | `POST /api/scraper/jobs/:id/cancel` | Cancel |
 | `DELETE /api/scraper/jobs/:id` | Cancel if needed and delete |
+
+### AI jobs (the AI Scraper, beta)
+
+`mode: "ai"` with `goal` (10–2,000 characters: what to collect, in the user's words) and
+`ai: { maxPosts 1–300 (50), commentsPerPost 0–100 (0), maxSteps 5–60 (25), maxMinutes 1–30 (10), model }`.
+`engine` is `server` (with `credentials` = the user's own Reddit API keys, else the server's keys or public pages)
+or `redditapis` (with `redditApisKey`, else the server's key); not `browser`.
+
+The job is run by **`python/ai_scraper.py`**, the agent (standard library only). It asks MetaCode's AI service,
+through the same code as the other AI features (key, chosen model, fallbacks, quota messages), for one tool
+call at a time, as a JSON object, and the server executes it (`scraper/ai/agent-runner.js`):
+
+| Tool | What the server does |
+|---|---|
+| `find_subreddits { query, limit≤10 }` | `GET /subreddits/search` |
+| `search_posts { query, subreddit?, sort, time, limit≤50, after? }` | `GET /search` or `/r/<sub>/search` (`restrict_sr`) |
+| `list_posts { subreddit, sort, time?, limit≤50, after? }` | `GET /r/<sub>/<sort>` |
+| `read_post { post_id, comments≤20 }` | `GET /comments/<id>`: the post's text and top comments, for the AI to judge |
+| `keep { post_ids, reason }` | Adds those posts (and up to `commentsPerPost` comments each) to the job's results |
+| `finish { summary }` | Ends the job |
+
+Every Reddit request goes through the job's Reddit client, so destination checks, rate limits (per key when
+the user's own keys are used), retries and robots.txt (public mode) apply as for any job. The AI only sees
+compact views (id, subreddit, score, comments, age, title, the start of the text); the records a job keeps are
+the ones Reddit returned to the server, so the AI can't invent data, and `keep` only accepts ids from results the
+agent has seen. Text from Reddit is presented to the AI as data, and the tools are read-only, so a post that
+tries to instruct the AI can at most steer which read-only call comes next. The agent process gets no keys or
+`.env`.
+
+Limits: `maxSteps` tool calls (format mistakes don't count), at most `maxSteps + 6` AI requests, `maxPosts`
+kept posts, and `maxMinutes` (then the agent is told to wrap up; it's stopped a minute later). The job's
+`meta.ai` holds `{ goal, steps: [{ step, tool, args, thought, result, error }], kept, aiCalls, summary, reason }`,
+where `reason` is `finished`, `limit`, `steps` or `time`. Errors that end a job: the AI service (`ai_error`, e.g.
+quota used up), bad keys (`auth_error`), Reddit blocking the server (`reddit_blocked`), robots.txt in public mode.
 
 ## 10. Troubleshooting
 
@@ -532,7 +570,7 @@ API (same-origin; errors are `{ error: { message, type } }`):
 | "Couldn't verify Reddit's TLS certificate …" | A proxy, firewall or antivirus intercepts HTTPS. epoxy-tls verifies certificates end-to-end and won't accept an interception certificate; run MetaCode on a network without HTTPS inspection |
 | "The Wisp proxy closed the connection before TLS started …" | The host isn't allowed, resolved to a private address, or is unreachable from the server. Check internet access; don't point `REDDIT_BASE_URL` at private hosts without `SCRAPER_ALLOW_PRIVATE_NETWORK` |
 | "MetaCode couldn't reach its Wisp proxy endpoint" | The server's own `/wisp/` WebSocket failed — restart MetaCode; check that a reverse proxy forwards WebSocket upgrades |
-| "Reddit refused this request because it was made without a Reddit login or API key …" | Reddit blocks logged-out access from your network (all subreddits, not just this one). Connect [Reddit API access](#reddit-api-credentials) on the Reddit API scraper page and run with *MetaCode server (Reddit API)* |
+| "Reddit refused this request because it was made without a Reddit login or API key …" | Reddit blocks logged-out access from your network (all subreddits, not just this one). Connect [Reddit API access](#reddit-api-credentials) on the Scraper page and run with *MetaCode server (Reddit API)* |
 | "r/… is private" / "is quarantined" / "only available to Reddit Premium members" | Reddit restricts that community; it can't be scraped |
 | "Reddit refused the API sign-in request with a block page …" | Reddit blocks this network even for the API; MetaCode can't reach Reddit from here |
 | "The keys weren't saved: Reddit rejected the API client ID / secret" | Re-copy the ID (under the app name) and secret; the app type must be **script** |

@@ -2,7 +2,7 @@
   "name": "metacode-reddit-collector",
   "version": "1.0.0",
   "private": true,
-  "description": "Client-side Reddit collector: a bot that reads Reddit pages loaded through Scramjet, stores records in IndexedDB and exports them",
+  "description": "MetaCode's AI Scraper (beta): describe the Reddit posts you need; an AI agent on the MetaCode server finds and picks them, and this app keeps and exports them",
   "type": "module",
   "scripts": {
     "dev": "vite",

@@ -1,31 +1,29 @@
 # Running MetaCode on a VPS with pm2
 
 This guide sets up MetaCode on a Linux server (Ubuntu 22.04/24.04 or Debian 12): pm2 keeps it running,
-nginx serves it over HTTPS, and the Scraper works through the reverse proxy.
+nginx serves it over HTTPS, and both scrapers work through the reverse proxy.
 
 ```
 Browser ──https──▶ nginx :443 ──http──▶ MetaCode (pm2, port 3000)
-          wss://your-site/wisp/  ──▶  MetaCode's own Wisp server (the Scraper's connection to Reddit)
+          wss://your-site/wisp/  ──▶  MetaCode's own Wisp server (the Reddit Scraper's in-app browser)
 ```
 
-**Why the proxy matters for the Scraper.** The Scraper (the Reddit Collector in the sidebar) opens Reddit pages
-in your browser through Scramjet. Scramjet reaches Reddit through MetaCode's **own Wisp server** at `/wisp/`.
-Wisp runs inside `server.js`, so there is nothing extra to install or run. The browser connects to it with a
-**WebSocket**. A reverse proxy that doesn't forward WebSockets causes this error:
+**Why the proxy matters.** The Reddit Scraper's in-app browser (**Browse Reddit**) and its "This browser"
+jobs reach Reddit through MetaCode's **own Wisp server** at `/wisp/`, which runs inside `server.js` (nothing extra
+to install). The browser connects to it with a **WebSocket**. A reverse proxy that doesn't forward WebSockets
+causes this error:
 
 ```
 Hyper client: hyper_util::client::legacy::Error(Connect, WebSocketConnectFailed("websocket did not open"))
 (client error (Wisp WebSocket failed to connect: websocket did not open))
 ```
 
-The nginx setup in [step 6](#6-nginx-and-https) forwards WebSockets correctly. Until the proxy is fixed, the
-Scraper falls back to MetaCode's **HTTP relay** (`POST /api/scraper/fetch`), which works through any proxy. The
-line under the Reddit browser says which connection is in use. Wisp is faster and handles everything a page
-does, so fix the proxy anyway.
+The nginx setup in [step 6](#6-nginx-and-https) forwards WebSockets correctly. The **AI Scraper (beta)** doesn't
+need WebSockets: its jobs run on the server.
 
 Throughout this guide, replace `metac0.de` with your domain and `~/metacode` with where you put MetaCode.
 
-**Already running MetaCode under pm2?** Update it, build the Scraper, and switch to the included pm2 file:
+**Already running MetaCode under pm2?** Update it, build the AI Scraper, and switch to the included pm2 file:
 
 ```bash
 cd ~/metacode
@@ -49,13 +47,13 @@ above. Run the checks in [step 9](#9-check-that-it-works).
 - A VPS with at least **1 GB RAM**, and SSH access as a user who can `sudo`.
 - A domain whose DNS **A record** points at the VPS: `metac0.de`, plus `www.metac0.de` and `status.metac0.de`
   (the [status page](../README.md#status-page)) if you want them.
-- **HTTPS.** The Scraper only works on `https://` (or `http://localhost`), because Scramjet needs a service
-  worker and browsers only allow those on secure pages. Opening `http://your-ip:3000` loads MetaCode, but
-  the Scraper won't run there.
+- **HTTPS.** The Reddit Scraper's in-app browser only works on `https://` (or `http://localhost`), because
+  Scramjet needs a service worker and browsers only allow those on secure pages.
+- **Python 3**, for the AI Scraper (beta)'s agent, Analyze CSV and the AI requests (step 3).
 
 ## 2. Install Node.js 22, pm2 and git
 
-MetaCode's scraper needs **Node.js 22**. Building the Scraper (Vite 7) needs **22.12 or newer**.
+MetaCode's scraper needs **Node.js 22**. Building the AI Scraper (Vite 7) needs **22.12 or newer**.
 
 ```bash
 sudo apt update
@@ -69,22 +67,23 @@ sudo npm install -g pm2
 If you already use `nvm`, `nvm install 22 && nvm alias default 22` works too. Then install pm2 with
 `npm install -g pm2`, without sudo.
 
-## 3. Get MetaCode and build the Scraper
+## 3. Get MetaCode and build the AI Scraper
 
 ```bash
 cd ~
 git clone https://github.com/kevinbwrightgmu/metacode.git   # a private repo asks for a GitHub token or SSH key
 cd ~/metacode
 npm install                     # MetaCode's server
-npm run collector:install       # the Scraper's own dependencies (collector/)
+npm run collector:install       # the AI Scraper's own dependencies (collector/)
 npm run collector:build         # builds it into collector/dist; MetaCode serves it at /collector/
 ```
 
-If you skip the build, the Scraper page shows *"The scraper isn't built yet"* and lists these commands.
+If you skip the build, the AI Scraper page shows *"The AI Scraper isn't built yet"* and lists these commands.
 
-**Python** (optional) is used for Analyze CSV (NetworkX), the AI requests and the old scraper's server engine.
-Without it, those features fall back or stay off. Ubuntu 23.04+ and Debian 12 don't allow `pip install` into
-the system Python, so use a virtual environment in `.venv`. The pm2 file below puts it first on `PATH`.
+**Python 3** runs the AI Scraper's agent (`python/ai_scraper.py`, standard library only) and is used for Analyze
+CSV (NetworkX), the AI requests and the Reddit Scraper's server engine. Without it, the AI Scraper can't run and
+the others fall back or stay off. Ubuntu 23.04+ and Debian 12 don't allow `pip install` into the system Python,
+so use a virtual environment in `.venv`. The pm2 file below puts it first on `PATH`.
 
 ```bash
 sudo apt install -y python3 python3-venv
@@ -224,19 +223,22 @@ nginx, which causes redirect loops after certbot's redirect.
 
 ## 7. A public server: Reddit API keys and limits
 
-If your VPS's IP is blocked by Reddit ("You've been blocked by network security"), the page-based Scraper
-can't reach Reddit from it. The **Reddit API scraper** works through Reddit's official API instead.
+If your VPS's IP is blocked by Reddit ("You've been blocked by network security"), requests to Reddit's public
+pages fail from it. Reddit's official API with keys works instead, for both the Reddit Scraper and the AI Scraper.
 
-- **Each user adds their own keys** (Reddit API scraper → Reddit API access → Add your keys). They stay in
-  that user's browser, are sent only with their jobs, and give each user their own Reddit API limit (about
-  100 requests a minute per app). Nobody can see, change or remove anyone else's keys.
+- **Each user adds their own keys** (Scraper → Reddit API access → Add your keys). They stay in that user's
+  browser, are sent only with their jobs (the AI Scraper uses them too), and give each user their own Reddit API
+  limit (about 100 requests a minute per app). Nobody can see, change or remove anyone else's keys.
 - **Optionally, give the server its own keys** in `.env` (`REDDIT_CLIENT_ID`, `REDDIT_CLIENT_SECRET`,
   `SCRAPER_USER_AGENT`) for users who haven't added theirs. All of them share that one limit. These can't be
   changed from the web.
 - Don't register several Reddit apps yourself and spread users across them: that's against Reddit's
   developer terms.
-- At most `SCRAPER_MAX_CONCURRENT_JOBS` jobs run at once on the server (default 2, up to 16); others wait
-  their turn. With many users bringing their own keys, raise it, e.g. `SCRAPER_MAX_CONCURRENT_JOBS=8`.
+- At most `SCRAPER_MAX_CONCURRENT_JOBS` jobs run at once on the server (default 2, up to 16), AI Scraper jobs
+  included; others wait their turn. With many users bringing their own keys, raise it, e.g.
+  `SCRAPER_MAX_CONCURRENT_JOBS=8`.
+- AI Scraper jobs also use MetaCode's AI key: each step is one AI request (a job makes at most its step limit
+  plus a few). The AI service's quota for that key is shared by everyone.
 
 ## 8. Firewall
 
@@ -256,7 +258,7 @@ If your VPS provider has its own firewall (security groups), allow 22, 80 and 44
 From your own computer:
 
 ```bash
-# The site and the Scraper app
+# The site and the AI Scraper app
 curl -sI https://metac0.de/app.html | head -1            # HTTP/2 200
 curl -sI https://metac0.de/collector/ | head -1          # HTTP/2 200 (503 = not built: step 3)
 
@@ -268,14 +270,14 @@ curl -i --http1.1 --max-time 3 https://metac0.de/wisp/ \
 
 | You get | Meaning |
 |---|---|
-| `HTTP/1.1 101 Switching Protocols` | WebSockets reach MetaCode. The Scraper uses Wisp. |
+| `HTTP/1.1 101 Switching Protocols` | WebSockets reach MetaCode: Browse Reddit works. |
 | `426` *"…a reverse proxy is not forwarding WebSockets"* | nginx is missing the `Upgrade`/`Connection` lines, or Cloudflare's WebSockets switch is off |
 | `403` | The origin check refused it: add `proxy_set_header Host $host;` or set `PUBLIC_URL` (then `pm2 reload metacode`) |
 | `502` / `504` | MetaCode isn't running or isn't on that port: `pm2 status`, `pm2 logs metacode` |
 
-Then open `https://metac0.de/app.html#scraper` and start a small job. The line under the Reddit browser says
-*"Connected through Wisp (WebSocket, end-to-end TLS)"* when the WebSocket works. It says *"Connected through
-MetaCode's HTTP relay"*, with the reason, when the Scraper had to fall back.
+Then open `https://metac0.de/app.html#scraper-beta`, ask the AI Scraper for a few posts, and watch its steps in
+the Monitor. If Reddit blocks the server, the job stops with "blocked by network security": add your own Reddit
+API keys (step 7).
 
 ## 10. Updating
 
@@ -288,13 +290,13 @@ npm run collector:build
 pm2 reload metacode
 ```
 
-Do the reload when no scraping is running. Jobs of the Reddit API scraper live in the server's memory, and a
-Scraper (collector) job running in a browser loses its connection for a moment. Projects, codebooks and
-collected Scraper data are stored in each user's browser, so they survive restarts.
+Do the reload when no scraping is running: scraper jobs (AI Scraper jobs too) live in the server's memory and stop
+with it. Projects, codebooks and the posts the AI Scraper already copied are stored in each user's browser, so
+they survive restarts.
 
 ## 11. Troubleshooting
 
-**"Wisp WebSocket failed to connect: websocket did not open" / `WebSocketConnectFailed`**
+**Browse Reddit: "Wisp WebSocket failed to connect: websocket did not open" / `WebSocketConnectFailed`**
 The WebSocket to `/wisp/` doesn't reach MetaCode. Run `pm2 logs metacode` and look for one of these:
 
 - `[wisp] The Wisp endpoint (/wisp/) was requested without a WebSocket upgrade` means nginx forwards the
@@ -307,29 +309,24 @@ The WebSocket to `/wisp/` doesn't reach MetaCode. Run `pm2 logs metacode` and lo
 - Nothing at all means the request never reached MetaCode. Check that the nginx site is enabled
   (`ls /etc/nginx/sites-enabled`), that `server_name` matches, and that `proxy_pass` uses MetaCode's `PORT`.
 
-While this is broken, the Scraper uses the HTTP relay by itself (**Settings → Connection to Reddit:
-Automatic**). "Wisp only" shows the error instead of falling back.
-
-**"You've been blocked by network security" / "Reddit blocked this browser's requests"**
+**"You've been blocked by network security" / "Reddit refused this request…"**
 Reddit is blocking your server's IP address, which it often does for data-centre addresses. MetaCode doesn't
-work around that. Use the Reddit API scraper with Reddit API keys ([step 7](#7-a-public-server-reddit-api-keys-and-limits)),
-or ask Reddit to review the block with the "File a ticket" link on that page.
+work around that. Use Reddit API keys ([step 7](#7-a-public-server-reddit-api-keys-and-limits)), or ask Reddit to
+review the block with the "File a ticket" link on that page.
 
-**The Scraper page says "The scraper isn't built yet" (or `/collector/` answers 503)**
+**The AI Scraper page says "The AI Scraper isn't built yet" (or `/collector/` answers 503)**
 Run `npm run collector:install && npm run collector:build` in `~/metacode`, then `pm2 reload metacode`.
 
-**"Scramjet needs the collector to be opened over https:// or at http://localhost"**
-You opened MetaCode over plain http (for example `http://your-ip:3000`). Use the https address from step 6.
+**AI Scraper: "needs Python 3 on the MetaCode server" / "MetaCode's AI isn't set up yet"**
+Install Python 3 (step 3), or point `SCRAPER_PYTHON` at it; set `EMIS_API_KEY` in `.env`. Then `pm2 reload metacode`.
 
 **The build fails with "Vite requires Node.js version 20.19+ or 22.12+"**
 Update Node.js (step 2). Then check `node -v`. `pm2 reload metacode` keeps using the Node version pm2 started
 with, so after a Node.js update run `pm2 update` once.
 
-**A Scraper job stops at once: "robots.txt doesn't allow…"**
-Reddit's robots.txt asks automated clients not to crawl. By default (**Settings → robots.txt: Obey**) the
-Scraper follows it, so jobs on reddit.com stop before loading a page. "Warn" runs the job and records why.
-That is your decision, and you are responsible for Reddit's terms. The **Reddit API scraper** (link at the
-top of the Scraper page) uses Reddit's official API with your own API keys instead.
+**A job stops at once: "robots.txt doesn't allow automated access…"**
+Without API keys, the server reads Reddit's public pages and follows Reddit's robots.txt, which disallows most
+of Reddit. Add Reddit API keys (step 7); the API isn't governed by robots.txt.
 
 **Serving on a port other than 443, e.g. `https://metac0.de:8443`, and you get "Requests from other websites aren't allowed"**
 nginx's `$host` leaves out the port, and MetaCode compares the page's address with the host name it

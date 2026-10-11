@@ -253,4 +253,4 @@ async function addComments(ctx, options, posts) {
   }
 }
 
-module.exports = { runStandardScrape };
+module.exports = { runStandardScrape, fetchPostWithComments, readListing };

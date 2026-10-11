@@ -73,13 +73,16 @@ describe('IndexedDB store', () => {
     expect(await store.counts()).toEqual({ posts: 0, comments: 0, jobs: 0, errors: 0 });
   });
 
-  it('jobs left running when the page closed are marked as interrupted', async () => {
-    const job = { id: 'j9', state: 'running', startedAt: '2026-10-01T00:00:00.000Z', finishedAt: null } as unknown as JobRecord;
-    await store.saveJob(job);
+  it('jobs of the earlier in-browser bot left running are marked as interrupted; AI jobs (on the server) are left to be picked up again', async () => {
+    const legacy = { id: 'j9', state: 'running', config: { subreddits: ['x'] }, startedAt: '2026-10-01T00:00:00.000Z', finishedAt: null } as unknown as JobRecord;
+    const ai = { id: 'a1', state: 'running', config: { goal: 'posts about x' }, startedAt: '2026-10-02T00:00:00.000Z', finishedAt: null } as unknown as JobRecord;
+    await store.saveJob(legacy);
+    await store.saveJob(ai);
     expect(await store.closeInterruptedJobs()).toBe(1);
-    const [saved] = await store.listJobs();
-    expect(saved.state).toBe('stopped');
-    expect(saved.outcome).toMatch(/Interrupted/);
+    const jobs = await store.listJobs();
+    expect(jobs.find(j => j.id === 'j9')!.state).toBe('stopped');
+    expect(jobs.find(j => j.id === 'j9')!.outcome).toMatch(/Interrupted/);
+    expect(jobs.find(j => j.id === 'a1')!.state).toBe('running');
   });
 
   it('orders orphaned replies (parent not collected) as top-level', () => {

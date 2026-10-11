@@ -381,11 +381,11 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     container.innerHTML = `
       <div class="view-header">
         <div>
-          <div class="view-title">Reddit API Scraper</div>
-          <div class="view-subtitle">The server-side scraper: Reddit API keys, RedditAPIs.com and custom code. The main Scraper is the Reddit Collector.</div>
+          <div class="view-title">Reddit Scraper</div>
+          <div class="view-subtitle">Collect Reddit posts and comments, then code them like any other posts</div>
         </div>
         <div class="view-actions">
-          <a class="btn btn-ghost" href="#scraper">← Scraper</a>
+          <a class="btn btn-ghost" href="#scraper-beta" title="Describe what you want; an AI finds and picks the posts">Try the AI Scraper (beta)</a>
           <button class="btn btn-secondary" id="sc-browser-toggle" onclick="RedditScraper.toggleBrowser()">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
             Browse Reddit
@@ -627,6 +627,8 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       <div class="form-error mt-2" id="sc-api-error" role="alert"></div>` : '');
   }
 
+  // AI jobs come from the AI Scraper (beta); they show up here too (same browser)
+  const modeLabel = mode => mode === 'custom' ? 'Custom code' : mode === 'ai' ? 'AI Scraper (beta)' : 'Standard';
   const hasApiKeys = () => !!(ownReddit() || (status && status.credentials && status.credentials.configured));
 
   function toggleApi(open) {
@@ -1499,7 +1501,7 @@ async def scrape(ctx):
         <div class="sc-job-title">
           <span class="badge ${STATUS_BADGE[job.status] || 'badge-gray'}" id="sc-job-status">${esc(cap(job.status))}</span>
           <span class="sc-label" title="${esc(job.label)}">${esc(job.label)}</span>
-          <span class="badge ${job.mode === 'custom' ? 'badge-violet' : 'badge-gray'}">${job.mode === 'custom' ? 'Custom code' : 'Standard'}</span>
+          <span class="badge ${job.mode === 'standard' ? 'badge-gray' : 'badge-violet'}">${modeLabel(job.mode)}</span>
           <span class="badge badge-gray">${job.engine === 'browser' ? 'Browser' : 'Server'}</span>
         </div>
         <div class="flex gap-2">
@@ -1951,7 +1953,7 @@ async def scrape(ctx):
     }
     el.innerHTML = '<div class="table-wrap"><table class="table"><thead><tr><th>Job</th><th>Mode</th><th>Status</th><th class="sc-cell-num">Items</th><th>Created</th><th></th></tr></thead><tbody>' +
       jobsList.map(j => '<tr><td><div class="sc-cell-text" title="' + esc(j.label) + '">' + esc(j.label) + '</div></td>' +
-        '<td>' + (j.mode === 'custom' ? 'Custom code' : 'Standard') + (j.engine === 'browser' ? ' · browser' : ' · server') + '</td>' +
+        '<td>' + modeLabel(j.mode) + (j.engine === 'browser' ? ' · browser' : ' · server') + '</td>' +
         '<td><span class="badge ' + (STATUS_BADGE[j.status] || 'badge-gray') + '">' + esc(cap(j.status)) + '</span></td>' +
         '<td class="sc-cell-num">' + fmtNum(j.itemCount) + '</td>' +
         '<td style="white-space:nowrap">' + fmtDate(j.createdAt) + '</td>' +
