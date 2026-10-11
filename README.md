@@ -469,6 +469,10 @@ Nothing is sent to any server except AI requests to the AI service (for coding, 
 post text being coded) and your own machine's Python process (for NetworkX analysis — this never leaves your
 computer). The AI key stays in the server's `.env` file and is only sent to the AI service.
 
+MetaCode's own pages (the landing page, the app, Survey Studio and the status page) load the Google tag
+(Google Analytics, `G-VYEQCY48SX`), which tells Google about page visits. Your posts, codes, projects and
+surveys are not part of it. Published surveys (the pages respondents answer) don't load it.
+
 Survey Studio puts a survey on the server only when you publish it: the published versions and their
 responses are stored as JSON files (`SURVEY_DATA_DIR`, default `survey-data/`) so respondents on other
 devices can answer, and only the browser that published it can see or manage them.

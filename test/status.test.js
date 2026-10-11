@@ -136,6 +136,16 @@ test('status.metac0.de (and any status.* host) serves the status page; other pag
   assert.doesNotMatch((await get('/', 'health.example.org')).body, /MetaCode Status<\/title>/);
 });
 
+test('the Google tag is on MetaCode\'s own pages, not on the pages survey respondents see', async () => {
+  for (const page of ['/', '/app.html', '/studio.html', '/status']) {
+    const body = (await get(page)).body;
+    assert.match(body, /<head>\s*<!-- Google tag \(gtag\.js\) -->\s*<script async src="https:\/\/www\.googletagmanager\.com\/gtag\/js\?id=G-VYEQCY48SX"><\/script>/, page);
+    assert.match(body, /gtag\('config', 'G-VYEQCY48SX'\);/, page);
+  }
+  assert.match((await get('/', 'status.metac0.de')).body, /G-VYEQCY48SX/);
+  assert.doesNotMatch((await get('/survey.html')).body, /googletagmanager|gtag\(/);
+});
+
 function findChromium() {
   const candidates = [];
   if (process.env.CHROMIUM_PATH) candidates.push(process.env.CHROMIUM_PATH);
