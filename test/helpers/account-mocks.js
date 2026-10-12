@@ -157,6 +157,12 @@ function mockStripe(opts) {
   const products = Object.assign({}, opts.products || {});   // id → { id, default_price, active }
   const calls = [];
   const sessions = [];
+  const recurring = (id, amount, product) => ({ id, object: 'price', active: true, type: 'recurring', unit_amount: amount, currency: 'usd', recurring: { interval: 'month', interval_count: 1 }, product });
+  const prices = Object.assign({
+    price_pro: recurring('price_pro', 900, 'prod_VQeJh2lPqfmae9'),
+    price_max: recurring('price_max', 2900, 'prod_VQeK26tKchu1VI'),
+    price_ultra: recurring('price_ultra', 7900, 'prod_VQeKXAJtQQLKqm')
+  }, opts.prices || {});
   const parseForm = body => {
     const out = {};
     new URLSearchParams(body).forEach((v, k) => { out[k] = v; });
@@ -185,9 +191,11 @@ function mockStripe(opts) {
       return json(200, { object: 'list', data: subscriptions.filter(s => s.customer === url.searchParams.get('customer')) });
     }
     const price = p.match(/^\/v1\/prices\/([^/]+)$/);
-    if (price) { const amounts = { price_pro: 900, price_max: 2900, price_ultra: 7900 }; return amounts[price[1]] ? json(200, { id: price[1], object: 'price', unit_amount: amounts[price[1]], currency: 'usd', recurring: { interval: 'month' } }) : json(404, { error: { message: 'No such price' } }); }
+    if (price) { const pr = prices[price[1]]; return pr ? json(200, pr) : json(404, { error: { type: 'invalid_request_error', code: 'resource_missing', message: "No such price: '" + price[1] + "'" } }); }
     const prod = p.match(/^\/v1\/products\/([^/]+)$/);
-    if (prod) return products[prod[1]] ? json(200, products[prod[1]]) : json(404, { error: { type: 'invalid_request_error', message: 'No such product' } });
+    if (prod) return products[prod[1]] ? json(200, products[prod[1]]) : json(404, { error: { type: 'invalid_request_error', code: 'resource_missing', message: "No such product: '" + prod[1] + "'" } });
+    if (p === '/v1/billing_portal/configurations') return json(200, { object: 'list', data: opts.portal || [] });
+    if (p === '/v1/webhook_endpoints') return json(200, { object: 'list', data: opts.webhooks || [] });
     if (p === '/v1/checkout/sessions' && req.method === 'POST') {
       const f = parseForm(body);
       sessions.push(f);

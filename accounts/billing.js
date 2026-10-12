@@ -79,7 +79,10 @@ function createBilling(opts) {
     }
     if (!out.ok) {
       const err = (out.json && out.json.error) || {};
-      console.error('[billing] Stripe ' + method + ' ' + path.replace(/\/(cus|sub|prod|price|cs)_[A-Za-z0-9]+/g, '/$1_…') + ' → ' + out.status + (err.type ? ' ' + err.type : '') + (err.code ? ' ' + err.code : ''));
+      // Stripe's own explanation helps the administrator; key-like strings are cut out of it
+      const said = String(err.message || '').replace(/\b(sk|rk|pk|whsec)_(live_|test_)?[A-Za-z0-9*]{4,}/g, '$1_…').replace(/[^\x20-\x7E]/g, '').slice(0, 300);
+      console.error('[billing] Stripe ' + method + ' ' + path.replace(/\/(cus|sub|cs)_[A-Za-z0-9]+/g, '/$1_…') + ' → ' + out.status + (err.type ? ' ' + err.type : '') + (err.code ? ' ' + err.code : '') + (err.param ? ' (' + err.param + ')' : '') +
+        (said ? ': ' + said : '') + ' — run "npm run billing:check" to test the Stripe setup.');
       const e = new BillingError(out.status >= 500 ? 503 : 502, out.status >= 500 ? 'billing_unavailable' : 'billing_error',
         out.status >= 500 ? 'Stripe isn\'t answering right now. Try again in a minute.' : 'Billing isn\'t set up correctly on this server. Please contact the site\'s administrator.');
       e.stripeStatus = out.status;

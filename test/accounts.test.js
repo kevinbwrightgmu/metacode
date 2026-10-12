@@ -158,6 +158,44 @@ test('Stripe webhooks: the signature must match and be recent', () => {
   assert.equal(formEncode({ a: 1, line_items: { 0: { price: 'p', quantity: 1 } }, m: { k: 'v w' } }), 'a=1&line_items%5B0%5D%5Bprice%5D=p&line_items%5B0%5D%5Bquantity%5D=1&m%5Bk%5D=v%20w');
 });
 
+test('npm run billing:check: a correct Stripe setup passes; the usual mistakes are named with their fix', async () => {
+  const { checkBilling } = require('../accounts/check-billing');
+  const products = {
+    prod_VQeJh2lPqfmae9: { id: 'prod_VQeJh2lPqfmae9', active: true, default_price: 'price_pro' },
+    prod_VQeK26tKchu1VI: { id: 'prod_VQeK26tKchu1VI', active: true, default_price: 'price_max' },
+    prod_VQeKXAJtQQLKqm: { id: 'prod_VQeKXAJtQQLKqm', active: true, default_price: 'price_ultra' }
+  };
+  const portal = [{ active: true, is_default: true, features: { subscription_update: { enabled: true, products: Object.keys(products).map(product => ({ product, prices: [] })) } } }];
+  const webhooks = [{ url: 'https://metac0.de/api/billing/webhook', status: 'enabled', enabled_events: ['checkout.session.completed', 'customer.subscription.created', 'customer.subscription.updated', 'customer.subscription.deleted'] }];
+  const good = mockStripe({ key: 'sk_test_mock123', products, portal, webhooks });
+  await good.start();
+  const env = base => ({ STRIPE_SECRET_KEY: 'sk_test_mock123', STRIPE_API_BASE: base, STRIPE_WEBHOOK_SECRET: 'whsec_x', PUBLIC_URL: 'https://metac0.de' });
+  const ok = await checkBilling(accountConfig(env(good.url)));
+  await good.close();
+  assert.deepEqual(ok.filter(r => r.ok !== true), [], JSON.stringify(ok));
+  assert.match(ok.find(r => r.label === 'Max').detail, /\$29\.00 every month/);
+  assert.ok(good.calls.every(c => c.method === 'GET'), 'read-only');
+
+  // The usual mistakes: a product from the other mode, a one-time default price, no portal, no webhook
+  const bad = mockStripe({ key: 'sk_test_mock123', products: { prod_VQeJh2lPqfmae9: products.prod_VQeJh2lPqfmae9, prod_VQeK26tKchu1VI: products.prod_VQeK26tKchu1VI },
+    prices: { price_max: { id: 'price_max', object: 'price', active: true, type: 'one_time', unit_amount: 2900, currency: 'usd', product: 'prod_VQeK26tKchu1VI' } } });
+  await bad.start();
+  const res = await checkBilling(accountConfig(env(bad.url)));
+  await bad.close();
+  const find = label => res.find(r => r.label.startsWith(label));
+  assert.equal(find('Pro').ok, true);
+  assert.equal(find('Max').ok, false);
+  assert.match(find('Max').detail, /one-time price/);
+  assert.equal(find('Ultra').ok, false);
+  assert.match(find('Ultra').detail, /Not found with this test key.*No such product: 'prod_VQeKXAJtQQLKqm'.*create it in test mode/);
+  assert.equal(find('Customer portal').ok, false);
+  assert.equal(find('Webhook endpoint').ok, false);
+  // The publishable key in the secret key's place
+  const pk = await checkBilling(accountConfig({ STRIPE_SECRET_KEY: 'pk_live_abc123' }));
+  assert.match(pk[0].detail, /not pk_/);
+  assert.ok(!JSON.stringify(res).includes('sk_test_mock123'), 'the key is never printed');
+});
+
 /* ── The server, enforcing plans ────────────── */
 
 let sb, stripe, emis, reddit, server, base, tmp, accounts;

@@ -133,6 +133,14 @@ Then run `npm install` (it adds `@supabase/supabase-js`, which MetaCode serves t
 
 - **Check it:** Settings → AI connection's status data (`GET /api/settings/status`) includes
   `accounts: { enabled, billing, webhook, problems }`.
+- **Check Stripe:** `npm run billing:check` asks Stripe, with the server's own `.env`, whether each plan's
+  product exists in the key's mode and has an active recurring default price, whether the customer portal
+  is set up, and whether a webhook endpoint sends the needed events. It prints what to fix, and it's
+  read-only: nothing in Stripe is changed.
+- **"Billing isn't set up correctly":** this message means Stripe refused a request. The server log
+  (`pm2 logs metacode`) has a `[billing]` line with Stripe's reason. The usual causes are products made in
+  test mode while the key is live (or the other way round), and a default price that's one-time instead
+  of monthly.
 - **Behind nginx:** also set `TRUST_PROXY` (see `docs/deploy-vps.md`), so per-account limits and logs see
   real addresses.
 
