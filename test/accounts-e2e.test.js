@@ -118,6 +118,16 @@ test('accounts in the pages: sign up, keep this browser\'s work, plan gates, che
   assert.equal(ws.data.posts.length, 2);
   assert.equal(ws.data.project.name, 'Climate threads');
 
+  // Free plan: loading a page doesn't ask for things the plan doesn't have (no 402s in the console)
+  const refused = [];
+  const onResponse = r => { if (r.status() === 402) refused.push(r.url()); };
+  page.on('response', onResponse);
+  await page.reload();
+  await page.waitForSelector('#acct-slot .acct-plan-badge.plan-free');
+  await page.waitForTimeout(1500);
+  page.off('response', onResponse);
+  assert.deepEqual(refused, []);
+
   // Free plan: the scraper is a Pro feature; AI coding shows what's left
   await page.click('.nav-item[data-view="scraper"]');
   await page.waitForSelector('.acct-gate');
