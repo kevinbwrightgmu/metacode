@@ -161,9 +161,9 @@ test('Stripe webhooks: the signature must match and be recent', () => {
 test('npm run billing:check: a correct Stripe setup passes; the usual mistakes are named with their fix', async () => {
   const { checkBilling } = require('../accounts/check-billing');
   const products = {
-    prod_VQeJh2lPqfmae9: { id: 'prod_VQeJh2lPqfmae9', active: true, default_price: 'price_pro' },
-    prod_VQeK26tKchu1VI: { id: 'prod_VQeK26tKchu1VI', active: true, default_price: 'price_max' },
-    prod_VQeKXAJtQQLKqm: { id: 'prod_VQeKXAJtQQLKqm', active: true, default_price: 'price_ultra' }
+    prod_VQeJh2lPqfmae9: { id: 'prod_VQeJh2lPqfmae9', name: 'Metacode - Pro', active: true, default_price: 'price_pro', tax_code: 'txcd_10103001' },
+    prod_VQeK26tKchu1VI: { id: 'prod_VQeK26tKchu1VI', name: 'Metacode - Max', active: true, default_price: 'price_max', tax_code: 'txcd_10103001' },
+    prod_VQeKXAJtQQLKqm: { id: 'prod_VQeKXAJtQQLKqm', name: 'Metacode - Ultra', active: true, default_price: 'price_ultra', tax_code: 'txcd_10103001' }
   };
   const portal = [{ active: true, is_default: true, features: { subscription_update: { enabled: true, products: Object.keys(products).map(product => ({ product, prices: [] })) } } }];
   const webhooks = [{ url: 'https://metac0.de/api/billing/webhook', status: 'enabled', enabled_events: ['checkout.session.completed', 'customer.subscription.created', 'customer.subscription.updated', 'customer.subscription.deleted'] }];
@@ -173,8 +173,10 @@ test('npm run billing:check: a correct Stripe setup passes; the usual mistakes a
   const ok = await checkBilling(accountConfig(env(good.url)));
   await good.close();
   assert.deepEqual(ok.filter(r => r.ok !== true), [], JSON.stringify(ok));
-  assert.match(ok.find(r => r.label === 'Max').detail, /\$29\.00 every month/);
-  assert.ok(good.calls.every(c => c.method === 'GET'), 'read-only');
+  assert.match(ok.find(r => r.label === 'Max').detail, /\$29\.00 every month.*tax code txcd_10103001/);
+  assert.ok(good.calls.every(c => c.method === 'GET' || /DoesNotExist/.test(c.path + c.query) || c.path === '/v1/billing_portal/sessions'), 'writes only name objects that don\'t exist');
+  assert.equal(good.customers.size, 0, 'nothing was created in Stripe');
+  assert.equal(good.sessions.length, 0);
 
   // The usual mistakes: a product from the other mode, a one-time default price, no portal, no webhook
   const bad = mockStripe({ key: 'sk_test_mock123', products: { prod_VQeJh2lPqfmae9: products.prod_VQeJh2lPqfmae9, prod_VQeK26tKchu1VI: products.prod_VQeK26tKchu1VI },
@@ -184,12 +186,34 @@ test('npm run billing:check: a correct Stripe setup passes; the usual mistakes a
   await bad.close();
   const find = label => res.find(r => r.label.startsWith(label));
   assert.equal(find('Pro').ok, true);
+  // No tax code (Managed Payments refuses checkout without one): named, with where to set it
+  const bare = mockStripe({ key: 'sk_test_mock123', products: { prod_VQeJh2lPqfmae9: Object.assign({}, products.prod_VQeJh2lPqfmae9, { tax_code: null }) } });
+  await bare.start();
+  const noTax = await checkBilling(accountConfig(env(bare.url)));
+  await bare.close();
+  const taxLine = noTax.find(r => r.label === 'Pro tax code');
+  assert.equal(taxLine.ok, null);
+  assert.match(taxLine.detail, /“Metacode - Pro” → Edit → Product tax code → .*txcd_10103001/);
   assert.equal(find('Max').ok, false);
   assert.match(find('Max').detail, /one-time price/);
   assert.equal(find('Ultra').ok, false);
   assert.match(find('Ultra').detail, /Not found with this test key.*No such product: 'prod_VQeKXAJtQQLKqm'.*create it in test mode/);
   assert.equal(find('Customer portal').ok, false);
   assert.equal(find('Webhook endpoint').ok, false);
+  // A restricted key that can read but not create customers or checkout sessions; a live account not yet activated
+  const restricted = mockStripe({ key: 'rk_live_mock123', products, portal, webhooks, denied: ['/v1/customers/cus_', '/v1/checkout/'], account: { charges_enabled: false } });
+  await restricted.start();
+  const rk = await checkBilling(accountConfig({ STRIPE_SECRET_KEY: 'rk_live_mock123', STRIPE_API_BASE: restricted.url, STRIPE_WEBHOOK_SECRET: 'whsec_x', PUBLIC_URL: 'https://metac0.de' }));
+  await restricted.close();
+  const perm = rk.find(r => r.label === 'Key permissions');
+  assert.equal(perm.ok, false);
+  assert.match(perm.detail, /may not: Customers: Write, Checkout Sessions: Write\./);
+  assert.equal(rk.find(r => r.label === 'Stripe account').ok, false);
+  assert.ok(restricted.calls.every(c => c.method === 'GET' || /DoesNotExist/.test(c.path + c.query) || c.path === '/v1/billing_portal/sessions'), 'writes only name objects that don\'t exist');
+  assert.equal(restricted.customers.size, 0, 'nothing was created');
+  assert.equal(restricted.sessions.length, 0);
+  assert.equal(ok.find(r => r.label === 'Key permissions').ok, true);
+
   // The publishable key in the secret key's place
   const pk = await checkBilling(accountConfig({ STRIPE_SECRET_KEY: 'pk_live_abc123' }));
   assert.match(pk[0].detail, /not pk_/);
