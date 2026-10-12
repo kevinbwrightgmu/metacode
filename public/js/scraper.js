@@ -2150,6 +2150,14 @@ async def scrape(ctx):
   // After a reload (on any page), resume serving browser-mode jobs that are still running.
   setTimeout(async () => {
     try {
+      // Accounts on (account.js): only plans with the scraper can have jobs — don't ask otherwise
+      if (window.Account) {
+        await Account.ready;
+        if (Account.enabled()) {
+          if (!Account.me()) await new Promise(resolve => { const t = setTimeout(resolve, 5000); const f = () => { Account.off(f); clearTimeout(t); resolve(); }; Account.onChange(f); });
+          if (!Account.can('scraper')) return;
+        }
+      }
       const res = await fetch(API + '/jobs');
       if (!res.ok) return;
       const data = await res.json();
