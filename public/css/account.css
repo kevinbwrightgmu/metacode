@@ -1,0 +1,151 @@
+/* account.css — sign-in, plans and usage (account.js, cloud-sync.js).
+   Self-contained so it looks the same in the app, Survey Studio and the front page. */
+:root {
+  --acct-ink: #0F172A;
+  --acct-muted: #64748B;
+  --acct-line: #E2E8F0;
+  --acct-surface: #FFFFFF;
+  --acct-soft: #F8FAFC;
+  --acct-accent: #2563EB;
+  --acct-accent-ink: #FFFFFF;
+  --acct-ok: #047857;
+  --acct-warn: #B45309;
+  --acct-bad: #B91C1C;
+  --acct-radius: 12px;
+  --acct-pro: #2563EB;
+  --acct-max: #7C3AED;
+  --acct-ultra: #0F766E;
+}
+
+/* ── Buttons ── */
+.acct-primary, .acct-secondary {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 38px; padding: 0 16px; border-radius: 9px; font: 600 13.5px/1 Inter, system-ui, sans-serif;
+  cursor: pointer; border: 1px solid transparent; transition: background .15s, border-color .15s;
+}
+.acct-primary { background: var(--acct-accent); color: var(--acct-accent-ink); }
+.acct-primary:hover { background: #1D4ED8; }
+.acct-secondary { background: var(--acct-surface); color: var(--acct-ink); border-color: var(--acct-line); }
+.acct-secondary:hover { background: var(--acct-soft); }
+.acct-primary:disabled, .acct-secondary:disabled { opacity: .6; cursor: default; }
+.acct-primary:focus-visible, .acct-secondary:focus-visible, .acct-chip:focus-visible, .acct-linkbtn:focus-visible { outline: 3px solid #93C5FD; outline-offset: 2px; }
+.acct-linkbtn { background: none; border: 0; padding: 0; color: var(--acct-accent); font: inherit; font-weight: 600; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
+.acct-row { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+
+/* ── Dialog ── */
+.acct-overlay { position: fixed; inset: 0; z-index: 10000; background: rgba(15,23,42,.55); display: flex; align-items: flex-start; justify-content: center; padding: 6vh 16px 16px; overflow-y: auto; }
+.acct-dialog { width: 100%; max-width: 440px; background: var(--acct-surface); color: var(--acct-ink); border-radius: 16px; box-shadow: 0 24px 60px rgba(15,23,42,.35); font: 14px/1.5 Inter, system-ui, sans-serif; }
+.acct-dialog.is-wide { max-width: 1040px; }
+.acct-d-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 22px 0; }
+.acct-d-head h2 { margin: 0; font: 700 19px/1.3 'Space Grotesk', Inter, system-ui, sans-serif; }
+.acct-x { width: 34px; height: 34px; border: 0; border-radius: 8px; background: transparent; color: var(--acct-muted); font-size: 16px; cursor: pointer; }
+.acct-x:hover { background: var(--acct-soft); color: var(--acct-ink); }
+.acct-d-body { padding: 14px 22px 22px; }
+.acct-reason { margin: 0 0 14px; padding: 10px 12px; border-radius: 10px; background: #EFF6FF; color: #1E3A8A; font-weight: 500; }
+.acct-tabs { display: flex; gap: 4px; padding: 4px; margin-bottom: 14px; background: var(--acct-soft); border: 1px solid var(--acct-line); border-radius: 10px; }
+.acct-tabs button { flex: 1; min-height: 34px; border: 0; border-radius: 7px; background: transparent; font: 600 13px Inter, system-ui, sans-serif; color: var(--acct-muted); cursor: pointer; }
+.acct-tabs button[aria-selected="true"] { background: var(--acct-surface); color: var(--acct-ink); box-shadow: 0 1px 2px rgba(15,23,42,.12); }
+.acct-form { display: grid; gap: 12px; }
+.acct-form label { display: grid; gap: 5px; font-weight: 600; font-size: 13px; }
+.acct-form input { min-height: 40px; padding: 0 12px; border: 1px solid #CBD5E1; border-radius: 9px; font: 14px Inter, system-ui, sans-serif; color: var(--acct-ink); background: #fff; }
+.acct-form input:focus { outline: none; border-color: var(--acct-accent); box-shadow: 0 0 0 3px rgba(37,99,235,.18); }
+.acct-form small { font-weight: 400; color: var(--acct-muted); }
+.acct-form .acct-primary { width: 100%; min-height: 42px; }
+.acct-err { margin: 0; min-height: 0; color: var(--acct-bad); font-size: 13px; }
+.acct-err:empty { display: none; }
+.acct-links { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+.acct-links button { background: none; border: 0; padding: 4px 0; color: var(--acct-accent); font: 500 13px Inter, system-ui, sans-serif; cursor: pointer; }
+.acct-ok { margin: 4px 0 0; padding: 12px 14px; border-radius: 10px; background: #ECFDF5; color: #065F46; }
+.acct-warn { color: var(--acct-warn); }
+.acct-fine { margin: 14px 0 0; color: var(--acct-muted); font-size: 12.5px; }
+
+/* ── Plans ── */
+.acct-plans { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+.acct-plan { display: flex; flex-direction: column; padding: 16px; border: 1px solid var(--acct-line); border-radius: var(--acct-radius); background: var(--acct-surface); }
+.acct-plan.is-highlight { border-color: var(--acct-accent); box-shadow: 0 0 0 3px rgba(37,99,235,.15); }
+.acct-plan.is-current { background: var(--acct-soft); }
+.acct-plan-name { font: 700 17px 'Space Grotesk', Inter, system-ui, sans-serif; }
+.acct-plan-price { margin-top: 2px; font-weight: 700; color: var(--acct-ink); min-height: 1.4em; }
+.acct-plan-tag { margin-top: 2px; color: var(--acct-muted); font-size: 13px; }
+.acct-plan ul { margin: 12px 0; padding-left: 18px; display: grid; align-content: start; gap: 6px; font-size: 13px; color: #334155; flex: 1; }
+.acct-plan-act { margin-top: auto; }
+.acct-plan-act .acct-primary, .acct-plan-act .acct-secondary { width: 100%; }
+.acct-current { display: inline-block; padding: 6px 10px; border-radius: 999px; background: #E0E7FF; color: #3730A3; font-weight: 600; font-size: 12.5px; }
+@media (max-width: 900px) { .acct-plans { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 560px) { .acct-plans { grid-template-columns: 1fr; } .acct-overlay { padding-top: 16px; } }
+
+/* ── Account chip and menu ── */
+[data-account-chip] { position: relative; display: inline-flex; }
+.acct-chip { display: inline-flex; align-items: center; gap: 7px; min-height: 34px; padding: 0 10px 0 4px; border: 1px solid var(--acct-line); border-radius: 999px; background: var(--acct-surface); color: var(--acct-ink); font: 600 13px Inter, system-ui, sans-serif; cursor: pointer; }
+.acct-chip.acct-signin { padding: 0 14px; background: var(--acct-accent); border-color: var(--acct-accent); color: #fff; }
+.acct-chip.is-loading { padding: 0 12px; color: var(--acct-muted); cursor: default; }
+.acct-avatar { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: #1E293B; color: #fff; font-size: 12px; font-weight: 700; }
+.acct-avatar.big { width: 44px; height: 44px; font-size: 18px; }
+.acct-plan-badge { display: inline-block; padding: 2px 8px; border-radius: 999px; background: #E2E8F0; color: #334155; font-size: 11.5px; font-weight: 700; letter-spacing: .02em; }
+.acct-plan-badge.big { padding: 4px 12px; font-size: 14px; }
+.acct-plan-badge.plan-pro { background: #DBEAFE; color: #1E40AF; }
+.acct-plan-badge.plan-max { background: #EDE9FE; color: #5B21B6; }
+.acct-plan-badge.plan-ultra { background: #CCFBF1; color: #115E59; }
+.acct-menu { position: absolute; right: 0; top: calc(100% + 6px); z-index: 9000; min-width: 230px; padding: 6px; background: var(--acct-surface); border: 1px solid var(--acct-line); border-radius: 12px; box-shadow: 0 12px 32px rgba(15,23,42,.18); font: 13.5px Inter, system-ui, sans-serif; }
+.acct-menu-who { display: grid; padding: 8px 10px 10px; border-bottom: 1px solid var(--acct-line); margin-bottom: 4px; color: var(--acct-ink); }
+.acct-menu-who b { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.acct-menu-who span { color: var(--acct-muted); font-size: 12.5px; }
+.acct-menu a, .acct-menu button { display: block; width: 100%; padding: 8px 10px; border: 0; border-radius: 8px; background: none; color: var(--acct-ink); text-align: left; text-decoration: none; font: inherit; cursor: pointer; }
+.acct-menu a:hover, .acct-menu button:hover, .acct-menu a:focus-visible, .acct-menu button:focus-visible { background: var(--acct-soft); outline: none; }
+
+/* Elements that only show with accounts on ([hidden] would lose to display:flex) */
+.nav-item[hidden], .acct-slot[hidden], [data-account-chip][hidden], [data-accounts][hidden] { display: none !important; }
+
+/* ── Sidebar lock ── */
+.nav-lock { margin-left: auto; padding: 1px 7px; border-radius: 999px; background: rgba(148,163,184,.18); color: #CBD5E1; font-size: 10px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; }
+.nav-item .nav-pill + .nav-lock { margin-left: 6px; }
+
+/* ── Gate (a page that needs a plan) ── */
+.acct-gate { display: grid; place-items: center; min-height: 60vh; padding: 24px 16px; }
+.acct-gate-card { max-width: 520px; padding: 32px; text-align: center; background: var(--acct-surface); border: 1px solid var(--acct-line); border-radius: 16px; box-shadow: 0 8px 24px rgba(15,23,42,.06); }
+.acct-gate-card h2 { margin: 8px 0; font: 700 21px/1.3 'Space Grotesk', Inter, system-ui, sans-serif; color: var(--acct-ink); }
+.acct-gate-card p { color: var(--acct-muted); margin: 6px 0; }
+.acct-gate-icon { font-size: 30px; }
+.acct-gate-actions { display: flex; gap: 8px; justify-content: center; margin-top: 16px; flex-wrap: wrap; }
+
+/* ── Usage meters and notes ── */
+.acct-meters { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px 24px; }
+.acct-meter-top { display: flex; justify-content: space-between; gap: 10px; font-size: 13px; color: #334155; }
+.acct-meter-top span:last-child { color: var(--acct-muted); text-align: right; }
+.acct-bar { height: 8px; margin-top: 6px; border-radius: 999px; background: #E2E8F0; overflow: hidden; }
+.acct-bar span { display: block; height: 100%; border-radius: inherit; background: var(--acct-accent); }
+.acct-meter.is-high .acct-bar span { background: #D97706; }
+.acct-meter.is-full .acct-bar span { background: #DC2626; }
+.acct-meter.is-none { opacity: .7; }
+.acct-meter-foot { margin-top: 4px; font-size: 11.5px; color: var(--acct-muted); }
+.acct-note { margin: 0 0 14px; padding: 10px 14px; border: 1px solid #BFDBFE; border-radius: 10px; background: #EFF6FF; color: #1E3A8A; font-size: 13px; }
+.acct-note.is-full { border-color: #FECACA; background: #FEF2F2; color: #991B1B; }
+
+/* ── Account page ── */
+.acct-page { display: grid; gap: 16px; }
+.acct-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
+@media (max-width: 1000px) { .acct-grid { grid-template-columns: 1fr; } }
+.acct-who { display: flex; align-items: center; gap: 12px; }
+.acct-who b { word-break: break-all; }
+.acct-planline { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.acct-hero { display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap; }
+.acct-hero-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.acct-h { margin: 8px 0 0; font: 700 17px 'Space Grotesk', Inter, system-ui, sans-serif; color: var(--acct-ink); }
+.acct-sync { margin: 0; }
+.acct-sync-error { color: var(--acct-bad); }
+.acct-sync-idle { color: var(--acct-ok); }
+
+/* ── Toasts (pages without their own) ── */
+.acct-toasts { position: fixed; right: 16px; bottom: 16px; z-index: 10001; display: grid; gap: 8px; max-width: min(420px, calc(100vw - 32px)); }
+.acct-toast { padding: 10px 14px; border-radius: 10px; background: #0F172A; color: #fff; font: 13.5px/1.4 Inter, system-ui, sans-serif; box-shadow: 0 8px 24px rgba(15,23,42,.25); }
+.acct-toast.error { background: #991B1B; }
+.acct-toast.success { background: #065F46; }
+.acct-toast.warning { background: #92400E; }
+
+/* ── Survey Studio and front page ── */
+.st-nav [data-account-chip] { margin-left: 6px; }
+.st-nav .acct-chip { border-color: rgba(255,255,255,.18); background: rgba(255,255,255,.06); color: #E2E8F0; }
+.st-nav .acct-chip.acct-signin { background: var(--acct-accent); border-color: var(--acct-accent); color: #fff; }
+.acct-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 18px; padding: 14px 16px; border: 1px solid #C7D2FE; border-radius: 12px; background: #EEF2FF; color: #312E81; }
+.acct-banner p { margin: 0; }
+.acct-lock-tag { display: inline-block; margin-left: 6px; padding: 1px 7px; border-radius: 999px; background: #EDE9FE; color: #5B21B6; font-size: 10.5px; font-weight: 700; vertical-align: middle; }

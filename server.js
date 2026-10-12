@@ -13,6 +13,7 @@ envLoader.load();
 const { createScraper } = require('./scraper');
 const { ScraperError, cancelledError } = require('./scraper/errors');
 const { createSurveys } = require('./surveys');
+const { createAccounts } = require('./accounts');
 const { createProjects } = require('./projects');
 const { rankSimilar } = require('./model-match');
 const { createStatusMonitor, statusRoutes } = require('./status-page');
@@ -42,7 +43,7 @@ app.use(statusSite.hostRouter);
 // and the scraper routes make requests to Reddit on this server's behalf, so
 // only MetaCode's own pages (same origin) may call them. The other routes
 // keep the permissive CORS they always had.
-const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?)\/?$/i;
+const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?|account(\/.*)?|billing\/(checkout|portal|sync)|network\/analyze)\/?$/i;
 const corsForAll = cors();
 app.use((req, res, next) => (AI_ROUTE.test(req.path) ? next() : corsForAll(req, res, next)));
 // …and state-changing requests to them must say they come from this site:
@@ -56,9 +57,23 @@ app.use((req, res, next) => {
   if (crossSite) return res.status(403).json({ error: { type: 'forbidden_origin', message: 'Requests from other websites aren\'t allowed.' } });
   next();
 });
+// Accounts, plans and limits (accounts/; off unless SUPABASE_URL and
+// SUPABASE_PUBLISHABLE_KEY are set). The Stripe webhook needs the raw body for
+// its signature, so it comes before any JSON parser. Every other /api request
+// learns who is signed in (a token verified with Supabase) before its route runs.
+const accounts = createAccounts();
+app.post('/api/billing/webhook', express.raw({ type: '*/*', limit: '1mb' }), (req, res) => accounts.webhook(req, res));
+app.use('/api', (req, res, next) => (/^\/(public\/|status|health)/.test(req.path) ? next() : accounts.attach(req, res, next)));
+app.use('/api/account', accounts.router);
+app.use('/api/billing', accounts.billingRouter);
+// The browser's Supabase client (account.js), served from this site
+app.get('/vendor/supabase.js', (req, res) => {
+  res.set('Cache-Control', 'public, max-age=86400');
+  res.sendFile(require.resolve('@supabase/supabase-js/dist/umd/supabase.js'));
+});
 // Survey Studio (surveys/): mounted before the shared JSON parser because
 // survey documents (with embedded images) may be larger than its limit.
-const surveys = createSurveys();
+const surveys = createSurveys({ policy: accounts.surveysPolicy });
 app.use('/api/surveys', surveys.router);
 app.use('/api/public/surveys', surveys.publicRouter);
 app.get('/s/:publicId', surveys.pageHandler);
@@ -1700,7 +1715,7 @@ function setFallbackHeaders(res, out) {
   res.set('X-MetaCode-Model-Requested', out.requested || '');
 }
 
-app.post('/api/ai', async (req, res) => {
+app.post('/api/ai', accounts.aiSingle, async (req, res) => {
   try {
     const switchModels = !/^(off|no|false|0)$/i.test(String(req.headers['x-metacode-model-switch'] || ''));
     const prep = await prepareChat(req.body, String(req.headers['x-provider'] || 'groq').toLowerCase(), { switchModels });
@@ -1746,7 +1761,7 @@ function aiMaxParallel() {
   const n = parseInt(process.env.AI_MAX_PARALLEL, 10);
   return Number.isFinite(n) && n >= 1 ? Math.min(n, 64) : 16;
 }
-app.post('/api/ai/batch', async (req, res) => {
+app.post('/api/ai/batch', accounts.aiBatch, async (req, res) => {
   const list = req.body && Array.isArray(req.body.requests) ? req.body.requests : null;
   if (!list || !list.length) return sendFailure(res, fail(400, 'invalid_request', 'Send a non-empty "requests" list.'));
   if (list.length > AI_BATCH_MAX_REQUESTS) return sendFailure(res, fail(400, 'invalid_request', 'At most ' + AI_BATCH_MAX_REQUESTS + ' requests per batch.'));
@@ -1766,8 +1781,11 @@ app.post('/api/ai/batch', async (req, res) => {
   const send = obj => { if (!res.writableEnded && !client.signal.aborted) res.write(JSON.stringify(obj) + '\n'); };
   const wait = ms => new Promise(resolve => { const t = setTimeout(resolve, ms); client.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true }); });
 
-  const queue = list.map(r => ({ id: r.id === undefined ? null : r.id, body: r.body, tries: 0, serverTries: 0 }));
-  let active = 0, pausedUntil = 0;
+  // The plan's posts left this month (accounts/): the rest of the batch isn't sent
+  const allowance = Number.isFinite(req.aiAllowance) ? req.aiAllowance : list.length;
+  list.slice(allowance).forEach(r => send({ id: r.id === undefined ? null : r.id, ok: false, status: 429, error: { message: req.aiLimitMessage || 'Your plan\'s AI coding limit is used up.', type: 'limit_reached' } }));
+  const queue = list.slice(0, allowance).map(r => ({ id: r.id === undefined ? null : r.id, body: r.body, tries: 0, serverTries: 0 }));
+  let active = 0, pausedUntil = 0, successes = 0;
   let ceiling = parallel;          // how many may run at once (lowered for good only by rate limits)
   let serverStreak = 0, okStreak = 0, gaveUp = null;
   async function one(item) {
@@ -1820,6 +1838,7 @@ app.post('/api/ai/batch', async (req, res) => {
     serverStreak = 0;
     // Answers are coming again: back up to full speed, one more at a time
     if (++okStreak >= 3 && parallel < ceiling) { parallel++; okStreak = 0; }
+    successes++;
     send(Object.assign({ id: item.id, ok: true, data: out.json }, out.fallback ? { fallback: out.fallback, fallbackReason: out.fallbackReason, requested: out.requested } : {}));
   }
   async function worker(slot) {
@@ -1846,6 +1865,7 @@ app.post('/api/ai/batch', async (req, res) => {
     await Promise.all(Array.from({ length: parallel }, (_, i) => worker(i)));
     send({ done: true, parallel: ceiling });
   } finally {
+    if (req.settleAi) req.settleAi(successes);     // only answered posts count against the plan
     client.release();
     if (!res.writableEnded) res.end();
   }
@@ -2005,7 +2025,7 @@ app.get('/api/network/status', async (req, res) => {
   res.json(status);
 });
 
-app.post('/api/network/analyze', async (req, res) => {
+app.post('/api/network/analyze', accounts.feature('network', { meter: 'networkRuns' }), async (req, res) => {
   const body  = req.body || {};
   const edges = body.edges;
   if (!Array.isArray(edges) || edges.length === 0) {
@@ -2046,7 +2066,9 @@ const scraperAi = {
     return { text: String((c && c.message && c.message.content) || ''), model: out.fallback || out.requested };
   }
 };
-const scraper = createScraper({ ai: scraperAi });
+const scraper = createScraper({ ai: scraperAi, policy: accounts.scraperPolicy });
+// Signing in moves what this browser made on the server to the account
+accounts.onClaim(async (from, to) => ({ surveys: await surveys.store.reassignOwner(from, to), scraperJobs: scraper.reassignOwner(from, to) }));
 app.use('/api/scraper', scraper.router);
 app.use('/scramjet', scraper.scramjetRouter);
 app.get('/wisp/', scraper.wispPlainHttp);         // only reached when a proxy dropped the WebSocket upgrade
@@ -2140,7 +2162,8 @@ function settingsStatus() {
       transport: emisTransport() === 'node' ? 'Node.js' : (emisPython.status().ok ? 'Python ' + emisPython.status().python + ' (' + emisPython.status().client + ')' : (emisTransport() === 'python' ? 'Python — not available: ' + (emisPython.status().problem || 'not started') : 'Node.js (Python not found)')),
       proxy: (() => { const u = proxyUrl(); if (!u) return null; try { return new URL(u).host; } catch (e) { return 'set'; } })()
     },
-    server: { version: VERSION, startedAt: STARTED_AT, node: process.version }
+    server: { version: VERSION, startedAt: STARTED_AT, node: process.version },
+    accounts: (() => { const a = accounts.config(); return { enabled: a.enabled, billing: a.stripe.enabled, webhook: !!a.stripe.webhookSecret, problems: a.problems }; })()
   };
 }
 app.get('/api/settings/status', (req, res) => { res.set('Cache-Control', 'no-store'); res.json(settingsStatus()); });
@@ -2202,9 +2225,10 @@ function start(port) {
       resolve(server);
     });
     server.on('error', reject);
-    server.on('upgrade', scraper.onUpgrade);
+    server.on('upgrade', accounts.upgradeGuard(scraper.onUpgrade));
     const close = server.close.bind(server);
     server.close = cb => {
+      accounts.flush();
       scraper.shutdown();
       statusMonitor.stop();
       scraper.onUpgrade.closeAll();
@@ -2271,4 +2295,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, start, scraper };
+module.exports = { app, start, scraper, accounts };

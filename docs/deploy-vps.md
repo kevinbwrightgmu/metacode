@@ -111,6 +111,17 @@ SCRAPER_USER_AGENT=nodejs:metacode-scraper:1.0 (by /u/your_reddit_name)
 work even when a proxy hides the original host name. With the nginx config below it isn't strictly needed,
 but it does no harm. The other settings are explained in `.env.example`.
 
+For accounts and plans (optional), add the Supabase and Stripe settings and follow
+[docs/accounts.md](accounts.md) (the database table, Auth URLs, Stripe portal and the webhook
+`https://metac0.de/api/billing/webhook`):
+
+```ini
+SUPABASE_URL=https://rebxueqhguxicpazvjdv.supabase.co
+SUPABASE_PUBLISHABLE_KEY=sb_publishable_…
+STRIPE_SECRET_KEY=sk_live_…
+STRIPE_WEBHOOK_SECRET=whsec_…
+```
+
 Behind nginx, also set which proxy to believe for visitors' IP addresses (rate limits, and respondent IPs
 for surveys that collect them):
 

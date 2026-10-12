@@ -247,6 +247,31 @@ class SurveyStore {
     });
   }
 
+  // Signing in: everything a browser owns (published surveys with their
+  // responses, and its library) moves to the account. → number of surveys moved
+  async reassignOwner(from, to) {
+    if (!from || !to || from === to) return 0;
+    const index = await this.loadIndex();
+    let moved = 0;
+    for (const sum of Array.from(index.values()).filter(x => x.owner === from)) {
+      await this.serial('s:' + sum.id, async () => {
+        const rec = await this.readJson(this.file('surveys', sum.id + '.json'), null);
+        if (!rec || rec.owner !== from) return;
+        rec.owner = to;
+        await this.writeJson(this.file('surveys', sum.id + '.json'), rec);
+        sum.owner = to;
+        moved++;
+      });
+    }
+    const lib = await this.readJson(this.file('libraries', from + '.json'), null);
+    if (lib) {
+      const mine = await this.library(to);
+      const merge = (a, b) => a.concat(b.filter(x => x && !a.some(y => y.id === x.id)));
+      await this.saveLibrary(to, { components: merge(mine.components, lib.components || []), styles: merge(mine.styles, lib.styles || []), templates: merge(mine.templates, lib.templates || []) });
+    }
+    return moved;
+  }
+
   // The single shared library older versions kept (library.json)
   async legacyLibrary() {
     const lib = await this.readJson(this.file('library.json'), null);

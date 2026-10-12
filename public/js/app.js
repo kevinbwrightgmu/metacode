@@ -18,6 +18,8 @@ const App = (() => {
 
   function save() {
     try { localStorage.setItem(STORAGE_KEY, JSON.stringify(state)); } catch(e) {}
+    // Signed in: the open project is also saved to the account (cloud-sync.js)
+    if (window.CloudSync) { try { CloudSync.noteWorkspace(); } catch (e) { /* never block saving */ } }
     // Autosave to the linked saved project (Projects page), if any
     if (typeof ProjectsView !== 'undefined') { try { ProjectsView.noteChange(); } catch (e) { /* never block saving */ } }
   }
@@ -40,6 +42,12 @@ const App = (() => {
     if (typeof state.settings.switchModels !== 'boolean') state.settings.switchModels = true;
   }
   function getState()  { return state; }
+  // The open project was replaced (another device's newer version, cloud-sync.js): show it
+  function reloadState() {
+    load();
+    if (currentView) navigate(location.hash.slice(1) || currentView);
+    else updateSidebarStats();
+  }
   function setState(patch) { Object.assign(state, patch); save(); }
 
   /* ── Routing ─────────────────────────────────*/
@@ -58,6 +66,7 @@ const App = (() => {
     'network':      () => NetworkViz.render(),
     'metrics':      () => EngagementViz.render(),
     'export':       renderExport,
+    'account':      param => Account.renderPage(document.getElementById('view-container'), param),
     // Survey Studio has its own page now; old #surveys links go there.
     'surveys':      param => { location.replace('studio.html' + (param ? '#' + param : '')); }
   };
@@ -67,7 +76,7 @@ const App = (() => {
     'codebook':'Codebook','ai-coding':'AI Coding','human-coding':'Human Coding',
     'reliability':'Reliability Analysis','csv-analyzer':'Analyze CSV (NetworkX)',
     'network':'Network Graph',
-    'metrics':'Metrics','export':'Export Data','surveys':'Survey Studio'
+    'metrics':'Metrics','export':'Export Data','surveys':'Survey Studio','account':'Account & plan'
   };
 
   // Former route ids that must keep working (bookmarks, browser history).
@@ -109,6 +118,8 @@ const App = (() => {
     const container = document.getElementById('view-container');
     container.className = 'view-container';
     container.innerHTML = '';
+    // Pages that need a plan show what it takes instead (account.js; the server enforces it too)
+    if (window.Account && Account.gate(view, container)) { updateSidebarStats(); return; }
     VIEWS[view](param);
 
     // Update sidebar stats
@@ -747,12 +758,15 @@ const App = (() => {
     const allMsgs = system ? [{ role: 'system', content: system }, ...messages] : [...messages];
     const body = { messages: allMsgs, max_tokens, temperature: 0.1 };
     if (model) body.model = model;
-    const res  = await fetch('/api/ai', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', 'x-provider': 'openai' }, switchHeader()), body: JSON.stringify(body) });
+    const res  = await fetch('/api/ai', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', 'x-provider': 'openai', 'X-MetaCode-Feature': feature || 'other' }, switchHeader()), body: JSON.stringify(body) });
     let data = null;
     try { data = await res.json(); } catch (e) { data = null; }
     if (!res.ok) {
       const msg = (data && data.error && data.error.message) ? data.error.message : ('API error ' + res.status);
-      throw new Error(msg);
+      const err = new Error(msg);
+      err.status = res.status;
+      err.type = data && data.error && data.error.type;
+      throw err;
     }
     lastModelUsed = (data && data.model) || model;
     const fb = res.headers.get('X-MetaCode-Model-Fallback');
@@ -788,6 +802,7 @@ const App = (() => {
       try { data = await res.json(); } catch (e) { data = null; }
       const err = new Error((data && data.error && data.error.message) || ('API error ' + res.status));
       err.status = res.status;
+      err.type = data && data.error && data.error.type;
       throw err;
     }
     const reader = res.body.getReader();
@@ -947,12 +962,28 @@ const App = (() => {
 
     updateApiStatus();
     refreshServerKeyInfo();   // async; re-runs updateApiStatus once .env key counts arrive
+
+    // Accounts (account.js): the chip in the top bar, the Account page in the sidebar
+    if (window.Account) {
+      const slot = document.getElementById('acct-slot');
+      Account.mountChip(slot);
+      let seen = 'unknown';
+      Account.onChange(me => {
+        const on = Account.enabled();
+        slot.hidden = !on;
+        document.getElementById('nav-account').hidden = !on;
+        // Who is signed in or their plan changed (or just became known): redraw pages that show it
+        const now = !on ? 'off' : !me ? 'unknown' : me.signedIn ? me.user.id + ':' + me.plan.id : 'out';
+        if (now !== seen && now !== 'off' && now !== 'unknown' && ['account', 'ai-coding', 'scraper', 'scraper-beta', 'csv-analyzer', 'network'].includes(currentView)) navigate(location.hash.slice(1) || currentView);
+        seen = now;
+      });
+    }
   }
 
   return {
     init, navigate: (v) => navigate(v), setViewCleanup, fetchModels, fetchKeyStatus, reloadEnv, modelFor, AI_FEATURES,
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
-    getState, setState, save,
+    getState, setState, save, reloadState,
     callClaude, callClaudeBatch, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,

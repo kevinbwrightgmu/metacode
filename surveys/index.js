@@ -36,7 +36,7 @@ class ApiError extends Error {
 
 function sendError(res, err) {
   if (res.headersSent) return;
-  if (err instanceof ApiError) return res.status(err.status).json({ error: { type: err.type, message: err.message } });
+  if (err instanceof ApiError) return res.status(err.status).json({ error: Object.assign({ type: err.type, message: err.message }, err.extra || {}) });
   if (err && err.type === 'entity.too.large') return res.status(413).json({ error: { type: 'too_large', message: 'The survey is too large to save (25 MB at most — large images are the usual cause).' } });
   if (err && err.type === 'entity.parse.failed') return res.status(400).json({ error: { type: 'invalid_request', message: 'The request body isn\'t valid JSON.' } });
   console.error('[surveys] ' + (err && (err.stack || err.message)));
@@ -212,6 +212,18 @@ function createSurveys(opts) {
   const store = new SurveyStore(path.resolve(dataDir));
   const pagePath = path.join(__dirname, '..', 'public', 'survey.html');
   const geo = geoConfig(opts.geoHeaders !== undefined ? opts.geoHeaders : process.env.SURVEY_GEO_HEADERS);
+  // Plans and limits (accounts/): who may create and publish, and how many
+  // responses an owner's surveys take. Without a policy nothing is limited.
+  const policy = opts.policy || null;
+  const allowed = async (req, action, ctx) => {
+    if (!policy) return;
+    const e = await policy.editor(req, action, ctx);
+    if (e) throw Object.assign(new ApiError(e.status, e.type, e.message), { extra: e.extra });
+  };
+  const isLive = sum => !!(sum && sum.publish && !sum.publish.unpublished && sum.publish.open);
+  const liveCount = async owner => (await store.list(owner)).filter(isLive).length;
+  // Collects something only the higher plans include (IP, location, session timeline)
+  const advancedOf = doc => { const p = Core.privacyOf(doc); return !!(p.derived.ip || p.derived.country || p.derived.region || p.session !== 'off'); };
 
   /* ── Editor API ───────────────────────────── */
   const router = express.Router();
@@ -242,6 +254,7 @@ function createSurveys(opts) {
   }));
 
   router.post('/', wrap(async (req, res) => {
+    await allowed(req, 'create');
     const body = req.body || {};
     let doc;
     let problems = [];
@@ -260,6 +273,7 @@ function createSurveys(opts) {
   router.get('/library', wrap(async (req, res) => { res.json({ library: await store.library(req.owner) }); }));
 
   router.put('/library', wrap(async (req, res) => {
+    await allowed(req, 'library');
     const lib = req.body && req.body.library;
     if (!lib || typeof lib !== 'object') throw new ApiError(400, 'invalid_request', 'Send { library: { components, styles, templates } }.');
     const pick = (arr, max) => (Array.isArray(arr) ? arr.filter(x => x && typeof x === 'object' && typeof x.id === 'string').slice(0, max) : []);
@@ -284,6 +298,7 @@ function createSurveys(opts) {
 
   router.put('/:id', wrap(async (req, res) => {
     await load(req.params.id, req);
+    await allowed(req, 'save');
     const body = req.body || {};
     if (!body.doc) throw new ApiError(400, 'invalid_request', 'Send { doc, baseRevision }.');
     const { doc, problems } = cleanDoc(body.doc);
@@ -303,6 +318,7 @@ function createSurveys(opts) {
 
   router.post('/:id/duplicate', wrap(async (req, res) => {
     const rec = await load(req.params.id, req);
+    await allowed(req, 'create');
     const { doc } = Core.normalizeDoc(rec.doc);
     doc.id = Core.uid('sv');
     doc.title = (doc.title + ' (copy)').slice(0, 300);
@@ -311,6 +327,12 @@ function createSurveys(opts) {
   }));
 
   router.post('/:id/publish', wrap(async (req, res) => {
+    if (policy) {
+      const existing = await store.get(req.params.id);
+      const mine = existing && existing.owner === req.owner ? existing : null;
+      const draft = req.body && req.body.doc ? cleanDoc(req.body.doc).doc : mine ? mine.doc : null;
+      await allowed(req, 'publish', { liveCount: await liveCount(req.owner), alreadyLive: isLive(mine), advanced: draft ? advancedOf(Core.normalizeDoc(draft).doc) : false });
+    }
     // A draft kept in the browser is sent along with its first publish
     if (req.body && req.body.doc && !(await store.get(req.params.id))) {
       if (!store.validId(req.params.id)) throw new ApiError(400, 'invalid_request', 'Invalid survey id.');
@@ -340,7 +362,8 @@ function createSurveys(opts) {
   }));
 
   router.patch('/:id/publish', wrap(async (req, res) => {
-    await load(req.params.id, req);
+    const rec = await load(req.params.id, req);
+    if (req.body && req.body.open && !isLive(rec)) await allowed(req, 'reopen', { liveCount: await liveCount(req.owner), alreadyLive: false });
     const out = await store.setPublishState(req.params.id, { open: !!(req.body && req.body.open) });
     if (!out) throw new ApiError(404, 'not_published', 'This survey hasn\'t been published.');
     res.json({ publish: out });
@@ -475,6 +498,8 @@ function createSurveys(opts) {
     const priv = Core.privacyOf(v.doc);
     const who = respondentOf(body, priv, !!body.complete);
     if (who.problems.length) return res.status(422).json({ error: { type: 'invalid_response', message: who.problems[0].message }, problems: who.problems });
+    // The owner's plan: Survey Studio included, and responses left this month
+    if (policy) { const e = await policy.response(rec); if (e) throw new ApiError(e.status, e.type, e.message); }
     const token = crypto.randomBytes(24).toString('hex');
     const now = new Date().toISOString();
     const derived = derivedOf(req, priv, geo);
