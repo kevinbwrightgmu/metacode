@@ -107,7 +107,7 @@ test('Survey Studio: create → style one answer → logic → preview → save/
   const { page, context, errors } = await openApp('/index.html');
 
   // 1–2. Open the site and enter the platform from the front page — it has its own page
-  const open = page.locator('.hero a[href="studio.html"]');
+  const open = page.locator('#methods a[href="studio.html"]');
   assert.match(await open.textContent(), /Open Survey Studio/);
   await open.click();
   await page.waitForSelector('#ss-new');
@@ -292,8 +292,10 @@ test('Survey Studio: create → style one answer → logic → preview → save/
   await page.keyboard.press('Escape');
   await page.waitForSelector('#modal-backdrop.is-open', { state: 'detached' }).catch(() => page.waitForSelector('#modal-backdrop:not(.is-open)'));
   await page.click('.ss-mode[data-mode="responses"]');
-  await page.waitForSelector('.ss-responses .stat-card');
-  assert.match(await page.textContent('.ss-responses'), /Because it works/);
+  await page.waitForSelector('.sr-stats');
+  assert.match(await page.textContent('.sr-stats'), /1\s*Total\s*1\s*Completed/);
+  await page.waitForSelector('#sr-detail .sr-q');
+  assert.match(await page.textContent('#sr-detail .sr-answers'), /Because it works/);
 
   assert.deepEqual(errors, []);
   assert.deepEqual(visitorErrors, []);
@@ -708,13 +710,16 @@ test('Random blocks: assign conditions, pick one message at random, preview and 
   assert.deepEqual(stored.map(r => r.vars.message), [names[m1], names[m2]], 'the recorded branch matches what was shown');
   // balanced: two participants get both conditions
   assert.deepEqual(stored.map(r => r.vars.condition).sort(), ['B', 'C']);
-  // The Responses tab shows the conditions
+  // The Responses tab shows the conditions (Details → Variables)
   await page.keyboard.press('Escape');
   await page.waitForSelector('#modal-backdrop.is-open', { state: 'detached' }).catch(() => page.waitForSelector('#modal-backdrop:not(.is-open)'));
   await page.click('.ss-mode[data-mode="responses"]');
-  await page.waitForSelector('.ss-resp-table');
-  const heads = await page.locator('.ss-resp-table th').allTextContents();
-  assert.ok(heads.includes('condition') && heads.includes('message'), heads.join(','));
+  await page.waitForSelector('.sr-item');
+  assert.equal(await page.locator('.sr-item').count(), 2);
+  await page.click('.sr-dtab[data-tab="details"]');
+  await page.waitForSelector('.sr-details');
+  const vars = await page.textContent('.sr-details');
+  assert.ok(/condition/.test(vars) && /message/.test(vars), vars);
   assert.deepEqual(errors, []);
   await context.close();
 });
@@ -779,7 +784,7 @@ test('the front page links to both apps and the coding app no longer embeds the 
   const { page, context, errors } = await openApp('/index.html');
   assert.equal(await page.locator('a[href="app.html"]').count() >= 1, true);
   assert.equal(await page.locator('a[href="studio.html"]').count() >= 2, true);
-  await page.click('.hero a[href="app.html"]');
+  await page.click('.site-head a[href="app.html"]');
   await page.waitForSelector('.nav-item[data-view="dashboard"]');
   assert.equal(await page.locator('.nav-item[data-view="surveys"]').count(), 0, 'no Survey Studio item in the coding app');
   assert.equal(await page.locator('script[src*="js/survey/"]').count(), 0, 'the coding app doesn\'t load the studio');

@@ -88,6 +88,117 @@ const publicSummary = strip;
 
 function sha(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
 
+/* ── Respondent information and session timelines ─────────────────────────
+   Only what the published survey says it collects is stored, and only the
+   survey's owner can read it (the editor API). The public API never returns it. */
+const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
+const EVENT_TYPES = new Set(['start', 'page', 'focus', 'answer', 'skip', 'invalid', 'submit', 'away', 'back', 'resume', 'abandon']);
+const MAX_EVENTS = 3000;
+const MAX_EVENT_T = 14 * 24 * 3600 * 1000;
+
+// One event from the respondent's browser → a clean copy, or null.
+function cleanEvent(e) {
+  if (!e || typeof e !== 'object' || !EVENT_TYPES.has(e.type)) return null;
+  const t = Number(e.t);
+  if (!Number.isFinite(t) || t < 0 || t > MAX_EVENT_T) return null;
+  const out = { t: Math.round(t), type: e.type };
+  ['page', 'from', 'q'].forEach(k => { if (typeof e[k] === 'string' && ID_RE.test(e[k])) out[k] = e[k]; });
+  if (['next', 'back', 'jump'].includes(e.dir)) out.dir = e.dir;
+  if (e.type === 'answer') {
+    if (e.cleared === true) out.cleared = true;
+    else if (Number.isInteger(e.len) && e.len >= 0 && e.len < 1e6) out.len = e.len;
+    else if (e.value !== undefined) {
+      const json = JSON.stringify(e.value);
+      if (json !== undefined && json.length <= 600) out.value = e.value;
+      else out.value = '[long value]';
+    }
+  }
+  if (e.type === 'invalid') {
+    if (Array.isArray(e.qs)) out.qs = e.qs.filter(x => typeof x === 'string' && ID_RE.test(x)).slice(0, 50);
+    if (e.respondent === true) out.respondent = true;
+  }
+  return out;
+}
+function cleanEvents(list) { return (Array.isArray(list) ? list : []).slice(0, MAX_EVENTS).map(cleanEvent).filter(Boolean); }
+// Appends events to a response's session timeline (capped).
+function appendEvents(r, events) {
+  if (!events.length) return;
+  const sess = r.session || (r.session = {});
+  sess.events = Array.isArray(sess.events) ? sess.events : [];
+  const room = MAX_EVENTS - sess.events.length;
+  if (room < events.length) sess.truncated = true;
+  if (room > 0) sess.events.push(...events.slice(0, room));
+}
+
+const COUNTRY_RE = /^[A-Za-z]{2}$/;
+// SURVEY_GEO_HEADERS: where the reverse proxy puts the IP-based location.
+//   cloudflare                → CF-IPCountry and CF-Region (Cloudflare's visitor location headers)
+//   <country-header>[,<region-header>]  e.g. X-Country-Code,X-Region (nginx GeoIP2, a load balancer…)
+// Unset: no country/region (they are never guessed from anything else).
+function geoConfig(raw) {
+  const v = String(raw || '').trim();
+  if (!v) return null;
+  if (v.toLowerCase() === 'cloudflare') return { country: 'cf-ipcountry', region: 'cf-region', source: 'cloudflare' };
+  const [country, region] = v.split(',').map(x => x.trim().toLowerCase()).filter(x => /^[a-z0-9-]{1,60}$/.test(x));
+  return country ? { country, region: region || null, source: 'header' } : null;
+}
+const normIp = ip => String(ip || '').replace(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/, '$1').slice(0, 64);
+const isPrivate = ip => /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|fc|fd|fe80:)/i.test(ip);
+// The respondent's IP address as the server sees it. Behind a reverse proxy the
+// address is only known when TRUST_PROXY tells Express which proxy to believe.
+function clientIp(req) {
+  const forwarded = req.headers['x-forwarded-for'] || req.headers['forwarded'] || req.headers['x-real-ip'];
+  const trusted = req.app && req.app.get('trust proxy');
+  const sock = normIp(req.socket && req.socket.remoteAddress);
+  if (forwarded && !trusted && isPrivate(sock)) return { ip: null, note: 'behind_proxy' };
+  const ip = normIp(req.ip || sock);
+  return ip ? { ip } : { ip: null, note: 'unknown' };
+}
+// Metadata the server derives for a response, limited to what the survey collects.
+function derivedOf(req, priv, geo) {
+  const d = priv.derived;
+  if (!d.ip && !d.country && !d.region) return null;
+  const out = {};
+  if (d.ip) { const c = clientIp(req); out.ip = c.ip; if (c.note) out.ipNote = c.note; }
+  if (d.country || d.region) {
+    if (!geo) out.geoNote = 'not_configured';
+    else {
+      out.geoSource = geo.source;
+      if (d.country) {
+        const raw = String(req.headers[geo.country] || '').trim().toUpperCase();
+        out.country = COUNTRY_RE.test(raw) && raw !== 'XX' && raw !== 'T1' ? raw : null;
+      }
+      if (d.region && geo.region) {
+        const raw = String(req.headers[geo.region] || '').replace(/[\u0000-\u001f<>]/g, '').trim().slice(0, 80);
+        out.region = raw || null;
+      }
+    }
+  }
+  return out;
+}
+// Participant-entered fields the published survey asks for → clean values; required ones are checked on completion.
+function respondentOf(body, priv, complete) {
+  const src = body && body.respondent && typeof body.respondent === 'object' ? body.respondent : {};
+  const out = {};
+  const problems = [];
+  const take = (key, max) => { const v = typeof src[key] === 'string' ? src[key].replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, max) : ''; if (v) out[key] = v; };
+  if (priv.entered.name) take('name', 120);
+  if (priv.entered.participantId || priv.link) take('participantId', 80);
+  if (priv.link && out.participantId) out.participantIdSource = 'link';
+  else if (out.participantId) out.participantIdSource = 'entered';
+  if (complete) {
+    if (priv.entered.name && priv.entered.name.required && !out.name) problems.push({ question: 'respondent', message: priv.entered.name.label + ' is required.' });
+    const pidReq = (priv.entered.participantId && priv.entered.participantId.required) || (priv.link && priv.link.required);
+    if (pidReq && !out.participantId) problems.push({ question: 'respondent', message: 'A participant code is required.' });
+  }
+  return { respondent: out, problems };
+}
+const recordingOf = (body, priv) => {
+  if (priv.session === 'off') return null;
+  const r = body && body.session && body.session.recording;
+  return r === 'consent' && priv.session === 'consent' ? 'consent' : r === 'notice' && priv.session === 'notice' ? 'notice' : r === 'declined' ? 'declined' : null;
+};
+
 function deviceOf(ua) {
   const s = String(ua || '');
   if (/iPad|Tablet/i.test(s)) return 'tablet';
@@ -100,6 +211,7 @@ function createSurveys(opts) {
   const dataDir = opts.dataDir || process.env.SURVEY_DATA_DIR || path.join(__dirname, '..', 'survey-data');
   const store = new SurveyStore(path.resolve(dataDir));
   const pagePath = path.join(__dirname, '..', 'public', 'survey.html');
+  const geo = geoConfig(opts.geoHeaders !== undefined ? opts.geoHeaders : process.env.SURVEY_GEO_HEADERS);
 
   /* ── Editor API ───────────────────────────── */
   const router = express.Router();
@@ -271,6 +383,25 @@ function createSurveys(opts) {
     res.json({ ok: true });
   }));
 
+  // Data minimization: remove IP addresses, location, identity fields or session timelines from every response.
+  router.post('/:id/responses/erase', wrap(async (req, res) => {
+    await load(req.params.id, req);
+    const what = req.body && req.body.what;
+    if (!['ip', 'location', 'identity', 'timeline'].includes(what)) throw new ApiError(400, 'invalid_request', 'what must be ip, location, identity or timeline.');
+    const n = await store.updateResponses(req.params.id, list => {
+      let count = 0;
+      list.forEach(r => {
+        const d = r.respondent && r.respondent.derived;
+        if (what === 'ip' && d && d.ip !== undefined) { delete d.ip; delete d.ipNote; d.ipErased = true; count++; }
+        if (what === 'location' && d && (d.country !== undefined || d.region !== undefined)) { delete d.country; delete d.region; d.locationErased = true; count++; }
+        if (what === 'identity' && r.respondent && (r.respondent.name || r.respondent.participantId)) { delete r.respondent.name; delete r.respondent.participantId; delete r.respondent.participantIdSource; r.respondent.identityErased = true; count++; }
+        if (what === 'timeline' && r.session && Array.isArray(r.session.events)) { r.session.events = []; r.session.erased = true; count++; }
+      });
+      return count;
+    });
+    res.json({ ok: true, updated: n });
+  }));
+
   router.delete('/:id/responses', wrap(async (req, res) => {
     await load(req.params.id, req);
     const n = await store.updateResponses(req.params.id, list => { const count = list.length; list.splice(0, list.length); return count; });
@@ -341,8 +472,14 @@ function createSurveys(opts) {
     const v = await versionDoc(rec, body.version);
     let checked;
     try { checked = record(body, v, req); } catch (e) { if (e.problems) return res.status(422).json({ error: { type: e.type, message: e.message }, problems: e.problems }); throw e; }
+    const priv = Core.privacyOf(v.doc);
+    const who = respondentOf(body, priv, !!body.complete);
+    if (who.problems.length) return res.status(422).json({ error: { type: 'invalid_response', message: who.problems[0].message }, problems: who.problems });
     const token = crypto.randomBytes(24).toString('hex');
     const now = new Date().toISOString();
+    const derived = derivedOf(req, priv, geo);
+    const respondent = Object.keys(who.respondent).length || derived ? Object.assign({}, who.respondent, derived ? { derived } : {}) : undefined;
+    const recording = recordingOf(body, priv);
     const response = {
       id: randomId('r_', 10), version: v.version,
       status: body.complete ? 'complete' : 'in_progress',
@@ -353,6 +490,11 @@ function createSurveys(opts) {
       meta: { device: deviceOf(req.headers['user-agent']), language: String(req.headers['accept-language'] || '').split(',')[0].slice(0, 20) },
       tokenHash: sha(token)
     };
+    if (respondent) response.respondent = respondent;
+    if (recording) {
+      response.session = { recording, startedAt: typeof (body.session || {}).startedAt === 'string' && !Number.isNaN(Date.parse(body.session.startedAt)) ? body.session.startedAt : response.startedAt, events: [] };
+      if (recording !== 'declined') appendEvents(response, cleanEvents(body.events));
+    }
     await store.updateResponses(rec.id, list => { list.push(response); });
     res.status(201).json({ responseId: response.id, token, status: response.status });
   }));
@@ -367,14 +509,41 @@ function createSurveys(opts) {
       if (r.status === 'complete') throw new ApiError(409, 'already_complete', 'This response was already submitted.');
       const v = await versionDoc(rec, r.version);
       const checked = record(body, v, req);
+      const priv = Core.privacyOf(v.doc);
+      const who = respondentOf(body, priv, !!body.complete);
+      if (who.problems.length) throw Object.assign(new ApiError(422, 'invalid_response', who.problems[0].message), { problems: who.problems });
       const now = new Date().toISOString();
       Object.assign(r, { answers: checked.answers, byKey: checked.byKey, score: checked.score, vars: checked.vars, path: sanitizePath(body.path), updatedAt: now,
         outcome: typeof body.outcome === 'string' ? body.outcome.slice(0, 500) : r.outcome });
+      if (Object.keys(who.respondent).length) {
+        const derived = r.respondent && r.respondent.derived;
+        r.respondent = Object.assign({}, who.respondent, derived ? { derived } : {});
+      }
+      const recording = recordingOf(body, priv);
+      if (recording && !r.session) r.session = { recording, startedAt: r.startedAt, events: [] };
+      if (r.session && r.session.recording !== 'declined' && recording && recording !== 'declined') appendEvents(r, cleanEvents(body.events));
       if (body.complete) { r.status = 'complete'; r.completedAt = now; }
       return r.status;
     }).catch(e => { if (e.problems) { res.status(422).json({ error: { type: e.type, message: e.message }, problems: e.problems }); return null; } throw e; });
     if (out === null) return;
     res.json({ responseId: req.params.rid, status: out });
+  }));
+
+  // The last timeline events of a respondent who leaves before finishing (sent with keepalive).
+  publicRouter.post('/:publicId/responses/:rid/events', limit, wrap(async (req, res) => {
+    const rec = await published(req.params.publicId);
+    const body = req.body || {};
+    const out = await store.updateResponses(rec.id, async list => {
+      const r = list.find(x => x.id === req.params.rid);
+      if (!r || r.tokenHash !== sha(body.token || '')) throw new ApiError(404, 'not_found', 'That response doesn\'t exist.');
+      if (r.status === 'complete') throw new ApiError(409, 'already_complete', 'This response was already submitted.');
+      if (!r.session || r.session.recording === 'declined') return 0;
+      const events = cleanEvents(body.events);
+      appendEvents(r, events);
+      r.updatedAt = new Date().toISOString();
+      return events.length;
+    });
+    res.json({ ok: true, recorded: out });
   }));
 
   // Body-parser failures (bad JSON, too large) and anything else thrown outside
@@ -393,4 +562,4 @@ function createSurveys(opts) {
   return { router, publicRouter, pageHandler, store };
 }
 
-module.exports = { createSurveys };
+module.exports = { createSurveys, cleanEvent, geoConfig, clientIp };

@@ -291,16 +291,27 @@
           }
         };
       },
+      // A button showing the font (drawn in it) that opens the searchable font library.
       font(ctl, f, id, onChange) {
-        const sel = document.createElement('select'); sel.className = 'ss-select'; sel.id = id;
-        Core.FONTS.forEach(ft => { const o = document.createElement('option'); o.value = ft.value; o.textContent = ft.label; sel.appendChild(o); });
-        const custom = document.createElement('option'); custom.value = '__custom'; custom.textContent = 'Custom…'; sel.appendChild(custom);
-        sel.addEventListener('change', () => {
-          if (sel.value === '__custom') { const v = prompt('Font family (CSS), e.g. "Roboto", sans-serif'); if (v) onChange(Core.cleanValue(v)); }
-          else onChange(sel.value);
+        const THEME_FONTS = [{ name: 'Body (theme)', value: Core.tokenVar('fontBody'), note: 'The theme\'s body font' }, { name: 'Display (theme)', value: Core.tokenVar('fontDisplay'), note: 'The theme\'s display font' }, { name: 'Monospace (theme)', value: Core.tokenVar('fontMono'), note: 'The theme\'s monospace font' }];
+        const btn = document.createElement('button');
+        btn.type = 'button'; btn.className = 'ss-select ss-font-btn'; btn.id = id;
+        btn.setAttribute('aria-haspopup', 'dialog');
+        let current = '';
+        btn.addEventListener('click', () => {
+          if (!window.SurveyFonts) return;
+          window.SurveyFonts.openPicker(btn, { value: current, title: f.label || 'Font', extra: THEME_FONTS, onPick: v => onChange(v) });
         });
-        ctl.appendChild(sel);
-        return { update(v, s) { const val = v !== undefined ? v : (s.inherited || ''); if (!Array.from(sel.options).some(o => o.value === val)) { const o = document.createElement('option'); o.value = val; o.textContent = String(val).replace(/^var\(--sv-(\w+)\)$/, 'Theme $1') || 'Inherit'; sel.insertBefore(o, custom); } sel.value = val; } };
+        ctl.appendChild(btn);
+        return { update(v, s) {
+          current = v !== undefined ? v : (s.inherited || '');
+          const shown = String(current).replace(/^var\(--sv-(\w+)\)$/, (m, k) => (THEME_FONTS.find(t => t.value === current) || { name: 'Theme ' + k }).name);
+          const name = window.SurveyFonts ? window.SurveyFonts.labelOf(current, THEME_FONTS) || shown : shown;
+          btn.textContent = s.mixed ? 'Mixed' : (name || 'Inherit');
+          btn.style.fontFamily = /^var\(/.test(current) ? '' : current;
+          if (window.SurveyFonts) window.SurveyFonts.ensure(current);
+          btn.setAttribute('aria-label', (f.label || 'Font') + ': ' + (name || 'inherit') + '. Choose a font');
+        } };
       },
       box4(ctl, f, id, onChange) {
         const wrap = document.createElement('div'); wrap.className = 'ss-box4';
@@ -637,9 +648,37 @@
         f.push({ path: 'props.autoHide', label: 'Hide on first page', kind: 'toggle', when: e => e.props.action && e.props.action.type === 'back' });
       }
       if (t === 'progress') f.push({ path: 'props.showLabel', label: 'Show percentage', kind: 'toggle' });
+      if (t === 'respondent') respondentFields(el).forEach(x => f.push(x));
       if (t === 'shape') f.push({ path: 'props.shape', label: 'Shape', kind: 'select', options: OPTS.shapeKind });
       if (t === 'tabs') f.push({ path: 'props.active', label: 'Tab shown in editor', kind: 'select', numeric: true, options: () => (el.children || []).map((c, i) => [String(i), (doc().elements[c] && doc().elements[c].props.label) || 'Tab ' + (i + 1)]) });
       return f.filter(x => !x.when || x.when(el));
+    }
+    // Respondent information: which fields are collected, where each comes from and who sees it.
+    function respondentFields(el) {
+      const cfg = e => Core.respondentConfig(e).fields;
+      const tx = (label, path) => v => store.tx(label, t => { Core.setPath(t.el(el.id), path, v); });
+      const flag = (key, label, hint) => ({ label, kind: 'toggle', hint, get: e => cfg(e)[key].on, custom: tx((label + (cfg(el)[key].on ? ' off' : ' on')), 'props.fields.' + key + '.on') });
+      const on = key => e => cfg(e)[key].on;
+      const f = [
+        { path: 'props.title', label: 'Title', kind: 'text', live: true },
+        { path: 'props.intro', label: 'Introduction', kind: 'textarea', rows: 2, wide: true, placeholder: 'Optional: why you ask, how it is used' },
+        { kind: 'info', wide: true, html: '<b>Entered by the participant</b><br>Shown to the participant and saved with the response.' },
+        flag('name', 'Ask for name', 'A text field the participant fills in. Don\'t ask unless you need it.'),
+        { path: 'props.fields.name.label', label: 'Name label', kind: 'text', live: true, when: on('name'), get: e => cfg(e).name.label },
+        { path: 'props.fields.name.required', label: 'Name required', kind: 'toggle', when: on('name'), get: e => cfg(e).name.required },
+        flag('participantId', 'Participant code', 'A participant ID typed by the participant, or passed in the survey link by a panel or recruiting system'),
+        { label: 'Code comes from', kind: 'select', when: on('participantId'), options: [['entered', 'Typed by the participant'], ['link', 'The survey link (?pid=…)']], get: e => cfg(e).participantId.from, custom: tx('Participant code source', 'props.fields.participantId.from') },
+        { path: 'props.fields.participantId.label', label: 'Code label', kind: 'text', live: true, when: on('participantId'), get: e => cfg(e).participantId.label },
+        { path: 'props.fields.participantId.param', label: 'Link parameter', kind: 'text', when: e => cfg(e).participantId.on && cfg(e).participantId.from === 'link', get: e => cfg(e).participantId.param, hint: 'e.g. pid → /s/abc123?pid=P-0042' },
+        { label: 'Visible to', kind: 'select', when: e => cfg(e).participantId.on && cfg(e).participantId.from === 'link', options: [['both', 'Participant and researchers'], ['researchers', 'Researchers only']],
+          get: e => (cfg(e).participantId.show ? 'both' : 'researchers'), custom: v => store.tx('Participant code visibility', t => { Core.setPath(t.el(el.id), 'props.fields.participantId.show', v === 'both'); }) },
+        { path: 'props.fields.participantId.required', label: 'Code required', kind: 'toggle', when: on('participantId'), get: e => cfg(e).participantId.required },
+        { kind: 'info', wide: true, html: '<b>Derived by the server</b> · researchers only<br>The participant is told these are recorded, before the survey starts and in this block. Country and region are estimates from the IP address, supplied by your reverse proxy (<code>SURVEY_GEO_HEADERS</code>) — never verified identity.' },
+        flag('country', 'Country (from IP)', 'Approximate; needs SURVEY_GEO_HEADERS on the server'),
+        flag('region', 'State / region (from IP)', 'Approximate; needs SURVEY_GEO_HEADERS on the server'),
+        flag('ip', 'IP address', 'Collect only when it is lawful, necessary and disclosed. Behind a proxy, needs TRUST_PROXY on the server.')
+      ];
+      return f;
     }
     function fieldPropFields(kind, target) {
       const f = [];
