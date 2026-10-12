@@ -691,7 +691,8 @@
         (v ? '<button class="btn btn-ghost" id="bk-v-del" style="margin-right:auto;color:#B91C1C">Delete variable</button>' : '') +
         '<button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button><button class="btn btn-primary" id="bk-v-ok">' + (v ? 'Save' : 'Create') + '</button>');
       const nameIn = document.getElementById('bk-v-name');
-      setTimeout(() => nameIn.focus(), 30);
+      // Focus the name, unless the person (or a test) is already typing in the dialog
+      setTimeout(() => { const m = nameIn.closest('.modal'); if (!(m && m.contains(document.activeElement))) nameIn.focus(); }, 30);
       const ok = () => {
         const nm = nameIn.value.trim().replace(/[^A-Za-z0-9_]/g, '_').replace(/^(\d)/, '_$1');
         const err = document.getElementById('bk-v-err');

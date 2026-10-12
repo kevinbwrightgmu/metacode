@@ -28,6 +28,30 @@ function decodeJwtPayload(token) {
   try { return JSON.parse(Buffer.from(part.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8')); } catch (e) { return null; }
 }
 
+// Copy-paste damage in .env values (phones and chat apps add it): invisible
+// characters, curly quotes around the value, and lookalike dashes. A key or URL
+// never contains any of these, so they're removed or turned back into "-".
+function cleanValue(raw) {
+  return String(raw || '')
+    .replace(/[\u200B-\u200D\u2060\uFEFF\u00AD]/g, '')
+    .replace(/[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g, ' ')
+    .trim()
+    .replace(/^["'`\u201C\u201D\u2018\u2019\u00AB\u00BB<]+|["'`\u201C\u201D\u2018\u2019\u00AB\u00BB>]+$/g, '')
+    .replace(/[\u2010-\u2015\u2212\uFE58\uFE63\uFF0D]/g, '-')
+    .trim();
+}
+
+// What's wrong with a value, precisely (without repeating the whole key)
+function badCharacter(value, allowed) {
+  for (let i = 0; i < value.length; i++) {
+    if (!allowed.test(value[i])) {
+      const c = value[i], code = 'U+' + c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0');
+      return 'character ' + (i + 1) + ' is ' + (c === ' ' ? 'a space' : '“' + c + '” (' + code + ')');
+    }
+  }
+  return null;
+}
+
 // Never let a secret key reach the browser through /api/account/config.
 function keyProblem(key) {
   if (!key) return null;
@@ -37,7 +61,12 @@ function keyProblem(key) {
     if (p && p.role === 'service_role') return 'SUPABASE_PUBLISHABLE_KEY holds the service_role key. Use the anon / publishable key — the service_role key must never be sent to browsers.';
     return null;
   }
-  if (!/^sb_publishable_[A-Za-z0-9_-]{10,}$/.test(key)) return 'SUPABASE_PUBLISHABLE_KEY doesn\'t look like a Supabase publishable key (sb_publishable_…).';
+  if (!/^sb_publishable_[A-Za-z0-9_-]{10,}$/.test(key)) {
+    const why = !/^sb_publishable_/.test(key) ? 'it should start with sb_publishable_ but starts with “' + key.slice(0, 6) + '…”'
+      : badCharacter(key, /[A-Za-z0-9_-]/) ? badCharacter(key, /[A-Za-z0-9_-]/) + ', which can\'t be in a key'
+      : 'it\'s too short';
+    return 'SUPABASE_PUBLISHABLE_KEY doesn\'t look like a Supabase publishable key (sb_publishable_…): ' + why + '. Copy it again from Supabase (Project Settings → API Keys) or type that line by hand.';
+  }
   return null;
 }
 
@@ -61,8 +90,8 @@ function parseOverrides(raw) {
 
 function accountConfig(env) {
   env = env || process.env;
-  const supabaseUrl = String(env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
-  const publishableKey = String(env.SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY || '').trim();
+  const supabaseUrl = cleanValue(env.SUPABASE_URL).replace(/\/+$/, '');
+  const publishableKey = cleanValue(env.SUPABASE_PUBLISHABLE_KEY || env.SUPABASE_ANON_KEY);
   const problems = [];
   if (supabaseUrl && !publishableKey) problems.push('SUPABASE_URL is set but SUPABASE_PUBLISHABLE_KEY isn\'t — accounts are off.');
   if (!supabaseUrl && publishableKey) problems.push('SUPABASE_PUBLISHABLE_KEY is set but SUPABASE_URL isn\'t — accounts are off.');
@@ -103,4 +132,4 @@ function accountConfig(env) {
   };
 }
 
-module.exports = { accountConfig, keyProblem, decodeJwtPayload, DEFAULT_PRODUCTS, PAID, isLocalHost };
+module.exports = { accountConfig, keyProblem, cleanValue, decodeJwtPayload, DEFAULT_PRODUCTS, PAID, isLocalHost };
