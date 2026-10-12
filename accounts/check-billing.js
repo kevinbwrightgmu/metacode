@@ -54,7 +54,12 @@ async function checkBilling(cfg, opts) {
     if (P.active === false) add(false, name + ' price (' + priceId + ')', 'This price is archived. Set an active price as the product\'s default.');
     else if (P.type !== 'recurring' || !P.recurring) add(false, name + ' price (' + priceId + ')', 'This is a one-time price, but plans are subscriptions. Add a recurring (e.g. monthly) price to the product and set it as the default.');
     else if (product && product !== id) add(false, name + ' price (' + priceId + ')', 'Belongs to a different product (' + product + ') than STRIPE_PRODUCT_' + plan.toUpperCase() + '.');
-    else add(true, name, ((P.unit_amount || 0) / 100).toLocaleString('en-US', { style: 'currency', currency: String(P.currency || 'usd').toUpperCase() }) + ' every ' + (P.recurring.interval_count > 1 ? P.recurring.interval_count + ' ' : '') + P.recurring.interval + ' (' + priceId + ').');
+    else {
+      const tax = typeof p.json.tax_code === 'string' ? p.json.tax_code : p.json.tax_code && p.json.tax_code.id;
+      add(true, name, ((P.unit_amount || 0) / 100).toLocaleString('en-US', { style: 'currency', currency: String(P.currency || 'usd').toUpperCase() }) + ' every ' + (P.recurring.interval_count > 1 ? P.recurring.interval_count + ' ' : '') + P.recurring.interval + ' (' + priceId + ')' + (tax ? ', tax code ' + tax : '') + '.');
+      // Stripe Managed Payments (and some Stripe Tax setups) refuse checkout for a product without one
+      if (!tax) add(null, name + ' tax code', 'The product has no tax code. With Managed Payments on, Stripe refuses checkout (“the product tax code is missing”). In Stripe: Product catalog → ' + (p.json.name ? '“' + p.json.name + '”' : 'the product') + ' → Edit → Product tax code → “Software as a service (SaaS) – business use” (txcd_10103001), then Save.');
+    }
   }
 
   // What checkout needs to do, tested without doing it: each request names an
