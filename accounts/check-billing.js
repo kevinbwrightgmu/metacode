@@ -19,9 +19,9 @@ async function checkBilling(cfg, opts) {
   const s = cfg.stripe;
   const out = [];
   const add = (ok, label, detail) => out.push({ ok, label, detail: detail || '' });
-  const call = async path => {
+  const call = async (path, method, body) => {
     try {
-      const r = await request(s.apiBase + path, { headers: { Authorization: 'Bearer ' + s.secretKey }, timeoutMs: 15000 });
+      const r = await request(s.apiBase + path, { method: method || 'GET', body, headers: Object.assign({ Authorization: 'Bearer ' + s.secretKey }, body ? { 'Content-Type': 'application/x-www-form-urlencoded' } : {}), timeoutMs: 15000 });
       return { ok: r.ok, status: r.status, json: r.json || {}, message: redact((r.json && r.json.error && r.json.error.message) || ('HTTP ' + r.status)) };
     } catch (e) { return { ok: false, status: 0, json: {}, message: 'MetaCode couldn\'t reach Stripe (' + e.message + ').' }; }
   };
@@ -55,6 +55,33 @@ async function checkBilling(cfg, opts) {
     else if (P.type !== 'recurring' || !P.recurring) add(false, name + ' price (' + priceId + ')', 'This is a one-time price, but plans are subscriptions. Add a recurring (e.g. monthly) price to the product and set it as the default.');
     else if (product && product !== id) add(false, name + ' price (' + priceId + ')', 'Belongs to a different product (' + product + ') than STRIPE_PRODUCT_' + plan.toUpperCase() + '.');
     else add(true, name, ((P.unit_amount || 0) / 100).toLocaleString('en-US', { style: 'currency', currency: String(P.currency || 'usd').toUpperCase() }) + ' every ' + (P.recurring.interval_count > 1 ? P.recurring.interval_count + ' ' : '') + P.recurring.interval + ' (' + priceId + ').');
+  }
+
+  // What checkout needs to do, tested without doing it: each request names an
+  // object that doesn't exist, so Stripe answers "no such …" when the key may do
+  // it and "permission denied" (403) when it may not. Nothing is created.
+  const NONE = 'MetaCodeCheckDoesNotExist';
+  const perms = [
+    ['Customers', 'Read', () => call('/v1/customers?limit=1')],
+    ['Customers', 'Write', () => call('/v1/customers/cus_' + NONE, 'POST', 'metadata%5Bmetacode_check%5D=1')],
+    ['Subscriptions', 'Read', () => call('/v1/subscriptions?limit=1')],
+    ['Checkout Sessions', 'Write', () => call('/v1/checkout/sessions/cs_' + NONE + '/expire', 'POST', '')],
+    ['Customer portal', 'Write', () => call('/v1/billing_portal/sessions', 'POST', 'customer=cus_' + NONE)]
+  ];
+  const missing = [];
+  for (const [what, level, probe] of perms) {
+    const r = await probe();
+    if (r.status === 403 || (r.status === 401 && /permission/i.test(r.message))) missing.push(what + ': ' + level);
+    else if (r.status === 0 || r.status >= 500) { add(null, what + ' (' + level + ')', 'Couldn\'t check: ' + r.message); }
+  }
+  if (missing.length) add(false, 'Key permissions', 'The ' + (/^rk_/.test(s.secretKey) ? 'restricted ' : '') + 'key may not: ' + missing.join(', ') + '. Developers → API keys → your key → Edit, and set ' + missing.join(', ') + ' (checkout needs them). Changes apply at once.');
+  else add(true, 'Key permissions', 'Customers (read, write), Subscriptions (read), Checkout Sessions (write), Customer portal (write).');
+
+  // A live account that can't take payments yet (activation unfinished) can't start a checkout
+  if (live) {
+    const acct = await call('/v1/account');
+    if (acct.ok && acct.json.charges_enabled === false) add(false, 'Stripe account', 'Can\'t take live payments yet. Finish activating the account in Stripe (the banner at the top of the Dashboard lists what\'s missing).');
+    else if (acct.ok) add(true, 'Stripe account', 'Can take live payments.');
   }
 
   const portal = await call('/v1/billing_portal/configurations?is_default=true&limit=1');

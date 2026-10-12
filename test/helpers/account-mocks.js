@@ -175,6 +175,12 @@ function mockStripe(opts) {
     const json = (status, obj) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
     if (req.headers.authorization !== 'Bearer ' + (opts.key || 'sk_test_mock')) return json(401, { error: { type: 'invalid_request_error', message: 'Invalid API Key provided' } });
     const p = url.pathname;
+    // A restricted key without permission for this kind of object
+    if ((opts.denied || []).some(prefix => p.startsWith(prefix))) return json(403, { error: { type: 'invalid_request_error', message: "The provided key 'rk_live_…' does not have the required permissions for this endpoint on account 'acct_1'." } });
+    if (p === '/v1/account') return json(200, Object.assign({ id: 'acct_1', object: 'account', charges_enabled: true }, opts.account || {}));
+    if (p === '/v1/customers' && req.method === 'GET') return json(200, { object: 'list', data: Array.from(customers.values()).slice(0, 1) });
+    if (/^\/v1\/customers\/cus_[A-Za-z0-9]+$/.test(p) && req.method === 'POST' && !customers.has(p.split('/').pop())) return json(404, { error: { type: 'invalid_request_error', code: 'resource_missing', message: "No such customer: '" + p.split('/').pop() + "'" } });
+    if (/^\/v1\/checkout\/sessions\/[^/]+\/expire$/.test(p)) return json(404, { error: { type: 'invalid_request_error', code: 'resource_missing', message: 'No such checkout.session' } });
     if (p === '/v1/customers/search') {
       const m = String(url.searchParams.get('query') || '').match(/metadata\['supabase_user_id'\]:'([^']+)'/);
       const found = Array.from(customers.values()).filter(c => m && c.metadata.supabase_user_id === m[1]);
@@ -203,6 +209,7 @@ function mockStripe(opts) {
     }
     if (p === '/v1/billing_portal/sessions' && req.method === 'POST') {
       const f = parseForm(body);
+      if (f.customer && !customers.has(f.customer)) return json(400, { error: { type: 'invalid_request_error', code: 'resource_missing', param: 'customer', message: "No such customer: '" + f.customer + "'" } });
       return json(200, { id: 'bps_1', url: 'https://billing.stripe.test/p/session/' + f.customer });
     }
     json(404, { error: { type: 'invalid_request_error', message: 'Unrecognized request URL' } });

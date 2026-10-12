@@ -174,7 +174,9 @@ test('npm run billing:check: a correct Stripe setup passes; the usual mistakes a
   await good.close();
   assert.deepEqual(ok.filter(r => r.ok !== true), [], JSON.stringify(ok));
   assert.match(ok.find(r => r.label === 'Max').detail, /\$29\.00 every month/);
-  assert.ok(good.calls.every(c => c.method === 'GET'), 'read-only');
+  assert.ok(good.calls.every(c => c.method === 'GET' || /DoesNotExist/.test(c.path + c.query) || c.path === '/v1/billing_portal/sessions'), 'writes only name objects that don\'t exist');
+  assert.equal(good.customers.size, 0, 'nothing was created in Stripe');
+  assert.equal(good.sessions.length, 0);
 
   // The usual mistakes: a product from the other mode, a one-time default price, no portal, no webhook
   const bad = mockStripe({ key: 'sk_test_mock123', products: { prod_VQeJh2lPqfmae9: products.prod_VQeJh2lPqfmae9, prod_VQeK26tKchu1VI: products.prod_VQeK26tKchu1VI },
@@ -190,6 +192,20 @@ test('npm run billing:check: a correct Stripe setup passes; the usual mistakes a
   assert.match(find('Ultra').detail, /Not found with this test key.*No such product: 'prod_VQeKXAJtQQLKqm'.*create it in test mode/);
   assert.equal(find('Customer portal').ok, false);
   assert.equal(find('Webhook endpoint').ok, false);
+  // A restricted key that can read but not create customers or checkout sessions; a live account not yet activated
+  const restricted = mockStripe({ key: 'rk_live_mock123', products, portal, webhooks, denied: ['/v1/customers/cus_', '/v1/checkout/'], account: { charges_enabled: false } });
+  await restricted.start();
+  const rk = await checkBilling(accountConfig({ STRIPE_SECRET_KEY: 'rk_live_mock123', STRIPE_API_BASE: restricted.url, STRIPE_WEBHOOK_SECRET: 'whsec_x', PUBLIC_URL: 'https://metac0.de' }));
+  await restricted.close();
+  const perm = rk.find(r => r.label === 'Key permissions');
+  assert.equal(perm.ok, false);
+  assert.match(perm.detail, /may not: Customers: Write, Checkout Sessions: Write\./);
+  assert.equal(rk.find(r => r.label === 'Stripe account').ok, false);
+  assert.ok(restricted.calls.every(c => c.method === 'GET' || /DoesNotExist/.test(c.path + c.query) || c.path === '/v1/billing_portal/sessions'), 'writes only name objects that don\'t exist');
+  assert.equal(restricted.customers.size, 0, 'nothing was created');
+  assert.equal(restricted.sessions.length, 0);
+  assert.equal(ok.find(r => r.label === 'Key permissions').ok, true);
+
   // The publishable key in the secret key's place
   const pk = await checkBilling(accountConfig({ STRIPE_SECRET_KEY: 'pk_live_abc123' }));
   assert.match(pk[0].detail, /not pk_/);
