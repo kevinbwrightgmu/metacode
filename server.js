@@ -19,6 +19,20 @@ const { createStatusMonitor, statusRoutes } = require('./status-page');
 
 const app = express();
 
+// Behind a reverse proxy (nginx, Caddy, Cloudflare…) the visitor's address is in
+// X-Forwarded-For, which anyone can also send directly. TRUST_PROXY says which
+// proxy to believe, so req.ip is the real visitor (used for survey rate limits and,
+// when a survey collects it, the respondent's IP address): a number of proxy hops
+// (1 = one proxy in front), "loopback" (a proxy on this machine), or a list of
+// proxy addresses/CIDR ranges. Unset: forwarded headers are ignored.
+(function trustProxy(raw) {
+  const v = String(raw || '').trim();
+  if (!v) return;
+  if (/^\d+$/.test(v)) app.set('trust proxy', Number(v));
+  else if (/^(true|yes|on)$/i.test(v)) app.set('trust proxy', 1);
+  else app.set('trust proxy', v.split(',').map(x => x.trim()).filter(Boolean));
+})(process.env.TRUST_PROXY);
+
 // status.metac0.de (any status.* host): only the status page and its data;
 // anything else on that host goes to the main site. See status-page.js.
 const statusSite = statusRoutes({ publicDir: path.join(__dirname, 'public') });

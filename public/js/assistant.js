@@ -417,13 +417,16 @@ const Assistant = (() => {
         (dual.length === 1 ? 'is 1' : 'are ' + dual.length) + ')';
     }
     const stats = ReliabilityAnalyzer.computeAll(dual).filter(st => st.n > 0);
-    if (!stats.length) return '- Reliability: no dimension has both an AI and a human code on the same post yet';
-    const pct = v => (v * 100).toFixed(1) + '%';
+    if (!stats.length) return '- Reliability: no dimension has both an AI and a Coder 1 code on the same post yet';
+    const pct = v => (v === null ? 'n/a' : (v * 100).toFixed(1) + '%');
+    const n3 = v => (v === null ? 'n/a (undefined)' : v.toFixed(3));
     const overall = ReliabilityAnalyzer.computeOverall(dual, s.codebook || []);
     const parts = stats.map(st => clean(st.name, 50) + ': ' + st.n + ' pairs, agreement ' + pct(st.pa) +
-      ', κ ' + st.kappa.toFixed(3) + ' (' + String(st.interp).toLowerCase() + '), α ' + st.alpha.toFixed(3));
-    return clip('- Reliability on ' + dual.length + ' dual-coded posts: overall agreement ' + pct(overall.pa) +
-      ', κ ' + overall.kappa.toFixed(3) + ', α ' + overall.alpha.toFixed(3) + '. By dimension — ' + parts.join('; '), 1400);
+      ', κ ' + n3(st.kappa) + ' (' + String(st.interp).toLowerCase() + '), α ' + n3(st.alpha));
+    const two = ReliabilityAnalyzer.computeOverall(null, s.codebook || [], ['coder1', 'coder2']);
+    return clip('- Reliability, Coder 1 vs AI on ' + dual.length + ' dual-coded posts: overall agreement ' + pct(overall.pa) +
+      ', mean κ ' + n3(overall.kappa) + ', mean α ' + n3(overall.alpha) + '. By dimension — ' + parts.join('; ') +
+      (two.n ? '. Coder 1 vs Coder 2: agreement ' + pct(two.pa) + ', mean κ ' + n3(two.kappa) + ' over ' + two.n + ' decisions' : ''), 1400);
   }
 
   function describeNetwork(net) {

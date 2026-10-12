@@ -42,9 +42,10 @@ has its own:
 
 ## Quick tour
 
-1. On the front page, click **Open Survey Studio**. Pick **New survey** or one of the templates: Customer
-   feedback, Research study, Event registration or Scored quiz. The logo at the top left goes back to the
-   front page.
+1. On the front page, click **Survey Studio**. The dashboard lists your surveys with their status
+   (draft, live, closed, unpublished, or *edited* when saved changes aren't published yet), response counts and quick links to Design, Theme, Preview and Responses; search,
+   filter by status and sort them. Pick **Create survey** or one of the templates: Customer feedback,
+   Research study, Event registration or Scored quiz. The logo at the top left goes back to the front page.
 2. Click an item in the **Add** palette on the left, for example **Single choice**. It appears on the page,
    already selected.
 3. Click the question to select it. **Double-click** to go inside it, for example to select one answer.
@@ -163,16 +164,29 @@ shown greyed, together with the place it comes from.
 
 ## Theme and inheritance
 
-The **Theme** tab edits:
+The **Theme** tab is a grouped editor on the left and a live preview of the survey on the right (it
+updates as you change things, on any page of the survey):
 
-- **Tokens:** the colours, fonts, radius and spacing used everywhere. The defaults are MetaCode's own
-  palette and fonts.
-- **Element defaults:** the default style for each element type, for example every option or every
-  question title.
-- **Survey settings:** page width, the background behind the page, responsive mode (*reflow* or *scale*),
-  progress bar, button labels, completion title and message (formulas allowed), and whether respondents
-  can go back.
-- **Theme JSON:** for copying a theme between surveys.
+- **Typography:** body, heading, question-title, button and monospace fonts, and text sizes.
+- **Colours:** the colour tokens (primary, text, muted, surface, border, error…), with a contrast check
+  against the background (WCAG AA).
+- **Background:** the page background behind the survey and the survey card.
+- **Layout:** page width, padding, radius, spacing, responsive mode (*reflow* or *scale*).
+- **Question styling, Buttons, Progress:** the defaults for those element types, the button labels, and the
+  progress bar.
+- **Advanced:** every token and every element type's defaults, and **Theme JSON** for copying a theme
+  between surveys.
+
+**Fonts.** Every font control opens the font library: 250+ Google Fonts and 7 system fonts, with search
+(by name or by style words such as *serif*, *geometric*, *handwriting*, *legible*), categories (sans,
+serif, display, handwriting, monospace, system) and each name shown in its own typeface. Hovering a font
+previews it; choosing it saves it in the theme. The fonts a survey uses are loaded from Google Fonts in the
+editor, the preview and on the published page (respondents' browsers request them from
+`fonts.googleapis.com`; choose a system font to avoid that).
+
+Survey-wide settings (title, completion message, going back, respondent identification and the session
+timeline) are on the **Settings** tab — see [Respondent identification and the session
+timeline](#respondent-identification-and-the-session-timeline).
 
 An element's style is resolved in this order: the built-in style of its type, then the theme default for
 that type, then the element's own overrides. Colours can refer to tokens, so changing **primary** recolours
@@ -413,21 +427,69 @@ The respondent page is a standalone page with no MetaCode interface. It:
 - announces errors to screen readers and supports the keyboard;
 - reflows to one column on narrow screens, or scales the design if you chose *scale*.
 
+## Respondent identification and the session timeline
+
+Both are on the **Settings** tab and are off by default.
+
+### Respondent information block
+
+**Settings → Respondent identification → Add the block** (or *Respondent information* in the Add palette)
+puts a block on the page. In its inspector, choose what it collects:
+
+| Field | Where the value comes from | Stored as |
+|---|---|---|
+| Name | Typed by the respondent | `respondent.name` |
+| Participant code | Typed by the respondent, **or** read from the survey link (e.g. `/s/<id>?pid=P-0042`, parameter name configurable) | `respondent.participantId` with `participantIdSource: 'entered' \| 'link'` |
+| Country, region | Derived by the server from the reverse proxy's location headers (needs `SURVEY_GEO_HEADERS`) | `respondent.derived.country`, `.region`, `.geoSource` |
+| IP address | Derived by the server from the request (needs `TRUST_PROXY` behind a proxy) | `respondent.derived.ip` |
+
+Typed fields can be required and labelled. Derived values are never typed or sent by the respondent's
+browser — the server takes them from the request when the response is saved, so a respondent can't
+substitute someone else's. When the server can't know them it says why (`ipNote: 'behind_proxy'`,
+`geoNote: 'not_configured'`) instead of guessing. The block can be hidden from respondents (a link code is
+still read), but derived fields are always announced: the respondent page shows a notice listing what is
+collected before the survey starts.
+
+On the Responses page these appear as, e.g., `🇺🇸 127.0.0.1 · California`, with *entered*, *from link* and
+*derived* labels.
+
+### Session timeline
+
+**Settings → Session timeline:** *Off* (default), *Notice* or *Consent*.
+
+- **Notice:** the respondent page says the session is recorded (your text, or a default) before the
+  respondent starts.
+- **Consent:** the respondent chooses **Allow and start** or **Start without the timeline**; declining
+  stores no events.
+
+What is recorded: start, page changes (next / back / jump), focus on a question, answers (choices and
+numbers as values; open text as its **length only**), cleared answers, skips, validation errors,
+leaving and returning to the tab, and submit — each with a time offset. At most 3,000 events per response.
+Keystrokes, mouse movements, the screen and anything outside the survey are **not** recorded; there is no
+video. Responses from before the timeline was turned on, or with it declined, show an empty state — nothing
+is reconstructed.
+
 ## Responses
 
 The **Responses** tab shows:
 
-- totals: complete, in progress, completion rate and median time;
-- a per-question summary: bar charts for choices, averages for numbers and ratings, recent answers for text;
-- a table of every response.
+- **Overview:** total, complete, in progress, abandoned (no activity for 30 minutes, or the respondent
+  closed the page), completion rate and median time. The *Summary* tab charts each question (bar charts for choices,
+  averages for numbers and ratings, recent answers for text).
+- **Individual:** a list (search by response ID, participant code, name, IP, location or answer text;
+  filter by status and date range; sort) next to the selected response, with **previous / next**:
+  - **Answers:** every question in the order it was presented, with its full text, type, the formatted
+    answer (choices by label, rankings in order, matrices as a grid), and *Not answered*, *Skipped* or
+    *Not shown to this respondent*.
+  - **Timeline:** time per page, the event list and a step-by-step **replay** of how the answers changed
+    (play, or jump to any event; **Open page** goes to that page in the editor).
+  - **Details:** respondent information (with entered / from link / derived labels), response ID,
+    status, version, start / last activity / submit times, duration, pages seen, device type, browser
+    language, score, timeline status and variables.
 
-You can delete one response or all of them.
-
-Exports:
-
-- **CSV:** one column per answer key, then one per variable (such as the condition a Random block
-  assigned).
-- **JSON:** includes the path, score, variables and version.
+**Exports** (CSV, JSON, events CSV) leave out the participant code, name, IP, location and timelines unless
+you tick them, and can be limited to the current filter. **Privacy** erases IP addresses, locations,
+identities or timelines from every response (the answers stay), deletes one response, or deletes them all.
 
 **Add text answers to project** turns open-text answers into MetaCode posts, ready for the codebook, AI
 coding and human coding.
@@ -557,6 +619,7 @@ server copy of a browser draft on its first publish.
 | `POST /:id/publish` · `PATCH /:id/publish` · `DELETE /:id/publish` | Publish a new version (422 with `problems` when logic is broken) · open/close responses · unpublish |
 | `GET /:id/versions` · `GET /:id/versions/:n` | Published versions |
 | `GET /:id/responses` · `DELETE /:id/responses/:rid` · `DELETE /:id/responses` | Responses |
+| `POST /:id/responses/erase` | `{ what: 'ip' \| 'location' \| 'identity' \| 'timeline' }` — erase that data from every response |
 | `GET /library` · `PUT /library` | This browser's components, saved styles, templates |
 
 ### Respondent routes
@@ -569,6 +632,12 @@ client.
 | `GET /:publicId` | The current published version |
 | `POST /:publicId/responses` | Start or submit a response → `{ responseId, token }` |
 | `PUT /:publicId/responses/:rid` | Update with the token; `complete: true` submits |
+| `POST /:publicId/responses/:rid/events` | Append session-timeline events with the token (used when the page is closed); 409 after submit |
+
+Responses carry `respondent` (`name`, `participantId`, `participantIdSource`, and `derived` with `ip`,
+`country`, `region`, `geoSource` and notes — only the fields the survey collects) and `session`
+(`recording`, `startedAt`, `events`). Events are checked against a fixed list of types and fields on the
+server; anything else is dropped.
 
 `GET /s/:publicId` serves the respondent page.
 
@@ -609,6 +678,12 @@ serialised.
   - required, format and range rules apply.
 - Response tokens are random and stored only as SHA-256 hashes. A response can't be changed after it is
   submitted.
+- IP address and location are taken from the request on the server, never from the respondent's browser.
+  Forwarded-IP headers (`X-Forwarded-For`, `Forwarded`) are believed only from the proxies `TRUST_PROXY`
+  names; location only from the headers `SURVEY_GEO_HEADERS` names. Both are collected only when the survey
+  asks for them, and disclosed on the respondent page.
+- Nothing is tracked covertly: the session timeline is off unless the author turns it on, and then the
+  respondent is told (or asked) first. Respondent data isn't written to the server log.
 
 ### Editor and content
 
@@ -626,6 +701,8 @@ serialised.
 | Variable | Default | Purpose |
 |---|---|---|
 | `SURVEY_DATA_DIR` | `survey-data/` (next to `server.js`) | Where surveys, versions, responses and the library are stored. Gitignored. |
+| `TRUST_PROXY` | unset (forwarded headers ignored) | Which reverse proxy to believe for the visitor's IP: a hop count (`1` = one proxy in front, e.g. nginx or Cloudflare → MetaCode), `loopback`, or a comma-separated list of proxy addresses/CIDR ranges. Used for rate limits and the respondent IP. Don't set it when MetaCode is reached directly — anyone could then fake their address. |
+| `SURVEY_GEO_HEADERS` | unset (no location) | Where the proxy puts the visitor's location: `cloudflare` (`CF-IPCountry`, and `CF-Region` with Cloudflare's visitor-location headers on), or `<country-header>[,<region-header>]`, e.g. `X-Country-Code,X-Region` from nginx GeoIP2. Only set it when the proxy overwrites those headers on every request. |
 
 Respondents open `/s/<publicId>` on **your** MetaCode server. To collect responses from other people, the
 server must be reachable by them, for example deployed or exposed through a tunnel. On `localhost`, only
@@ -633,8 +710,10 @@ your own computer can answer.
 
 ## Limitations
 
-- There are no user accounts. Anyone who can open MetaCode on your server can edit its surveys, as with the
-  rest of MetaCode.
+- There are no user accounts. Published surveys and their responses belong to the browser that published
+  them (see Storage); anyone with that browser (or its backup file) can see them.
+- The session timeline is an event log with a replay of the answers, not a screen recording.
+- Location needs a proxy or CDN that adds location headers; MetaCode has no IP-geolocation database.
 - The options inside a native **Dropdown** menu are drawn by the browser and can't be styled one by one.
   Use **Single choice** for fully styled options.
 - `pattern` (regular expression) validation runs only in the respondent's browser. The server checks the
@@ -670,8 +749,13 @@ public/js/survey/
   studio-tour.js                     The quick tour of the list and the editor (uses ../tour.js)
   studio-tutorial.js                 The hands-on tutorial and the Learn Survey Studio menu
   survey-templates.js                Built-in templates
-  survey-studio.js                   Survey list, editor shell, theme, preview, publish, responses
+  survey-studio.js                   Survey dashboard, editor shell, theme editor, settings, preview, publish
+  survey-fonts.js                    Font library (catalog, search, picker, loading the fonts a survey uses)
+  survey-responses.js                Responses page: overview, list + detail, timeline/replay, exports, privacy
 test/survey-core.test.js             Model + logic unit tests
 test/survey-api.test.js              API integration tests
 test/survey-e2e.test.js              Browser tests (full authoring → response flow)
+test/survey-privacy.test.js          Respondent information, trusted IP/location, session events, erase
+test/survey-fonts.test.js            Font catalog/search and Responses helpers
+test/platform-e2e.test.js            Browser tests: front page, dashboard, theme/fonts, respondent block, timeline, Human Coding
 ```

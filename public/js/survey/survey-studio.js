@@ -15,7 +15,7 @@ const SurveyStudio = (() => {
   const Core = window.SurveyCore, Logic = window.SurveyLogic, api = window.SurveyStore.api;
   const esc = s => App.esc(s === undefined || s === null ? '' : String(s));
   const icon = (inner, cls) => '<svg class="' + (cls || 'ss-ico') + '" viewBox="0 0 24 24" aria-hidden="true">' + inner + '</svg>';
-  const MODES = [['design', 'Design'], ['logic', 'Logic'], ['theme', 'Theme'], ['preview', 'Preview'], ['responses', 'Responses']];
+  const MODES = [['design', 'Design'], ['logic', 'Logic'], ['theme', 'Theme'], ['settings', 'Settings'], ['preview', 'Preview'], ['responses', 'Responses']];
   const I = {
     back: '<polyline points="15 18 9 12 15 6"/>', undo: '<polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>',
     redo: '<polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>',
@@ -87,20 +87,59 @@ const SurveyStudio = (() => {
     openEditor(container, id, mode);
   }
 
-  /* ══ Survey list ═════════════════════════════ */
+  /* ══ Survey list (the Survey Studio dashboard) ═══════════ */
+  // Search, status filter and sort are remembered in this browser.
+  const LIST_PREF_KEY = 'metacode_ss_list';
+  const listPrefs = (() => { try { return Object.assign({ q: '', status: 'all', sort: 'updated' }, JSON.parse(localStorage.getItem(LIST_PREF_KEY) || '{}')); } catch (e) { return { q: '', status: 'all', sort: 'updated' }; } })();
+  const saveListPrefs = () => { try { localStorage.setItem(LIST_PREF_KEY, JSON.stringify(listPrefs)); } catch (e) { /* private window */ } };
+  let listCache = null;
+
+  function statusOf(s) {
+    const p = s.publish;
+    if (!p) return 'draft';
+    if (p.unpublished) return 'unpublished';
+    return p.open ? 'live' : 'closed';
+  }
+  function statusBadge(s) {
+    const p = s.publish, st = statusOf(s);
+    const b = st === 'draft' ? '<span class="badge badge-gray">Draft</span>' : st === 'unpublished' ? '<span class="badge badge-gray">Unpublished</span>'
+      : st === 'live' ? '<span class="badge badge-green">Live · v' + p.version + '</span>' : '<span class="badge badge-amber">Closed · v' + p.version + '</span>';
+    const changed = p && !p.unpublished && s.revision > (p.publishedRevision || 0) ? ' <span class="badge badge-blue" title="Saved changes that aren\'t published yet">Edited</span>' : '';
+    return b + changed;
+  }
+
   async function renderList(container) {
     container.classList.remove('is-flush');
-    container.innerHTML = '<div class="view-header"><div><div class="view-title">Survey Studio</div><div class="view-subtitle">Design surveys visually — every element is yours to shape — then publish a link and collect responses.</div></div>' +
-      '<div class="view-actions"><button class="btn btn-secondary" id="ss-import">Import JSON</button><button class="btn btn-primary" id="ss-new">' + icon(I.plus) + 'New survey</button></div></div>' +
-      '<div class="ss-templates" id="ss-templates" aria-label="Start from a template"></div><div id="ss-legacy"></div><div class="card ss-list-card" id="ss-list"><div class="loading-state">Loading surveys…</div></div>';
+    container.innerHTML = '<div class="ssd">' +
+      '<div class="view-header ssd-head"><div><h1 class="view-title">Surveys</h1><div class="view-subtitle">Design a survey, publish a link, then inspect every response. Drafts stay in this browser; published versions and their responses are kept on this MetaCode server.</div></div>' +
+        '<div class="view-actions"><button class="btn btn-secondary" id="ss-import">Import JSON</button><button class="btn btn-primary" id="ss-new">' + icon(I.plus) + 'Create survey</button></div></div>' +
+      '<div id="ss-legacy"></div>' +
+      '<div class="ssd-stats" id="ss-stats" hidden></div>' +
+      '<div class="card ss-list-card">' +
+        '<div class="ssd-toolbar" id="ss-toolbar" hidden>' +
+          '<label class="ssd-search"><span class="sr-only">Search surveys</span><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>' +
+            '<input type="search" id="ss-search" placeholder="Search by title or description" autocomplete="off" value="' + esc(listPrefs.q) + '"></label>' +
+          '<label class="ssd-select"><span>Status</span><select id="ss-filter">' + [['all', 'All'], ['live', 'Live'], ['draft', 'Draft'], ['closed', 'Closed'], ['unpublished', 'Unpublished']].map(([v, l]) => '<option value="' + v + '"' + (listPrefs.status === v ? ' selected' : '') + '>' + l + '</option>').join('') + '</select></label>' +
+          '<label class="ssd-select"><span>Sort</span><select id="ss-sort">' + [['updated', 'Last edited'], ['created', 'Newest'], ['title', 'Name (A–Z)'], ['responses', 'Most responses']].map(([v, l]) => '<option value="' + v + '"' + (listPrefs.sort === v ? ' selected' : '') + '>' + l + '</option>').join('') + '</select></label>' +
+          '<span class="ssd-count" id="ss-count" role="status" aria-live="polite"></span>' +
+        '</div>' +
+        '<div id="ss-list"><div class="loading-state">Loading surveys…</div></div>' +
+      '</div>' +
+      '<section class="ssd-templates" aria-labelledby="ssd-tpl-h"><div class="ssd-sec-head"><h2 id="ssd-tpl-h">Start from a template</h2><p>Each template is a complete, editable survey — questions, pages, logic and theme.</p></div><div class="ss-templates" id="ss-templates" aria-label="Start from a template"></div></section>' +
+    '</div>';
+    document.getElementById('ss-new').onclick = () => createFrom('blank');
+    document.getElementById('ss-import').onclick = importDialog;
+    const search = document.getElementById('ss-search');
+    let searchTimer = null;
+    search.oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { listPrefs.q = search.value; saveListPrefs(); drawList(); }, 120); };
+    document.getElementById('ss-filter').onchange = e => { listPrefs.status = e.target.value; saveListPrefs(); drawList(); };
+    document.getElementById('ss-sort').onchange = e => { listPrefs.sort = e.target.value; saveListPrefs(); drawList(); };
     const lib = await loadLibrary();
     const tpl = document.getElementById('ss-templates');
     if (!tpl) return;
     const all = SurveyTemplates.list.map(t => ({ id: t.id, name: t.name, description: t.description, builtin: true })).concat((lib.templates || []).map(t => ({ id: t.id, name: t.name, description: t.description || 'Your template', builtin: false })));
     tpl.innerHTML = all.map(t => '<button type="button" class="ss-tpl" data-tpl="' + esc(t.id) + '"><span class="ss-tpl-name">' + esc(t.name) + (t.builtin ? '' : ' <span class="badge badge-violet">Yours</span>') + '</span><span class="ss-tpl-desc">' + esc(t.description) + '</span></button>').join('');
     tpl.onclick = e => { const b = e.target.closest('[data-tpl]'); if (b) createFrom(b.dataset.tpl); };
-    document.getElementById('ss-new').onclick = () => createFrom('blank');
-    document.getElementById('ss-import').onclick = importDialog;
     await refreshList();
   }
 
@@ -129,27 +168,63 @@ const SurveyStudio = (() => {
     const box = document.getElementById('ss-list');
     if (!box) return;
     renderLegacy();
-    let surveys;
-    try { surveys = (await api('')).surveys; } catch (e) {
-      box.innerHTML = '<div class="empty-state"><div class="empty-title">Couldn\'t load surveys</div><div class="empty-sub">' + esc(e.message) + ' Survey Studio needs the MetaCode server (npm start).</div></div>';
+    try { listCache = (await api('')).surveys; } catch (e) {
+      listCache = null;
+      box.innerHTML = '<div class="empty-state"><div class="empty-title">Couldn\'t load surveys</div><div class="empty-sub">' + esc(e.message) + ' Survey Studio needs the MetaCode server (npm start).</div><button type="button" class="btn btn-secondary" id="ss-retry">Try again</button></div>';
+      const r = document.getElementById('ss-retry'); if (r) r.onclick = refreshList;
       return;
     }
+    drawList();
+  }
+
+  function drawList() {
+    const box = document.getElementById('ss-list');
+    if (!box || !listCache) return;
+    const surveys = listCache;
+    const stats = document.getElementById('ss-stats'), bar = document.getElementById('ss-toolbar');
     if (!surveys.length) {
-      box.innerHTML = '<div class="empty-state"><div class="empty-title">No surveys yet</div><div class="empty-sub">Pick a template above, or start with a blank survey. New to Survey Studio? Build your first one step by step.</div>' +
-        '<button type="button" class="btn btn-primary" id="ss-empty-tutorial">Start the tutorial</button></div>';
+      if (stats) stats.hidden = true;
+      if (bar) bar.hidden = true;
+      box.innerHTML = '<div class="empty-state ssd-empty"><div class="empty-title">No surveys yet</div><div class="empty-sub">Create a blank survey, start from a template below, or learn Survey Studio by building your first survey step by step.</div>' +
+        '<div class="ssd-empty-actions"><button type="button" class="btn btn-primary" id="ss-empty-new">' + icon(I.plus) + 'Create survey</button><button type="button" class="btn btn-secondary" id="ss-empty-tutorial">Start the tutorial</button></div></div>';
+      document.getElementById('ss-empty-new').onclick = () => createFrom('blank');
       const tut = document.getElementById('ss-empty-tutorial');
       if (tut) tut.onclick = () => { if (window.StudioTutorial) window.StudioTutorial.start(true); };
       return;
     }
-    box.innerHTML = '<div class="table-wrap"><table class="table ss-table"><thead><tr><th>Survey</th><th>Status</th><th>Responses</th><th>Questions</th><th>Updated</th><th><span class="sr-only">Actions</span></th></tr></thead><tbody>' +
-      surveys.map(s => {
+    if (bar) bar.hidden = false;
+    if (stats) {
+      const n = st => surveys.filter(x => statusOf(x) === st).length;
+      const resp = surveys.reduce((a, x) => a + (x.completed || 0), 0);
+      stats.hidden = false;
+      stats.innerHTML = [[surveys.length, 'Surveys'], [n('live'), 'Live'], [n('draft'), 'Drafts'], [resp, 'Completed responses']]
+        .map(([v, l]) => '<div class="ssd-stat"><b>' + v.toLocaleString() + '</b><span>' + l + '</span></div>').join('');
+    }
+    const q = listPrefs.q.trim().toLowerCase();
+    let rows = surveys.filter(x => (listPrefs.status === 'all' || statusOf(x) === listPrefs.status) &&
+      (!q || (x.title + ' ' + (x.description || '')).toLowerCase().includes(q)));
+    const by = { updated: (a, b) => String(b.updatedAt).localeCompare(String(a.updatedAt)), created: (a, b) => String(b.createdAt).localeCompare(String(a.createdAt)),
+      title: (a, b) => a.title.localeCompare(b.title), responses: (a, b) => (b.responses || 0) - (a.responses || 0) || String(b.updatedAt).localeCompare(String(a.updatedAt)) };
+    rows = rows.sort(by[listPrefs.sort] || by.updated);
+    const count = document.getElementById('ss-count');
+    if (count) count.textContent = rows.length === surveys.length ? surveys.length + ' survey' + (surveys.length === 1 ? '' : 's') : rows.length + ' of ' + surveys.length + ' shown';
+    if (!rows.length) {
+      box.innerHTML = '<div class="empty-state ssd-empty"><div class="empty-title">No surveys match</div><div class="empty-sub">Nothing matches ' + (q ? '“' + esc(listPrefs.q.trim()) + '”' : 'this filter') + (listPrefs.status !== 'all' ? ' with status “' + esc(listPrefs.status) + '”' : '') + '.</div><button type="button" class="btn btn-secondary" id="ss-clear-filters">Clear search and filter</button></div>';
+      document.getElementById('ss-clear-filters').onclick = () => { listPrefs.q = ''; listPrefs.status = 'all'; saveListPrefs(); document.getElementById('ss-search').value = ''; document.getElementById('ss-filter').value = 'all'; drawList(); };
+      return;
+    }
+    const quick = (id, m, l) => '<a class="ssd-quick" href="#' + esc(id) + '/' + m + '">' + l + '</a>';
+    box.innerHTML = '<div class="table-wrap"><table class="table ss-table"><thead><tr><th>Survey</th><th>Status</th><th>Responses</th><th>Last edited</th><th>Go to</th><th><span class="sr-only">More</span></th></tr></thead><tbody>' +
+      rows.map(s => {
         const p = s.publish;
-        const status = !p ? '<span class="badge badge-gray">Draft</span>' : p.unpublished ? '<span class="badge badge-gray">Unpublished</span>' : p.open ? '<span class="badge badge-green">Live · v' + p.version + '</span>' : '<span class="badge badge-amber">Closed · v' + p.version + '</span>';
-        const changed = p && !p.unpublished && s.revision > (p.publishedRevision || 0) ? ' <span class="badge badge-blue" title="Saved changes that aren\'t published yet">Edited</span>' : '';
-        return '<tr data-id="' + esc(s.id) + '"><td><a href="#' + esc(s.id) + '" class="ss-list-title">' + esc(s.title) + '</a><div class="ss-list-sub">' + s.pages + ' page' + (s.pages === 1 ? '' : 's') + '</div></td>' +
-          '<td>' + status + changed + '</td><td>' + s.completed + (s.responses > s.completed ? ' <span class="text-muted">(+' + (s.responses - s.completed) + ' in progress)</span>' : '') + '</td><td>' + s.questions + '</td><td title="' + esc(s.updatedAt) + '">' + rel(s.updatedAt) + '</td>' +
-          '<td class="ss-row-actions"><a class="btn btn-secondary btn-sm" href="#' + esc(s.id) + '">Edit</a>' +
-          (p && !p.unpublished ? '<a class="btn btn-ghost btn-sm" href="/s/' + esc(p.publicId) + '" target="_blank" rel="noopener">Open link</a>' : '') +
+        const inProgress = (s.responses || 0) - (s.completed || 0);
+        return '<tr data-id="' + esc(s.id) + '"><td class="ssd-title-cell"><a href="#' + esc(s.id) + '" class="ss-list-title">' + esc(s.title) + '</a><div class="ss-list-sub">' +
+            (s.description ? esc(s.description.slice(0, 120)) + ' · ' : '') + s.pages + ' page' + (s.pages === 1 ? '' : 's') + ' · ' + s.questions + ' question' + (s.questions === 1 ? '' : 's') + '</div></td>' +
+          '<td>' + statusBadge(s) + '</td>' +
+          '<td><span class="ssd-resp"><b>' + (s.completed || 0).toLocaleString() + '</b> completed</span>' + (inProgress > 0 ? '<span class="ss-list-sub">' + inProgress + ' in progress</span>' : '') + '</td>' +
+          '<td title="' + esc(s.updatedAt) + '">' + rel(s.updatedAt) + '</td>' +
+          '<td class="ssd-quicks">' + quick(s.id, 'design', 'Design') + quick(s.id, 'theme', 'Theme') + quick(s.id, 'preview', 'Preview') + quick(s.id, 'responses', 'Responses') + '</td>' +
+          '<td class="ss-row-actions">' + (p && !p.unpublished ? '<a class="btn btn-ghost btn-sm" href="/s/' + esc(p.publicId) + '" target="_blank" rel="noopener">Open link</a>' : '') +
           '<button class="btn btn-ghost btn-sm" data-act="menu" aria-label="More actions for ' + esc(s.title) + '">⋯</button></td></tr>';
       }).join('') + '</tbody></table></div>';
     box.onclick = e => {
@@ -258,6 +333,7 @@ const SurveyStudio = (() => {
         '</div>' +
         '<div class="ss-view ss-view-logic" data-view="logic"></div>' +
         '<div class="ss-view ss-view-theme" data-view="theme"></div>' +
+        '<div class="ss-view ss-view-settings" data-view="settings"></div>' +
         '<div class="ss-view ss-view-preview" data-view="preview"></div>' +
         '<div class="ss-view ss-view-responses" data-view="responses"></div>' +
       '</div><div class="ss-live sr-only" aria-live="polite"></div>';
@@ -313,8 +389,12 @@ const SurveyStudio = (() => {
       $('#ss-publish').textContent = changed ? 'Publish changes' : 'Published';
     }
 
+    // Web fonts the survey uses are loaded for the canvas, preview and theme pages.
+    if (window.SurveyFonts) SurveyFonts.ensureDoc(doc());
+    let fontScan = null;
     cleanup.push(store.on((type, info) => {
       if (type === 'save' || type === 'saved') { renderSave(); renderPubState(); }
+      if (type === 'change' && window.SurveyFonts) { clearTimeout(fontScan); fontScan = setTimeout(() => SurveyFonts.ensureDoc(doc()), 200); }
       if (type === 'change') {
         renderUndo();
         if (info.doc && document.activeElement !== titleInput) { titleInput.value = doc().title; }
@@ -337,9 +417,12 @@ const SurveyStudio = (() => {
       root.querySelectorAll('.ss-view').forEach(v => { v.hidden = v.dataset.view !== m; });
       if (push !== false) history.replaceState(null, '', '#' + doc().id + (m === 'design' ? '' : '/' + m));
       if (previewRT && m !== 'preview') { previewRT.destroy(); previewRT = null; }
+      if (themeRT && m !== 'theme') { themeRT.destroy(); themeRT = null; }
+      if (window.SurveyFonts) window.SurveyFonts.closePicker(true);
       if (m === 'design') ensureDesign();
       if (m === 'logic') { if (!logicUI) logicUI = SurveyBlocks.create($('.ss-view-logic'), store, { notify: App.notify }); else logicUI.render(); }
       if (m === 'theme') renderTheme();
+      if (m === 'settings') renderSettings();
       if (m === 'preview') renderPreview();
       if (m === 'responses') renderResponses();
     }
@@ -627,44 +710,107 @@ const SurveyStudio = (() => {
     } else if (backup) store.clearBackup();
 
     /* ── Theme view ──────────────────── */
+    // Appearance only, in groups (typography, colours, background, layout,
+    // questions, buttons, progress, advanced), with a live preview of the
+    // survey that updates as settings change. Behaviour and privacy are in Settings.
     const THEME_TYPES = [['qtitle', 'Question titles'], ['qdesc', 'Question descriptions'], ['option', 'Answer options'], ['indicator', 'Radio / checkbox indicators'], ['optlabel', 'Option labels'],
-      ['field', 'Inputs'], ['button', 'Buttons'], ['heading', 'Headings'], ['paragraph', 'Paragraphs'], ['instructions', 'Instructions'], ['qerror', 'Validation messages'], ['rankitem', 'Ranking items'], ['matrixrow', 'Matrix rows'], ['container', 'Containers'], ['section', 'Sections']];
+      ['field', 'Inputs'], ['button', 'Buttons'], ['heading', 'Headings'], ['paragraph', 'Paragraphs'], ['instructions', 'Instructions'], ['qerror', 'Validation messages'], ['rankitem', 'Ranking items'], ['matrixrow', 'Matrix rows'], ['container', 'Containers'], ['section', 'Sections'], ['progress', 'Progress bar'], ['respondent', 'Respondent information']];
+    const QUESTION_PARTS = ['qtitle', 'qdesc', 'option', 'indicator', 'optlabel', 'field', 'matrixrow', 'rankitem', 'qerror'];
+    const COLOR_GROUPS = [['Brand & accents', ['primary', 'primaryHover', 'primaryLight', 'primaryMid', 'accent', 'accentLight', 'teal', 'tealLight', 'amber']],
+      ['Text', ['text', 'text2', 'text3', 'onPrimary']], ['Surfaces & lines', ['surface', 'surface2', 'border']], ['Feedback', ['error', 'success']]];
+    const THEME_FONTS = [{ name: 'Body (theme)', value: Core.tokenVar('fontBody'), note: 'The theme\'s body font' }, { name: 'Display (theme)', value: Core.tokenVar('fontDisplay'), note: 'The theme\'s display font' }];
     let themeType = 'option';
+    let themeOpen = { typography: true, colors: true };
+    let themePreview = { device: 'desktop', page: '' };
+    let themeRT = null, themeTimer = null;
+    const tokenOf = k => doc().theme.tokens[k];
+    const resolveVar = v => String(v === undefined || v === null ? '' : v).replace(/var\(--sv-(\w+)\)/g, (m, key) => tokenOf(key) || '');
+    const typeStyle = (type, path) => { const own = Core.getPath(doc().theme.types[type] || {}, path); return own !== undefined ? own : Core.getPath(Core.builtinStyle(type), path); };
+    const ownTypeStyle = (type, path) => Core.getPath(doc().theme.types[type] || {}, path);
+    // WCAG contrast ratio between two colours
+    function contrast(a, b) {
+      const rgb = c => { const ctx = document.createElement('canvas').getContext('2d'); ctx.fillStyle = '#000'; ctx.fillStyle = c; const v = ctx.fillStyle; const m = /^#([0-9a-f]{6})$/i.exec(v); if (m) return [0, 2, 4].map(i => parseInt(m[1].slice(i, i + 2), 16)); const r = /rgba?\(([^)]+)\)/.exec(v); return r ? r[1].split(',').slice(0, 3).map(Number) : [0, 0, 0]; };
+      const lum = c => { const [r, g, bl] = rgb(c).map(x => { x /= 255; return x <= 0.03928 ? x / 12.92 : Math.pow((x + 0.055) / 1.055, 2.4); }); return 0.2126 * r + 0.7152 * g + 0.0722 * bl; };
+      const l1 = lum(a), l2 = lum(b);
+      return (Math.max(l1, l2) + 0.05) / (Math.min(l1, l2) + 0.05);
+    }
+
     function renderTheme() {
       const box = $('.ss-view-theme');
       const t = doc().theme.tokens;
       const s = doc().settings;
-      const colorTokens = Core.TOKENS.filter(x => x.kind === 'color');
-      box.innerHTML = '<div class="ss-theme">' +
-        '<section class="ss-card"><div class="ss-card-head"><span>Colours</span><button type="button" class="ss-chip-btn" data-act="reset-tokens">Reset to MetaCode palette</button></div><div class="ss-token-grid">' +
-          colorTokens.map(x => '<label class="ss-token"><button type="button" class="ss-swatch" data-token="' + x.key + '" style="--c:' + esc(t[x.key]) + '" aria-label="' + esc(x.label) + '"></button><span>' + esc(x.label) + '</span><input class="ss-input is-mono" data-token-in="' + x.key + '" value="' + esc(t[x.key]) + '" aria-label="' + esc(x.label) + ' value"></label>').join('') +
-        '</div></section>' +
-        '<section class="ss-card"><div class="ss-card-head"><span>Fonts & shape</span></div><div class="ss-token-grid">' +
-          Core.TOKENS.filter(x => x.kind !== 'color').map(x => '<label class="ss-token ss-token-wide"><span>' + esc(x.label) + '</span>' + (x.kind === 'font'
-            ? '<select class="ss-select" data-token-in="' + x.key + '">' + Core.FONTS.filter(f => !/^var/.test(f.value)).map(f => '<option value="' + esc(f.value) + '"' + (f.value === t[x.key] ? ' selected' : '') + '>' + esc(f.label) + '</option>').join('') + (Core.FONTS.some(f => f.value === t[x.key]) ? '' : '<option selected value="' + esc(t[x.key]) + '">' + esc(t[x.key]) + '</option>') + '</select>'
-            : '<input class="ss-input" type="number" min="0" data-token-in="' + x.key + '" value="' + esc(t[x.key]) + '">') + '</label>').join('') +
-        '</div></section>' +
-        '<section class="ss-card ss-theme-types"><div class="ss-card-head"><span>Element defaults</span><select class="ss-select" id="ss-theme-type" aria-label="Element type">' + THEME_TYPES.map(([k, l]) => '<option value="' + k + '"' + (k === themeType ? ' selected' : '') + '>' + esc(l) + '</option>').join('') + '</select></div>' +
-          '<p class="ss-empty-note">Changes here apply to every element of this type that doesn\'t override the property itself. Properties set on an element always win.</p><div id="ss-theme-fields"></div></section>' +
-        '<section class="ss-card"><div class="ss-card-head"><span>Survey settings</span></div><div class="ss-settings">' +
-          setting('title', 'Title', 'text', doc().title) + setting('description', 'Description (internal)', 'text', doc().description) +
-          setting('settings.width', 'Design width (px)', 'number', s.width) +
-          '<label class="ss-setting"><span>On smaller screens</span><select class="ss-select" data-setting="settings.responsive"><option value="reflow"' + (s.responsive === 'reflow' ? ' selected' : '') + '>Scale, then stack elements on phones</option><option value="scale"' + (s.responsive === 'scale' ? ' selected' : '') + '>Scale the whole design down</option><option value="fixed"' + (s.responsive === 'fixed' ? ' selected' : '') + '>Keep the exact size (scroll)</option></select></label>' +
-          setting('settings.reflowBelow', 'Stack below width (px)', 'number', s.reflowBelow) +
-          setting('settings.nextLabel', 'Next button label', 'text', s.nextLabel) + setting('settings.backLabel', 'Back button label', 'text', s.backLabel) + setting('settings.submitLabel', 'Submit button label', 'text', s.submitLabel) +
-          setting('settings.allowBack', 'Allow going back', 'check', s.allowBack !== false) +
-          setting('settings.completionTitle', 'Completion title', 'text', s.completionTitle) + setting('settings.completionMessage', 'Completion message', 'text', s.completionMessage) +
-          setting('settings.keepHiddenAnswers', 'Keep answers to questions hidden by logic', 'check', !!s.keepHiddenAnswers) +
-          setting('settings.grid', 'Editor grid size (px)', 'number', s.grid) +
-        '</div></section>' +
-        '<section class="ss-card"><div class="ss-card-head"><span>Share this theme</span></div><p class="ss-empty-note">Copy the theme to another survey: export here, then import there.</p><div class="ss-btn-row"><button type="button" class="ss-chip-btn" data-act="export-theme">Copy theme JSON</button><button type="button" class="ss-chip-btn" data-act="import-theme">Import theme JSON…</button></div></section>' +
+      const sec = (id, title, sub, body) => '<section class="ss-th-sec' + (themeOpen[id] ? ' is-open' : '') + '" data-sec="' + id + '"><button type="button" class="ss-th-head" aria-expanded="' + !!themeOpen[id] + '" data-toggle="' + id + '"><span><b>' + esc(title) + '</b><small>' + esc(sub) + '</small></span><svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg></button><div class="ss-th-body"' + (themeOpen[id] ? '' : ' hidden') + '>' + body + '</div></section>';
+      const fontBtn = (attr, value, label, hint) => '<div class="ss-th-row"><span class="ss-th-label">' + esc(label) + (hint ? '<small>' + esc(hint) + '</small>' : '') + '</span><button type="button" class="ss-select ss-font-btn" ' + attr + ' style="font-family:' + esc(/^var\(/.test(value) ? resolveVar(value) : value) + '">' + esc(SurveyFonts.labelOf(value, THEME_FONTS) || 'Inherit') + '</button></div>';
+      const num = (attr, value, label, unit, placeholder) => '<label class="ss-th-row"><span class="ss-th-label">' + esc(label) + '</span><span class="ss-inline"><input class="ss-input ss-th-num" type="number" ' + attr + ' value="' + esc(value === undefined ? '' : value) + '" placeholder="' + esc(placeholder === undefined ? '' : placeholder) + '">' + (unit ? '<span class="ss-unit">' + unit + '</span>' : '') + '</span></label>';
+      const colorRow = (attr, value, label, inherited) => '<div class="ss-th-row"><span class="ss-th-label">' + esc(label) + '</span><span class="ss-inline"><button type="button" class="ss-swatch ss-swatch-sm" ' + attr.replace('data-', 'data-sw-') + ' style="--c:' + esc(resolveVar(value || inherited)) + '" aria-label="Choose ' + esc(label) + '"></button><input class="ss-input is-mono" ' + attr + ' value="' + esc(value || '') + '" placeholder="' + esc(inherited || '') + '" aria-label="' + esc(label) + '"></span></div>';
+      const tokenFont = (k, label, hint) => fontBtn('data-font-token="' + k + '"', t[k], label, hint);
+      const typeFont = (type, label, hint) => fontBtn('data-font-type="' + type + '"', ownTypeStyle(type, 'fontFamily') || typeStyle(type, 'fontFamily'), label, hint);
+      const typeNum = (type, path, label, unit) => num('data-type-num="' + type + '|' + path + '"', ownTypeStyle(type, path), label, unit, typeStyle(type, path));
+      const typeColor = (type, path, label) => colorRow('data-type-color="' + type + '|' + path + '"', ownTypeStyle(type, path), label, typeStyle(type, path));
+      const tokenSwatch = k => { const x = Core.TOKENS.find(y => y.key === k); return '<label class="ss-token"><button type="button" class="ss-swatch" data-token="' + k + '" style="--c:' + esc(t[k]) + '" aria-label="' + esc(x.label) + '"></button><span>' + esc(x.label) + '</span><input class="ss-input is-mono" data-token-in="' + k + '" value="' + esc(t[k]) + '" aria-label="' + esc(x.label) + ' value"></label>'; };
+      const pg = doc().theme.page || {};
+      const ratio = (a, b) => { const r = contrast(resolveVar(a), resolveVar(b)); return '<span class="ss-contrast' + (r >= 4.5 ? ' is-ok' : ' is-bad') + '" title="WCAG AA needs 4.5:1 for body text">' + r.toFixed(1) + ':1 ' + (r >= 4.5 ? '✓' : 'low') + '</span>'; };
+      box.innerHTML = '<div class="ss-th">' +
+        '<div class="ss-th-panel" aria-label="Theme settings">' +
+          '<div class="ss-th-top"><div><h2 class="ss-logic-h">Theme</h2><p class="ss-logic-sub">How the survey looks. Changes show in the preview right away.</p></div></div>' +
+          sec('typography', 'Typography', 'Fonts and text sizes',
+            tokenFont('fontBody', 'Body text', 'Paragraphs, answers, inputs') + tokenFont('fontDisplay', 'Headings', 'Headings and question titles') +
+            typeFont('qtitle', 'Question titles', 'Overrides Headings') + typeFont('button', 'Buttons', 'Overrides Body text') + tokenFont('fontMono', 'Monospace') +
+            '<div class="ss-th-grid">' + typeNum('heading', 'fontSize', 'Heading size', 'px') + typeNum('qtitle', 'fontSize', 'Question title size', 'px') + typeNum('paragraph', 'fontSize', 'Body text size', 'px') + typeNum('optlabel', 'fontSize', 'Answer text size', 'px') + '</div>' +
+            '<p class="ss-th-note">' + SurveyFonts.FONTS.length + ' fonts — sans-serif, serif, monospace, display, humanist, geometric and handwriting — searchable by name or style. Web fonts load from Google Fonts on the published survey.</p>') +
+          sec('colors', 'Colours', 'The palette every element uses',
+            COLOR_GROUPS.map(([g, keys]) => '<div class="ss-th-sub">' + esc(g) + '</div><div class="ss-token-grid">' + keys.map(tokenSwatch).join('') + '</div>').join('') +
+            '<div class="ss-th-sub">Contrast</div><div class="ss-contrasts"><span>Text on surface ' + ratio(t.text, t.surface) + '</span><span>Secondary text ' + ratio(t.text2, t.surface) + '</span><span>Button text ' + ratio(t.onPrimary, t.primary) + '</span></div>' +
+            '<div class="ss-btn-row"><button type="button" class="ss-chip-btn" data-act="reset-tokens">Reset to MetaCode palette</button></div>') +
+          sec('background', 'Background', 'Page and survey card',
+            '<div class="ss-th-sub">Page</div><div class="ss-token-grid">' + tokenSwatch('background') + '</div>' +
+            '<div class="ss-th-sub">Survey card</div>' + colorRow('data-page="fill"', pg.fill, 'Card fill', 'var(--sv-surface)') + colorRow('data-page="borderColor"', pg.borderColor, 'Card border', 'var(--sv-border)') +
+            num('data-page-num="borderWidth"', pg.borderWidth, 'Border width', 'px', 1) +
+            '<label class="ss-th-row ss-check-row"><input type="checkbox" data-page-shadow' + (Array.isArray(pg.shadows) && !pg.shadows.length ? '' : ' checked') + '> Soft shadow</label>') +
+          sec('layout', 'Layout & spacing', 'Width, corners, small screens',
+            '<div class="ss-th-grid">' + num('data-setting="settings.width"', s.width, 'Design width', 'px') + num('data-token-num="radius"', t.radius, 'Corner radius', 'px') + num('data-token-num="radiusLarge"', t.radiusLarge, 'Card radius', 'px') + num('data-setting="settings.reflowBelow"', s.reflowBelow, 'Stack below', 'px') + '</div>' +
+            '<label class="ss-th-row"><span class="ss-th-label">On smaller screens</span><select class="ss-select" data-setting="settings.responsive"><option value="reflow"' + (s.responsive === 'reflow' ? ' selected' : '') + '>Scale, then stack elements on phones</option><option value="scale"' + (s.responsive === 'scale' ? ' selected' : '') + '>Scale the whole design down</option><option value="fixed"' + (s.responsive === 'fixed' ? ' selected' : '') + '>Keep the exact size (scroll)</option></select></label>' +
+            num('data-setting="settings.grid"', s.grid, 'Editor grid', 'px')) +
+          sec('questions', 'Question styling', 'Titles, options, inputs, matrices',
+            '<label class="ss-th-row"><span class="ss-th-label">Part</span><select class="ss-select" id="ss-theme-qtype">' + THEME_TYPES.filter(([k]) => QUESTION_PARTS.includes(k)).map(([k, l]) => '<option value="' + k + '"' + (k === (QUESTION_PARTS.includes(themeType) ? themeType : 'option') ? ' selected' : '') + '>' + esc(l) + '</option>').join('') + '</select></label>' +
+            '<div id="ss-theme-fields" data-scope="questions"></div>') +
+          sec('buttons', 'Buttons & controls', 'Navigation buttons and their labels',
+            typeColor('button', 'fill', 'Button fill') + typeColor('button', 'color', 'Button text') + typeColor('button', 'states.hover.fill', 'Hover fill') +
+            '<div class="ss-th-grid">' + typeNum('button', 'radius', 'Corner radius', 'px') + typeNum('button', 'fontSize', 'Text size', 'px') + '</div>' +
+            '<div class="ss-th-sub">Labels</div><div class="ss-th-grid">' + ['nextLabel', 'backLabel', 'submitLabel'].map(k => '<label class="ss-th-row"><span class="ss-th-label">' + { nextLabel: 'Next', backLabel: 'Back', submitLabel: 'Submit' }[k] + '</span><input class="ss-input" data-setting="settings.' + k + '" value="' + esc(s[k]) + '"></label>').join('') + '</div>') +
+          sec('progress', 'Progress indicator', 'The progress bar element',
+            typeColor('progress', 'fill', 'Track') + typeColor('progress', 'markColor', 'Fill') + typeNum('progress', 'radius', 'Roundness', 'px') +
+            '<p class="ss-th-note">Add a progress bar from Design → Add → Interactive. It shows how much of the survey (pages the respondent will see) is done.</p>') +
+          sec('advanced', 'Advanced', 'Defaults for any element type, theme JSON',
+            '<label class="ss-th-row"><span class="ss-th-label">Element type</span><select class="ss-select" id="ss-theme-type" aria-label="Element type">' + THEME_TYPES.map(([k, l]) => '<option value="' + k + '"' + (k === themeType ? ' selected' : '') + '>' + esc(l) + '</option>').join('') + '</select></label>' +
+            '<p class="ss-th-note">Applies to every element of this type that doesn\'t set the property itself. Properties set on an element always win.</p><div id="ss-theme-fields-adv" data-scope="advanced"></div>' +
+            '<div class="ss-th-sub">Share this theme</div><div class="ss-btn-row"><button type="button" class="ss-chip-btn" data-act="export-theme">Copy theme JSON</button><button type="button" class="ss-chip-btn" data-act="import-theme">Import theme JSON…</button></div>') +
+        '</div>' +
+        '<div class="ss-th-preview" aria-label="Live preview">' +
+          '<div class="ss-th-pvbar"><span class="ss-th-pvlabel">Live preview</span><select class="ss-select" id="ss-th-page" aria-label="Page to preview">' + doc().pages.map(p => '<option value="' + esc(p.id) + '"' + (p.id === themePreview.page ? ' selected' : '') + '>' + esc(p.name) + '</option>').join('') + '</select>' +
+            '<div class="ss-seg" role="radiogroup" aria-label="Preview width">' + [['desktop', 'Desktop'], ['mobile', 'Phone']].map(([d, l]) => '<button type="button" class="ss-seg-btn' + (d === themePreview.device ? ' is-on' : '') + '" data-th-device="' + d + '" role="radio" aria-checked="' + (d === themePreview.device) + '">' + l + '</button>').join('') + '</div></div>' +
+          '<div class="ss-th-stage"><div class="ss-th-frame is-' + themePreview.device + '"><div class="ss-th-host" id="ss-th-host"></div></div></div>' +
+        '</div>' +
       '</div>';
       renderThemeFields();
+      mountThemePreview();
       box.onclick = e => {
+        const tg = e.target.closest('[data-toggle]');
+        if (tg) { const id = tg.dataset.toggle; themeOpen[id] = !themeOpen[id]; const secEl = tg.closest('.ss-th-sec'); secEl.classList.toggle('is-open', themeOpen[id]); tg.setAttribute('aria-expanded', String(themeOpen[id])); secEl.querySelector('.ss-th-body').hidden = !themeOpen[id]; return; }
+        const dv = e.target.closest('[data-th-device]');
+        if (dv) { themePreview.device = dv.dataset.thDevice; box.querySelectorAll('[data-th-device]').forEach(b => { const on = b === dv; b.classList.toggle('is-on', on); b.setAttribute('aria-checked', String(on)); }); $('.ss-th-frame').className = 'ss-th-frame is-' + themePreview.device; mountThemePreview(); return; }
+        const ft = e.target.closest('[data-font-token]');
+        if (ft) { const k = ft.dataset.fontToken; SurveyFonts.openPicker(ft, { value: t[k], title: ft.closest('.ss-th-row').querySelector('.ss-th-label').firstChild.textContent + ' font', onPick: v => { setToken(k, v); renderTheme(); }, onPreview: v => previewFont(k, v) }); return; }
+        const fty = e.target.closest('[data-font-type]');
+        if (fty) { const type = fty.dataset.fontType; SurveyFonts.openPicker(fty, { value: ownTypeStyle(type, 'fontFamily') || typeStyle(type, 'fontFamily'), title: fty.closest('.ss-th-row').querySelector('.ss-th-label').firstChild.textContent + ' font', extra: THEME_FONTS, onPick: v => { setTypeStyleOf(type, 'fontFamily', v); renderTheme(); } }); return; }
         const sw = e.target.closest('[data-token]');
-        if (sw) { const k = sw.dataset.token; inspectorColor(sw, t[k], v => setToken(k, resolveTokenValue(v))); return; }
+        if (sw) { const k = sw.dataset.token; inspectorColor(sw, t[k], v => { setToken(k, resolveTokenValue(v)); scheduleThemePreview(); }); return; }
+        const swt = e.target.closest('[data-sw-type-color]');
+        if (swt) { const [type, path] = swt.dataset.swTypeColor.split('|'); inspectorColor(swt, '', v => { setTypeStyleOf(type, path, v); renderTheme(); }); return; }
+        const swp = e.target.closest('[data-sw-page]');
+        if (swp) { inspectorColor(swp, '', v => { setPageStyle(swp.dataset.swPage, v); renderTheme(); }); return; }
         const b = e.target.closest('[data-act]'); if (!b) return;
-        if (b.dataset.act === 'reset-tokens') store.tx('Reset theme colours', tx => { tx.part('theme').tokens = Core.defaultTokens(); }), renderTheme();
+        if (b.dataset.act === 'reset-tokens') { store.tx('Reset theme colours', tx => { const th = tx.part('theme'); const d = Core.defaultTokens(); Core.TOKENS.filter(x => x.kind === 'color').forEach(x => { th.tokens[x.key] = d[x.key]; }); }); renderTheme(); }
         if (b.dataset.act === 'export-theme') copyText(JSON.stringify(doc().theme, null, 2), 'Theme JSON copied');
         if (b.dataset.act === 'import-theme') {
           const raw = prompt('Paste theme JSON');
@@ -675,53 +821,149 @@ const SurveyStudio = (() => {
       };
       box.onchange = e => {
         const el = e.target;
-        if (el.dataset.tokenIn) setToken(el.dataset.tokenIn, el.type === 'number' ? Number(el.value) : Core.cleanValue(el.value));
+        if (el.dataset.tokenIn) { setToken(el.dataset.tokenIn, Core.cleanValue(el.value)); renderTheme(); }
+        else if (el.dataset.tokenNum) { setToken(el.dataset.tokenNum, Math.max(0, Math.min(200, Number(el.value) || 0))); scheduleThemePreview(); }
+        else if (el.dataset.typeNum) { const [type, path] = el.dataset.typeNum.split('|'); setTypeStyleOf(type, path, el.value === '' ? undefined : Math.max(0, Math.min(400, Number(el.value)))); }
+        else if (el.dataset.typeColor) { const [type, path] = el.dataset.typeColor.split('|'); setTypeStyleOf(type, path, el.value === '' ? undefined : Core.cleanValue(el.value)); renderTheme(); }
+        else if (el.dataset.page) { setPageStyle(el.dataset.page, el.value === '' ? undefined : Core.cleanValue(el.value)); renderTheme(); }
+        else if (el.dataset.pageNum) { setPageStyle(el.dataset.pageNum, el.value === '' ? undefined : Math.max(0, Math.min(20, Number(el.value)))); }
+        else if (el.hasAttribute('data-page-shadow')) { setPageStyle('shadows', el.checked ? undefined : []); }
         else if (el.id === 'ss-theme-type') { themeType = el.value; renderThemeFields(); }
+        else if (el.id === 'ss-theme-qtype') { themeType = el.value; renderThemeFields(); }
+        else if (el.id === 'ss-th-page') { themePreview.page = el.value; mountThemePreview(); }
         else if (el.dataset.setting) {
           const path = el.dataset.setting;
           let v = el.type === 'checkbox' ? el.checked : (el.type === 'number' ? Number(el.value) : el.value);
           if (path === 'settings.width') v = Math.max(240, Math.min(4000, Number(v) || 760));
-          if (path === 'title' || path === 'description') store.tx('Edit survey', tx => tx.set(path, String(v).slice(0, 300)));
-          else store.tx('Survey settings', tx => { const st = tx.part('settings'); Core.setPath(st, path.slice(9), v); });
-          if (path === 'title') { titleInput.value = doc().title; setDocTitle(doc().title); }
+          if (path === 'settings.reflowBelow') v = Math.max(0, Math.min(4000, Number(v) || 640));
+          if (path === 'settings.grid') v = Math.max(1, Math.min(200, Number(v) || 8));
+          store.tx('Survey settings', tx => { const st = tx.part('settings'); Core.setPath(st, path.slice(9), v); });
+          scheduleThemePreview();
         }
       };
     }
+    // Live preview: the real survey runtime, re-mounted shortly after each change.
+    function mountThemePreview() {
+      const host = $('#ss-th-host');
+      if (!host) return;
+      if (themeRT) { themeRT.destroy(); themeRT = null; }
+      SurveyFonts.ensureDoc(doc());
+      host.style.background = doc().theme.tokens.background;
+      themeRT = SurveyRuntime.mount(host, Core.clone(doc()), { mode: 'preview', onSubmit: () => Promise.resolve({ test: true }) });
+      const pid = themePreview.page && doc().pages.some(p => p.id === themePreview.page) ? themePreview.page : null;
+      if (pid) themeRT.goTo(pid);
+    }
+    function scheduleThemePreview() { clearTimeout(themeTimer); themeTimer = setTimeout(() => { if (mode === 'theme') mountThemePreview(); }, 150); }
+    // Hovering fonts in the picker previews them on a copy of the survey (nothing is saved).
+    let fontPreviewTimer = null;
+    function previewFont(tokenKey, v) {
+      clearTimeout(fontPreviewTimer);
+      fontPreviewTimer = setTimeout(() => {
+        const host = $('#ss-th-host');
+        if (!host || mode !== 'theme') return;
+        if (v === null) { mountThemePreview(); return; }
+        SurveyFonts.ensure(v);
+        const copy = Core.clone(doc());
+        copy.theme.tokens[tokenKey] = v;
+        if (themeRT) themeRT.destroy();
+        themeRT = SurveyRuntime.mount(host, copy, { mode: 'preview', onSubmit: () => Promise.resolve({ test: true }) });
+        const pid = themePreview.page && copy.pages.some(p => p.id === themePreview.page) ? themePreview.page : null;
+        if (pid) themeRT.goTo(pid);
+      }, 60);
+    }
+    function setPageStyle(path, value) { store.tx('Theme: survey card', tx => { const th = tx.part('theme'); th.page = th.page || {}; Core.setPath(th.page, path, value); }); scheduleThemePreview(); }
+    function setTypeStyleOf(type, path, value) { store.tx('Theme: ' + type + ' style', tx => { const th = tx.part('theme'); th.types[type] = th.types[type] || {}; Core.setPath(th.types[type], path, value); }); scheduleThemePreview(); }
     function resolveTokenValue(v) { const m = /^var\(--sv-(\w+)\)$/.exec(v); return m ? doc().theme.tokens[m[1]] : v; }
     function inspectorColor(anchor, v, cb) { ensureDesignQuiet(); inspector.openColor(anchor, v, cb); }
     function ensureDesignQuiet() { if (!inspector) { ensureDesign(); } }
-    function setToken(k, v) { store.tx('Theme: ' + k, tx => { tx.part('theme').tokens[k] = v; }, { coalesce: 'token-' + k }); const sw = $('[data-token="' + k + '"]'); if (sw) sw.style.setProperty('--c', v); const inp = $('[data-token-in="' + k + '"]'); if (inp && document.activeElement !== inp) inp.value = v; }
+    function setToken(k, v) { store.tx('Theme: ' + k, tx => { tx.part('theme').tokens[k] = v; }, { coalesce: 'token-' + k }); const sw = $('[data-token="' + k + '"]'); if (sw) sw.style.setProperty('--c', v); const inp = $('[data-token-in="' + k + '"]'); if (inp && document.activeElement !== inp) inp.value = v; scheduleThemePreview(); }
     function setting(path, label, kind, value) {
       if (kind === 'check') return '<label class="ss-setting ss-setting-check"><input type="checkbox" data-setting="' + path + '"' + (value ? ' checked' : '') + '><span>' + esc(label) + '</span></label>';
       return '<label class="ss-setting"><span>' + esc(label) + '</span><input class="ss-input" type="' + (kind === 'number' ? 'number' : 'text') + '" data-setting="' + path + '" value="' + esc(value) + '"></label>';
     }
     function renderThemeFields() {
-      const host = $('#ss-theme-fields');
-      if (!host) return;
-      const cur = Core.deepMerge(Core.builtinStyle(themeType), doc().theme.types[themeType] || {});
-      const own = doc().theme.types[themeType] || {};
-      const f = [['fill', 'Fill', 'color'], ['color', 'Text colour', 'color'], ['borderColor', 'Border colour', 'color'], ['borderWidth', 'Border width', 'number'], ['radius', 'Corner radius', 'number'],
-        ['fontFamily', 'Font', 'font'], ['fontSize', 'Font size', 'number'], ['fontWeight', 'Font weight', 'text'], ['markColor', 'Mark / accent colour', 'color'],
-        ['states.hover.fill', 'Hover fill', 'color'], ['states.hover.borderColor', 'Hover border', 'color'], ['states.checked.fill', 'Selected fill', 'color'], ['states.checked.borderColor', 'Selected border', 'color']];
-      host.innerHTML = '<div class="ss-theme-fields">' + f.map(([p, l, k]) => {
-        const v = Core.getPath(own, p), inh = Core.getPath(Core.builtinStyle(themeType), p);
-        const shown = v !== undefined ? v : inh;
-        const resolved = String(shown === undefined ? '' : shown).replace(/var\(--sv-(\w+)\)/g, (m, key) => doc().theme.tokens[key] || '');
-        return '<label class="ss-setting"><span>' + (v !== undefined ? '<button type="button" class="ss-dot is-set" data-reset="' + p + '" title="Reset to the built-in default" aria-label="Reset ' + esc(l) + '"></button>' : '<span class="ss-dot" title="Built-in default"></span>') + esc(l) + '</span>' +
-          (k === 'color' ? '<span class="ss-inline"><button type="button" class="ss-swatch ss-swatch-sm" data-tcolor="' + p + '" style="--c:' + esc(resolved) + '" aria-label="Choose ' + esc(l) + '"></button><input class="ss-input" data-tpath="' + p + '" value="' + esc(v === undefined ? '' : v) + '" placeholder="' + esc(inh === undefined ? '' : inh) + '"></span>'
-            : k === 'font' ? '<select class="ss-select" data-tpath="' + p + '">' + Core.FONTS.map(fo => '<option value="' + esc(fo.value) + '"' + (fo.value === shown ? ' selected' : '') + '>' + esc(fo.label) + '</option>').join('') + '</select>'
-              : '<input class="ss-input" data-tpath="' + p + '" ' + (k === 'number' ? 'type="number"' : '') + ' value="' + esc(v === undefined ? '' : v) + '" placeholder="' + esc(inh === undefined ? '' : inh) + '">') + '</label>';
-      }).join('') + '</div>';
-      void cur;
-      host.onchange = e => { const p = e.target.dataset.tpath; if (!p) return; const raw = e.target.value; setTypeStyle(p, raw === '' ? undefined : (e.target.type === 'number' ? Number(raw) : Core.cleanValue(raw))); };
-      host.onclick = e => {
-        const r = e.target.closest('[data-reset]'); if (r) { e.preventDefault(); setTypeStyle(r.dataset.reset, undefined); return; }
-        const c = e.target.closest('[data-tcolor]'); if (c) { e.preventDefault(); inspectorColor(c, '', v => setTypeStyle(c.dataset.tcolor, v)); }
-      };
+      ['#ss-theme-fields', '#ss-theme-fields-adv'].forEach(sel => {
+        const host = $(sel);
+        if (!host) return;
+        const type = sel === '#ss-theme-fields' ? (QUESTION_PARTS.includes(themeType) ? themeType : ($('#ss-theme-qtype') ? $('#ss-theme-qtype').value : 'option')) : themeType;
+        const own = doc().theme.types[type] || {};
+        const f = [['fill', 'Fill', 'color'], ['color', 'Text colour', 'color'], ['borderColor', 'Border colour', 'color'], ['borderWidth', 'Border width', 'number'], ['radius', 'Corner radius', 'number'],
+          ['fontFamily', 'Font', 'font'], ['fontSize', 'Font size', 'number'], ['fontWeight', 'Font weight', 'text'], ['markColor', 'Mark / accent colour', 'color'],
+          ['states.hover.fill', 'Hover fill', 'color'], ['states.hover.borderColor', 'Hover border', 'color'], ['states.checked.fill', 'Selected fill', 'color'], ['states.checked.borderColor', 'Selected border', 'color']];
+        host.innerHTML = '<div class="ss-theme-fields">' + f.map(([p, l, k]) => {
+          const v = Core.getPath(own, p), inh = Core.getPath(Core.builtinStyle(type), p);
+          const shown = v !== undefined ? v : inh;
+          const resolved = resolveVar(shown);
+          return '<label class="ss-setting"><span>' + (v !== undefined ? '<button type="button" class="ss-dot is-set" data-reset="' + p + '" title="Reset to the built-in default" aria-label="Reset ' + esc(l) + '"></button>' : '<span class="ss-dot" title="Built-in default"></span>') + esc(l) + '</span>' +
+            (k === 'color' ? '<span class="ss-inline"><button type="button" class="ss-swatch ss-swatch-sm" data-tcolor="' + p + '" style="--c:' + esc(resolved) + '" aria-label="Choose ' + esc(l) + '"></button><input class="ss-input" data-tpath="' + p + '" value="' + esc(v === undefined ? '' : v) + '" placeholder="' + esc(inh === undefined ? '' : inh) + '"></span>'
+              : k === 'font' ? '<button type="button" class="ss-select ss-font-btn" data-tfont="' + p + '" style="font-family:' + esc(resolveVar(shown)) + '">' + esc(SurveyFonts.labelOf(shown, THEME_FONTS.concat([{ name: 'Monospace (theme)', value: Core.tokenVar('fontMono') }])) || 'Inherit') + '</button>'
+                : '<input class="ss-input" data-tpath="' + p + '" ' + (k === 'number' ? 'type="number"' : '') + ' value="' + esc(v === undefined ? '' : v) + '" placeholder="' + esc(inh === undefined ? '' : inh) + '">') + '</label>';
+        }).join('') + '</div>';
+        host.onchange = e => { e.stopPropagation(); const p = e.target.dataset.tpath; if (!p) return; const raw = e.target.value; setTypeStyleOf(type, p, raw === '' ? undefined : (e.target.type === 'number' ? Number(raw) : Core.cleanValue(raw))); renderThemeFields(); };
+        host.onclick = e => {
+          e.stopPropagation();
+          const r = e.target.closest('[data-reset]'); if (r) { e.preventDefault(); setTypeStyleOf(type, r.dataset.reset, undefined); renderThemeFields(); return; }
+          const c = e.target.closest('[data-tcolor]'); if (c) { e.preventDefault(); inspectorColor(c, '', v => { setTypeStyleOf(type, c.dataset.tcolor, v); renderThemeFields(); }); return; }
+          const fo = e.target.closest('[data-tfont]'); if (fo) { e.preventDefault(); SurveyFonts.openPicker(fo, { value: Core.getPath(own, 'fontFamily') || Core.getPath(Core.builtinStyle(type), 'fontFamily'), title: 'Font', extra: THEME_FONTS, onPick: v => { setTypeStyleOf(type, 'fontFamily', v); renderThemeFields(); } }); }
+        };
+      });
     }
-    function setTypeStyle(path, value) {
-      store.tx('Theme: ' + themeType + ' style', tx => { const th = tx.part('theme'); th.types[themeType] = th.types[themeType] || {}; Core.setPath(th.types[themeType], path, value); });
-      renderThemeFields();
+    function setTypeStyle(path, value) { setTypeStyleOf(themeType, path, value); renderThemeFields(); }
+    void setTypeStyle;
+
+    /* ── Settings view ───────────────── */
+    // How the survey behaves and what it records about respondents.
+    function renderSettings() {
+      const box = $('.ss-view-settings');
+      const s = doc().settings;
+      const priv = Core.privacyOf(doc());
+      const blocks = Object.values(doc().elements).filter(el => el && el.type === 'respondent');
+      const collected = [];
+      if (priv.entered.name) collected.push(['Name', 'Entered by the participant']);
+      if (priv.entered.participantId) collected.push(['Participant code', 'Entered by the participant']);
+      if (priv.link) collected.push(['Participant code', 'From the survey link (?' + priv.link.param + '=…) · ' + (priv.link.show ? 'shown to the participant' : 'researchers only')]);
+      if (priv.derived.country) collected.push(['Country', 'Derived from the IP address by your proxy · approximate · researchers only']);
+      if (priv.derived.region) collected.push(['State / region', 'Derived from the IP address by your proxy · approximate · researchers only']);
+      if (priv.derived.ip) collected.push(['IP address', 'Derived by the server · researchers only']);
+      const mode = s.sessionRecording || 'off';
+      box.innerHTML = '<div class="ss-set">' +
+        '<div class="ss-set-head"><h2 class="ss-logic-h">Settings</h2><p class="ss-logic-sub">Survey details, navigation, and what is recorded about respondents.</p></div>' +
+        '<section class="ss-card"><div class="ss-card-head"><span>Survey</span></div><div class="ss-settings">' +
+          setting('title', 'Title', 'text', doc().title) + setting('description', 'Description (internal)', 'text', doc().description) +
+          setting('settings.allowBack', 'Allow going back', 'check', s.allowBack !== false) +
+          setting('settings.keepHiddenAnswers', 'Keep answers to questions hidden by logic', 'check', !!s.keepHiddenAnswers) +
+        '</div></section>' +
+        '<section class="ss-card"><div class="ss-card-head"><span>When respondents finish</span></div><div class="ss-settings">' +
+          setting('settings.completionTitle', 'Completion title', 'text', s.completionTitle) + setting('settings.completionMessage', 'Completion message', 'text', s.completionMessage) +
+        '</div></section>' +
+        '<section class="ss-card" id="ss-set-identity"><div class="ss-card-head"><span>Respondent identification</span><span class="badge ' + (collected.length ? 'badge-amber' : 'badge-green') + '">' + (collected.length ? 'Identifying data collected' : 'Anonymous') + '</span></div>' +
+          (collected.length ? '<table class="ss-set-table"><thead><tr><th>Field</th><th>Source and visibility</th></tr></thead><tbody>' + collected.map(([a, b]) => '<tr><td>' + esc(a) + '</td><td>' + esc(b) + '</td></tr>').join('') + '</tbody></table>'
+            : '<p class="ss-th-note">Responses are anonymous: nothing about the person or their connection is stored with their answers (besides device type and browser language).</p>') +
+          '<p class="ss-th-note">' + (blocks.length ? 'Configured in ' + blocks.length + ' Respondent information block' + (blocks.length === 1 ? '' : 's') + ' (Design → select the block).' : 'To collect a participant code or name — or, if lawful and disclosed, IP-based location — add a Respondent information block.') + '</p>' +
+          '<div class="ss-btn-row">' + (blocks.length ? '<button type="button" class="ss-chip-btn" data-act="select-resp">Show the block</button>' : '<button type="button" class="ss-chip-btn" data-act="add-resp">Add a Respondent information block</button>') + '</div>' +
+        '</section>' +
+        '<section class="ss-card"><div class="ss-card-head"><span>Session timeline</span><span class="badge ' + (mode === 'off' ? 'badge-gray' : 'badge-blue') + '">' + ({ off: 'Off', notice: 'Recorded with notice', consent: 'Recorded with consent' })[mode] + '</span></div>' +
+          '<p class="ss-th-note">Records how each respondent moves through the survey — pages viewed, questions entered, answers selected or changed (the length only for typed text), skipped questions, validation messages, leaving and returning to the tab, submission or abandonment — so you can review response quality in Responses → Timeline. No mouse movement, keystrokes or browsing outside the survey are recorded.</p>' +
+          '<div class="ss-seg ss-set-seg" role="radiogroup" aria-label="Session timeline">' + [['off', 'Off'], ['notice', 'Record and tell respondents'], ['consent', 'Ask respondents first']].map(([v, l]) => '<button type="button" class="ss-seg-btn' + (v === mode ? ' is-on' : '') + '" data-rec="' + v + '" role="radio" aria-checked="' + (v === mode) + '">' + esc(l) + '</button>').join('') + '</div>' +
+          (mode !== 'off' ? '<label class="ss-setting ss-set-notice"><span>What respondents are told before they begin</span><textarea class="ss-input" rows="4" data-setting="settings.sessionNotice" placeholder="' + esc(Core.SESSION_NOTICE) + '">' + esc(s.sessionNotice || '') + '</textarea><small>Leave empty to use the text shown. With “Ask respondents first”, they choose between “Allow and start” and “Start without the timeline”.</small></label>' : '') +
+        '</section>' +
+      '</div>';
+      box.onchange = e => {
+        const el = e.target;
+        if (!el.dataset.setting) return;
+        const path = el.dataset.setting;
+        const v = el.type === 'checkbox' ? el.checked : el.value;
+        if (path === 'title' || path === 'description') store.tx('Edit survey', tx => tx.set(path, String(v).slice(0, path === 'title' ? 300 : 5000)));
+        else store.tx('Survey settings', tx => { const st = tx.part('settings'); Core.setPath(st, path.slice(9), path === 'settings.sessionNotice' ? String(v).slice(0, 2000) : v); });
+        if (path === 'title') { titleInput.value = doc().title; setDocTitle(doc().title); }
+      };
+      box.onclick = e => {
+        const r = e.target.closest('[data-rec]');
+        if (r) { store.tx('Session timeline: ' + r.dataset.rec, tx => { tx.part('settings').sessionRecording = r.dataset.rec; }); renderSettings(); return; }
+        const b = e.target.closest('[data-act]'); if (!b) return;
+        if (b.dataset.act === 'select-resp' && blocks.length) { setMode('design', true); const pg = Core.pageOf(doc(), blocks[0].id); if (pg) store.setPage(pg.id); store.select([blocks[0].id]); }
+        if (b.dataset.act === 'add-resp') { setMode('design', true); if (cmds) { cmds.addElement('respondent'); App.notify('Respondent information block added — set its fields on the right', 'success'); } }
+      };
     }
 
     /* ── Preview view ────────────────── */
@@ -798,6 +1040,7 @@ const SurveyStudio = (() => {
       const host = $('#ss-pv-host');
       if (!host) return;
       host.style.background = doc().theme.tokens.background;
+      if (window.SurveyFonts) SurveyFonts.ensureDoc(doc());
       previewRT = SurveyRuntime.mount(host, Core.clone(doc()), {
         mode: 'preview',
         onSubmit: payload => { lastPayload = payload; return Promise.resolve({ test: true }); },
@@ -819,72 +1062,17 @@ const SurveyStudio = (() => {
         (lastPayload ? '<div class="ss-tp-sec"><div class="ss-tp-h">Submitted data</div><pre class="ss-tp-pre">' + esc(JSON.stringify({ answers: lastPayload.answers, score: lastPayload.score, path: lastPayload.path, outcome: lastPayload.outcome }, null, 2)) + '</pre></div>' : '');
     }
 
-    /* ── Responses view ──────────────── */
-    async function renderResponses() {
-      const box = $('.ss-view-responses');
-      box.innerHTML = '<div class="ss-responses"><div class="loading-state">Loading responses…</div></div>';
-      let list;
-      try { list = (await api('/' + doc().id + '/responses')).responses; } catch (e) { box.innerHTML = '<div class="empty-state"><div class="empty-title">Couldn\'t load responses</div><div class="empty-sub">' + esc(e.message) + '</div></div>'; return; }
-      if (mode !== 'responses') return;
-      const qs = Core.questionsInOrder(doc());
-      const keys = qs.map(q => Core.dataKeyOf(doc(), q));
-      const extra = Array.from(new Set(list.flatMap(r => Object.keys(r.byKey || {})))).filter(k => !keys.includes(k));
-      const cols = keys.concat(extra);
-      // Variables saved with each response (e.g. the condition a randomization block assigned)
-      const varCols = Array.from(new Set(list.flatMap(r => Object.keys(r.vars || {})))).filter(k => !/^__/.test(k) && !cols.includes(k));
-      const varOf = (r, c) => (r.vars && Object.prototype.hasOwnProperty.call(r.vars, c) ? r.vars[c] : undefined);
-      const done = list.filter(r => r.status === 'complete');
-      const durs = done.map(r => (Date.parse(r.completedAt) - Date.parse(r.startedAt)) / 1000).filter(x => x >= 0 && x < 86400 * 3);
-      const med = durs.length ? durs.sort((a, b) => a - b)[Math.floor(durs.length / 2)] : null;
-      const p = store.publish;
-      let html = '<div class="ss-responses"><div class="ss-resp-head"><div><h2 class="ss-logic-h">Responses</h2><p class="ss-logic-sub">' + (p && !p.unpublished ? 'Collecting at <a href="/s/' + esc(p.publicId) + '" target="_blank" rel="noopener">' + esc(location.origin + '/s/' + p.publicId) + '</a>' : 'Publish the survey to start collecting responses.') + '</p></div>' +
-        '<div class="ss-btn-row"><button type="button" class="btn btn-secondary btn-sm" data-act="refresh">↻ Refresh</button><button type="button" class="btn btn-secondary btn-sm" data-act="csv"' + (list.length ? '' : ' disabled') + '>Export CSV</button><button type="button" class="btn btn-secondary btn-sm" data-act="json"' + (list.length ? '' : ' disabled') + '>Export JSON</button>' +
-        '<button type="button" class="btn btn-teal btn-sm" data-act="to-project"' + (done.length ? '' : ' disabled') + ' title="Turn text answers into project posts for coding">Add text answers to project</button>' +
-        '<button type="button" class="btn btn-ghost btn-sm" data-act="clear"' + (list.length ? '' : ' disabled') + '>Delete all</button></div></div>' +
-        '<div class="ss-resp-stats"><div class="stat-card"><div class="stat-num">' + done.length + '</div><div class="stat-label">Completed</div></div>' +
-        '<div class="stat-card"><div class="stat-num">' + (list.length - done.length) + '</div><div class="stat-label">In progress / abandoned</div></div>' +
-        '<div class="stat-card"><div class="stat-num">' + (list.length ? Math.round(done.length / list.length * 100) : 0) + '%</div><div class="stat-label">Completion rate</div></div>' +
-        '<div class="stat-card"><div class="stat-num">' + (med === null ? '—' : (med < 60 ? Math.round(med) + 's' : Math.round(med / 60) + 'm')) + '</div><div class="stat-label">Median time</div></div></div>';
-      if (!list.length) html += '<div class="card"><div class="empty-state"><div class="empty-title">No responses yet</div><div class="empty-sub">Responses appear here as soon as people submit the published survey.</div></div></div>';
-      else {
-        html += '<div class="ss-resp-summary">' + qs.map(q => summaryCard(q, done)).join('') + '</div>';
-        html += '<div class="card"><div class="card-title">All responses</div><div class="table-wrap"><table class="table ss-resp-table"><thead><tr><th>Response</th><th>Status</th><th>Version</th><th>Submitted</th><th>Score</th>' + cols.map(c => '<th>' + esc(c) + '</th>').join('') + varCols.map(c => '<th title="Variable">' + esc(c) + '</th>').join('') + '<th></th></tr></thead><tbody>' +
-          list.slice().reverse().map(r => '<tr><td><code>' + esc(r.id) + '</code></td><td>' + (r.status === 'complete' ? '<span class="badge badge-green">Complete</span>' : '<span class="badge badge-amber">In progress</span>') + '</td><td>v' + r.version + '</td><td title="' + esc(r.completedAt || r.updatedAt) + '">' + rel(r.completedAt || r.updatedAt) + '</td><td>' + esc(r.score) + '</td>' +
-            cols.map(c => '<td class="ss-resp-cell">' + esc(cell(r.byKey ? r.byKey[c] : undefined)) + '</td>').join('') + varCols.map(c => '<td class="ss-resp-cell">' + esc(cell(varOf(r, c))) + '</td>').join('') + '<td><button type="button" class="ss-icon-btn" data-del="' + esc(r.id) + '" aria-label="Delete response ' + esc(r.id) + '">✕</button></td></tr>').join('') +
-          '</tbody></table></div></div>';
-      }
-      box.innerHTML = html + '</div>';
-      box.onclick = async e => {
-        const b = e.target.closest('button'); if (!b || b.disabled) return;
-        if (b.dataset.act === 'refresh') renderResponses();
-        if (b.dataset.act === 'csv') {
-          const header = ['response_id', 'status', 'version', 'started_at', 'completed_at', 'score'].concat(cols, varCols);
-          App.downloadCSV(Core.slug(doc().title, 'survey') + '-responses.csv', header, list.map(r => [r.id, r.status, r.version, r.startedAt, r.completedAt || '', r.score].concat(cols.map(c => cell(r.byKey ? r.byKey[c] : undefined)), varCols.map(c => cell(varOf(r, c))))));
-        }
-        if (b.dataset.act === 'json') download(Core.slug(doc().title, 'survey') + '-responses.json', JSON.stringify({ survey: { id: doc().id, title: doc().title }, responses: list }, null, 2), 'application/json');
-        if (b.dataset.act === 'clear') { if (!confirm('Delete all ' + list.length + ' responses? This can\'t be undone.')) return; try { await api('/' + doc().id + '/responses', { method: 'DELETE' }); renderResponses(); } catch (err) { App.notify(err.message, 'error'); } }
-        if (b.dataset.del) { if (!confirm('Delete this response?')) return; try { await api('/' + doc().id + '/responses/' + encodeURIComponent(b.dataset.del), { method: 'DELETE' }); renderResponses(); } catch (err) { App.notify(err.message, 'error'); } }
-        if (b.dataset.act === 'to-project') toProject(done, qs);
-      };
+    /* ── Responses view (survey-responses.js) ── */
+    let responsesUI = null;
+    function renderResponses() {
+      if (responsesUI) responsesUI.destroy();
+      responsesUI = SurveyResponses.mount($('.ss-view-responses'), {
+        doc, api, publish: () => store.publish, download, isActive: () => mode === 'responses',
+        toProject: (done, qs) => toProject(done, qs),
+        onOpenPage: pid => { setMode('design', true); if (Core.getPage(doc(), pid)) store.setPage(pid); else App.notify('That page is no longer in the survey.', 'info'); }
+      });
     }
-    function cell(v) { if (v === undefined || v === null) return ''; if (Array.isArray(v)) return v.join('; '); if (typeof v === 'object') return Object.keys(v).map(k => k + '=' + v[k]).join('; '); return String(v); }
-    function summaryCard(q, done) {
-      const kind = Logic.valueKind(q);
-      const answered = done.filter(r => r.answers && r.answers[q.id] !== undefined);
-      let body = '';
-      if (kind === 'choice' || kind === 'multi') {
-        const ch = Logic.choicesOf(doc(), q);
-        const counts = ch.map(c => answered.filter(r => { const v = r.answers[q.id]; return Array.isArray(v) ? v.some(x => String(x) === String(c.value)) : String(v) === String(c.value); }).length);
-        const max = Math.max(1, ...counts);
-        body = '<ul class="ss-bars">' + ch.map((c, i) => '<li><span class="ss-bar-label">' + esc(c.label || c.value) + '</span><span class="ss-hbar"><span style="width:' + (counts[i] / max * 100) + '%"></span></span><span class="ss-bar-n">' + counts[i] + '</span></li>').join('') + '</ul>';
-      } else if (kind === 'number') {
-        const nums = answered.map(r => Number(r.answers[q.id])).filter(Number.isFinite);
-        body = nums.length ? '<div class="ss-tp-kv"><span>Average</span><b>' + (Math.round(nums.reduce((a, b) => a + b, 0) / nums.length * 100) / 100) + '</b></div><div class="ss-tp-kv"><span>Range</span><b>' + Math.min(...nums) + ' – ' + Math.max(...nums) + '</b></div>' : '';
-      } else if (kind === 'text') {
-        body = '<ul class="ss-quotes">' + answered.slice(-3).reverse().map(r => '<li>' + esc(String(r.answers[q.id]).slice(0, 160)) + '</li>').join('') + '</ul>';
-      }
-      return '<div class="ss-sum-card"><div class="ss-sum-title">' + esc(Core.displayName(doc(), q)) + '</div><div class="ss-sum-sub">' + answered.length + ' of ' + done.length + ' answered</div>' + body + '</div>';
-    }
+    cleanup.push(() => { if (responsesUI) responsesUI.destroy(); });
     function toProject(done, qs) {
       const textQs = qs.filter(q => Logic.valueKind(q) === 'text');
       if (!textQs.length) { App.notify('This survey has no text questions.', 'info'); return; }

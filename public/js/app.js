@@ -7,7 +7,7 @@ const App = (() => {
   /* ── State ─────────────────────────────────── */
   let state = {
     project:  { name: 'Untitled Project', description: '' },
-    posts:    [],   // [{id, text, author, timestamp, engagement:{}, humanCodes:{}, aiCodes:{}}]
+    posts:    [],   // [{id, text, author, timestamp, engagement:{}, humanCodes:{} (Coder 1), coder2Codes:{}, coderNotes:{}, aiCodes:{}, adjudicated:{}}]
     codebook: [],   // [{id, name, description, codes:[{id,label,description}]}]
     network:  { nodes: [], edges: [] },
     networkAnalysis: null, // last NetworkX result from Analyze CSV (see csv-analyzer.js)
@@ -52,8 +52,8 @@ const App = (() => {
     'scraper-beta': () => CollectorView.render(),        // AI Scraper (beta): the collector/ app, an AI agent collects
     'codebook':     () => Codebook.render(),
     'ai-coding':    () => AICoder.render(),
-    'human-coding': () => HumanCoder.render(),
-    'reliability':  () => ReliabilityAnalyzer.render(),
+    'human-coding': param => HumanCoder.render(param),           // tabs: coder1, coder2, ai, reliability
+    'reliability':  () => ReliabilityAnalyzer.render(),           // the Reliability Analysis tab
     'csv-analyzer': () => CSVAnalyzer.render(),
     'network':      () => NetworkViz.render(),
     'metrics':      () => EngagementViz.render(),
@@ -414,8 +414,8 @@ const App = (() => {
   }
 
   function clearCodes() {
-    if (!confirm('Clear all AI and human coding data? Post text and codebook will remain.')) return;
-    state.posts = state.posts.map(p => ({ ...p, aiCodes:{}, humanCodes:{} }));
+    if (!confirm('Clear all AI and human coding data (Coder 1, Coder 2, AI, memos and adjudications)? Post text and codebook will remain.')) return;
+    state.posts = state.posts.map(p => ({ ...p, aiCodes:{}, humanCodes:{}, coder2Codes:{}, coderNotes:{}, adjudicated:{} }));
     save();
     notify('All codes cleared', 'warning');
   }
@@ -485,25 +485,29 @@ const App = (() => {
 
     const aiDims    = codebook.map(d => `ai_${d.id}`);
     const humanDims = codebook.map(d => `human_${d.id}`);
+    const coder2Dims = codebook.map(d => `coder2_${d.id}`);
+    const finalDims = codebook.map(d => `final_${d.id}`);
     const confDims  = codebook.map(d => `ai_confidence_${d.id}`);
 
     const headers = ['id','text','author','timestamp',
       'eng_likes','eng_shares','eng_comments','eng_views',
-      ...aiDims, ...humanDims, ...confDims, 'agree_all'];
+      ...aiDims, ...humanDims, ...coder2Dims, ...finalDims, ...confDims, 'agree_all'];
 
     const rows = posts.map(p => {
       const agree = codebook.length > 0 && codebook.every(d => {
-        const a = (p.aiCodes[d.id] || {}).code;
-        const h = p.humanCodes[d.id];
+        const a = ((p.aiCodes || {})[d.id] || {}).code;
+        const h = (p.humanCodes || {})[d.id];
         return a && h && a === h;
       });
       return [
         p.id, p.text, p.author || '', p.timestamp || '',
         p.engagement?.likes||'', p.engagement?.shares||'',
         p.engagement?.comments||'', p.engagement?.views||'',
-        ...codebook.map(d => (p.aiCodes[d.id]||{}).code || ''),
-        ...codebook.map(d => p.humanCodes[d.id] || ''),
-        ...codebook.map(d => (p.aiCodes[d.id]||{}).confidence || ''),
+        ...codebook.map(d => ((p.aiCodes || {})[d.id]||{}).code || ''),
+        ...codebook.map(d => (p.humanCodes || {})[d.id] || ''),
+        ...codebook.map(d => (p.coder2Codes || {})[d.id] || ''),
+        ...codebook.map(d => HumanCoder.finalCode(p, d.id) || ''),
+        ...codebook.map(d => ((p.aiCodes || {})[d.id]||{}).confidence || ''),
         agree ? '1' : '0'
       ];
     });
@@ -512,10 +516,13 @@ const App = (() => {
   }
 
   function exportReliability() {
-    const stats = ReliabilityAnalyzer.computeAll();
-    if (!stats.length) { notify('No dual-coded posts yet', 'warning'); return; }
-    const headers = ['dimension','n_paired','pct_agreement','cohens_kappa','krippendorff_alpha','interpretation'];
-    const rows = stats.map(s => [s.name, s.n, (s.pa*100).toFixed(1)+'%', s.kappa.toFixed(3), s.alpha.toFixed(3), s.interp]);
+    const n3 = v => (v === null || v === undefined ? '' : v.toFixed(3));
+    const rows = [];
+    [['coder1', 'coder2'], ['coder1', 'ai'], ['coder2', 'ai']].forEach(pair => ReliabilityAnalyzer.computeAll(null, pair).forEach(s => {
+      if (s.n) rows.push([pair[0], pair[1], s.name, s.n, s.pa === null ? '' : (s.pa * 100).toFixed(1) + '%', n3(s.kappa), n3(s.alpha), s.interp, s.kappaNote || '']);
+    }));
+    if (!rows.length) { notify('No posts coded by two sources yet', 'warning'); return; }
+    const headers = ['source_a','source_b','dimension','n_paired','pct_agreement','cohens_kappa','krippendorff_alpha','interpretation','note'];
     downloadCSV('metacode_reliability.csv', headers, rows);
     notify('Exported reliability report', 'success');
   }

@@ -12,8 +12,16 @@
      onSubmit(payload) → Promise,     // final response
      onProgress(payload) → Promise,   // optional, after each page
      onDebug(info),                   // preview: answers, variables, rules…
-     onPageChange(page)
+     onPageChange(page),
+     onEvent(event),                  // session timeline events (see emit() below)
+     params: { name: value }          // the survey link's query parameters (participant code)
    }) → { reset(), goTo(pageId), getAnswers(), destroy() }
+
+   Session events (only delivered to opts.onEvent; the published page records
+   them only when the survey discloses it): start, page (viewed), focus
+   (question entered), answer (value for choices and numbers; only the length
+   for typed text), skip (left unanswered), invalid (validation errors shown),
+   submit. Respondent-information fields never produce events.
    ══════════════════════════════════════════════ */
 (function (root) {
   'use strict';
@@ -42,6 +50,9 @@
     let startedAt = new Date().toISOString();
     let eventsLog = [];
     let message = null;
+    let respondent = {};            // participant-entered respondent information (name, participant code)
+    let respErrors = {};            // respondent block id → message
+    const params = opts.params && typeof opts.params === 'object' ? opts.params : {};
     const textDeps = new Set();     // elements whose text uses {{ }}
 
     // DOM scaffolding
@@ -72,7 +83,7 @@
         if (raw.indexOf('{{') !== -1) textDeps.add(el.id);
         return state ? Logic.interpolate(raw, state.env) : raw;
       },
-      bindOption, bindField, bindRankItem, bindMatrixCell,
+      bindOption, bindField, bindRankItem, bindMatrixCell, bindRespondent, respondentLink,
       buttonLabel, onButton,
       progress: progressPct,
       tabActive: el => (tabs[el.id] !== undefined ? tabs[el.id] : Math.max(0, num(el.props.active, 0))),
@@ -263,6 +274,86 @@
       if (!(opt && opt.noSync)) syncQuestion(qid);
       scheduleApply(changed);
       if (opts.mode === 'preview') log('answer', (Core.dataKeyOf(doc, q)) + ' = ' + JSON.stringify(answers[qid] === undefined ? null : answers[qid]));
+      queueAnswerEvent(qid);
+    }
+
+    /* ── Session events ──────────────────────── */
+    function emit(type, data) {
+      if (!opts.onEvent) return;
+      try { opts.onEvent(Object.assign({ type, at: Date.now() }, data || {})); } catch (e) { /* recording never breaks the survey */ }
+    }
+    // Answer events are coalesced per question (typing, sliders) and flushed on page changes.
+    const answerTimers = {};
+    function queueAnswerEvent(qid) {
+      if (!opts.onEvent) return;
+      clearTimeout(answerTimers[qid]);
+      answerTimers[qid] = setTimeout(() => answerEvent(qid), 700);
+    }
+    function answerEvent(qid) {
+      delete answerTimers[qid];
+      const q = doc.elements[qid];
+      if (!q) return;
+      const v = answers[qid];
+      if (v === undefined) return emit('answer', { q: qid, cleared: true });
+      if (q.type === 'shorttext' || q.type === 'longtext') return emit('answer', { q: qid, len: String(v).length });
+      emit('answer', { q: qid, value: v });
+    }
+    function flushAnswerEvents() { Object.keys(answerTimers).forEach(qid => { clearTimeout(answerTimers[qid]); answerEvent(qid); }); }
+    let lastFocusQ = null;
+    run.addEventListener('focusin', e => {
+      const n = e.target && e.target.closest ? e.target.closest('[data-svid]') : null;
+      if (!n || !opts.onEvent) return;
+      const q = Core.questionOf(doc, n.getAttribute('data-svid'));
+      if (q && q.id !== lastFocusQ) { lastFocusQ = q.id; emit('focus', { q: q.id }); }
+    });
+
+    /* ── Respondent information ─────────────── */
+    function bindRespondent(el, key, input) {
+      input.value = respondent[key] || '';
+      input.addEventListener('input', () => {
+        respondent[key] = input.value;
+        if (respErrors[el.id]) { delete respErrors[el.id]; showRespError(el); }
+      });
+    }
+    // A participant code that comes from the survey link (?pid=…)
+    function respondentLink(el) {
+      const c = Core.respondentConfig(el).fields.participantId;
+      if (!c.on || c.from !== 'link') return null;
+      const v = params[c.param];
+      return typeof v === 'string' && v.trim() ? v.trim().slice(0, 80) : null;
+    }
+    function respondentPayload() {
+      const priv = Core.privacyOf(doc);
+      const out = {};
+      if (priv.entered.name && typeof respondent.name === 'string' && respondent.name.trim()) out.name = respondent.name.trim().slice(0, 120);
+      if (priv.entered.participantId && typeof respondent.participantId === 'string' && respondent.participantId.trim()) out.participantId = respondent.participantId.trim().slice(0, 80);
+      if (priv.link) { const v = params[priv.link.param]; if (typeof v === 'string' && v.trim()) out.participantId = v.trim().slice(0, 80); }
+      return out;
+    }
+    function respondentBlocksOn(pid) {
+      const p = Core.getPage(doc, pid);
+      if (!p) return [];
+      return Core.descendants(doc, 'page:' + p.id).map(id => doc.elements[id]).filter(el => el && el.type === 'respondent' && !el.hidden && (!state || state.isVisible(el.id)));
+    }
+    function checkRespondent(el) {
+      const c = Core.respondentConfig(el).fields;
+      const missing = [];
+      if (c.name.on && c.name.required && !(respondent.name || '').trim()) missing.push(['name', c.name.label]);
+      if (c.participantId.on && c.participantId.required) {
+        if (c.participantId.from === 'entered' && !(respondent.participantId || '').trim()) missing.push(['participantId', c.participantId.label]);
+        if (c.participantId.from === 'link' && !respondentLink(el)) return { message: 'This link is missing your ' + c.participantId.label.toLowerCase() + '. Please open the survey with the link you were given.' };
+      }
+      return missing.length ? { message: 'Please fill in: ' + missing.map(m => m[1]).join(', ') + '.', keys: missing.map(m => m[0]) } : null;
+    }
+    function showRespError(el, keys) {
+      const node = renderer.node(el.id);
+      if (!node) return;
+      const msg = respErrors[el.id] || '';
+      const err = node.querySelector('.sv-resp-err');
+      if (err) { err.textContent = msg; err.classList.toggle('is-shown', !!msg); }
+      const box = node.querySelector('.sv-resp');
+      if (box) box.classList.toggle('is-invalid', !!msg);
+      node.querySelectorAll('[data-resp]').forEach(inp => { if (msg && keys && keys.includes(inp.dataset.resp)) inp.setAttribute('aria-invalid', 'true'); else inp.removeAttribute('aria-invalid'); });
     }
     // Reflects an answer in the DOM (checked classes, inputs).
     function syncQuestion(qid) {
@@ -498,6 +589,22 @@
         if (e) { errors[q.id] = e; if (!first) first = q; }
       });
       applyState();
+      respErrors = {};
+      let firstResp = null;
+      respondentBlocksOn(p.id).forEach(el => {
+        const r = checkRespondent(el);
+        if (r) { respErrors[el.id] = r.message; if (!firstResp) firstResp = { el, keys: r.keys || [] }; }
+        showRespError(el, r && r.keys);
+      });
+      if (firstResp && !first) {
+        const n = renderer.node(firstResp.el.id);
+        const inp = n && (n.querySelector('[data-resp="' + (firstResp.keys[0] || '') + '"]') || n.querySelector('[data-resp]'));
+        if (inp) inp.focus({ preventScroll: true });
+        if (n && n.scrollIntoView) n.scrollIntoView({ block: 'center', behavior: 'smooth' });
+        announce(respErrors[firstResp.el.id]);
+        emit('invalid', { page: p.id, qs: [], respondent: true });
+        return false;
+      }
       if (first) {
         const n = renderer.node(first.id);
         const focusable = n && n.querySelector('input:not([disabled]), select, textarea, button');
@@ -506,6 +613,7 @@
         const count = Object.keys(errors).length;
         announce(count === 1 ? 'One question needs your attention.' : count + ' questions need your attention.');
         log('validation', count + ' error(s) on ' + p.name);
+        emit('invalid', { page: p.id, qs: Object.keys(errors).slice(0, 50) });
         return false;
       }
       return true;
@@ -517,19 +625,24 @@
       const effects = Logic.runEvent(doc, { type: 'pageExit', page: page().id }, state);
       if (applyEffects(effects, 'pageExit')) return;
       const n = forceSubmit ? -1 : nextVisibleIndex(pageIndex);
+      flushAnswerEvents();
+      pageQuestions(page().id).forEach(q => { if (state.isVisible(q.id) && answers[q.id] === undefined) emit('skip', { q: q.id }); });
       progressSave();
       if (n === -1) submit(null);
       else go(n, true);
     }
     function back() {
       if (busy || finished || !history.length) return;
+      flushAnswerEvents();
       const prev = history.pop();
       go(prev, false);
     }
-    function go(i, push) {
+    function go(i, push, how) {
       if (i === pageIndex && push) return;
       if (push) history.push(pageIndex);
+      const from = doc.pages[pageIndex] ? doc.pages[pageIndex].id : null;
       pageIndex = i;
+      emit('page', { page: doc.pages[i].id, from, dir: how || (push ? 'next' : 'back') });
       errors = {};
       const p = doc.pages[i];
       if (p.props && p.props.ending) { showPage(); submit(null, true); return; }
@@ -567,7 +680,7 @@
       const out = {};
       Object.keys(answers).forEach(id => { if (keepHidden || state.isVisible(id)) out[id] = answers[id]; });
       const path = history.map(i => doc.pages[i].id).concat([page().id]);
-      return { answers: out, path, complete: !!complete, startedAt, varState, outcome: outcome || message || null, score: state.score, vars: state.vars };
+      return { answers: out, path, complete: !!complete, startedAt, varState, outcome: outcome || message || null, score: state.score, vars: state.vars, respondent: respondentPayload() };
     }
     let progressTimer = null;
     function progressSave() {
@@ -589,6 +702,8 @@
       applyState();
       showBanner(opts.mode === 'preview' ? '' : 'Submitting…');
       clearTimeout(progressTimer);
+      flushAnswerEvents();
+      emit('submit', { page: page().id });
       try {
         const result = opts.onSubmit ? await opts.onSubmit(payload(true, outcome)) : null;
         busy = false;
@@ -708,7 +823,7 @@
 
     function start() {
       answers = {}; varState = { __seed: opts.seed || Logic.newSeed() }; visOverride = {}; touched = new Set(); errors = {}; attempted = new Set(); history = []; rankOrder = {}; tabs = {};
-      finished = false; busy = false; message = null; eventsLog = []; startedAt = new Date().toISOString();
+      finished = false; busy = false; message = null; eventsLog = []; startedAt = new Date().toISOString(); respondent = {}; respErrors = {}; lastFocusQ = null;
       recompute();
       blockedLink = null;
       firedOnce = new Set();   // nothing runs until the first answer
@@ -716,6 +831,7 @@
       if (pageIndex < 0) pageIndex = 0;
       showBanner('');
       showPage();
+      emit('start', { page: page().id });
       log('start', 'Random seed ' + varState.__seed);
       // "when the survey starts" scripts run once per participant
       const startEffects = Logic.runEvent(doc, { type: 'start' }, state);
@@ -729,11 +845,16 @@
 
     return {
       reset: start,
-      goTo(pid) { const i = doc.pages.findIndex(p => p.id === pid); if (i >= 0) { finished = false; history = []; go(i, false); } },
+      goTo(pid) { const i = doc.pages.findIndex(p => p.id === pid); if (i >= 0) { finished = false; history = []; go(i, false, 'jump'); } },
+      currentPage: () => (page() ? page().id : null),
+      isFinished: () => finished,
+      answeredCount: () => Object.keys(answers).length,
+      flushEvents: flushAnswerEvents,
+      snapshot: () => payload(false),
       getAnswers: () => Core.clone(answers),
       element: () => run,
       fit,
-      destroy() { if (ro) ro.disconnect(); else window.removeEventListener('resize', fit); clearTimeout(progressTimer); renderer.destroy(); run.remove(); }
+      destroy() { if (ro) ro.disconnect(); else window.removeEventListener('resize', fit); clearTimeout(progressTimer); Object.keys(answerTimers).forEach(k => clearTimeout(answerTimers[k])); renderer.destroy(); run.remove(); }
     };
   }
 

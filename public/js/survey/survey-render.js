@@ -581,5 +581,51 @@
     };
   }
 
+  // Respondent information block: participant-entered fields, a participant
+  // code from the link, and the notice about any metadata the server records.
+  let respSeq = 0;
+  Core.getType('respondent').render = (el, ctx) => {
+    const { mode, live } = ctx;
+    const c = Core.respondentConfig(el);
+    const box = h('div', 'sv-resp');
+    const title = h('div', 'sv-resp-title');
+    title.textContent = c.title;
+    box.appendChild(title);
+    if (c.intro) { const p = h('p', 'sv-resp-intro'); p.textContent = c.intro; box.appendChild(p); }
+    const field = (key, cfg, maxLength, autocomplete) => {
+      const id = 'sv-resp-' + (++respSeq);
+      const row = h('div', 'sv-resp-field');
+      const lab = h('label', 'sv-resp-label', { for: id });
+      lab.textContent = cfg.label;
+      if (cfg.required) { const r = h('span', 'sv-resp-req', { 'aria-hidden': 'true' }); r.textContent = ' *'; lab.appendChild(r); }
+      const input = h('input', 'sv-resp-input', { id, type: 'text', maxlength: String(maxLength), autocomplete, spellcheck: 'false', 'data-resp': key, 'aria-required': cfg.required ? 'true' : undefined });
+      if (mode === 'design' || !live) { input.disabled = true; input.tabIndex = -1; input.placeholder = cfg.label; }
+      else if (live.bindRespondent) live.bindRespondent(el, key, input);
+      row.appendChild(lab);
+      row.appendChild(input);
+      box.appendChild(row);
+    };
+    if (c.fields.name.on) field('name', c.fields.name, 120, 'name');
+    const pid = c.fields.participantId;
+    if (pid.on && pid.from === 'entered') field('participantId', pid, 80, 'off');
+    if (pid.on && pid.from === 'link' && (pid.show || mode === 'design')) {
+      const row = h('div', 'sv-resp-static' + (pid.show ? '' : ' sv-resp-design-only'));
+      const lab = h('span', 'sv-resp-label');
+      lab.textContent = pid.label + ': ';
+      const val = h('b', '', { 'data-resp-static': 'participantId' });
+      const v = live && live.respondentLink ? live.respondentLink(el) : null;
+      val.textContent = v || (mode === 'design' || !live ? 'from the link (?' + pid.param + '=…)' + (pid.show ? '' : ' — researchers only') : 'missing from the link');
+      row.appendChild(lab); row.appendChild(val);
+      box.appendChild(row);
+    }
+    const priv = { derived: { ip: c.fields.ip.on, country: c.fields.country.on, region: c.fields.region.on } };
+    const notice = Core.derivedNotice(priv);
+    if (notice) { const n = h('p', 'sv-resp-note'); n.textContent = notice; box.appendChild(n); }
+    if (mode === 'design' && !c.fields.name.on && !pid.on && !notice) { const n = h('p', 'sv-resp-note'); n.textContent = 'Nothing is recorded yet — turn on fields in Respondent information (right).'; box.appendChild(n); }
+    const err = h('div', 'sv-resp-err', { role: 'alert', 'aria-live': 'polite' });
+    box.appendChild(err);
+    return box;
+  };
+
   root.SurveyRender = { create };
 })(typeof window !== 'undefined' ? window : this);

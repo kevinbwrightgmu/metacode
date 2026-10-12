@@ -196,7 +196,8 @@
     rankitem: '<line x1="8" y1="8" x2="20" y2="8"/><line x1="8" y1="16" x2="20" y2="16"/><circle cx="4" cy="8" r="1"/><circle cx="4" cy="16" r="1"/>',
     matrixgrid: '<rect x="3" y="3" width="18" height="18" rx="2"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="12" y1="3" x2="12" y2="21"/>',
     matrixrow: '<rect x="3" y="9" width="18" height="6" rx="1"/>',
-    page: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>'
+    page: '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
+    respondent: '<rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2.5"/><path d="M5.5 16.5c.7-1.8 2-2.7 3.5-2.7s2.8.9 3.5 2.7"/><line x1="15" y1="9" x2="19" y2="9"/><line x1="15" y1="13" x2="19" y2="13"/>'
   };
 
   /* ── Built-in default styles per type (use theme tokens) ───────────────── */
@@ -374,6 +375,76 @@
     style: { fill: T('border'), markColor: T('primary'), radius: 99, fontFamily: T('fontBody'), fontSize: 12, color: T('text2') },
     build: () => spec('progress', { props: { showLabel: false }, frame: { w: 664, h: 6 } }) });
 
+  /* ── Respondent information ─────────────────────────────────────────────
+     A block that decides what is recorded about the person or session with
+     each response. Participant-entered fields (name, participant code) are
+     typed by the respondent; a participant code can instead come from the
+     survey link (?pid=…), shown to the respondent or kept for researchers
+     only. Derived metadata (IP address, and country/region looked up from
+     it by the server's proxy) is never shown back to the respondent; the
+     block always tells them it is recorded. Values are stored with the
+     response (response.respondent), never in the answers, and only the
+     survey's owner can see them. Everything is off except a participant
+     code until the researcher turns it on. */
+  const RESPONDENT_FIELDS = [
+    { key: 'name', source: 'participant', label: 'Name', defaults: { on: false, label: 'Your name', required: false }, maxLength: 120 },
+    { key: 'participantId', source: 'participant', label: 'Participant code', defaults: { on: true, label: 'Participant code', required: false, from: 'entered', param: 'pid', show: true }, maxLength: 80 },
+    { key: 'country', source: 'derived', label: 'Country (approximate, from IP address)', defaults: { on: false } },
+    { key: 'region', source: 'derived', label: 'State / region (approximate, from IP address)', defaults: { on: false } },
+    { key: 'ip', source: 'derived', label: 'IP address', defaults: { on: false } }
+  ];
+  function respondentConfig(el) {
+    const p = isObj(el && el.props) ? el.props : {};
+    const f = isObj(p.fields) ? p.fields : {};
+    const fields = {};
+    RESPONDENT_FIELDS.forEach(d => {
+      const raw = isObj(f[d.key]) ? f[d.key] : {};
+      const c = Object.assign({}, d.defaults);
+      c.on = raw.on === undefined ? d.defaults.on : !!raw.on;
+      if (d.source === 'participant') {
+        c.label = str(raw.label, d.defaults.label).slice(0, 120) || d.defaults.label;
+        c.required = !!raw.required;
+      }
+      if (d.key === 'participantId') {
+        c.from = raw.from === 'link' ? 'link' : 'entered';
+        c.param = str(raw.param, 'pid').replace(/[^A-Za-z0-9_-]/g, '').slice(0, 40) || 'pid';
+        c.show = raw.show === undefined ? true : !!raw.show;
+      }
+      fields[d.key] = c;
+    });
+    return { title: str(p.title, 'About you').slice(0, 200), intro: str(p.intro).slice(0, 1000), fields };
+  }
+  /** What a survey records about respondents, across its Respondent information blocks. */
+  function privacyOf(doc) {
+    const out = { entered: {}, link: null, derived: { ip: false, country: false, region: false }, blocks: 0,
+      session: (doc && doc.settings && doc.settings.sessionRecording) || 'off' };
+    Object.values((doc && doc.elements) || {}).forEach(el => {
+      if (!el || el.type !== 'respondent' || el.hidden) return;
+      out.blocks++;
+      const c = respondentConfig(el);
+      if (c.fields.name.on) out.entered.name = { label: c.fields.name.label, required: c.fields.name.required, maxLength: 120 };
+      if (c.fields.participantId.on) {
+        if (c.fields.participantId.from === 'link') out.link = { param: c.fields.participantId.param, show: c.fields.participantId.show, required: c.fields.participantId.required };
+        else out.entered.participantId = { label: c.fields.participantId.label, required: c.fields.participantId.required, maxLength: 80 };
+      }
+      ['ip', 'country', 'region'].forEach(k => { if (c.fields[k].on) out.derived[k] = true; });
+    });
+    if (!['off', 'notice', 'consent'].includes(out.session)) out.session = 'off';
+    return out;
+  }
+  const SESSION_NOTICE = 'This survey records how you move through it — the pages you view, when you answer or change an answer, how long each page takes, and when you leave and come back to the survey\'s tab — to check the quality of responses. It does not record the text you type until you submit it, your mouse movements, or anything you do outside this survey.';
+  /** The sentence telling respondents which metadata is recorded, or '' when none is. */
+  function derivedNotice(priv) {
+    const d = priv.derived;
+    const parts = [];
+    if (d.ip) parts.push('your IP address');
+    if (d.country || d.region) parts.push('your approximate location (' + [d.country ? 'country' : null, d.region ? 'state or region' : null].filter(Boolean).join(' and ') + ', estimated from your IP address)');
+    return parts.length ? 'With your response we also record ' + parts.join(' and ') + '. Only the researchers can see it.' : '';
+  }
+  registerType({ type: 'respondent', label: 'Respondent information', category: 'interactive', icon: ICONS.respondent,
+    style: { fill: T('surface2'), borderColor: T('border'), borderWidth: 1, radius: T('radius'), padding: [16, 18, 16, 18], fontFamily: T('fontBody'), fontSize: 14, color: T('text') },
+    build: () => spec('respondent', { props: { title: 'About you', intro: '', fields: { participantId: { on: true, label: 'Participant code', required: false, from: 'entered', param: 'pid', show: true } } }, frame: { w: 664, h: 'auto' } }) });
+
   /* ── Element construction ──────────────────── */
   const FRAME_DEFAULT = { x: 0, y: 0, w: 300, h: 'auto', rot: 0, sx: 1, sy: 1, kx: 0, ky: 0, ox: 0.5, oy: 0.5, pos: 'flow' };
 
@@ -483,7 +554,8 @@
         showProgress: true, allowBack: true,
         nextLabel: 'Next', backLabel: 'Back', submitLabel: 'Submit',
         completionTitle: 'Thank you!', completionMessage: 'Your response has been recorded.',
-        keepHiddenAnswers: false, grid: 8
+        keepHiddenAnswers: false, grid: 8,
+        sessionRecording: 'off', sessionNotice: ''
       },
       theme: { tokens: defaultTokens(), types: {}, page: {} },
       pages: [], elements: {}, variables: [], rules: [], styles: [],
@@ -633,6 +705,8 @@
     doc.settings = Object.assign({}, fresh.settings, isObj(doc.settings) ? doc.settings : {});
     doc.settings.width = clamp(num(doc.settings.width, 760), 240, 4000);
     if (!['scale', 'reflow', 'fixed'].includes(doc.settings.responsive)) doc.settings.responsive = 'scale';
+    if (!['off', 'notice', 'consent'].includes(doc.settings.sessionRecording)) doc.settings.sessionRecording = 'off';
+    doc.settings.sessionNotice = str(doc.settings.sessionNotice).slice(0, 2000);
     doc.theme = isObj(doc.theme) ? doc.theme : {};
     doc.theme.tokens = Object.assign(defaultTokens(), isObj(doc.theme.tokens) ? doc.theme.tokens : {});
     doc.theme.types = isObj(doc.theme.types) ? doc.theme.types : {};
@@ -675,6 +749,7 @@
         else delete el.children;
       }
       if (isTextType(el.type)) el.props.text = str(el.props.text).slice(0, LIMITS.textLength);
+      if (el.type === 'respondent') el.props = Object.assign({}, el.props, respondentConfig(el));
     }
 
     // Pages
@@ -1077,6 +1152,7 @@
     questionsInOrder, displayName, optionLabel, plainText, dataKeyOf,
     normalizeDoc, builtinStyle, inheritedStyle, resolveStyle, styleDecls, tokenDecls, elementCss, cleanCss, cleanValue, safeUrl,
     frameLinear, applyLinear, invertLinear, localToParent, distortMatrix, transformCss,
-    sanitizeHtml, escapeHtml, decodeEntities, videoEmbedUrl
+    sanitizeHtml, escapeHtml, decodeEntities, videoEmbedUrl,
+    RESPONDENT_FIELDS, respondentConfig, privacyOf, derivedNotice, SESSION_NOTICE
   };
 });

@@ -221,3 +221,35 @@ audio.sv-media { height: auto; }
   .sv-anim, [class*="sv-loop-"] { animation: none !important; }
   .sv-root * { transition-duration: 0ms !important; }
 }
+
+/* ── Respondent information block ─────────── */
+.sv-resp { display: flex; flex-direction: column; gap: 12px; }
+.sv-resp-title { font-family: var(--sv-fontDisplay); font-size: 17px; font-weight: 600; line-height: 1.35; color: var(--sv-text); }
+.sv-resp-intro { margin: -4px 0 0; color: var(--sv-text2); font-size: 13.5px; line-height: 1.5; }
+.sv-resp-field { display: flex; flex-direction: column; gap: 6px; }
+.sv-resp-label { font-size: 13.5px; font-weight: 500; color: var(--sv-text); }
+.sv-resp-req { color: var(--sv-error); }
+.sv-resp-input { height: 42px; padding: 0 12px; border: 1px solid var(--sv-border); border-radius: var(--sv-radius); background: var(--sv-surface); color: var(--sv-text); font: inherit; font-size: 14.5px; width: 100%; box-sizing: border-box; }
+.sv-resp-input:focus { outline: none; border-color: var(--sv-primary); box-shadow: 0 0 0 3px rgba(37, 99, 235, .18); }
+.sv-resp-input:disabled { opacity: .8; cursor: default; }
+.sv-resp.is-invalid .sv-resp-input[aria-invalid="true"] { border-color: var(--sv-error); }
+.sv-resp-static { font-size: 13.5px; color: var(--sv-text2); }
+.sv-resp-static b { color: var(--sv-text); font-weight: 600; }
+.sv-mode-live .sv-resp-design-only { display: none; }
+.sv-resp-note { margin: 0; padding: 10px 12px; border-radius: var(--sv-radius); background: var(--sv-primaryLight); color: var(--sv-text2); font-size: 12.5px; line-height: 1.5; }
+.sv-resp-err { display: none; color: var(--sv-error); font-size: 12.5px; font-weight: 500; }
+.sv-resp-err.is-shown { display: block; }
+
+/* ── Before-you-begin notice (published surveys that record a session timeline or metadata) ── */
+.svp-notice { max-width: 620px; margin: 6vh auto 0; background: #fff; border: 1px solid #E2E8F0; border-radius: 16px; padding: 28px 28px 24px; box-shadow: 0 1px 2px rgba(0,0,0,.05); }
+.svp-notice h1 { font: 700 21px/1.3 'Space Grotesk', system-ui, sans-serif; margin: 0 0 6px; color: #0F172A; }
+.svp-notice .svp-sub { font-size: 13.5px; color: #64748B; margin: 0 0 16px; }
+.svp-notice ul { margin: 0 0 18px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 10px; }
+.svp-notice li { font-size: 14px; line-height: 1.55; color: #334155; padding-left: 14px; border-left: 3px solid #BFDBFE; }
+.svp-notice .svp-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.svp-btn { font: 600 14.5px/1 'Inter', system-ui, sans-serif; padding: 12px 18px; border-radius: 10px; border: 1px solid transparent; cursor: pointer; }
+.svp-btn-primary { background: #0F172A; color: #fff; }
+.svp-btn-primary:hover { background: #1E293B; }
+.svp-btn-secondary { background: #fff; color: #0F172A; border-color: #CBD5E1; }
+.svp-btn-secondary:hover { border-color: #0F172A; }
+.svp-btn:focus-visible { outline: 3px solid #2563EB; outline-offset: 2px; }

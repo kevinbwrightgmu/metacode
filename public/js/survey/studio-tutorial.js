@@ -209,9 +209,9 @@
       text: '<span class="tour-do">Open <b>Responses</b>.</span>',
       until: () => mode() === 'responses', done: 'Responses show up here as people submit.' }),
 
-    step({ before: () => tab('responses'), target: ['.ss-responses', '.ss-views'], placement: 'left',
+    step({ before: () => tab('responses'), target: ['.sr', '.ss-views'], placement: 'left',
       title: 'Read and export responses',
-      text: '<p>You\'ll see the completion rate and typical time, a chart for every question and a table of every response. <b>Export CSV</b> or <b>JSON</b> for SPSS, R or Excel — or <b>Add text answers to project</b> to code them in the MetaCode app.</p>' }),
+      text: '<p>You\'ll see the completion rate and typical time, then each response with its answers, timeline and details — and a Summary tab with a chart for every question. <b>Export…</b> CSV or JSON for SPSS, R or Excel, or <b>Add text answers to project</b> to code them in the MetaCode app.</p>' }),
 
     step({ before: () => drawer(null),
       title: 'You\'ve built a survey 🎉',
