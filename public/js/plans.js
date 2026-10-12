@@ -49,7 +49,7 @@
     },
     max: {
       id: 'max', name: 'Max', rank: 2,
-      tagline: 'Every method, for serious projects',
+      tagline: 'Multiple methods, for serious projects',
       features: { surveys: 'full', scraper: true, aiScraper: true, customCode: true, network: true, surveyAdvanced: true },
       limits: {
         aiPostsPerWeek: 4000, aiRequestsPerDay: 500, aiRequestsPerMinute: 80, aiBatchesAtOnce: 3,

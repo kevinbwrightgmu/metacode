@@ -57,7 +57,7 @@ const overflow = page => page.evaluate(() => document.documentElement.scrollWidt
 
 test('front page: the four methods, a multi-method workflow, audiences, and calls to action that work', { skip, timeout: 60000 }, async () => {
   const { page, context, errors } = await open('/index.html');
-  assert.match(await page.textContent('h1'), /One platform\.\s*Every method\.\s*Deeper social insights\./);
+  assert.match(await page.textContent('h1'), /One platform\.\s*Multiple methods\.\s*Deeper social insights\./);
   assert.match(await page.textContent('.lede'), /data collection, AI-powered coding, network analysis, and survey research/);
   const methods = await page.$$eval('#methods .method', els => els.map(e => [e.querySelector('h3').textContent, e.querySelector('.method-link').getAttribute('href')]));
   assert.deepEqual(methods, [['Reddit Data Collection', 'app.html#scraper'], ['AI Coding', 'app.html#ai-coding'], ['Network Analysis', 'app.html#csv-analyzer'], ['Survey Studio', 'studio.html']]);
