@@ -55,6 +55,8 @@ const AICoder = (() => {
         '<div class="view-title">AI Auto-Coding</div>' +
         '<div class="view-subtitle">Claude will apply your codebook to each post and explain its reasoning</div>' +
       '</div></div>' +
+      // Accounts on: how many posts the plan has left this week (account.js)
+      (window.Account ? '<div id="ai-plan-note">' + Account.noteHTML('aiPosts', 'AI coding') + '</div>' : '') +
 
       '<div class="coding-controls">' +
         '<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">' +
@@ -305,6 +307,13 @@ const AICoder = (() => {
 
     if (!toCode.length) { App.notify('All visible posts are already coded', 'info'); return; }
     if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add your AI key (EMIS_API_KEY) to the server\'s .env file (see Settings)', 'error'); return; }
+    // Accounts on: sign in first, and say so up front when the plan has fewer posts left than this run needs
+    if (window.Account && Account.enabled()) {
+      if (!Account.signedIn()) { Account.openSignIn({ reason: 'Sign in to use AI coding — free accounts include ' + MetaPlans.get('free').limits.aiPostsPerWeek.toLocaleString() + ' posts a week.' }); return; }
+      const left = Account.remaining('aiPosts');
+      if (left === 0) { Account.openPlans({ reason: 'You\'ve used all of this week\'s AI coding posts on the ' + Account.plan().name + ' plan. They reset on Monday.', highlight: (MetaPlans.ORDER.map(MetaPlans.get).find(p => p.rank > MetaPlans.get(Account.plan().id).rank) || {}).id }); return; }
+      if (left < toCode.length && !confirm('Your ' + Account.plan().name + ' plan has ' + left.toLocaleString() + ' AI-coded posts left this week, and ' + toCode.length.toLocaleString() + ' posts are waiting. Code the first ' + left.toLocaleString() + ' now?')) return;
+    }
 
     running = true; stopFlag = false;
     abort = new AbortController();
@@ -313,7 +322,7 @@ const AICoder = (() => {
 
     const system = buildSystemPrompt();
     let parallel = App.getParallel();
-    let done = 0, coded = 0, failed = 0, lastError = '', serverFailed = 0, serverProblems = false, gaveUp = false;
+    let done = 0, coded = 0, failed = 0, lastError = '', serverFailed = 0, serverProblems = false, gaveUp = false, limitHit = '';
     const substitutes = {};      // model → posts it coded because the chosen model was rate-limited or failing
     let pending = toCode.slice();
     updateProgress(0, toCode.length);
@@ -351,6 +360,7 @@ const AICoder = (() => {
               const serverSide = !r.ok && (!r.status || r.status >= 500 || r.status === 408);
               if (serverSide) { serverFailed++; serverProblems = true; }
               if (r.type === 'service_unavailable') gaveUp = true;     // the server stopped this run: no more rounds
+              if (r.type === 'limit_reached') { gaveUp = true; limitHit = r.error; }   // the plan's posts for this week are used up
               // An unreadable answer, or a passing EMIS problem, is worth another try
               // (not once the server has given up on the AI service for this run)
               if (round < 2 && (r.ok || (serverSide && r.type !== 'service_unavailable'))) { retry.push(post); console.warn('[AICoder] post', post.id, '— will try again:', problem); }
@@ -378,6 +388,10 @@ const AICoder = (() => {
     running = false; abort = null;
     toggleRunButton(false);
     refreshTable();
+    if (window.Account && Account.enabled()) {
+      Account.refresh().then(() => { const n = document.getElementById('ai-plan-note'); if (n) { n.innerHTML = Account.noteHTML('aiPosts', 'AI coding'); Account.wireNotes(n); } });
+      if (limitHit) Account.handleApiError({ type: 'limit_reached', message: limitHit, upgradeTo: (MetaPlans.ORDER.map(MetaPlans.get).find(p => p.rank > MetaPlans.get(Account.plan().id).rank) || {}).id || null });
+    }
     updateProgress(done, toCode.length);
 
     const subs = Object.keys(substitutes);

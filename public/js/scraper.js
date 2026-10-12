@@ -392,6 +392,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
           </button>
         </div>
       </div>
+      ${window.Account && Account.enabled() && Account.signedIn() ? '<div class="sc-plan">' + Account.noteHTML('scrapeItems', 'the Reddit Scraper') + '</div>' : ''}
 
       <div class="card sc-banner" id="sc-status"><span class="text-muted">Checking the scraper…</span></div>
 

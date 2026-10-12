@@ -21,6 +21,7 @@
   <link rel="stylesheet" href="css/survey-studio.css">
   <link rel="stylesheet" href="css/survey-blocks.css">
   <link rel="stylesheet" href="css/tour.css">
+  <link rel="stylesheet" href="css/account.css">
 </head>
 <body class="studio-page">
 
@@ -35,6 +36,7 @@
     <a href="index.html">Home</a>
     <a href="app.html">Coding app</a>
     <button type="button" class="st-tour" id="st-tour" title="Hands-on tutorial and a quick tour of Survey Studio">Tutorial &amp; tour</button>
+    <span id="st-account" hidden></span>
   </nav>
 </header>
 
@@ -56,6 +58,9 @@
 <div class="notif-stack" id="notif-stack"></div>
 
 <script src="js/local-db.js"></script>
+<script src="js/plans.js"></script>
+<script src="js/account.js"></script>
+<script src="js/cloud-sync.js"></script>
 <script src="js/survey/studio-shell.js"></script>
 <script src="js/survey/survey-core.js"></script>
 <script src="js/survey/survey-fonts.js"></script>
@@ -74,6 +79,6 @@
 <script src="js/tour.js"></script>
 <script src="js/survey/studio-tour.js"></script>
 <script src="js/survey/studio-tutorial.js"></script>
-<script>StudioTour.init();</script>
+<script>StudioTour.init(); Account.mountChip(document.getElementById('st-account'));</script>
 </body>
 </html>

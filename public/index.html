@@ -202,6 +202,8 @@
   .foot-links a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
 
   /* Subtle entrance for the composition only */
+  #plans .acct-plan-act .btn { width: 100%; justify-content: center; }
+  .plans-fine { margin-top: 18px; color: var(--muted); font-size: var(--t-sm, 14px); }
   @media (prefers-reduced-motion: no-preference) {
     .workspace .panel { animation: rise .5s ease both; }
     .workspace .panel:nth-child(2) { animation-delay: .08s; } .workspace .panel:nth-child(3) { animation-delay: .16s; } .workspace .panel:nth-child(4) { animation-delay: .24s; }
@@ -243,6 +245,7 @@
     .hero-note > * + *::before { display: none; }
   }
 </style>
+<link rel="stylesheet" href="css/account.css">
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>
@@ -255,8 +258,10 @@
       <a href="#workflow">Workflow</a>
       <a href="#audiences">Who it's for</a>
       <a href="#integrity">Research integrity</a>
+      <a href="#plans" data-accounts hidden>Plans</a>
     </nav>
     <div class="head-actions">
+      <a class="btn btn-quiet" href="app.html#account" data-accounts hidden>Sign in</a>
       <a class="btn btn-quiet" href="studio.html">Survey Studio</a>
       <a class="btn btn-primary" href="app.html">Open the platform</a>
     </div>
@@ -454,10 +459,23 @@
         <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
           <div><strong>Measured reliability</strong><p>Two independent human coders, standard agreement statistics with their inputs stated, and adjudication kept apart from the original decisions.</p></div></li>
         <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
-          <div><strong>Privacy by default</strong><p>Projects stay in your browser. Surveys are anonymous unless you add identification, and session timelines are recorded only when respondents are told first.</p></div></li>
+          <div><strong>Privacy by default</strong><p><span data-accounts-text="Projects are private to your account — only you can open them.">Projects stay in your browser.</span> Surveys are anonymous unless you add identification, and session timelines are recorded only when respondents are told first.</p></div></li>
         <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="20 6 9 17 4 12"/></svg>
           <div><strong>Platform rules respected</strong><p>Data collection goes through Reddit's API, RedditAPIs.com or ordinary page requests, keeps to rate limits, and never logs in, solves CAPTCHAs or gets around blocks.</p></div></li>
       </ul>
+    </div>
+  </section>
+
+  <!-- ── Plans (shown when this server has accounts; plans.js) ── -->
+  <section class="section" id="plans" aria-labelledby="plans-title" data-accounts hidden>
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">Plans</p>
+        <h2 id="plans-title">Start free. Add methods as your project grows.</h2>
+        <p>Every account can import, code and analyse its own data. Paid plans add Survey Studio, Reddit data collection and network analysis.</p>
+      </div>
+      <div class="acct-plans" id="plan-cards"></div>
+      <p class="plans-fine">AI coding posts reset every Monday; other limits reset monthly or daily. Change or cancel any time from your account.</p>
     </div>
   </section>
 
@@ -465,7 +483,7 @@
   <section class="final" aria-labelledby="final-title">
     <div class="wrap">
       <h2 id="final-title">Start with the method you need. Add the others when your question does.</h2>
-      <p>No account and no installation for your team — open the platform in a browser and begin a project.</p>
+      <p data-accounts-text="Create a free account and begin a project — nothing to install.">No account and no installation for your team — open the platform in a browser and begin a project.</p>
       <div class="cta-row">
         <a class="btn btn-primary btn-lg" href="app.html#projects">Start a research project</a>
         <a class="btn btn-outline btn-lg" href="studio.html">Open Survey Studio</a>
@@ -486,5 +504,26 @@
     </nav>
   </div>
 </footer>
+<script src="js/plans.js"></script>
+<script>
+  // Accounts on (this server has Supabase settings): show sign-in and the plans
+  (async function () {
+    let cfg = null;
+    try { const r = await fetch('/api/account/config'); cfg = r.ok ? await r.json() : null; } catch (e) { cfg = null; }
+    if (!cfg || !cfg.enabled) return;
+    document.querySelectorAll('[data-accounts]').forEach(el => { el.hidden = false; });
+    document.querySelectorAll('[data-accounts-text]').forEach(el => { el.textContent = el.getAttribute('data-accounts-text'); });
+    let prices = {};
+    try { const r = await fetch('/api/account/prices'); prices = r.ok ? (await r.json()).prices || {} : {}; } catch (e) { prices = {}; }
+    const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');
+    const price = id => { const p = prices[id]; if (!p) return id === 'free' ? '$0' : ''; return (p.amount / 100).toLocaleString(undefined, { style: 'currency', currency: p.currency.toUpperCase(), minimumFractionDigits: p.amount % 100 ? 2 : 0 }) + (p.interval ? ' / ' + p.interval : ''); };
+    document.getElementById('plan-cards').innerHTML = MetaPlans.ORDER.map(id => {
+      const p = MetaPlans.get(id);
+      return '<div class="acct-plan' + (id === 'max' ? ' is-highlight' : '') + '"><div class="acct-plan-name">' + p.name + '</div><div class="acct-plan-price">' + esc(price(id)) + '</div>' +
+        '<div class="acct-plan-tag">' + esc(p.tagline) + '</div><ul>' + MetaPlans.highlights(id).map(h => '<li>' + esc(h) + '</li>').join('') + '</ul>' +
+        '<div class="acct-plan-act"><a class="btn ' + (id === 'max' ? 'btn-primary' : 'btn-outline') + '" href="app.html#account">' + (id === 'free' ? 'Create a free account' : 'Choose ' + p.name) + '</a></div></div>';
+    }).join('');
+  })();
+</script>
 </body>
 </html>

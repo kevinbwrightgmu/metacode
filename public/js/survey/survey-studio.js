@@ -113,6 +113,7 @@ const SurveyStudio = (() => {
     container.innerHTML = '<div class="ssd">' +
       '<div class="view-header ssd-head"><div><h1 class="view-title">Surveys</h1><div class="view-subtitle">Design a survey, publish a link, then inspect every response. Drafts stay in this browser; published versions and their responses are kept on this MetaCode server.</div></div>' +
         '<div class="view-actions"><button class="btn btn-secondary" id="ss-import">Import JSON</button><button class="btn btn-primary" id="ss-new">' + icon(I.plus) + 'Create survey</button></div></div>' +
+      '<div id="ss-plan"></div>' +
       '<div id="ss-legacy"></div>' +
       '<div class="ssd-stats" id="ss-stats" hidden></div>' +
       '<div class="card ss-list-card">' +
@@ -129,6 +130,7 @@ const SurveyStudio = (() => {
     '</div>';
     document.getElementById('ss-new').onclick = () => createFrom('blank');
     document.getElementById('ss-import').onclick = importDialog;
+    drawPlanBanner();
     const search = document.getElementById('ss-search');
     let searchTimer = null;
     search.oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(() => { listPrefs.q = search.value; saveListPrefs(); drawList(); }, 120); };
@@ -142,6 +144,21 @@ const SurveyStudio = (() => {
     tpl.onclick = e => { const b = e.target.closest('[data-tpl]'); if (b) createFrom(b.dataset.tpl); };
     await refreshList();
   }
+
+  // Accounts on (account.js): Survey Studio is part of Pro, Max and Ultra. The server enforces it;
+  // this says so up front, and keeps what's already published reachable (responses, exports).
+  function drawPlanBanner() {
+    const box = document.getElementById('ss-plan');
+    if (!box || !window.Account) return;
+    if (!Account.enabled() || !Account.me() || Account.can('surveys')) { box.innerHTML = ''; return; }
+    const signed = Account.signedIn();
+    box.innerHTML = '<div class="acct-banner"><p>' + (signed ? '<b>Survey Studio is part of the Pro, Max and Ultra plans.</b> You\'re on ' + esc(Account.plan().name) + ' — you can still open your existing surveys, their responses and exports.'
+      : '<b>Sign in to create and publish surveys.</b> Survey Studio is part of the Pro, Max and Ultra plans.') + '</p>' +
+      '<div class="acct-row" style="margin:0">' + (signed ? '' : '<button type="button" class="acct-secondary" data-acct="signin">Sign in</button>') + '<button type="button" class="acct-primary" data-acct="plans" data-plan="pro">See plans</button></div></div>';
+  }
+  if (window.Account) Account.onChange(() => drawPlanBanner());
+  // Signed in on several devices: drafts changed elsewhere appear in the list (cloud-sync.js)
+  document.addEventListener('metacode:synced', e => { if (!current && e.detail && e.detail.kinds.includes('surveys') && document.getElementById('ss-list')) refreshList(); });
 
   // Surveys saved on the server by an older MetaCode (shared by everyone then)
   async function renderLegacy() {
@@ -249,6 +266,7 @@ const SurveyStudio = (() => {
   }
 
   async function createFrom(tplId) {
+    if (window.Account && !Account.require('surveys')) return;
     let doc;
     const builtin = SurveyTemplates.list.find(t => t.id === tplId);
     if (builtin) doc = builtin.build();
@@ -260,6 +278,7 @@ const SurveyStudio = (() => {
   }
 
   function importDialog() {
+    if (window.Account && !Account.require('surveys')) return;
     App.openModal('Import a survey', '<p class="form-hint" style="margin-bottom:10px">Choose a .survey.json file exported from Survey Studio, or paste its JSON.</p>' +
       '<input type="file" id="ss-imp-file" accept=".json,application/json" class="form-input" style="margin-bottom:10px"><textarea id="ss-imp-text" class="form-textarea" rows="8" placeholder="{ … }" style="font-family:var(--f-mono);font-size:12px"></textarea><div class="form-error" id="ss-imp-err"></div>',
     '<button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button><button class="btn btn-primary" id="ss-imp-go">Import</button>');
@@ -918,6 +937,8 @@ const SurveyStudio = (() => {
       const s = doc().settings;
       const priv = Core.privacyOf(doc());
       const blocks = Object.values(doc().elements).filter(el => el && el.type === 'respondent');
+      // IP address, location and session timelines are part of Max and Ultra (accounts on)
+      const maxTag = window.Account && Account.enabled() && Account.me() && !Account.can('surveyAdvanced') ? ' <span class="acct-lock-tag" title="Collecting IP addresses, locations or session timelines needs the Max or Ultra plan">IP, location &amp; timeline: Max</span>' : '';
       const collected = [];
       if (priv.entered.name) collected.push(['Name', 'Entered by the participant']);
       if (priv.entered.participantId) collected.push(['Participant code', 'Entered by the participant']);
@@ -936,13 +957,13 @@ const SurveyStudio = (() => {
         '<section class="ss-card"><div class="ss-card-head"><span>When respondents finish</span></div><div class="ss-settings">' +
           setting('settings.completionTitle', 'Completion title', 'text', s.completionTitle) + setting('settings.completionMessage', 'Completion message', 'text', s.completionMessage) +
         '</div></section>' +
-        '<section class="ss-card" id="ss-set-identity"><div class="ss-card-head"><span>Respondent identification</span><span class="badge ' + (collected.length ? 'badge-amber' : 'badge-green') + '">' + (collected.length ? 'Identifying data collected' : 'Anonymous') + '</span></div>' +
+        '<section class="ss-card" id="ss-set-identity"><div class="ss-card-head"><span>Respondent identification' + maxTag + '</span><span class="badge ' + (collected.length ? 'badge-amber' : 'badge-green') + '">' + (collected.length ? 'Identifying data collected' : 'Anonymous') + '</span></div>' +
           (collected.length ? '<table class="ss-set-table"><thead><tr><th>Field</th><th>Source and visibility</th></tr></thead><tbody>' + collected.map(([a, b]) => '<tr><td>' + esc(a) + '</td><td>' + esc(b) + '</td></tr>').join('') + '</tbody></table>'
             : '<p class="ss-th-note">Responses are anonymous: nothing about the person or their connection is stored with their answers (besides device type and browser language).</p>') +
           '<p class="ss-th-note">' + (blocks.length ? 'Configured in ' + blocks.length + ' Respondent information block' + (blocks.length === 1 ? '' : 's') + ' (Design → select the block).' : 'To collect a participant code or name — or, if lawful and disclosed, IP-based location — add a Respondent information block.') + '</p>' +
           '<div class="ss-btn-row">' + (blocks.length ? '<button type="button" class="ss-chip-btn" data-act="select-resp">Show the block</button>' : '<button type="button" class="ss-chip-btn" data-act="add-resp">Add a Respondent information block</button>') + '</div>' +
         '</section>' +
-        '<section class="ss-card"><div class="ss-card-head"><span>Session timeline</span><span class="badge ' + (mode === 'off' ? 'badge-gray' : 'badge-blue') + '">' + ({ off: 'Off', notice: 'Recorded with notice', consent: 'Recorded with consent' })[mode] + '</span></div>' +
+        '<section class="ss-card"><div class="ss-card-head"><span>Session timeline' + maxTag + '</span><span class="badge ' + (mode === 'off' ? 'badge-gray' : 'badge-blue') + '">' + ({ off: 'Off', notice: 'Recorded with notice', consent: 'Recorded with consent' })[mode] + '</span></div>' +
           '<p class="ss-th-note">Records how each respondent moves through the survey — pages viewed, questions entered, answers selected or changed (the length only for typed text), skipped questions, validation messages, leaving and returning to the tab, submission or abandonment — so you can review response quality in Responses → Timeline. No mouse movement, keystrokes or browsing outside the survey are recorded.</p>' +
           '<div class="ss-seg ss-set-seg" role="radiogroup" aria-label="Session timeline">' + [['off', 'Off'], ['notice', 'Record and tell respondents'], ['consent', 'Ask respondents first']].map(([v, l]) => '<button type="button" class="ss-seg-btn' + (v === mode ? ' is-on' : '') + '" data-rec="' + v + '" role="radio" aria-checked="' + (v === mode) + '">' + esc(l) + '</button>').join('') + '</div>' +
           (mode !== 'off' ? '<label class="ss-setting ss-set-notice"><span>What respondents are told before they begin</span><textarea class="ss-input" rows="4" data-setting="settings.sessionNotice" placeholder="' + esc(Core.SESSION_NOTICE) + '">' + esc(s.sessionNotice || '') + '</textarea><small>Leave empty to use the text shown. With “Ask respondents first”, they choose between “Allow and start” and “Start without the timeline”.</small></label>' : '') +

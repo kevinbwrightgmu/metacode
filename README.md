@@ -13,6 +13,7 @@ The front page (`index.html`) introduces the four research methods — Reddit da
 | **Import Data** | Upload CSVs for posts, engagement metrics, and social network data. The `text` column is optional — if no text-like column is found by name, AI reads the file's structure and maps it for you |
 | **Reddit Scraper** | Sidebar → **Scraper**. Collect subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed Python, JavaScript or TypeScript (custom code mode); live progress, results table/JSON, CSV/JSON export, and **Add to project** to code the posts. Each user can add their own Reddit API keys (kept in their browser). Server requests go through a Python worker (or epoxy-tls over Wisp without Python); an in-app Reddit browser uses Scramjet. See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
 | **AI Scraper (beta)** | Sidebar → **AI Scraper**. Describe the posts you need in a sentence or two; an AI agent on the server (Python) finds where they're discussed, searches, reads posts when unsure and keeps the ones that fit, through Reddit's API. You watch each step; the posts are kept in your browser (IndexedDB), export as JSON, JSON Lines or CSV, and **Add to project** sends them for coding with their engagement. See [collector/README.md](collector/README.md) |
+| **Accounts & plans** | Optional (on when the server has Supabase settings). Sign in with Supabase Auth; your projects and surveys are saved to your account and follow you to any device. Plans from Stripe — **Free** (AI coding of 850 posts a week), **Pro** (basic Survey Studio, a tightly limited Reddit Scraper, 2,300 posts a week), **Max** (full Survey Studio, near-unlimited scraping, social network analysis, 4,000 posts a week), **Ultra** (everything, fair-use ceilings) — with usage limits and request rate limits enforced by the server. See [docs/accounts.md](docs/accounts.md) |
 | **Projects** | Save the open project and keep as many as you like (in your browser — private to you, even on a shared MetaCode server): reopen an earlier one, rename, duplicate, export/import as JSON, delete. A project that's open is saved automatically (Autosave) |
 | **Survey Studio** | Its own page, opened from the front page. A dashboard of your surveys (search, status filter, sort, response counts, quick links to Design / Theme / Preview / Responses). Build surveys on a freeform canvas where every part — down to a single answer choice — can be moved, resized, rotated, scaled, distorted and styled; 30+ element types, layers, groups, components, a theme editor with a live preview and a searchable library of 250+ fonts, Scratch-style block logic (show/hide, skip, branching, variables, formulas, scores, conditional styling, randomization blocks for assigning participants to conditions or messages), device preview and versioned publishing to a public link. An optional **Respondent information** block collects a name or participant code and, if you choose, the IP address and approximate location. **Responses** has a searchable list with a detail view of every answer, an optional disclosed session timeline with step-by-step replay, privacy-conscious CSV/JSON exports and erase/delete controls. Open-text answers can be added to the project for coding. See [docs/survey-studio.md](docs/survey-studio.md) |
 | **Codebook Builder** | Define custom coding dimensions and codes; each code has an optional AI Fine-Tuning Notes field the model reads during Auto-Coding, separate from the Description shown to human coders; import/export as CSV |
@@ -297,6 +298,34 @@ locations aren't recorded; nothing is guessed.
 
 ---
 
+## Accounts and Plans
+
+Accounts are **off** unless the server's `.env` has `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`; then
+MetaCode works as described elsewhere in this README, with no sign-in and no limits. With them on:
+
+- **Sign in** (top bar) with email and password: create an account, confirm the email, reset a forgotten
+  password, or get an email sign-in link. The **Account & plan** page shows the plan, usage meters, plan
+  cards, *Manage subscription* (Stripe's billing portal) and the sync status of your data.
+- **Your work is saved to your account** (Supabase table `metacode_data`, protected by Row Level
+  Security): the open project, saved projects and Survey Studio drafts, on every device you sign in on.
+  The browser keeps working offline and catches up later.
+- **Plans** come from Stripe subscriptions to the Pro (`prod_VQeJh2lPqfmae9`), Max
+  (`prod_VQeK26tKchu1VI`) and Ultra (`prod_VQeKXAJtQQLKqm`) products:
+
+| | Free | Pro | Max | Ultra |
+|---|---|---|---|---|
+| AI coding (posts / week, resets Monday 00:00 UTC) | 850 | 2,300 | 4,000 | 100,000 |
+| Survey Studio | — | Basic: 3 live surveys, 300 responses / month | Full: 25 live, 5,000 / month | Full: 250 live, 100,000 / month |
+| Reddit Scraper | — | 3 jobs / day, 100 items / job, 1,000 / month | 100 jobs / day, 5,000 / job, 100,000 / month, AI Scraper, custom code | 1,000 / day, 25,000 / job, 2,000,000 / month |
+| Social network analysis | — | — | ✓ | ✓ |
+
+Plus daily limits on other AI requests and per-minute request limits. The server checks every sign-in
+with Supabase and every plan with Stripe — the browser is never trusted for either — and counts only work
+that succeeds. Setup (the SQL migration, Supabase Auth URLs, Stripe products, portal and webhook) and the
+full table: **[docs/accounts.md](docs/accounts.md)**.
+
+---
+
 ## Human Coding and Reliability
 
 **Human Coding** has four tabs:
@@ -535,6 +564,10 @@ Reddit browser), MetaCode's server requests data from Reddit. Scrape results are
 (visible only to the browser that started the job) until they expire or the server restarts; they only become part of your project (localStorage) when you
 click **Add to project**.
 
+**With accounts on**, a signed-in person's work is also saved to their account (Supabase, readable only by
+them) — see [Accounts and Plans](#accounts-and-plans). The MetaCode server keeps only usage counters and
+the link between an account and its Stripe customer (`ACCOUNT_DATA_DIR`).
+
 To reset everything: Settings → Danger Zone → Reset All Data.
 
 **Upgrading from an older version?** Older versions saved projects (`project-data/`) and surveys on the
@@ -569,13 +602,16 @@ metacode/
 ├── env-file.js                 Reads .env (encodings, .env.txt, other folders, reload) — see AI Provider
 ├── status-page.js              Status page (status.metac0.de, /status): checks, history, host routing
 ├── model-match.js              "Closest model" ranking, used when the AI service rate-limits a model
-├── owner.js                    Which browser a request comes from (mc_owner cookie) — published surveys, scraper jobs
+├── owner.js                    Whose request it is: the signed-in account, else the browser (mc_owner cookie)
+├── accounts/                   Accounts, plans and limits: Supabase sign-in checks, Stripe plans, usage counters, guards
+├── supabase/migrations/        The Supabase table for accounts' data (Row Level Security)
 ├── projects/                   Import of projects older versions saved on the server (this computer only)
 ├── surveys/                    Survey Studio server side: API routes, publishing, responses, JSON-file store
 ├── docs/reddit-scraper.md      Reddit Scraper guide (also the AI jobs API)
 ├── docs/deploy-vps.md         Running MetaCode on a server: pm2, nginx, HTTPS, troubleshooting
 ├── ecosystem.config.cjs        pm2 process file (one process, fork mode)
 ├── docs/survey-studio.md       Survey Studio guide
+├── docs/accounts.md            Accounts, plans and limits: setup and how it works
 ├── test/                       node:test suites (+ Playwright browser tests) and a mock Reddit
 ├── python/
 │   ├── network_analysis.py     Reads edges JSON on stdin, runs NetworkX, writes stats JSON on stdout

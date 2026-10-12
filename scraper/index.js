@@ -198,8 +198,13 @@ function createScraper(opts) {
     logToConsole: opts.logToConsole
   });
   const onUpgrade = createUpgradeHandler(config);
+  // Plans and limits (accounts/): who may scrape, and how much. Without a policy nothing is limited.
+  const policy = opts.policy || null;
   jobs.on('event', (job, type, payload) => {
-    if (type === 'status' && FINISHED.has(payload.status)) relay.cancelJob(job.id);
+    if (type === 'status' && FINISHED.has(payload.status)) {
+      relay.cancelJob(job.id);
+      if (policy && policy.jobFinished) policy.jobFinished(job);
+    }
   });
   jobs.on('removed', job => relay.cancelJob(job.id));
   relay.ownerOfJob = jobId => { const j = jobs.get(jobId); return j ? j.owner || null : null; };
@@ -367,6 +372,14 @@ function createScraper(opts) {
   });
 
   router.get('/status', (req, res) => res.json(status(req)));
+  if (policy) {
+    router.use((req, res, next) => {
+      Promise.resolve(policy.use(req)).then(e => {
+        if (!e) return next();
+        res.status(e.status).json({ error: Object.assign({ message: e.message, type: e.type }, e.extra || {}) });
+      }, err => sendError(res, err));
+    });
+  }
 
 
   router.post('/resolve', (req, res) => {
@@ -447,10 +460,15 @@ function createScraper(opts) {
     res.json({ jobs: jobs.list().filter(j => (j.owner || null) === owner).map(j => jobs.summary(j)) });
   });
 
-  router.post('/jobs', (req, res) => {
+  router.post('/jobs', async (req, res) => {
     try {
       const spec = parseSpec(req.body);
       spec.owner = ownerOf(req);
+      if (policy) {
+        const running = jobs.list().filter(j => (j.owner || null) === spec.owner && !FINISHED.has(j.status)).length;
+        const e = await policy.job(req, spec, { running });
+        if (e) return res.status(e.status).json({ error: Object.assign({ message: e.message, type: e.type }, e.extra || {}) });
+      }
       const job = jobs.create(spec);
       res.status(202).json({ job: jobs.summary(job) });
     } catch (err) { sendError(res, err); }
@@ -625,6 +643,12 @@ function createScraper(opts) {
 
   return {
     config, http, jobs, relay, router, scramjetRouter, onUpgrade, status, wispPlainHttp: plainHttpHandler,
+    // Signing in: a browser's running and finished jobs move to the account
+    reassignOwner(from, to) {
+      let n = 0;
+      if (from && to && from !== to) jobs.list().forEach(j => { if (j.owner === from) { j.owner = to; n++; } });
+      return n;
+    },
     setPort(p) {
       port = p;
       if (typeof transport.choose === 'function') transport.choose().catch(() => {});

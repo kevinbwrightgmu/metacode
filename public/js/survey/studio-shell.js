@@ -61,6 +61,7 @@
     setState(patch) {
       const s = Object.assign(readState(), patch);
       try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch (e) { App.notify('The project couldn\'t be saved in this browser.', 'error'); }
+      if (root.CloudSync) { try { root.CloudSync.noteWorkspace(); } catch (e) { /* never block saving */ } }
     },
     setViewCleanup(fn) { viewCleanup = fn; }
   };

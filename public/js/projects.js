@@ -425,5 +425,10 @@ const ProjectsView = (() => {
     } catch (e) { /* ignore */ }
   });
 
+  // Signed in on several devices: saved projects changed elsewhere show up here (cloud-sync.js)
+  document.addEventListener('metacode:synced', e => {
+    if (e.detail && e.detail.kinds.includes('projects') && App.getCurrentView && App.getCurrentView().id === 'projects') render();
+  });
+
   return { render, noteChange, saveNow, link: readLink };
 })();

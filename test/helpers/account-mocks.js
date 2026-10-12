@@ -1,0 +1,224 @@
+// Local stand-ins for the services accounts/ talks to, so tests never reach the
+// real Supabase project or Stripe:
+//   • mockSupabase(): Auth (password sign-in, sign-up, refresh, user, logout) and
+//     a small PostgREST for the metacode_data table, with per-user row isolation
+//     (what Row Level Security does in the real database).
+//   • mockStripe(): customers, subscriptions, products, checkout and portal
+//     sessions — enough of the REST API for accounts/billing.js.
+// These prove MetaCode's own code against the documented API shapes; they don't
+// prove the live services are configured.
+const http = require('http');
+const crypto = require('crypto');
+
+const b64u = obj => Buffer.from(JSON.stringify(obj)).toString('base64url');
+function jwtFor(sub, email, ttlSec) {
+  const exp = Math.floor(Date.now() / 1000) + (ttlSec || 3600);
+  return b64u({ alg: 'ES256', typ: 'JWT' }) + '.' + b64u({ sub, email, role: 'authenticated', aud: 'authenticated', exp }) + '.' + crypto.randomBytes(16).toString('base64url');
+}
+const readBody = req => new Promise(resolve => { let b = ''; req.on('data', c => { b += c; }); req.on('end', () => resolve(b)); });
+const listen = server => new Promise(resolve => server.listen(0, '127.0.0.1', () => resolve('http://127.0.0.1:' + server.address().port)));
+const close = server => new Promise(resolve => { server.closeAllConnections(); server.close(resolve); });
+
+function mockSupabase(opts) {
+  opts = opts || {};
+  const users = new Map();       // email → { id, email, password, confirmed }
+  const tokens = new Map();      // access token → user id
+  const refresh = new Map();     // refresh token → user id
+  const rows = [];               // metacode_data rows
+  const calls = [];
+  let clock = Date.now();
+  const nextStamp = () => { clock = Math.max(clock + 1, Date.now()); return new Date(clock).toISOString(); };
+
+  function addUser(email, password, o) {
+    const u = { id: (o && o.id) || crypto.randomUUID(), email: email.toLowerCase(), password, confirmed: !(o && o.unconfirmed) };
+    users.set(u.email, u);
+    return u;
+  }
+  function issue(u) {
+    const access = jwtFor(u.id, u.email, 3600);
+    const r = crypto.randomBytes(12).toString('hex');
+    tokens.set(access, u.id);
+    refresh.set(r, u.id);
+    return { access_token: access, token_type: 'bearer', expires_in: 3600, expires_at: Math.floor(Date.now() / 1000) + 3600, refresh_token: r, user: publicUser(u) };
+  }
+  const publicUser = u => ({ id: u.id, aud: 'authenticated', role: 'authenticated', email: u.email, email_confirmed_at: u.confirmed ? new Date().toISOString() : null, app_metadata: { provider: 'email' }, user_metadata: {}, created_at: new Date().toISOString() });
+  const userById = id => Array.from(users.values()).find(u => u.id === id) || null;
+  const bearerUser = req => { const m = String(req.headers.authorization || '').match(/^Bearer (.+)$/); return m && tokens.has(m[1]) ? userById(tokens.get(m[1])) : null; };
+
+  // PostgREST filters used by cloud-sync.js: col=eq.v, col=gt.v, col=in.(a,b)
+  function matches(row, params) {
+    for (const [k, v] of params) {
+      if (['select', 'order', 'limit', 'offset', 'on_conflict', 'columns'].includes(k)) continue;
+      const m = v.match(/^(eq|gt|gte|in)\.(.*)$/);
+      if (!m) continue;
+      const val = row[k] === undefined ? null : row[k];
+      if (m[1] === 'eq' && String(val) !== decodeURIComponent(m[2])) return false;
+      if (m[1] === 'gt' && !(String(val) > m[2])) return false;
+      if (m[1] === 'gte' && !(String(val) >= m[2])) return false;
+      if (m[1] === 'in') { const list = m[2].replace(/^\(|\)$/g, '').split(',').map(s => decodeURIComponent(s.replace(/^"|"$/g, ''))); if (!list.includes(String(val))) return false; }
+    }
+    return true;
+  }
+  function project(row, select) {
+    if (!select || select === '*') return Object.assign({}, row);
+    const out = {};
+    select.split(',').forEach(c => { out[c.trim()] = row[c.trim()]; });
+    return out;
+  }
+
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://x');
+    const body = await readBody(req);
+    calls.push({ method: req.method, path: url.pathname, apikey: req.headers.apikey || null });
+    const json = (status, obj, headers) => { res.writeHead(status, Object.assign({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': '*', 'Access-Control-Expose-Headers': '*' }, headers || {})); res.end(obj === undefined ? '' : JSON.stringify(obj)); };
+    if (req.method === 'OPTIONS') return json(204);
+    if (opts.apikey && req.headers.apikey !== opts.apikey) return json(401, { message: 'Invalid API key' });
+    const p = url.pathname;
+    let data = {};
+    try { data = body ? JSON.parse(body) : {}; } catch (e) { data = {}; }
+
+    if (p === '/auth/v1/token' && url.searchParams.get('grant_type') === 'password') {
+      const u = users.get(String(data.email || '').toLowerCase());
+      if (!u || u.password !== data.password) return json(400, { error: 'invalid_grant', error_description: 'Invalid login credentials', code: 'invalid_credentials', msg: 'Invalid login credentials' });
+      if (!u.confirmed) return json(400, { error: 'invalid_grant', code: 'email_not_confirmed', msg: 'Email not confirmed' });
+      return json(200, issue(u));
+    }
+    if (p === '/auth/v1/token' && url.searchParams.get('grant_type') === 'refresh_token') {
+      const id = refresh.get(data.refresh_token);
+      if (!id) return json(400, { error: 'invalid_grant', msg: 'Invalid Refresh Token' });
+      refresh.delete(data.refresh_token);
+      return json(200, issue(userById(id)));
+    }
+    if (p === '/auth/v1/signup') {
+      if (users.has(String(data.email || '').toLowerCase())) return json(422, { code: 'user_already_exists', msg: 'User already registered' });
+      const u = addUser(String(data.email), String(data.password), { unconfirmed: !!opts.confirmEmail });
+      if (opts.confirmEmail) return json(200, publicUser(u));
+      return json(200, issue(u));
+    }
+    if (p === '/auth/v1/user' && req.method === 'GET') {
+      const u = bearerUser(req);
+      return u ? json(200, publicUser(u)) : json(401, { code: 'bad_jwt', msg: 'invalid JWT' });
+    }
+    if (p === '/auth/v1/user' && req.method === 'PUT') {
+      const u = bearerUser(req);
+      if (!u) return json(401, { msg: 'invalid JWT' });
+      if (data.password) u.password = data.password;
+      return json(200, publicUser(u));
+    }
+    if (p === '/auth/v1/logout') {
+      const m = String(req.headers.authorization || '').match(/^Bearer (.+)$/);
+      if (m) tokens.delete(m[1]);
+      return json(204);
+    }
+    if (p === '/auth/v1/recover' || p === '/auth/v1/otp') return json(200, {});
+    if (p === '/auth/v1/settings') return json(200, { external: { email: true }, disable_signup: false });
+
+    if (p === '/rest/v1/metacode_data') {
+      const u = bearerUser(req);
+      if (!u) return json(401, { code: 'PGRST301', message: 'JWT invalid' });
+      const params = Array.from(url.searchParams.entries());
+      const mine = rows.filter(r => r.user_id === u.id);
+      if (req.method === 'GET') {
+        let list = mine.filter(r => matches(r, params));
+        list.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
+        const limit = Number(url.searchParams.get('limit')) || list.length;
+        return json(200, list.slice(0, limit).map(r => project(r, url.searchParams.get('select'))));
+      }
+      if (req.method === 'POST') {
+        const list = Array.isArray(data) ? data : [data];
+        for (const r of list) {
+          if (r.user_id && r.user_id !== u.id) return json(403, { code: '42501', message: 'new row violates row-level security policy for table "metacode_data"' });
+          const row = { user_id: u.id, kind: r.kind, id: r.id, data: r.data === undefined ? null : r.data, deleted: !!r.deleted, updated_at: nextStamp() };
+          const i = rows.findIndex(x => x.user_id === u.id && x.kind === row.kind && x.id === row.id);
+          if (i >= 0) rows[i] = row; else rows.push(row);
+        }
+        return json(201, undefined);
+      }
+      if (req.method === 'DELETE') {
+        for (let i = rows.length - 1; i >= 0; i--) if (rows[i].user_id === u.id && matches(rows[i], params)) rows.splice(i, 1);
+        return json(204);
+      }
+      return json(405, { message: 'method' });
+    }
+    json(404, { message: 'not found: ' + p });
+  });
+
+  return {
+    server, users, rows, calls, addUser, issue, jwtFor,
+    async start() { this.url = await listen(server); return this.url; },
+    close: () => close(server)
+  };
+}
+
+function mockStripe(opts) {
+  opts = opts || {};
+  const customers = new Map();     // id → { id, email, metadata }
+  const subscriptions = [];        // { id, customer, status, items: { data: [{ price: { id, product } }] }, current_period_end, cancel_at_period_end }
+  const products = Object.assign({}, opts.products || {});   // id → { id, default_price, active }
+  const calls = [];
+  const sessions = [];
+  const parseForm = body => {
+    const out = {};
+    new URLSearchParams(body).forEach((v, k) => { out[k] = v; });
+    return out;
+  };
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, 'http://x');
+    const body = await readBody(req);
+    calls.push({ method: req.method, path: url.pathname, query: url.search, auth: req.headers.authorization || null, idempotency: req.headers['idempotency-key'] || null });
+    const json = (status, obj) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
+    if (req.headers.authorization !== 'Bearer ' + (opts.key || 'sk_test_mock')) return json(401, { error: { type: 'invalid_request_error', message: 'Invalid API Key provided' } });
+    const p = url.pathname;
+    if (p === '/v1/customers/search') {
+      const m = String(url.searchParams.get('query') || '').match(/metadata\['supabase_user_id'\]:'([^']+)'/);
+      const found = Array.from(customers.values()).filter(c => m && c.metadata.supabase_user_id === m[1]);
+      return json(200, { object: 'search_result', data: found });
+    }
+    if (p === '/v1/customers' && req.method === 'POST') {
+      const f = parseForm(body);
+      const id = 'cus_' + crypto.randomBytes(6).toString('hex');
+      const c = { id, object: 'customer', email: f.email || null, metadata: { supabase_user_id: f['metadata[supabase_user_id]'] } };
+      customers.set(id, c);
+      return json(200, c);
+    }
+    if (p === '/v1/subscriptions' && req.method === 'GET') {
+      return json(200, { object: 'list', data: subscriptions.filter(s => s.customer === url.searchParams.get('customer')) });
+    }
+    const price = p.match(/^\/v1\/prices\/([^/]+)$/);
+    if (price) { const amounts = { price_pro: 900, price_max: 2900, price_ultra: 7900 }; return amounts[price[1]] ? json(200, { id: price[1], object: 'price', unit_amount: amounts[price[1]], currency: 'usd', recurring: { interval: 'month' } }) : json(404, { error: { message: 'No such price' } }); }
+    const prod = p.match(/^\/v1\/products\/([^/]+)$/);
+    if (prod) return products[prod[1]] ? json(200, products[prod[1]]) : json(404, { error: { type: 'invalid_request_error', message: 'No such product' } });
+    if (p === '/v1/checkout/sessions' && req.method === 'POST') {
+      const f = parseForm(body);
+      sessions.push(f);
+      return json(200, { id: 'cs_test_' + sessions.length, object: 'checkout.session', url: 'https://checkout.stripe.test/c/pay/cs_test_' + sessions.length, form: f });
+    }
+    if (p === '/v1/billing_portal/sessions' && req.method === 'POST') {
+      const f = parseForm(body);
+      return json(200, { id: 'bps_1', url: 'https://billing.stripe.test/p/session/' + f.customer });
+    }
+    json(404, { error: { type: 'invalid_request_error', message: 'Unrecognized request URL' } });
+  });
+  return {
+    server, customers, subscriptions, products, calls, sessions,
+    // Gives a customer (made for userId if needed) a subscription to product
+    subscribe(userId, product, status) {
+      let c = Array.from(customers.values()).find(x => x.metadata.supabase_user_id === userId);
+      if (!c) { c = { id: 'cus_' + crypto.randomBytes(6).toString('hex'), object: 'customer', metadata: { supabase_user_id: userId } }; customers.set(c.id, c); }
+      const s = { id: 'sub_' + crypto.randomBytes(6).toString('hex'), object: 'subscription', customer: c.id, status: status || 'active', cancel_at_period_end: false,
+        current_period_end: Math.floor(Date.now() / 1000) + 30 * 86400, metadata: { supabase_user_id: userId }, items: { data: [{ price: { id: 'price_' + product, product } }] } };
+      subscriptions.push(s);
+      return s;
+    },
+    async start() { this.url = await listen(server); return this.url; },
+    close: () => close(server)
+  };
+}
+
+// A Stripe-Signature header for body, as Stripe would send it
+function stripeSignature(body, secret, t) {
+  t = t || Math.floor(Date.now() / 1000);
+  return 't=' + t + ',v1=' + crypto.createHmac('sha256', secret).update(t + '.' + body).digest('hex');
+}
+
+module.exports = { mockSupabase, mockStripe, stripeSignature, jwtFor };

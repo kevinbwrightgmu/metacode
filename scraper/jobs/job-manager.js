@@ -49,6 +49,7 @@ class JobManager extends EventEmitter {
       id,
       mode: spec.mode,
       owner: spec.owner || null,      // the browser that started it (owner.js); only it can see the job
+      usage: spec.usage || null,      // the plan usage reserved for it (accounts/), settled when it finishes
       engine: spec.engine || 'server',
       status: 'queued',
       target: spec.target,

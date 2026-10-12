@@ -4,6 +4,11 @@
 // to live on the server — published surveys and their responses, scraper
 // jobs — are tagged with a hash of that secret, so each browser only sees and
 // manages its own. The secret itself is never stored on the server.
+//
+// With accounts on (accounts/), a signed-in request belongs to the account
+// instead — req.account, set from a token Supabase verified, never from
+// anything the browser claims — so the same things follow the person to any
+// browser they sign in on.
 
 const crypto = require('crypto');
 
@@ -17,10 +22,16 @@ function ownerKeyOf(req) {
 }
 
 // → a stable id for this browser (a hash of its secret), or null
+function browserOwnerOf(req) {
+  const key = ownerKeyOf(req);
+  return key ? crypto.createHash('sha256').update('metacode-owner:' + key).digest('hex').slice(0, 40) : null;
+}
+const accountOwner = id => crypto.createHash('sha256').update('metacode-account:' + id).digest('hex').slice(0, 40);
+
+// → the signed-in account's id, else this browser's, else null
 function ownerOf(req) {
   if (req._mcOwner !== undefined) return req._mcOwner;
-  const key = ownerKeyOf(req);
-  req._mcOwner = key ? crypto.createHash('sha256').update('metacode-owner:' + key).digest('hex').slice(0, 40) : null;
+  req._mcOwner = req.account && req.account.id ? accountOwner(req.account.id) : browserOwnerOf(req);
   return req._mcOwner;
 }
 
@@ -33,4 +44,4 @@ function isLoopback(req) {
   return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1';
 }
 
-module.exports = { ownerOf, isLoopback };
+module.exports = { ownerOf, browserOwnerOf, accountOwner, isLoopback };
