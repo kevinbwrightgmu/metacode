@@ -72,6 +72,28 @@ test('settings: accounts need both values, a publishable (never a secret) key, a
   assert.equal(o.stripe.apiBase, 'https://api.stripe.com', 'Stripe calls only go to Stripe (or a local test server)');
 });
 
+test('settings: copy-paste damage in the key is cleaned up, and anything else is named precisely', () => {
+  const KEYV = 'sb_publishable_TESTONLYabc-def_ghijklmn';
+  const url = 'https://abc.supabase.co';
+  // curly quotes, a lookalike dash, invisible characters, odd spaces
+  for (const pasted of ['“' + KEYV + '”', KEYV.replace('-', '\u2011'), '\u200B' + KEYV + '\uFEFF', '\u00A0' + KEYV + ' ', '"' + KEYV + '"', '<' + KEYV + '>']) {
+    const c = accountConfig({ SUPABASE_URL: '“' + url + '”', SUPABASE_PUBLISHABLE_KEY: pasted });
+    assert.equal(c.enabled, true, JSON.stringify(pasted) + ' ' + c.problems.join(' '));
+    assert.equal(c.publishableKey, KEYV);
+    assert.equal(c.supabaseUrl, url);
+  }
+  const typo = accountConfig({ SUPABASE_URL: url, SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_TESTONLY abc' });
+  assert.equal(typo.enabled, false);
+  assert.match(typo.problems[0], /character 24 is a space/);
+  const other = accountConfig({ SUPABASE_URL: url, SUPABASE_PUBLISHABLE_KEY: 'sb_publishable_TESTONLY€abcdef' });
+  assert.match(other.problems[0], /character 24 is “€” \(U\+20AC\), which can't be in a key/);
+  const wrong = accountConfig({ SUPABASE_URL: url, SUPABASE_PUBLISHABLE_KEY: 'pk_live_1234567890abcdef' });
+  assert.match(wrong.problems[0], /should start with sb_publishable_ but starts with “pk_liv…”/);
+  assert.ok(!/1234567890/.test(wrong.problems[0]), 'the rest of the key isn\'t repeated');
+  // A secret key is still refused, quotes or not
+  assert.equal(accountConfig({ SUPABASE_URL: url, SUPABASE_PUBLISHABLE_KEY: '“sb_secret_abcdefghijklmnop”' }).enabled, false);
+});
+
 test('usage counters: reserve up to the limit, give back failures, AI coding posts reset every Monday, others each month and day, survive a restart', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-usage-'));
   let t = Date.parse('2026-10-31T23:00:00Z');            // a Saturday, the last day of October
@@ -259,7 +281,7 @@ test('config and /me: public settings only, sign-in verified with Supabase, plan
   assert.equal(sb.calls.filter(c => c.path === '/auth/v1/user').length, before);
 });
 
-test('AI: sign-in required; coded posts and other requests counted separately; failures aren\'t charged; the monthly limit holds', async () => {
+test('AI: sign-in required; coded posts and other requests counted separately; failures aren\'t charged; the weekly limit holds', async () => {
   const anon = await api('POST', '/api/ai', { body: chat });
   assert.equal(anon.status, 401);
   assert.equal(anon.json.error.type, 'sign_in_required');
