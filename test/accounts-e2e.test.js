@@ -124,13 +124,13 @@ test('accounts in the pages: sign up, keep this browser\'s work, plan gates, che
   assert.match(await page.textContent('.acct-gate'), /the Reddit Scraper is part of the Pro, Max and Ultra plans/i);
   await page.click('.nav-item[data-view="ai-coding"]');
   await page.waitForSelector('#ai-plan-note .acct-note');
-  assert.match(await page.textContent('#ai-plan-note'), /Free plan: 850 of 850 posts left this month/);
+  assert.match(await page.textContent('#ai-plan-note'), /Free plan: 850 of 850 posts left this week/);
 
   // The Account page: plan, usage, plans
   await page.click('#nav-account');
   await page.waitForSelector('.acct-meters');
   assert.match(await page.textContent('.acct-page'), /researcher@example\.org/);
-  assert.match(await page.textContent('.acct-meters'), /Posts coded by the AI\s*0 of 850 posts this month/);
+  assert.match(await page.textContent('.acct-meters'), /Posts coded by the AI\s*0 of 850 posts this week/);
   assert.match(await page.textContent('.acct-meters'), /Scraper jobs\s*Not in your plan/);
   assert.match(await page.textContent('.acct-plans'), /\$29 \/ month/, 'prices come from Stripe');
   assert.match(await page.textContent('#acct-sync'), /Saved to your account/);

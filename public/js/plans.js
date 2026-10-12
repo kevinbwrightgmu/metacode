@@ -4,14 +4,15 @@
    One table, used by the server (accounts/, which enforces it) and by the
    pages (account.js, which shows it), so what people see is what they get.
 
-   Free  (an account, no subscription): AI coding up to 850 posts a month; no
+   Free  (an account, no subscription): AI coding up to 850 posts a week; no
          Survey Studio, no scraping, no network analysis.
    Pro   basic Survey Studio, a tightly limited Reddit Scraper, 2,300 posts.
    Max   full Survey Studio, near-unlimited scraping (custom code and the AI
          Scraper too), social network analysis, 4,000 posts.
    Ultra everything, with fair-use ceilings instead of limits.
 
-   "Per month" means per calendar month (UTC); "per day" per UTC day.
+   "Per week" means Monday to Sunday (the count resets Monday 00:00 UTC);
+   "per month" the calendar month (UTC); "per day" the UTC day.
    Changing a number here changes it everywhere.
    ══════════════════════════════════════════════ */
 (function (root, factory) {
@@ -29,7 +30,7 @@
       tagline: 'Code and analyse your own data',
       features: { surveys: false, scraper: false, aiScraper: false, customCode: false, network: false, surveyAdvanced: false },
       limits: {
-        aiPostsPerMonth: 850, aiRequestsPerDay: 40, aiRequestsPerMinute: 20, aiBatchesAtOnce: 1,
+        aiPostsPerWeek: 850, aiRequestsPerDay: 40, aiRequestsPerMinute: 20, aiBatchesAtOnce: 1,
         scrapeJobsPerDay: 0, scrapeItemsPerJob: 0, scrapeItemsPerMonth: 0, scrapeJobsAtOnce: 0,
         publishedSurveys: 0, surveyResponsesPerMonth: 0,
         networkRunsPerDay: 0
@@ -40,7 +41,7 @@
       tagline: 'Surveys and a first taste of scraping',
       features: { surveys: 'basic', scraper: true, aiScraper: false, customCode: false, network: false, surveyAdvanced: false },
       limits: {
-        aiPostsPerMonth: 2300, aiRequestsPerDay: 150, aiRequestsPerMinute: 40, aiBatchesAtOnce: 2,
+        aiPostsPerWeek: 2300, aiRequestsPerDay: 150, aiRequestsPerMinute: 40, aiBatchesAtOnce: 2,
         scrapeJobsPerDay: 3, scrapeItemsPerJob: 100, scrapeItemsPerMonth: 1000, scrapeJobsAtOnce: 1,
         publishedSurveys: 3, surveyResponsesPerMonth: 300,
         networkRunsPerDay: 0
@@ -51,7 +52,7 @@
       tagline: 'Every method, for serious projects',
       features: { surveys: 'full', scraper: true, aiScraper: true, customCode: true, network: true, surveyAdvanced: true },
       limits: {
-        aiPostsPerMonth: 4000, aiRequestsPerDay: 500, aiRequestsPerMinute: 80, aiBatchesAtOnce: 3,
+        aiPostsPerWeek: 4000, aiRequestsPerDay: 500, aiRequestsPerMinute: 80, aiBatchesAtOnce: 3,
         scrapeJobsPerDay: 100, scrapeItemsPerJob: 5000, scrapeItemsPerMonth: 100000, scrapeJobsAtOnce: 3,
         publishedSurveys: 25, surveyResponsesPerMonth: 5000,
         networkRunsPerDay: 100
@@ -62,7 +63,7 @@
       tagline: 'Unlimited, within fair use',
       features: { surveys: 'full', scraper: true, aiScraper: true, customCode: true, network: true, surveyAdvanced: true },
       limits: {
-        aiPostsPerMonth: 100000, aiRequestsPerDay: 5000, aiRequestsPerMinute: 200, aiBatchesAtOnce: 6,
+        aiPostsPerWeek: 100000, aiRequestsPerDay: 5000, aiRequestsPerMinute: 200, aiBatchesAtOnce: 6,
         scrapeJobsPerDay: 1000, scrapeItemsPerJob: 25000, scrapeItemsPerMonth: 2000000, scrapeJobsAtOnce: 5,
         publishedSurveys: 250, surveyResponsesPerMonth: 100000,
         networkRunsPerDay: 1000
@@ -82,7 +83,7 @@
 
   // Usage counters and the limit each one is checked against
   const METERS = {
-    aiPosts:         { limit: 'aiPostsPerMonth', period: 'month', label: 'Posts coded by the AI', unit: 'posts' },
+    aiPosts:         { limit: 'aiPostsPerWeek', period: 'week', label: 'Posts coded by the AI', unit: 'posts' },
     aiRequests:      { limit: 'aiRequestsPerDay', period: 'day', label: 'Other AI requests (assistant, column detection)', unit: 'requests' },
     scrapeJobs:      { limit: 'scrapeJobsPerDay', period: 'day', label: 'Scraper jobs', unit: 'jobs' },
     scrapeItems:     { limit: 'scrapeItemsPerMonth', period: 'month', label: 'Items scraped', unit: 'items' },
@@ -90,6 +91,8 @@
     networkRuns:     { limit: 'networkRunsPerDay', period: 'day', label: 'Network analyses', unit: 'runs' }
   };
 
+  // "this week", "today"… and how a period is said in a sentence
+  const PERIODS = { month: { this: 'this month', a: 'a month' }, week: { this: 'this week', a: 'a week' }, day: { this: 'today', a: 'a day' } };
   const get = id => PLANS[id] || PLANS.free;
   const has = (planId, feature) => !!get(planId).features[feature];
   // The cheapest plan that includes a feature (or allows more than `atLeast` of a limit)
@@ -101,7 +104,7 @@
   // The lines shown on each plan card
   function highlights(planId) {
     const p = get(planId), L = p.limits, f = p.features, n = v => Number(v).toLocaleString('en-US');
-    const out = ['AI coding: ' + n(L.aiPostsPerMonth) + ' posts / month'];
+    const out = ['AI coding: ' + n(L.aiPostsPerWeek) + ' posts / week'];
     out.push(f.surveys === 'full' ? 'Survey Studio: full — ' + n(L.publishedSurveys) + ' live surveys, ' + n(L.surveyResponsesPerMonth) + ' responses / month'
       : f.surveys === 'basic' ? 'Survey Studio: basic — ' + n(L.publishedSurveys) + ' live surveys, ' + n(L.surveyResponsesPerMonth) + ' responses / month'
       : 'No Survey Studio');
@@ -111,5 +114,5 @@
     return out;
   }
 
-  return { ORDER, PLANS, FEATURES, METERS, get, has, lowestWith, lowestAbove, namesFrom, listNames, highlights };
+  return { ORDER, PLANS, FEATURES, METERS, PERIODS, get, has, lowestWith, lowestAbove, namesFrom, listNames, highlights };
 });

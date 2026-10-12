@@ -15,8 +15,15 @@ const Plans = require('../public/js/plans.js');
 
 const monthOf = t => new Date(t).toISOString().slice(0, 7);
 const dayOf = t => new Date(t).toISOString().slice(0, 10);
+// Weeks run Monday 00:00 UTC to Sunday; a week is named by its Monday (YYYY-MM-DD)
+function mondayOf(t) {
+  const d = new Date(t);
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() - ((d.getUTCDay() + 6) % 7));
+}
+const weekOf = t => new Date(mondayOf(t)).toISOString().slice(0, 10);
 function nextReset(period, t) {
   const d = new Date(t);
+  if (period === 'week') return new Date(mondayOf(t) + 7 * 86400000).toISOString();
   return period === 'month' ? new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() + 1, 1)).toISOString()
     : new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate() + 1)).toISOString();
 }
@@ -65,14 +72,15 @@ class UsageStore {
     const d = this.load();
     const t = this.now();
     let u = d.users[userId];
-    if (!u) u = d.users[userId] = { month: monthOf(t), day: dayOf(t), m: {}, d: {} };
+    if (!u) u = d.users[userId] = { month: monthOf(t), week: weekOf(t), day: dayOf(t), m: {}, w: {}, d: {} };
     if (u.month !== monthOf(t)) { u.month = monthOf(t); u.m = {}; }
+    if (u.week !== weekOf(t) || !u.w) { u.week = weekOf(t); u.w = {}; }
     if (u.day !== dayOf(t)) { u.day = dayOf(t); u.d = {}; }
     return u;
   }
 
-  bucket(u, meter) { return Plans.METERS[meter].period === 'month' ? u.m : u.d; }
-  periodKey(meter) { const t = this.now(); return Plans.METERS[meter].period === 'month' ? monthOf(t) : dayOf(t); }
+  bucket(u, meter) { const p = Plans.METERS[meter].period; return p === 'month' ? u.m : p === 'week' ? u.w : u.d; }
+  periodKey(meter) { const t = this.now(), p = Plans.METERS[meter].period; return p === 'month' ? monthOf(t) : p === 'week' ? weekOf(t) : dayOf(t); }
 
   used(userId, meter) { return this.bucket(this.user(userId), meter)[meter] || 0; }
 
@@ -122,4 +130,4 @@ class UsageStore {
   userOfOwner(owner) { return (owner && this.load().owners[owner]) || null; }
 }
 
-module.exports = { UsageStore, nextReset, monthOf, dayOf };
+module.exports = { UsageStore, nextReset, monthOf, weekOf, dayOf };

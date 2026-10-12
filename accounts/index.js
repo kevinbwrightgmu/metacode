@@ -95,8 +95,8 @@ function createAccounts(opts) {
     const next = Plans.ORDER.map(Plans.get).find(p => p.rank > c.plan.rank && p.limits[m.limit] > r.limit) || null;
     const when = new Date(r.resetsAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: 'UTC' });
     return fail(429, 'limit_reached',
-      'You\'ve used all ' + fmt(r.limit) + ' ' + m.unit + ' ' + (m.period === 'month' ? 'this month' : 'today') + ' on the ' + c.plan.name + ' plan (' + m.label.toLowerCase() + '). ' +
-      'It resets ' + (m.period === 'month' ? 'on ' + when : 'tomorrow') + (next ? ' — or upgrade to ' + next.name + ' for ' + fmt(next.limits[m.limit]) + '.' : '.'),
+      'You\'ve used all ' + fmt(r.limit) + ' ' + m.unit + ' ' + Plans.PERIODS[m.period].this + ' on the ' + c.plan.name + ' plan (' + m.label.toLowerCase() + '). ' +
+      'It resets ' + (m.period === 'day' ? 'tomorrow' : 'on ' + (m.period === 'week' ? new Date(r.resetsAt).toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' }) + ', ' : '') + when) + (next ? ' — or upgrade to ' + next.name + ' for ' + fmt(next.limits[m.limit]) + ' ' + Plans.PERIODS[m.period].a + '.' : '.'),
       { meter, used: r.used, limit: r.limit, resetsAt: r.resetsAt, plan: c.plan.id, upgradeTo: next ? next.id : null });
   }
   function perMinute(c, bucket, limit) {
@@ -126,7 +126,7 @@ function createAccounts(opts) {
   }
 
   // POST /api/ai/batch — AI Coding; each request is one post. Takes what's left of
-  // the month's posts: the rest of the batch is answered with limit_reached
+  // the week's posts: the rest of the batch is answered with limit_reached
   // (req.aiAllowance), and req.settleAi(successes) gives back what didn't succeed.
   async function aiBatch(req, res, next) {
     try {
@@ -138,7 +138,7 @@ function createAccounts(opts) {
       if (!n) return next();            // the route answers bad requests
       const releaseSlot = rate.acquire(c.user.id + ':batch', c.plan.limits.aiBatchesAtOnce);
       if (!releaseSlot) return send(res, fail(429, 'account_rate_limited', 'The ' + c.plan.name + ' plan runs ' + c.plan.limits.aiBatchesAtOnce + ' AI coding run' + (c.plan.limits.aiBatchesAtOnce === 1 ? '' : 's') + ' at a time. Wait for the current one to finish.'));
-      const r = usage.reserve(c.user.id, 'aiPosts', n, c.plan.limits.aiPostsPerMonth);
+      const r = usage.reserve(c.user.id, 'aiPosts', n, c.plan.limits.aiPostsPerWeek);
       if (!r.granted) { releaseSlot(); return send(res, limitError(c, 'aiPosts', r)); }
       req.aiAllowance = r.granted;
       req.aiLimitMessage = limitError(c, 'aiPosts', Object.assign({}, r, { used: r.limit })).message;

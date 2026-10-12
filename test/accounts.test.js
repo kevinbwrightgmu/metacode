@@ -28,14 +28,14 @@ test('plans: what each plan includes, as asked for — and every limit grows wit
   const f = id => Plans.get(id).features, L = id => Plans.get(id).limits;
   // no plan: no surveys, no scraper, AI coding up to 850 posts
   assert.equal(f('free').surveys, false); assert.equal(f('free').scraper, false); assert.equal(f('free').network, false);
-  assert.equal(L('free').aiPostsPerMonth, 850);
+  assert.equal(L('free').aiPostsPerWeek, 850);
   // pro: basic surveys, a tightly limited scraper, 2,300 posts
   assert.equal(f('pro').surveys, 'basic'); assert.equal(f('pro').scraper, true); assert.equal(f('pro').network, false); assert.equal(f('pro').aiScraper, false);
-  assert.equal(L('pro').aiPostsPerMonth, 2300);
+  assert.equal(L('pro').aiPostsPerWeek, 2300);
   assert.ok(L('pro').scrapeItemsPerJob <= 100 && L('pro').scrapeJobsPerDay <= 5, 'pro scraping is tightly limited');
   // max: full surveys, near-unlimited scraping, network analysis, 4,000 posts
   assert.equal(f('max').surveys, 'full'); assert.equal(f('max').network, true); assert.equal(f('max').aiScraper, true);
-  assert.equal(L('max').aiPostsPerMonth, 4000);
+  assert.equal(L('max').aiPostsPerWeek, 4000);
   assert.ok(L('max').scrapeItemsPerMonth >= 100 * L('pro').scrapeItemsPerMonth);
   // ultra: everything, with fair-use ceilings
   Object.keys(f('ultra')).forEach(k => assert.ok(f('ultra')[k], k));
@@ -72,17 +72,19 @@ test('settings: accounts need both values, a publishable (never a secret) key, a
   assert.equal(o.stripe.apiBase, 'https://api.stripe.com', 'Stripe calls only go to Stripe (or a local test server)');
 });
 
-test('usage counters: reserve up to the limit, give back failures, reset each month and day, survive a restart', () => {
+test('usage counters: reserve up to the limit, give back failures, AI coding posts reset every Monday, others each month and day, survive a restart', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-usage-'));
-  let t = Date.parse('2026-10-31T23:00:00Z');
+  let t = Date.parse('2026-10-31T23:00:00Z');            // a Saturday, the last day of October
   const u = new UsageStore(dir, { now: () => t, writeDelayMs: 0 });
   let r = u.reserve('u1', 'aiPosts', 600, 850);
   assert.equal(r.granted, 600);
   r = u.reserve('u1', 'aiPosts', 600, 850);
   assert.equal(r.granted, 250, 'only what is left');
-  assert.equal(r.resetsAt, '2026-11-01T00:00:00.000Z');
+  assert.equal(r.resetsAt, '2026-11-02T00:00:00.000Z', 'AI coding posts reset on Monday 00:00 UTC');
   u.release('u1', 'aiPosts', 100, r.period);
   assert.equal(u.used('u1', 'aiPosts'), 750);
+  const items = u.reserve('u1', 'scrapeItems', 400, 1000);
+  assert.equal(items.resetsAt, '2026-11-01T00:00:00.000Z', 'monthly limits still reset on the 1st');
   u.reserve('u1', 'scrapeJobs', 2, 3);
   u.setCustomer('u1', 'cus_1');
   u.linkOwner('owner-hash', 'u1');
@@ -92,11 +94,19 @@ test('usage counters: reserve up to the limit, give back failures, reset each mo
   assert.equal(again.customerOf('u1'), 'cus_1');
   assert.equal(again.userOfCustomer('cus_1'), 'u1');
   assert.equal(again.userOfOwner('owner-hash'), 'u1');
-  t = Date.parse('2026-11-01T00:30:00Z');
-  assert.equal(again.used('u1', 'aiPosts'), 0, 'a new month starts at zero');
+  // Sunday 1 November: a new month and a new day, but the same week
+  t = Date.parse('2026-11-01T12:00:00Z');
+  assert.equal(again.used('u1', 'aiPosts'), 750, 'the week isn\'t over on the 1st of the month');
+  assert.equal(again.used('u1', 'scrapeItems'), 0, 'a new month starts at zero');
   assert.equal(again.used('u1', 'scrapeJobs'), 0, 'a new day starts at zero');
+  // Sunday 23:59 UTC: still the same week; Monday 00:00 UTC: a new one
+  t = Date.parse('2026-11-01T23:59:59Z');
+  assert.equal(again.used('u1', 'aiPosts'), 750);
+  t = Date.parse('2026-11-02T00:00:00Z');
+  assert.equal(again.used('u1', 'aiPosts'), 0, 'a new week starts at zero');
+  assert.equal(again.reserve('u1', 'aiPosts', 0, 850).resetsAt, '2026-11-09T00:00:00.000Z');
   again.release('u1', 'aiPosts', 50, r.period);
-  assert.equal(again.used('u1', 'aiPosts'), 0, 'last month\'s refunds don\'t touch this month');
+  assert.equal(again.used('u1', 'aiPosts'), 0, 'last week\'s refunds don\'t touch this week');
   assert.equal(fs.statSync(path.join(dir, 'usage.json')).mode & 0o077, 0, 'the file is private to the server user');
   fs.rmSync(dir, { recursive: true, force: true });
 });
@@ -230,7 +240,8 @@ test('config and /me: public settings only, sign-in verified with Supabase, plan
   assert.equal(free.signedIn, true);
   assert.equal(free.user.email, 'free@example.org');
   assert.equal(free.plan.id, 'free');
-  assert.equal(free.limits.aiPostsPerMonth, 850);
+  assert.equal(free.limits.aiPostsPerWeek, 850);
+  assert.equal(free.usage.aiPosts.period, 'week');
   assert.equal(free.usage.aiPosts.limit, 850);
   assert.equal((await me('pro')).plan.id, 'pro');
   const max = await me('max');
@@ -273,7 +284,7 @@ test('AI: sign-in required; coded posts and other requests counted separately; f
   assert.equal(results.filter(l => l.ok).length, 3);
   const refused = results.filter(l => !l.ok);
   assert.equal(refused.length, 2);
-  assert.ok(refused.every(l => l.status === 429 && l.error.type === 'limit_reached' && /850 posts this month on the Free plan/.test(l.error.message) && /upgrade to Pro for 2,300/.test(l.error.message)));
+  assert.ok(refused.every(l => l.status === 429 && l.error.type === 'limit_reached' && /850 posts this week on the Free plan/.test(l.error.message) && /resets on Monday/.test(l.error.message) && /upgrade to Pro for 2,300 a week/.test(l.error.message)));
   assert.ok(lines[lines.length - 1].done);
   u = (await me('free')).usage;
   assert.equal(u.aiPosts.used, 850);

@@ -30,7 +30,7 @@ changing a number there changes it everywhere.
 
 | | Free | Pro | Max | Ultra |
 |---|---|---|---|---|
-| **AI coding** (posts coded by the AI, per month) | 850 | 2,300 | 4,000 | 100,000 |
+| **AI coding** (posts coded by the AI, per week — resets Monday 00:00 UTC) | 850 | 2,300 | 4,000 | 100,000 |
 | Other AI requests per day (assistant, column detection, Test connection) | 40 | 150 | 500 | 5,000 |
 | AI requests per minute · AI coding runs at once | 20 · 1 | 40 · 2 | 80 · 3 | 200 · 6 |
 | **Survey Studio** | — | Basic | Full | Full |
@@ -44,7 +44,8 @@ changing a number there changes it everywhere.
 Every account, Free included, can import data, build codebooks, code by hand, compute reliability, see
 metrics and export.
 
-- **Periods:** "Per month" is the calendar month in UTC (limits reset on the 1st); "per day" ends at
+- **Periods:** "Per week" (AI coding posts) runs Monday to Sunday and resets every Monday at 00:00 UTC.
+  "Per month" is the calendar month in UTC (limits reset on the 1st); "per day" ends at
   midnight UTC.
 - **Free has no subscription:** it's simply a signed-in account.
 - **Ultra's numbers are fair-use ceilings:** they stop runaway use, not normal work.
@@ -168,7 +169,7 @@ browser ── mc_session cookie (access token) ──▶ MetaCode server
   |---|---|---|
   | 401 | `sign_in_required` | Needs an account (or the sign-in expired) |
   | 402 | `plan_required` | Not in this plan — `requiredPlan`, `feature` say what would include it |
-  | 429 | `limit_reached` | A monthly/daily allowance is used up — `meter`, `used`, `limit`, `resetsAt`, `upgradeTo` |
+  | 429 | `limit_reached` | A weekly, monthly or daily allowance is used up — `meter`, `used`, `limit`, `resetsAt`, `upgradeTo` |
   | 429 | `account_rate_limited` | Too many requests a minute, or too many runs at once (`Retry-After`) |
   | 503 | `account_unavailable` | Supabase or Stripe couldn't be reached just now |
 
@@ -176,7 +177,7 @@ browser ── mc_session cookie (access token) ──▶ MetaCode server
 
 | Feature | Server route | Rule |
 |---|---|---|
-| AI (all features) | `POST /api/ai`, `POST /api/ai/batch` | Signed in; per-minute rate; AI coding posts per month (batch requests and `X-MetaCode-Feature: coding`); other AI requests per day; AI coding runs at once |
+| AI (all features) | `POST /api/ai`, `POST /api/ai/batch` | Signed in; per-minute rate; AI coding posts per week (batch requests and `X-MetaCode-Feature: coding`); other AI requests per day; AI coding runs at once |
 | Reddit Scraper | `/api/scraper/*` except `GET /status` | Pro+; custom code and AI mode Max+; scrapes at once; jobs per day; items per job and per month |
 | In-app Reddit browser | WebSocket `/wisp/` | Pro+ (the server's own connection from this machine is exempt) |
 | Network analysis | `POST /api/network/analyze` | Max+; runs per day |

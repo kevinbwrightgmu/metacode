@@ -248,7 +248,7 @@
           (mode === 'signin' ? '<div class="acct-links"><button type="button" data-act="reset">Forgot password?</button><button type="button" data-act="link">Email me a sign-in link</button></div>' : '') +
           (mode === 'reset' ? '<div class="acct-links"><button type="button" data-mode="signin">Back to sign in</button></div>' : '') +
         '</form>' +
-        '<p class="acct-fine">' + (mode === 'signup' ? 'Free accounts include AI coding of up to ' + fmt(Plans.get('free').limits.aiPostsPerMonth) + ' posts a month. ' : '') +
+        '<p class="acct-fine">' + (mode === 'signup' ? 'Free accounts include AI coding of up to ' + fmt(Plans.get('free').limits.aiPostsPerWeek) + ' posts a week. ' : '') +
           'Your projects and surveys are saved to your account, so they\'re there on any device you sign in on.</p>';
       body.querySelectorAll('[data-mode]').forEach(b => { b.onclick = () => { opts.email = body.querySelector('[name=email]').value; mode = b.dataset.mode; draw(); }; });
       const form = body.querySelector('form');
@@ -367,7 +367,7 @@
     if (!enabled()) return;
     await loadPrices();
     const d = dialog('MetaCode plans', (opts.reason ? '<p class="acct-reason">' + esc(opts.reason) + '</p>' : '') + plansHTML(opts.highlight) +
-      '<p class="acct-fine">Plans renew monthly and can be changed or cancelled any time from Account → Manage subscription. Limits reset on the 1st of each month (daily limits at midnight UTC).</p>', { wide: true });
+      '<p class="acct-fine">Plans renew monthly and can be changed or cancelled any time from Account → Manage subscription. AI coding posts reset every Monday (00:00 UTC); other monthly limits on the 1st, daily ones at midnight UTC.</p>', { wide: true });
     wirePlans(d.el, d.close);
   }
 
@@ -502,18 +502,18 @@
     if (!u.limit) return '<div class="acct-meter is-none"><div class="acct-meter-top"><span>' + esc(m.label) + '</span><span>Not in your plan</span></div></div>';
     const pct = Math.min(100, Math.round(u.used / u.limit * 100));
     const reset = new Date(u.resetsAt);
-    return '<div class="acct-meter' + (pct >= 100 ? ' is-full' : pct >= 80 ? ' is-high' : '') + '"><div class="acct-meter-top"><span>' + esc(opts.label || m.label) + '</span><span><b>' + fmt(u.used) + '</b> of ' + fmt(u.limit) + ' ' + esc(m.unit) + ' ' + (m.period === 'month' ? 'this month' : 'today') + '</span></div>' +
+    return '<div class="acct-meter' + (pct >= 100 ? ' is-full' : pct >= 80 ? ' is-high' : '') + '"><div class="acct-meter-top"><span>' + esc(opts.label || m.label) + '</span><span><b>' + fmt(u.used) + '</b> of ' + fmt(u.limit) + ' ' + esc(m.unit) + ' ' + Plans.PERIODS[m.period].this + '</span></div>' +
       '<div class="acct-bar" role="progressbar" aria-valuemin="0" aria-valuemax="' + u.limit + '" aria-valuenow="' + u.used + '" aria-label="' + esc(m.label) + '"><span style="width:' + pct + '%"></span></div>' +
-      '<div class="acct-meter-foot">Resets ' + esc(reset.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })) + (m.period === 'day' ? ' (midnight UTC)' : '') + '</div></div>';
+      '<div class="acct-meter-foot">Resets ' + esc(reset.toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })) + (m.period === 'day' ? ' (midnight UTC)' : m.period === 'week' ? ' (Monday, 00:00 UTC)' : '') + '</div></div>';
   }
   // A one-line note for a page (e.g. AI Coding): sign in / what's left this month
   function noteHTML(meter, what) {
     if (!enabled() || !known()) return '';
-    if (!signedIn()) return '<div class="acct-note">Sign in to use ' + esc(what) + ' — free accounts include ' + fmt(Plans.get('free').limits[Plans.METERS[meter].limit]) + ' ' + esc(Plans.METERS[meter].unit) + ' a ' + Plans.METERS[meter].period + '. <button type="button" class="acct-linkbtn" data-acct="signin">Sign in</button></div>';
+    if (!signedIn()) return '<div class="acct-note">Sign in to use ' + esc(what) + ' — free accounts include ' + fmt(Plans.get('free').limits[Plans.METERS[meter].limit]) + ' ' + esc(Plans.METERS[meter].unit) + ' ' + Plans.PERIODS[Plans.METERS[meter].period].a + '. <button type="button" class="acct-linkbtn" data-acct="signin">Sign in</button></div>';
     const u = usageOf(meter);
     if (!u) return '';
     const left = Math.max(0, u.limit - u.used);
-    return '<div class="acct-note' + (left === 0 ? ' is-full' : '') + '">' + esc(plan().name) + ' plan: <b>' + fmt(left) + '</b> of ' + fmt(u.limit) + ' ' + esc(Plans.METERS[meter].unit) + ' left this ' + Plans.METERS[meter].period + '. ' +
+    return '<div class="acct-note' + (left === 0 ? ' is-full' : '') + '">' + esc(plan().name) + ' plan: <b>' + fmt(left) + '</b> of ' + fmt(u.limit) + ' ' + esc(Plans.METERS[meter].unit) + ' left ' + Plans.PERIODS[Plans.METERS[meter].period].this + '. ' +
       (plan().id !== 'ultra' ? '<button type="button" class="acct-linkbtn" data-acct="plans">More with ' + esc((Plans.ORDER.map(Plans.get).find(p => p.rank > Plans.get(plan().id).rank) || {}).name || '') + '</button>' : '') + '</div>';
   }
   function wireNotes() { /* the note buttons are handled by one listener on the page (below) */ }

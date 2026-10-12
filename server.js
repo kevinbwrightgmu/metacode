@@ -1781,7 +1781,7 @@ app.post('/api/ai/batch', accounts.aiBatch, async (req, res) => {
   const send = obj => { if (!res.writableEnded && !client.signal.aborted) res.write(JSON.stringify(obj) + '\n'); };
   const wait = ms => new Promise(resolve => { const t = setTimeout(resolve, ms); client.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true }); });
 
-  // The plan's posts left this month (accounts/): the rest of the batch isn't sent
+  // The plan's posts left this week (accounts/): the rest of the batch isn't sent
   const allowance = Number.isFinite(req.aiAllowance) ? req.aiAllowance : list.length;
   list.slice(allowance).forEach(r => send({ id: r.id === undefined ? null : r.id, ok: false, status: 429, error: { message: req.aiLimitMessage || 'Your plan\'s AI coding limit is used up.', type: 'limit_reached' } }));
   const queue = list.slice(0, allowance).map(r => ({ id: r.id === undefined ? null : r.id, body: r.body, tries: 0, serverTries: 0 }));
