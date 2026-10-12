@@ -2,7 +2,7 @@
 
 An AI-assisted content analysis platform for researchers. Auto-code social media posts, apply your own codebook, perform manual human coding, calculate intercoder reliability, and run real NetworkX social network analysis on any CSV.
 
-Opening the app now shows a landing page first — click **Launch MetaCode** to get to the actual tool (`app.html`).
+The front page (`index.html`) introduces the four research methods — Reddit data collection, AI coding, network analysis and Survey Studio — and how they connect. **Open the platform** (or **Start a research project**) goes to the coding app (`app.html`); **Survey Studio** opens the survey builder (`studio.html`).
 
 ---
 
@@ -14,11 +14,11 @@ Opening the app now shows a landing page first — click **Launch MetaCode** to 
 | **Reddit Scraper** | Sidebar → **Scraper**. Collect subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed Python, JavaScript or TypeScript (custom code mode); live progress, results table/JSON, CSV/JSON export, and **Add to project** to code the posts. Each user can add their own Reddit API keys (kept in their browser). Server requests go through a Python worker (or epoxy-tls over Wisp without Python); an in-app Reddit browser uses Scramjet. See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
 | **AI Scraper (beta)** | Sidebar → **AI Scraper**. Describe the posts you need in a sentence or two; an AI agent on the server (Python) finds where they're discussed, searches, reads posts when unsure and keeps the ones that fit, through Reddit's API. You watch each step; the posts are kept in your browser (IndexedDB), export as JSON, JSON Lines or CSV, and **Add to project** sends them for coding with their engagement. See [collector/README.md](collector/README.md) |
 | **Projects** | Save the open project and keep as many as you like (in your browser — private to you, even on a shared MetaCode server): reopen an earlier one, rename, duplicate, export/import as JSON, delete. A project that's open is saved automatically (Autosave) |
-| **Survey Studio** | Its own page, opened from the front page (**Open Survey Studio**). Build surveys on a freeform canvas where every part — down to a single answer choice — can be moved, resized, rotated, scaled, distorted and styled; 30+ element types, layers, groups, components, a theme with per-element overrides, Scratch-style block logic (show/hide, skip, branching, variables, formulas, scores, conditional styling, randomization blocks for assigning participants to conditions or messages), device preview, versioned publishing to a public link, and response collection with CSV/JSON export. Open-text answers can be added to the project for coding. See [docs/survey-studio.md](docs/survey-studio.md) |
+| **Survey Studio** | Its own page, opened from the front page. A dashboard of your surveys (search, status filter, sort, response counts, quick links to Design / Theme / Preview / Responses). Build surveys on a freeform canvas where every part — down to a single answer choice — can be moved, resized, rotated, scaled, distorted and styled; 30+ element types, layers, groups, components, a theme editor with a live preview and a searchable library of 250+ fonts, Scratch-style block logic (show/hide, skip, branching, variables, formulas, scores, conditional styling, randomization blocks for assigning participants to conditions or messages), device preview and versioned publishing to a public link. An optional **Respondent information** block collects a name or participant code and, if you choose, the IP address and approximate location. **Responses** has a searchable list with a detail view of every answer, an optional disclosed session timeline with step-by-step replay, privacy-conscious CSV/JSON exports and erase/delete controls. Open-text answers can be added to the project for coding. See [docs/survey-studio.md](docs/survey-studio.md) |
 | **Codebook Builder** | Define custom coding dimensions and codes; each code has an optional AI Fine-Tuning Notes field the model reads during Auto-Coding, separate from the Description shown to human coders; import/export as CSV |
 | **AI Auto-Coding** | The AI applies your codebook to posts and provides confidence scores + reasoning |
-| **Human Coding** | Efficient post-by-post manual coding interface with AI suggestions |
-| **Reliability Analysis** | Cohen's Kappa, Krippendorff's Alpha, % agreement, confusion matrices |
+| **Human Coding** | Tabs for **Coder 1**, **Coder 2**, **AI Coder** and **Reliability Analysis**. Each human coder codes on their own record with a memo per post, progress and keyboard navigation; blind coding (on by default) hides the other coder's and the AI's codes. Coder files let two people code in separate browsers and combine their work |
+| **Reliability Analysis** | Coder 1 vs Coder 2, Coder 1 vs AI or Coder 2 vs AI: overall and per-dimension % agreement, Cohen's κ, weighted κ (ordinal dimensions), Krippendorff's α (nominal/ordinal), confusion matrices, code-by-code agreement, a disagreement list and adjudication into final codes kept separately from the coders' originals |
 | **Analyze CSV (NetworkX)** | Upload *any* CSV — AI (or heuristics) detects source/target edge columns, then a real Python NetworkX backend computes density, centrality (degree/betweenness/closeness/eigenvector), components, and communities |
 | **Network Graph** | Interactive D3.js force-directed visualization — can be populated directly from the NetworkX analysis, with detected communities as node colors; export the full graph as PNG or SVG at any time, regardless of current zoom/pan |
 | **Metrics** | Engagement averages, every post's engagement (sortable list — posts from the Scraper bring theirs), code distributions, engagement by code, AI–human agreement and completion charts |
@@ -99,8 +99,9 @@ works, its limits and troubleshooting.
                      — or Scraper → collect Reddit posts/comments → Add to project
 2. Codebook        → Define dimensions (Sentiment, Stance, Topic, etc.) and codes
 3. AI Coding       → Run batch AI coding — the model codes all posts automatically
-4. Human Coding    → Manually code a sample of posts for reliability testing
-5. Reliability     → Compare AI vs Human coding — view Kappa, Alpha, confusion matrix
+4. Human Coding    → Coder 1 and Coder 2 code a sample independently (blind by default)
+5. Reliability     → Compare Coder 1, Coder 2 and the AI — κ, weighted κ, α, confusion matrices;
+                     adjudicate disagreements into final codes
 6. Analyze CSV     → Upload any relational CSV (mentions, follows, replies) for NetworkX analysis
 7. Network Graph   → Explore the graph visually, or send NetworkX results straight in
 8. Metrics         → Explore code distributions and engagement by code
@@ -267,22 +268,67 @@ tour of the screen.
   and an event log.
 - **Publish:** creates an immutable version and a public link, `/s/<id>`. Re-publishing keeps the link.
   Each response records its version.
-- **Responses:** summaries, a response table, and CSV/JSON export. **Add text answers to project** sends
-  open-text answers to the coding tools.
+- **Theme:** grouped settings (typography, colours, background, layout, question styling, buttons,
+  progress, advanced) with a live preview of the survey. Fonts come from a searchable library of 250+
+  Google Fonts plus system fonts, with categories and previews; the fonts a survey uses are loaded in the
+  editor, the preview and on the published page.
+- **Settings → Respondent identification:** the optional **Respondent information** block asks for a name
+  and/or participant code (typed, or read from the survey link, e.g. `?pid=…`) and can record the IP address
+  and approximate country/region. Typed values and values the server derives are stored and labelled
+  separately; derived values are off by default and always disclosed to respondents before they start.
+- **Settings → Session timeline:** off by default. With *notice* or *consent* the respondent page records
+  page changes, answers (open text as length only), skips and validation errors, after telling the
+  respondent; with consent they can start without it. Nothing else (no keystrokes, mouse or screen) is
+  recorded.
+- **Responses:** overview metrics, a searchable list (status, dates, participant code) next to the selected
+  response: every answer with its question, type and order, timestamps, metadata and — when recorded — the
+  session timeline with a step-by-step replay. Exports (CSV, JSON, events CSV) leave identifying fields out
+  unless ticked; the privacy dialog erases IPs, locations, identities or timelines, or deletes all responses.
+  **Add text answers to project** sends open-text answers to the coding tools.
 
 Survey drafts stay in your browser. Publishing puts the published version on the server (JSON files in
 `SURVEY_DATA_DIR`, default `survey-data/`), where its responses are collected; only the browser that
 published it can see them. Respondents must be able to reach your MetaCode server to answer.
 
+Behind a reverse proxy (nginx, Cloudflare, a load balancer), set `TRUST_PROXY` so the server knows the
+respondent's real IP address, and `SURVEY_GEO_HEADERS` if the proxy adds the visitor's country/region —
+see [docs/survey-studio.md](docs/survey-studio.md#configuration). Without them, IPs read as unknown and
+locations aren't recorded; nothing is guessed.
+
 ---
 
-## Intercoder Reliability Metrics
+## Human Coding and Reliability
+
+**Human Coding** has four tabs:
+
+- **Coder 1** and **Coder 2** — each codes on their own record (`humanCodes` and `coder2Codes` on each
+  post), with their name, a memo per post, a status per post (not started / in progress / coded), progress,
+  filters and `←`/`→` navigation. **Blind coding** is on by default: a coder sees neither the other coder's
+  codes nor the AI's (the AI can be shown when blind coding is off). Blind coding is a screen safeguard in a
+  shared browser, not access control — for strict independence each coder works in their own browser and
+  shares a **coder file** (Coder files → export / import), which carries only that coder's codes and memos.
+- **AI Coder** — the AI's codes, confidence and reasoning from AI Coding, kept separate from both human
+  coders (marked unavailable where the AI hasn't coded a post).
+- **Reliability Analysis** — pick the pair (Coder 1 vs Coder 2, Coder 1 vs AI, Coder 2 vs AI). Shows the
+  counts (posts, coded by each, coded by both, missing), overall agreement, mean κ, a per-dimension table,
+  for a chosen dimension its confusion matrix and code-by-code agreement, and the disagreements. Opening a
+  disagreement shows the post, both decisions, memos and the AI's code; **Save final code** records the
+  adjudicated code with its basis, note, adjudicator and time in `adjudicated` — the coders' codes never
+  change. Exports: a reliability report CSV and the final codes CSV.
 
 | Metric | Formula | What it measures |
 |---|---|---|
-| **% Agreement** | agreements / total | Raw proportion of matching codes |
-| **Cohen's κ** | (Po − Pe) / (1 − Pe) | Agreement corrected for chance |
-| **Krippendorff's α** | 1 − Do/De | Reliability for 2+ nominal raters |
+| **% Agreement** | agreements / units coded by both | Raw proportion of matching codes |
+| **Cohen's κ** | (Po − Pe) / (1 − Pe) | Agreement corrected for chance (codes unordered) |
+| **Weighted κ** | 1 − Σw·O / Σw·E, linear or quadratic weights | For **Ordinal** dimensions: partial credit for nearby codes (codebook order) |
+| **Krippendorff's α** | 1 − Do/De from the coincidence matrix | Nominal or ordinal; any number of coders; units with one code are left out. "All three" adds the third source |
+| **Code-by-code** | 2×2 table per code; κ and specific agreement 2a / (2a + b + c) | Whether both used the same code on the same posts |
+
+Statistics are computed on the posts both sources coded (pairwise deletion). A statistic that isn't
+defined — fewer than 2 shared units, or chance agreement of 100% (both always chose one code) — shows **—**
+with the reason, never 0. Colours: green ≥ .800 and amber ≥ .667 (Krippendorff's thresholds), red below.
+The calculations live in `public/js/reliability-stats.js` and are tested against published reference values
+(`test/reliability-stats.test.js`).
 
 ### Kappa Interpretation
 | κ value | Strength |
@@ -479,6 +525,10 @@ surveys are not part of it. Published surveys (the pages respondents answer) don
 Survey Studio puts a survey on the server only when you publish it: the published versions and their
 responses are stored as JSON files (`SURVEY_DATA_DIR`, default `survey-data/`) so respondents on other
 devices can answer, and only the browser that published it can see or manage them.
+Respondent IP addresses, locations, names, participant codes and session timelines are collected only
+when the survey's author turns them on, are disclosed to respondents on the survey page, are stored with
+the response, and are visible only to that browser; Responses → Privacy erases any of them (or deletes the
+responses), and exports leave them out unless ticked. The server doesn't log them.
 
 The Reddit Scraper is the exception that reaches out on purpose: when you run a scrape (or open the in-app
 Reddit browser), MetaCode's server requests data from Reddit. Scrape results are kept in the server's memory
@@ -551,8 +601,9 @@ metacode/
 │       ├── data.js              CSV import for posts/engagement/network (AI-assisted structure detection)
 │       ├── codebook.js          Coding scheme management
 │       ├── ai-coding.js         Batch AI coding
-│       ├── human-coding.js      Manual coding interface
-│       ├── reliability.js       Kappa, Alpha, confusion matrices
+│       ├── human-coding.js      Human Coding: Coder 1, Coder 2, AI Coder and Reliability Analysis tabs, adjudication
+│       ├── reliability-stats.js % agreement, Cohen's κ, weighted κ, Krippendorff's α, confusion matrices (pure functions)
+│       ├── reliability.js       #reliability route and reliability summaries for Export and the assistant
 │       ├── csv-analyzer.js      AI edge detection + NetworkX analysis UI
 │       ├── network.js           D3.js network visualization
 │       ├── engagement.js        Chart.js charts for the Metrics section

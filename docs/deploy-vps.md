@@ -111,6 +111,19 @@ SCRAPER_USER_AGENT=nodejs:metacode-scraper:1.0 (by /u/your_reddit_name)
 work even when a proxy hides the original host name. With the nginx config below it isn't strictly needed,
 but it does no harm. The other settings are explained in `.env.example`.
 
+Behind nginx, also set which proxy to believe for visitors' IP addresses (rate limits, and respondent IPs
+for surveys that collect them):
+
+```ini
+TRUST_PROXY=loopback                  # nginx on this machine forwards to MetaCode
+```
+
+With Cloudflare in front of nginx, list Cloudflare's ranges too (from cloudflare.com/ips), e.g.
+`TRUST_PROXY=loopback,173.245.48.0/20,103.21.244.0/22,…`, so the address is the visitor's rather than
+Cloudflare's. Surveys that collect country/region also need `SURVEY_GEO_HEADERS=cloudflare` (turn on
+Cloudflare's visitor location headers) — set it only if the server can't be reached except through
+Cloudflare, since anyone reaching it directly could send those headers themselves.
+
 ## 5. Start it with pm2
 
 The repo includes `ecosystem.config.cjs`, which runs **one** MetaCode process in fork mode. Don't use cluster

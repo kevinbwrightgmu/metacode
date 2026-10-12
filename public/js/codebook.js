@@ -157,7 +157,9 @@ const Codebook = (() => {
     const posts = App.getState().posts.map(p => {
       const aiCodes    = {...p.aiCodes};    delete aiCodes[dimId];
       const humanCodes = {...p.humanCodes}; delete humanCodes[dimId];
-      return { ...p, aiCodes, humanCodes };
+      const coder2Codes = {...p.coder2Codes}; delete coder2Codes[dimId];
+      const adjudicated = {...p.adjudicated}; delete adjudicated[dimId];
+      return { ...p, aiCodes, humanCodes, coder2Codes, adjudicated };
     });
     App.setState({ codebook, posts });
     App.notify('Dimension deleted', 'warning');
