@@ -216,6 +216,100 @@ test('accounts in the pages: sign up, keep this browser\'s work, plan gates, che
   await ctx.close(); await ctx2.close(); await ctx3.close();
 });
 
+test('sync: editing in two tabs never makes "(from another device)" copies; a real conflict makes exactly one; old copies are cleaned up', { skip, timeout: 180000 }, async () => {
+  const seedWs = { fn: () => {
+    if (localStorage.getItem('seeded')) return;
+    localStorage.setItem('seeded', '1');
+    localStorage.setItem('strata_v1', JSON.stringify({ project: { name: 'Untitled Project', description: '' }, posts: [{ id: 'p1', text: 'Rent is too high', humanCodes: {}, aiCodes: {} }], codebook: [{ id: 'tone', name: 'Tone', codes: [{ id: 'neg', label: 'Negative' }] }], network: { nodes: [], edges: [] }, settings: { model: '', delay: 500 } }));
+  }, arg: null };
+  sb.addUser('sync@example.org', 'sync password 1');
+  const signIn = async (page, email, pw) => {
+    await page.waitForSelector('[data-account-chip] .acct-signin');
+    await page.click('[data-account-chip] .acct-signin');
+    await page.fill('.acct-form [name=email]', email);
+    await page.fill('.acct-form [name=password]', pw);
+    await page.click('.acct-form .acct-primary');
+  };
+  const copies = page => page.evaluate(async () => (await LocalDB.all('projects')).filter(p => / \(from another device\)$/.test(p.name)).map(p => p.name));
+  const edit = (page, text) => page.evaluate(t => { App.setState({ project: Object.assign({}, App.getState().project, { description: t }) }); }, text);
+  const sync = page => page.evaluate(() => CloudSync.syncNow());
+
+  // Device A: the app and Survey Studio open side by side (two tabs, one browser)
+  const ctxA = await context(seedWs);
+  const { page: app, errors } = await newPage(ctxA);
+  await app.goto(baseUrl + '/app.html#dashboard');
+  await signIn(app, 'sync@example.org', 'sync password 1');
+  await app.waitForSelector('text=Add this browser\'s work to your account?');
+  await app.click('.acct-dialog .acct-primary');
+  const user = sb.users.get('sync@example.org');
+  for (let i = 0; i < 100 && !sb.rows.some(r => r.user_id === user.id && r.kind === 'workspace'); i++) await app.waitForTimeout(100);
+  const { page: studio } = await newPage(ctxA);
+  await studio.goto(baseUrl + '/studio.html');
+  await studio.waitForSelector('[data-account-chip] .acct-plan-badge');
+  for (let i = 0; i < 4; i++) {
+    await edit(app, 'edit ' + i);
+    await sync(app);
+    await sync(studio);
+    await edit(app, 'edit ' + i + 'b');        // changed again before the other tab syncs
+    await sync(studio);
+    await sync(app);
+    // Edited while a sync is running — in the same tab, and while the other tab syncs
+    await app.evaluate(async t => { const p = CloudSync.syncNow(); App.setState({ project: Object.assign({}, App.getState().project, { description: t }) }); await p; }, 'edit ' + i + 'c');
+    const other = studio.evaluate(() => CloudSync.syncNow());
+    await edit(app, 'edit ' + i + 'd');
+    await other;
+    await sync(app);
+  }
+  await studio.waitForTimeout(300);
+  assert.deepEqual(await copies(app), [], 'no copies from editing on one device');
+  assert.deepEqual(await copies(studio), []);
+  const ws = () => sb.rows.find(r => r.user_id === user.id && r.kind === 'workspace').data;
+  await sync(app);
+  assert.equal(ws().project.description, 'edit 3d', 'the account has the latest edit');
+  assert.ok(!sb.rows.some(r => r.user_id === user.id && r.kind === 'projects' && / \(from another device\)$/.test((r.data || {}).name || '')));
+
+  // Device B: changes there arrive on A without a copy when A hasn't changed anything
+  const ctxB = await context();
+  const { page: b } = await newPage(ctxB);
+  await b.goto(baseUrl + '/app.html#dashboard');
+  await signIn(b, 'sync@example.org', 'sync password 1');
+  await b.waitForFunction(() => document.getElementById('stat-posts').textContent === '1', null, { timeout: 15000 });
+  await edit(b, 'from B');
+  await sync(b);
+  await sync(app);
+  assert.equal(await app.evaluate(() => App.getState().project.description), 'from B');
+  assert.deepEqual(await copies(app), []);
+
+  // A real conflict (both changed before syncing): exactly one copy, however often it syncs
+  await edit(b, 'B again');
+  await sync(b);
+  await edit(app, 'A meanwhile');
+  await app.evaluate(() => { localStorage.setItem('metacode_sync_copies_asked', '1'); });
+  await sync(app);
+  for (let i = 0; i < 3; i++) { await sync(app); await sync(studio); await sync(b); }
+  assert.deepEqual(await copies(app), ['Untitled Project (from another device)']);
+  assert.equal(await app.evaluate(() => App.getState().project.description), 'A meanwhile', 'the open project stays as it is on this device');
+  await ctxB.close();
+
+  // Copies an earlier version made: exact duplicates go quietly; the rest only if the person agrees
+  await app.evaluate(async () => {
+    localStorage.removeItem('metacode_sync_copies_asked');
+    const cur = JSON.parse(localStorage.getItem('strata_v1'));
+    const older = Object.assign({}, cur, { project: Object.assign({}, cur.project, { description: 'an older version' }) });
+    const mk = (id, data) => LocalDB.put('projects', { id, name: 'Untitled Project (from another device)', createdAt: '2026-10-13T00:00:0' + id.slice(-1) + 'Z', savedAt: '2026-10-13T00:00:00Z', revision: 1, data });
+    await mk('pr_syncold1', cur); await mk('pr_syncold2', cur); await mk('pr_syncold3', older); await mk('pr_syncold4', older);
+  });
+  await app.reload();
+  await app.waitForSelector('text=Remove automatic copies?', { timeout: 15000 });
+  assert.match(await app.textContent('.acct-dialog'), /saved 2 copies/, 'two exact duplicates of the open project were removed without asking; one of each older version is left to ask about… plus the conflict copy');
+  await app.click('.acct-dialog .acct-primary');
+  await app.waitForTimeout(500);
+  assert.deepEqual(await copies(app), []);
+  const ignorable = m => /Failed to fetch|NetworkError|ERR_FAILED|net::/i.test(m);
+  assert.deepEqual(errors.filter(m => !ignorable(m)), []);
+  await ctxA.close();
+});
+
 test('with accounts off, the pages work as before (no sign-in, no locks)', { skip, timeout: 60000 }, async () => {
   // A second server process isn't needed: the config endpoint is what the pages read
   const c = await context();

@@ -29,10 +29,16 @@ const CloudSync = (() => {
   const BATCH_BYTES = 4 * 1024 * 1024;
 
   let user = null;         // the account this browser syncs with right now
-  let st = null;           // { user, lastPull, wsHash, pending: { 'kind/id': { kind, id, op, v } } }
+  // What this browser has synced — shared by all its MetaCode tabs (localStorage):
+  //   { user, lastPull, wsHash, wsAt, firstLink,
+  //     seen:    { 'kind/id': updated_at of the newest version this browser has },
+  //     pending: { 'kind/id': { kind, id, op, t } }   changes waiting to be sent,
+  //     done:    { 'kind/id': t of the newest change sent } }
+  let st = null;
   let busy = false, again = false, timer = null, pullTimer = null, backoff = 0;
   let status = { state: 'off', lastSync: null, error: null, pending: 0 };
   let seq = 0;
+  const stamp = () => Date.now() * 1000 + (++seq % 1000);     // orders changes, across tabs too
 
   const raw = { put: LocalDB.put, del: LocalDB.del };
   const client = () => (window.Account && Account.client()) || null;
@@ -40,8 +46,44 @@ const CloudSync = (() => {
   const app = () => (typeof App !== 'undefined' ? App : window.App) || null;
 
   /* ── Local bookkeeping ─────────────────────── */
-  function load() { try { const s = JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); return s && typeof s === 'object' ? s : null; } catch (e) { return null; } }
-  function save() { try { localStorage.setItem(STATE_KEY, JSON.stringify(st)); } catch (e) { /* storage full: the queue lives on in memory */ } }
+  function load() {
+    let s = null;
+    try { s = JSON.parse(localStorage.getItem(STATE_KEY) || 'null'); } catch (e) { s = null; }
+    if (!s || typeof s !== 'object') return null;
+    ['seen', 'done', 'pending'].forEach(k => { if (!s[k] || typeof s[k] !== 'object') s[k] = {}; });   // (saved by an older version)
+    return s;
+  }
+  const newer = (a, b) => (a && (!b || a > b) ? a : b);
+  // Other MetaCode tabs of this browser (the app, Survey Studio…) share this
+  // state. Before changing or using it, take theirs into account: newest known
+  // versions, changes still waiting, the last synced open project.
+  function merge(mine, disk) {
+    if (!mine) return disk;
+    if (!disk || disk.user !== mine.user) return mine;
+    const out = Object.assign({}, mine);
+    out.lastPull = newer(mine.lastPull, disk.lastPull);
+    out.seen = Object.assign({}, disk.seen || {});
+    Object.keys(mine.seen || {}).forEach(k => { out.seen[k] = newer(mine.seen[k], out.seen[k]); });
+    out.done = Object.assign({}, disk.done || {});
+    Object.keys(mine.done || {}).forEach(k => { out.done[k] = Math.max(mine.done[k] || 0, out.done[k] || 0); });
+    out.pending = {};
+    [disk.pending || {}, mine.pending || {}].forEach(src => Object.keys(src).forEach(k => {
+      const e = src[k];
+      if (!e || (out.done[k] || 0) >= (e.t || 0)) return;          // already sent
+      if (!out.pending[k] || (e.t || 0) > (out.pending[k].t || 0)) out.pending[k] = e;
+    }));
+    if ((disk.wsAt || 0) > (mine.wsAt || 0)) { out.wsHash = disk.wsHash; out.wsAt = disk.wsAt; }
+    out.firstLink = !!(mine.firstLink && disk.firstLink !== false);
+    return out;
+  }
+  function refresh() { if (st) st = merge(st, load()); }
+  function save() {
+    refresh();
+    try { localStorage.setItem(STATE_KEY, JSON.stringify(st)); } catch (e) { /* storage full: the queue lives on in memory */ }
+  }
+  function setWsHash(h) { st.wsHash = h; st.wsAt = stamp(); }
+  // One tab at a time talks to the account (where the browser supports it)
+  const withLock = fn => (navigator.locks && navigator.locks.request ? navigator.locks.request('metacode-sync', fn) : fn());
   function setStatus(state, extra) {
     status = Object.assign({}, status, { state, pending: st ? Object.keys(st.pending || {}).length : 0 }, extra || {});
     try { document.dispatchEvent(new CustomEvent('metacode:sync-status', { detail: status })); } catch (e) { /* old browser */ }
@@ -52,6 +94,16 @@ const CloudSync = (() => {
     for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 0x01000193); }
     return (h >>> 0).toString(16) + ':' + str.length;
   }
+  // The same content gives the same text whatever order its fields are in. The
+  // database (jsonb) hands objects back with their keys reordered, so comparing
+  // plain JSON.stringify output made identical projects look different.
+  function canonical(v) {
+    if (Array.isArray(v)) return '[' + v.map(x => (x === undefined || typeof x === 'function' ? 'null' : canonical(x))).join(',') + ']';
+    if (v && typeof v === 'object') return '{' + Object.keys(v).filter(k => v[k] !== undefined && typeof v[k] !== 'function').sort().map(k => JSON.stringify(k) + ':' + canonical(v[k])).join(',') + '}';
+    return JSON.stringify(v === undefined ? null : v);
+  }
+  const contentHash = obj => hash(canonical(obj));
+  function wsHashOf(str) { try { return contentHash(JSON.parse(str)); } catch (e) { return hash(String(str)); } }
   const wsString = () => { try { return localStorage.getItem(WS_KEY); } catch (e) { return null; } };
   // A workspace with nothing in it (a fresh browser's default project)
   function isEmptyWs(str) {
@@ -61,7 +113,8 @@ const CloudSync = (() => {
 
   function queue(kind, id, op) {
     if (!user || !st) return;
-    st.pending[kind + '/' + id] = { kind, id, op, v: ++seq };
+    refresh();
+    st.pending[kind + '/' + id] = { kind, id, op, t: stamp() };
     save();
     schedule(3000);
   }
@@ -82,7 +135,7 @@ const CloudSync = (() => {
   function checkWorkspace() {
     if (!user || !st) return;
     const s = wsString();
-    if (s && hash(s) !== st.wsHash) queue('workspace', 'current', 'put');
+    if (s && wsHashOf(s) !== st.wsHash) queue('workspace', 'current', 'put');
   }
   let wsTimer = null;
   // app.js and studio-shell.js call this after saving the open project
@@ -106,12 +159,19 @@ const CloudSync = (() => {
     const flush = async () => {
       if (!batch.length) return;
       const rows = batch.map(b => b.row);
-      const { error } = await sb.from(TABLE).upsert(rows, { onConflict: 'user_id,kind,id' });
+      const { data: saved, error } = await sb.from(TABLE).upsert(rows, { onConflict: 'user_id,kind,id' }).select('kind,id,updated_at');
       if (error) throw new Error(error.message || 'Saving to your account failed');
+      // The server's timestamp of each row this browser just wrote: when a later
+      // pull reads them back, they're recognised as ours, not another device's.
+      refresh();
+      st.seen = st.seen || {};
+      st.done = st.done || {};
+      (saved || []).forEach(r => { if (r && r.updated_at) st.seen[r.kind + '/' + r.id] = newer(r.updated_at, st.seen[r.kind + '/' + r.id]); });
       batch.forEach(b => {
         const k = b.item.kind + '/' + b.item.id;
-        if (st.pending[k] && st.pending[k].v === b.item.v) delete st.pending[k];
-        if (b.wsHash) st.wsHash = b.wsHash;
+        st.done[k] = Math.max(st.done[k] || 0, b.item.t || 0);
+        if (st.pending[k] && (st.pending[k].t || 0) <= (b.item.t || 0)) delete st.pending[k];
+        if (b.wsHash) setWsHash(b.wsHash);
       });
       save();
       batch = []; bytes = 0;
@@ -121,7 +181,7 @@ const CloudSync = (() => {
       if (!deleted) {
         if (item.kind === 'workspace') {
           const s = wsString();
-          if (s) { try { data = JSON.parse(s); wsHashNow = hash(s); } catch (e) { data = null; } }
+          if (s) { try { data = JSON.parse(s); wsHashNow = contentHash(data); } catch (e) { data = null; } }
         } else data = await LocalDB.get(item.kind, item.id);
         if (!data) deleted = true;
       }
@@ -150,10 +210,13 @@ const CloudSync = (() => {
       if (error) throw new Error(error.message || 'Reading your account failed');
       if (!heads || !heads.length) break;
       const want = {};
+      st.seen = st.seen || {};
       for (const h of heads) {
         const key = h.kind + '/' + h.id;
-        if (st.pending[key]) continue;                      // changed here too: this browser's version is sent next
+        if (st.seen[key] && h.updated_at <= st.seen[key]) continue;   // this browser wrote (or already has) this version
+        st.seen[key] = h.updated_at;
         if (h.kind === 'workspace') { if (!h.deleted) await pullWorkspace(); changed.add('workspace'); continue; }
+        if (st.pending[key]) continue;                      // changed here too: this browser's version is sent next
         if (!KINDS.includes(h.kind)) continue;
         if (h.deleted) { await raw.del(h.kind, h.id); changed.add(h.kind); continue; }
         (want[h.kind] = want[h.kind] || []).push(h.id);
@@ -182,28 +245,47 @@ const CloudSync = (() => {
     if (error) throw new Error(error.message || 'Reading your account failed');
     const remote = data && data[0] && data[0].data;
     if (!remote || typeof remote !== 'object') return;
-    const remoteStr = JSON.stringify(remote);
+    const remoteHash = contentHash(remote);
     const local = wsString();
-    if (local && hash(local) === hash(remoteStr)) { st.wsHash = hash(local); return; }
-    if (!local || isEmptyWs(local) || hash(local) === st.wsHash) {
+    const localHash = local ? wsHashOf(local) : null;
+    const PK = 'workspace/current';
+    // Same content (whatever the order of its fields): nothing to do, nothing to send
+    if (localHash === remoteHash) {
+      setWsHash(remoteHash);
+      if (st.pending[PK]) { st.done[PK] = Math.max(st.done[PK] || 0, st.pending[PK].t || 0); delete st.pending[PK]; }
+      save();
+      return;
+    }
+    const changedHere = !!st.pending[PK] || (local && localHash !== st.wsHash);
+    if (!local || isEmptyWs(local) || !changedHere) {
       // Unchanged here since the last sync: take the other device's version
-      try { localStorage.setItem(WS_KEY, remoteStr); } catch (e) { notify('Your open project changed on another device but is too large for this browser\'s storage.', 'warning', 8000); return; }
-      st.wsHash = hash(remoteStr);
+      try { localStorage.setItem(WS_KEY, JSON.stringify(remote)); } catch (e) { notify('Your open project changed on another device but is too large for this browser\'s storage.', 'warning', 8000); return; }
+      setWsHash(remoteHash);
+      if (st.pending[PK]) { st.done[PK] = Math.max(st.done[PK] || 0, st.pending[PK].t || 0); delete st.pending[PK]; }
       save();
       if (app() && typeof app().reloadState === 'function') app().reloadState();
       return;
     }
-    keepAsProject(remote, ' (from another device)', 'this version of the open project was changed on another device at the same time as this browser');
+    // Changed here AND on another device since the last sync: this one stays open
+    // (and is sent next); the other device's version is kept as a saved project.
+    await keepAsProject(remote, ' (from another device)', 'this version of the open project was changed on another device at the same time as this browser');
+    if (!st.pending[PK]) st.pending[PK] = { kind: 'workspace', id: 'current', op: 'put', t: stamp() };
   }
 
   // Keeps another version of the open project as a saved project (Projects page)
   async function keepAsProject(remote, suffix, why) {
     if (isEmptyWs(JSON.stringify(remote))) return;
+    // Never a copy of something that's already here: the open project or any saved project
+    const h = contentHash(remote);
+    const local = wsString();
+    if (local && wsHashOf(local) === h) return;
+    for (const p of await LocalDB.all('projects')) {
+      if (p && p.data && (p.syncHash === h || contentHash(p.data) === h)) return;
+    }
     const now = new Date().toISOString();
     const name = ((remote.project && remote.project.name) || 'Untitled Project') + suffix;
-    const rec = { id: 'pr_sync' + Date.now().toString(36), name: name.slice(0, 300), description: 'Saved automatically: ' + why + '.', createdAt: now, savedAt: now, revision: 1, data: remote };
+    const rec = { id: 'pr_sync' + Date.now().toString(36), name: name.slice(0, 300), description: 'Saved automatically: ' + why + '.', createdAt: now, savedAt: now, revision: 1, data: remote, syncHash: h };
     await LocalDB.put('projects', rec);
-    queue('workspace', 'current', 'put');
     notify('Another version of your open project is saved under Projects as “' + name + '”.', 'warning', 10000);
   }
 
@@ -215,11 +297,50 @@ const CloudSync = (() => {
     if (error) throw new Error(error.message || 'Reading your account failed');
     const remote = data && data[0] && data[0].data;
     const local = wsString();
-    if (remote && typeof remote === 'object' && local && hash(local) !== hash(JSON.stringify(remote))) {
+    if (remote && typeof remote === 'object' && local && wsHashOf(local) !== contentHash(remote)) {
       await keepAsProject(remote, ' (saved in your account)', 'this was the open project in your account when this browser\'s work was added to it');
     }
     st.firstLink = false;
     save();
+  }
+
+  // An earlier version of this file made a "… (from another device)" copy of the
+  // open project on most syncs. Once per page: copies identical to the open
+  // project or to another saved project are removed (nothing is lost); if other
+  // such copies remain, the person is asked once whether to remove them too.
+  let tidied = false;
+  const COPY_SUFFIX = ' (from another device)';
+  const ASKED_KEY = 'metacode_sync_copies_asked';
+  async function tidyCopies() {
+    const all = await LocalDB.all('projects');
+    const copies = all.filter(p => p && /^pr_sync/.test(p.id) && String(p.name || '').endsWith(COPY_SUFFIX))
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    if (!copies.length) return;
+    const kept = new Set();
+    const local = wsString();
+    if (local) kept.add(wsHashOf(local));
+    all.forEach(p => { if (p && p.data && copies.indexOf(p) === -1) kept.add(contentHash(p.data)); });
+    let removed = 0;
+    const rest = [];
+    for (const c of copies) {
+      const h = c.data ? contentHash(c.data) : null;
+      if (!h || kept.has(h) || isEmptyWs(JSON.stringify(c.data))) { await LocalDB.del('projects', c.id); removed++; }
+      else { kept.add(h); rest.push(c); }
+    }
+    let asked = null;
+    try { asked = localStorage.getItem(ASKED_KEY); } catch (e) { asked = '1'; }
+    if (rest.length && !asked) {
+      try { localStorage.setItem(ASKED_KEY, '1'); } catch (e) { /* ask once per load at most */ }
+      const ok = await ask('Remove automatic copies?',
+        '<p>An earlier version of MetaCode saved ' + rest.length + ' cop' + (rest.length === 1 ? 'y' : 'ies') + ' of your open project named “… (from another device)” when nothing had changed on another device. That was a bug, now fixed.</p>' +
+        '<p>They\'re older versions of your open project. Remove them? (Your open project and your other saved projects stay.)</p>',
+        [{ label: 'Remove ' + rest.length + ' cop' + (rest.length === 1 ? 'y' : 'ies'), value: true }, { label: 'Keep them', value: false }]);
+      if (ok) { for (const c of rest) { await LocalDB.del('projects', c.id); removed++; } }
+    }
+    if (removed) {
+      notify(removed + ' automatic cop' + (removed === 1 ? 'y' : 'ies') + ' of your open project removed.', 'success', 6000);
+      try { document.dispatchEvent(new CustomEvent('metacode:synced', { detail: { kinds: ['projects'] } })); } catch (e) { /* old browser */ }
+    }
   }
 
   async function syncNow() {
@@ -229,13 +350,18 @@ const CloudSync = (() => {
     clearTimeout(timer);
     setStatus('syncing');
     try {
-      if (st.firstLink) await firstLink();
-      checkWorkspace();
-      await push();
-      await pull();
-      if (Object.keys(st.pending).length) await push();
+      await withLock(async () => {
+        refresh();
+        if (st.firstLink) await firstLink();
+        checkWorkspace();
+        // Read the account first: a change made on another device is seen before
+        // this browser's changes are sent (so neither silently replaces the other)
+        await pull();
+        await push();
+      });
       backoff = 0;
       setStatus('idle', { lastSync: new Date().toISOString(), error: null });
+      if (!tidied) { tidied = true; tidyCopies().catch(e => console.warn('[sync] tidy', e)); }
     } catch (e) {
       backoff = Math.min(300000, backoff ? backoff * 2 : 5000);
       setStatus(navigator.onLine === false ? 'offline' : 'error', { error: String(e && e.message || e).slice(0, 200) });
@@ -299,10 +425,11 @@ const CloudSync = (() => {
           [{ label: 'Add to my account', value: true }, { label: 'Remove from this browser', value: false }]);
         if (!add) await clearLocal();
       }
-      st = { user: id, lastPull: null, wsHash: null, pending: {} };
+      st = { user: id, lastPull: null, wsHash: null, wsAt: 0, seen: {}, done: {}, pending: {} };
+      try { localStorage.removeItem(STATE_KEY); } catch (e) { /* a fresh start for this account */ }
       if (add) {
-        for (const k of KINDS) for (const r of await LocalDB.all(k)) st.pending[k + '/' + r.id] = { kind: k, id: r.id, op: 'put', v: ++seq };
-        if (n.workspace) { st.pending['workspace/current'] = { kind: 'workspace', id: 'current', op: 'put', v: ++seq }; st.firstLink = true; }
+        for (const k of KINDS) for (const r of await LocalDB.all(k)) st.pending[k + '/' + r.id] = { kind: k, id: r.id, op: 'put', t: stamp() };
+        if (n.workspace) { st.pending['workspace/current'] = { kind: 'workspace', id: 'current', op: 'put', t: stamp() }; st.firstLink = true; }
         // …and what this browser published (surveys, responses) moves to the account on the server
         try { await fetch('/api/account/claim', { method: 'POST' }); } catch (e) { /* tried again next sign-in */ }
       }
@@ -320,6 +447,7 @@ const CloudSync = (() => {
     if (!user) return true;
     checkWorkspace();
     await syncNow();
+    refresh();
     const waiting = Object.keys((st && st.pending) || {}).length;
     const choice = await ask('Sign out',
       (waiting ? '<p class="acct-warn">' + waiting + ' change(s) couldn\'t be saved to your account yet (' + escHtml(status.error || 'offline') + '). If you remove them from this browser now, they\'ll be lost.</p>' : '<p>Everything is saved to your account.</p>') +
