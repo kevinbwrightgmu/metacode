@@ -59,6 +59,18 @@ function mockSupabase(opts) {
     }
     return true;
   }
+  // Postgres jsonb doesn't keep the order of an object's keys: it hands them back
+  // shorter keys first, then in byte order. The real database does this, so the
+  // stand-in does too (code that compares JSON text would break on it).
+  function jsonb(v) {
+    if (Array.isArray(v)) return v.map(jsonb);
+    if (v && typeof v === 'object') {
+      const out = {};
+      Object.keys(v).sort((a, b) => (a.length - b.length) || (a < b ? -1 : a > b ? 1 : 0)).forEach(k => { if (v[k] !== undefined) out[k] = jsonb(v[k]); });
+      return out;
+    }
+    return v;
+  }
   function project(row, select) {
     if (!select || select === '*') return Object.assign({}, row);
     const out = {};
@@ -126,12 +138,16 @@ function mockSupabase(opts) {
       }
       if (req.method === 'POST') {
         const list = Array.isArray(data) ? data : [data];
+        const saved = [];
         for (const r of list) {
           if (r.user_id && r.user_id !== u.id) return json(403, { code: '42501', message: 'new row violates row-level security policy for table "metacode_data"' });
-          const row = { user_id: u.id, kind: r.kind, id: r.id, data: r.data === undefined ? null : r.data, deleted: !!r.deleted, updated_at: nextStamp() };
+          const row = { user_id: u.id, kind: r.kind, id: r.id, data: r.data === undefined || r.data === null ? null : jsonb(r.data), deleted: !!r.deleted, updated_at: nextStamp() };
           const i = rows.findIndex(x => x.user_id === u.id && x.kind === row.kind && x.id === row.id);
           if (i >= 0) rows[i] = row; else rows.push(row);
+          saved.push(row);
         }
+        // ?select=… (supabase-js .upsert().select()) returns what was saved, with the server's timestamps
+        if (url.searchParams.get('select')) return json(201, saved.map(r => project(r, url.searchParams.get('select'))));
         return json(201, undefined);
       }
       if (req.method === 'DELETE') {
