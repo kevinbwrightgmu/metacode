@@ -226,20 +226,34 @@ test('YouTube live chat: follows a live stream\'s chat until it goes offline; an
 
 test('YouTube live chat from a channel link (@name/live) finds its current stream; a chat that ends stops the job; restricted chats are explained', async () => {
   yt.state.liveCalls = 0;
+  const searchesBefore = yt.seen.liveSearches || 0;
+  // Found among the channel's uploads without a live search; of its two live streams, the one with the most viewers
   let r = await start({ platform: 'youtube', target: { type: 'livechat', video: 'https://www.youtube.com/@livechan/live' }, options: { maxChatMinutes: 2 } });
   assert.equal(r.status, 202, JSON.stringify(r.json));
   let job = await waitForJob(app.api, r.json.job.id, 20000);
   assert.equal(job.status, 'completed', JSON.stringify(job.lastError));
   let recs = (await results(job.id)).records;
-  assert.equal(recs.find(x => x.record_type === 'post').video_id, 'livevideo01', 'the channel\'s live stream was found');
+  assert.equal(recs.find(x => x.record_type === 'post').video_id, 'livevideo01', 'the channel\'s most-watched live stream was found');
   assert.equal(recs.filter(x => x.source === 'live_chat').length, 4);
-  const detail = (await getJson(app.api + '/jobs/' + job.id)).json.job;
+  assert.equal(yt.seen.liveSearches || 0, searchesBefore, 'no live search was needed');
+  let detail = (await getJson(app.api + '/jobs/' + job.id)).json.job;
+  assert.ok(detail.meta.youtubeQuota < 100, 'no 100-unit search was spent: ' + detail.meta.youtubeQuota);
+  const logs = (await getJson(app.api + '/jobs/' + job.id + '/logs')).json.logs.map(l => l.message).join('\n');
+  assert.match(logs, /has 2 streams live; following the one with the most viewers/);
+  assert.match(logs, /endingvid01/, 'the other live stream is named');
+  // A live stream missing from the uploads is found through YouTube's live search
+  r = await start({ platform: 'youtube', target: { type: 'livechat', video: '@searchonly' }, options: { maxChatMinutes: 2 } });
+  job = await waitForJob(app.api, r.json.job.id, 20000);
+  assert.equal(job.status, 'completed', JSON.stringify(job.lastError));
+  assert.equal((await results(job.id)).records.find(x => x.record_type === 'post').video_id, 'livevideo01');
+  assert.equal(yt.seen.liveSearches, searchesBefore + 1, 'the live search ran once');
+  detail = (await getJson(app.api + '/jobs/' + job.id)).json.job;
   assert.ok(detail.meta.youtubeQuota >= 100, 'the live search is counted (100 units): ' + detail.meta.youtubeQuota);
   // A channel that isn't live
   r = await start({ platform: 'youtube', target: { type: 'livechat', video: '@testchan' } });
   job = await waitForJob(app.api, r.json.job.id);
   assert.equal(job.status, 'failed');
-  assert.match((job.lastError || job.error).message, /isn't streaming live right now/);
+  assert.match((job.lastError || job.error).message, /Couldn't find a live stream on @testchan.*paste the stream's own link/);
   // chatEndedEvent: the job stops at once; deleted-message placeholders are left out
   r = await start({ platform: 'youtube', target: { type: 'livechat', video: 'https://youtu.be/endingvid01' }, options: { maxChatMinutes: 5 } });
   job = await waitForJob(app.api, r.json.job.id, 10000);

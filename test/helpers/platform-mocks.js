@@ -30,7 +30,9 @@ function createYouTubeMock() {
       return { items: items.slice(start, start + size), nextPageToken: next, pageInfo: { totalResults: items.length } };
     };
     if (resource === 'channels') {
-      if (q.get('forHandle') === '@livechan') return send(200, { items: [{ id: 'UClivechannel0000000000aa' }] });
+      // @livechan has two streams live among its uploads; @searchonly's live stream shows up only in live search.
+      if (q.get('forHandle') === '@livechan') return send(200, { items: [{ id: 'UClivechannel0000000000aa', contentDetails: { relatedPlaylists: { uploads: 'UUlivechannel0000000000aa' } } }] });
+      if (q.get('forHandle') === '@searchonly') return send(200, { items: [{ id: 'UCsearchonly00000000000aa', contentDetails: { relatedPlaylists: { uploads: 'UUsearchonly00000000000aa' } } }] });
       const ok = q.get('forHandle') === '@testchan' || (q.get('id') || '').split(',').includes(CH);
       if (!ok) return send(200, { items: [] });
       return send(200, { items: [{ id: CH, snippet: { title: 'Test Channel', customUrl: '@testchan', description: 'A channel', publishedAt: '2015-01-01T00:00:00Z', country: 'US' },
@@ -42,21 +44,24 @@ function createYouTubeMock() {
       return send(200, { items: [] });
     }
     if (resource === 'playlistItems') {
-      const ids = q.get('playlistId') === UPLOADS ? VIEWS.map((_, i) => vid(i)) : q.get('playlistId') === 'PLtestplaylist1' ? [vid(1), vid(4), vid(7)] : null;
+      const lists = { [UPLOADS]: VIEWS.map((_, i) => vid(i)), PLtestplaylist1: [vid(1), vid(4), vid(7)],
+        UUlivechannel0000000000aa: [vid(0), 'endingvid01', 'livevideo01', 'endedvideo1'], UUsearchonly00000000000aa: [vid(2), 'endedvideo1'] };
+      const ids = lists[q.get('playlistId') || ''] || null;
       if (!ids) return fail(404, 'playlistNotFound', 'The playlist identified with the request\'s playlistId parameter cannot be found.');
       return send(200, page(ids.map(id => ({ contentDetails: { videoId: id } })), 4));
     }
     if (resource === 'videos') {
       const LIVE = {
         livevideo01: { activeLiveChatId: 'chat-1', actualStartTime: '2026-10-17T10:00:00Z', concurrentViewers: '321' },
-        endingvid01: { activeLiveChatId: 'chat-ends', actualStartTime: '2026-10-17T10:00:00Z' },
+        endingvid01: { activeLiveChatId: 'chat-ends', actualStartTime: '2026-10-17T10:00:00Z', concurrentViewers: '50' },
         memberlive1: { activeLiveChatId: 'chat-members', actualStartTime: '2026-10-17T10:00:00Z' },
         endedvideo1: { actualStartTime: '2026-10-01T10:00:00Z', actualEndTime: '2026-10-01T12:00:00Z' }
       };
       const items = (q.get('id') || '').split(',').filter(id => /^vid\d{8}$/.test(id) || LIVE[id]).map(id => {
         const n = /^vid/.test(id) ? Number(id.slice(3)) : 0;
         const live = LIVE[id];
-        return { id, snippet: { title: 'Video ' + n + (n % 2 ? ' about cats' : ' about dogs'), description: 'Description ' + n, channelId: CH, channelTitle: 'Test Channel',
+        const state = live && live.activeLiveChatId && !live.actualEndTime ? 'live' : 'none';
+        return { id, snippet: { title: 'Video ' + n + (n % 2 ? ' about cats' : ' about dogs'), description: 'Description ' + n, channelId: CH, channelTitle: 'Test Channel', liveBroadcastContent: state,
           publishedAt: new Date(Date.UTC(2020, 0, 1 + n)).toISOString(), tags: ['t' + n], categoryId: '22', thumbnails: { high: { url: 'https://i.ytimg.com/vi/' + id + '/hq.jpg' } } },
           statistics: { viewCount: String(VIEWS[n] || 10), likeCount: String(10 + n), commentCount: String(3) }, contentDetails: { duration: 'PT1H2M3S', definition: 'hd', caption: 'false' },
           liveStreamingDetails: live };
@@ -66,7 +71,7 @@ function createYouTubeMock() {
     if (resource === 'search') {
       if (q.get('eventType') === 'live') {
         seen.liveSearches = (seen.liveSearches || 0) + 1;
-        return send(200, { items: q.get('channelId') === 'UClivechannel0000000000aa' ? [{ id: { kind: 'youtube#video', videoId: 'livevideo01' } }] : [] });
+        return send(200, { items: ['UClivechannel0000000000aa', 'UCsearchonly00000000000aa'].includes(q.get('channelId') || '') ? [{ id: { kind: 'youtube#video', videoId: 'livevideo01' } }] : [] });
       }
       const all = [vid(5), vid(1), vid(3), vid(2), vid(7), vid(9)];
       const p = page(all.map(id => { const n = Number(id.slice(3)); return { id: { kind: 'youtube#video', videoId: id }, snippet: { title: 'Video ' + n + (n % 2 ? ' about cats' : ' about dogs'), publishedAt: new Date(Date.UTC(2020, 0, 1 + n)).toISOString() } }; }), 4);

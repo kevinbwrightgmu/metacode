@@ -593,7 +593,7 @@ function createYouTubeRunner(deps) {
           throw new ScraperError('chat_unavailable', ls.actualEndTime
             ? 'This stream has ended. YouTube\'s API only serves the chat of streams that are live now, so a replay\'s chat can\'t be collected through it.'
             : ls.scheduledStartTime && !ls.actualStartTime ? 'This stream hasn\'t started yet (scheduled for ' + ls.scheduledStartTime + '). Start the job once it is live.'
-              : ls.actualStartTime ? 'This stream is live, but its chat is turned off.'
+              : ls.actualStartTime || (v.snippet && v.snippet.liveBroadcastContent === 'live') ? 'This stream is live, but YouTube reports no chat for it: the chat is turned off, or limited to members or subscribers.'
                 : 'This video isn\'t a live stream, so it has no live chat.', { status: 404 });
         }
         state.chatId = ls.activeLiveChatId;
@@ -635,22 +635,52 @@ function createYouTubeRunner(deps) {
       ctx.progress({ message: 'Collected ' + total + ' chat message' + (total === 1 ? '' : 's') + '. ' + spent + ' quota units used (live chat calls are counted as 5 units each, an estimate).' });
     }
 
-    // A channel's stream that is live now (a search: 100 quota units)
+    // A channel's stream that is live now. YouTube's live search (search.list
+    // eventType=live) often lags behind or misses streams, so the channel's
+    // newest uploads are checked first — a stream that is live is listed there
+    // (2 units); the search (100 units) is only a fallback, and every hit is
+    // checked with videos.list. Several live streams: the one with the most
+    // viewers (what youtube.com/@name/live usually shows); the others are logged.
     async function currentStream() {
       const ref = target.channel;
-      let channelId = ref.by === 'id' ? ref.value : null;
-      if (!channelId) {
-        const params = /** @type {Record<string, string>} */ ({ part: 'id' });
-        params[ref.by === 'handle' ? 'forHandle' : 'forUsername'] = ref.value;
-        const c = await api('channels', params);
-        channelId = c.items && c.items[0] && c.items[0].id;
-        if (!channelId) throw new ScraperError('not_found', 'YouTube has no channel ' + ref.value + '.', { status: 404 });
-      }
+      const params = /** @type {Record<string, string>} */ ({ part: 'id,contentDetails' });
+      params[ref.by === 'id' ? 'id' : ref.by === 'handle' ? 'forHandle' : 'forUsername'] = ref.value;
+      const c = await api('channels', params);
+      const ch = c.items && c.items[0];
+      if (!ch) throw new ScraperError('not_found', 'YouTube has no channel ' + ref.value + '.', { status: 404 });
       ctx.progress({ message: 'Looking for the channel\'s live stream…' });
-      const s = await api('search', { part: 'id', channelId, eventType: 'live', type: 'video', maxResults: 5 });
-      const id = s.items && s.items[0] && s.items[0].id && s.items[0].id.videoId;
-      if (!id) throw new ScraperError('chat_unavailable', ref.value + ' isn\'t streaming live right now. Start the job while the stream is live (or paste the stream\'s own link).', { status: 404 });
-      return String(id);
+      /** Of these videos, the ones live now with a chat, most viewers first. @param {string[]} ids */
+      const liveOf = async ids => {
+        if (!ids.length) return [];
+        const r = await api('videos', { part: 'snippet,liveStreamingDetails', id: ids.slice(0, 50).join(','), maxResults: 50 });
+        return (r.items || []).filter(/** @param {any} v */ v => {
+          const ls = v.liveStreamingDetails || {};
+          return v.snippet && v.snippet.liveBroadcastContent === 'live' && !ls.actualEndTime;
+        }).sort(/** @param {any} a @param {any} b */ (a, b) => (Number(b.liveStreamingDetails.concurrentViewers) || 0) - (Number(a.liveStreamingDetails.concurrentViewers) || 0));
+      };
+      let live = [];
+      const uploads = ch.contentDetails && ch.contentDetails.relatedPlaylists && ch.contentDetails.relatedPlaylists.uploads;
+      if (uploads) {
+        try {
+          const pl = await api('playlistItems', { part: 'contentDetails', playlistId: uploads, maxResults: 50 });
+          live = await liveOf((pl.items || []).map(/** @param {any} i */ i => i.contentDetails && i.contentDetails.videoId).filter(Boolean));
+        } catch (err) {
+          const e = /** @type {any} */ (err);
+          if (!e || e.type !== 'not_found') throw err;      // a channel without uploads: try the search
+        }
+      }
+      if (!live.length) {
+        ctx.log('info', 'No live stream among the channel\'s newest uploads; asking YouTube\'s live search (100 quota units).');
+        const sr = await api('search', { part: 'id', channelId: ch.id, eventType: 'live', type: 'video', maxResults: 10 });
+        live = await liveOf((sr.items || []).map(/** @param {any} i */ i => i.id && i.id.videoId).filter(Boolean));
+      }
+      if (!live.length) {
+        throw new ScraperError('chat_unavailable', 'Couldn\'t find a live stream on ' + ref.value + ': none of its newest 50 uploads is live, and YouTube\'s live search shows none. ' +
+          'If it is live, paste the stream\'s own link instead (open the stream → Share → Copy link).', { status: 404 });
+      }
+      if (live.length > 1) ctx.log('info', ref.value + ' has ' + live.length + ' streams live; following the one with the most viewers. The others: ' +
+        live.slice(1, 6).map(/** @param {any} v */ v => v.id + ' ("' + String(v.snippet.title).slice(0, 60) + '")').join(', ') + (live.length > 6 ? ' …' : '') + ' — paste a stream\'s link to follow a specific one.');
+      return String(live[0].id);
     }
   };
 }
