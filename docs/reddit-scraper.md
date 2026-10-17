@@ -57,9 +57,11 @@ GET  /api/scraper/jobs/:id/export                     └─ custom code ──�
    sends the request with **epoxy-tls over MetaCode's own Wisp endpoint**.
 4. Reddit's JSON is normalized into records (`scraper/reddit/format.js`): `post`, `comment`,
    `subreddit`, `user`. Fields Reddit didn't send are `null`.
-5. Results stay in server memory (like the rest of MetaCode's server state) for
-   `SCRAPER_JOB_RETENTION_MINUTES`. Export them, or click **Add to project** to store them in the
-   project (browser localStorage) as posts.
+5. Jobs and their results are kept on the server's disk (`SCRAPER_DATA_DIR`) and survive a
+   restart; finished jobs are deleted after `SCRAPER_JOB_RETENTION_MINUTES`. Export them, or click
+   **Add to project** to store them in the project (browser localStorage) as posts. Standard scrapes
+   keep checkpoints, so they can be paused, resumed, and continue after a restart — see
+   [scraper-network.md](scraper-network.md).
 
 Where requests are made — **Fetch Reddit through** (next to *Start scrape*). The choice is remembered in each
 browser; until someone picks, it is the server's default, `SCRAPER_DEFAULT_ENGINE` (**RedditAPIs.com** unless
@@ -485,7 +487,8 @@ Limitations to be aware of:
 - wisp-js 0.5.0 checks a stream's resolved address and then resolves the hostname again when connecting
   (its DNS-cache TTL compares milliseconds with seconds), so DNS rebinding isn't fully excluded at the
   Wisp layer. The hostname allow-list only admits Reddit-owned domains, which keeps this theoretical.
-- Results live in server memory; a restart loses them (export or add them to the project).
+- Finished jobs are deleted after `SCRAPER_JOB_RETENTION_MINUTES` (export or add them to the project to keep them).
+  Custom-code and AI jobs can't be resumed part-way; a restart ends them, keeping what they collected.
 - The in-app browser renders Reddit inside MetaCode's origin through Scramjet's rewriting; it is a
   convenience for finding targets, not a security boundary. Don't sign in to Reddit inside it.
 
@@ -511,6 +514,8 @@ Limitations to be aware of:
 |---|---|
 | `queued` | Waiting for a free slot (`SCRAPER_MAX_CONCURRENT_JOBS`) |
 | `running` | Fetching; progress and logs stream to the page |
+| `waiting` | A temporary failure; retries automatically at the time shown (bounded) |
+| `paused` | Paused by you or after the automatic retries; **Resume** continues from the checkpoint |
 | `completed` | Finished (possibly with 0 items — the log explains) |
 | `failed` | Stopped by an error; items collected before it are kept |
 | `cancelled` | Stopped by **Cancel**; items collected before it are kept |
@@ -531,6 +536,7 @@ API (same-origin; errors are `{ error: { message, type } }`):
 | `GET /api/scraper/jobs/:id/logs` | Log lines |
 | `GET /api/scraper/jobs/:id/export?format=csv\|json\|ndjson&type=&nested=1` | Download |
 | `POST /api/scraper/jobs/:id/cancel` | Cancel |
+| `POST /api/scraper/jobs/:id/pause` · `/resume`, `PATCH /api/scraper/jobs/:id`, `GET …/summary`, `GET …/history` | Pause, resume, change a paused job's settings, collection summary, event history — see [scraper-network.md](scraper-network.md) |
 | `DELETE /api/scraper/jobs/:id` | Cancel if needed and delete |
 
 ### AI jobs (the AI Scraper, beta)
@@ -593,7 +599,8 @@ quota used up), bad keys (`auth_error`), Reddit blocking the server (`reddit_blo
 | "Couldn't verify the server's TLS certificate … (Python engine)" | On macOS with Python from python.org run *Install Certificates.command* (or `pip install certifi`); otherwise an HTTPS-inspecting proxy is in the way |
 | "The custom-code sandbox needs Node.js 22 …" / "TypeScript needs Node.js 22.13 …" | Upgrade Node.js |
 | Browse Reddit: "couldn't start" | Needs a browser with service workers and MetaCode at `http://localhost` or `https://`; check that `SCRAPER_BROWSER_ENABLED` isn't `false` |
-| Results disappeared | Jobs are kept in memory for `SCRAPER_JOB_RETENTION_MINUTES` and lost on restart — export or add to the project |
+| Results disappeared | Finished jobs are deleted after `SCRAPER_JOB_RETENTION_MINUTES` — export or add to the project. With `SCRAPER_PERSIST_JOBS=false` they are also lost on restart |
+| A job says *Waiting* or *Paused* | A temporary failure (network route down, Reddit rate limit or server errors): it retries on its own a few times, then pauses — see [scraper-network.md](scraper-network.md) |
 | `npm test` browser tests skipped | No Chromium found; set `CHROMIUM_PATH` or install one with `npx playwright install chromium` |
 
 ## Licenses

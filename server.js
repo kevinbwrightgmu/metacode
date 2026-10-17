@@ -2066,7 +2066,7 @@ const scraperAi = {
     return { text: String((c && c.message && c.message.content) || ''), model: out.fallback || out.requested };
   }
 };
-const scraper = createScraper({ ai: scraperAi, policy: accounts.scraperPolicy });
+const scraper = createScraper({ ai: scraperAi, policy: accounts.scraperPolicy, adminGuard: accounts.admin() });
 // Signing in moves what this browser made on the server to the account
 accounts.onClaim(async (from, to) => ({ surveys: await surveys.store.reassignOwner(from, to), scraperJobs: scraper.reassignOwner(from, to) }));
 app.use('/api/scraper', scraper.router);

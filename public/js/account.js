@@ -450,8 +450,8 @@
 
   /* ── Sidebar locks and page gates (app.html) ── */
   function decorateNav() {
-    document.querySelectorAll('.nav-item[data-view]').forEach(a => {
-      const f = GATED[a.dataset.view];
+    document.querySelectorAll('.nav-item[data-view], .nav-item[data-feature]').forEach(a => {
+      const f = a.dataset.feature || GATED[a.dataset.view];
       let lock = a.querySelector('.nav-lock');
       const need = f && enabled() && me && !can(f) ? (Plans.lowestWith(f) || {}).name : null;
       if (!need) { if (lock) lock.remove(); return; }
@@ -567,7 +567,7 @@
           (me.billing && me.billing.enabled ? '<button type="button" class="acct-secondary" data-a="refresh" title="Check Stripe for changes now">Refresh</button>' : '') + '</div></div>' +
         '<div class="card"><div class="card-title">Your data</div><div id="acct-sync">' + (sync ? syncHTML(sync) : '<p class="text-muted">Saved in this browser.</p>') + '</div></div>' +
       '</div>' +
-      '<div class="card"><div class="card-title">Usage</div><div class="acct-meters">' + Object.keys(Plans.METERS).map(k => meterHTML(k)).join('') + '</div>' +
+      '<div class="card"><div class="card-title">Usage</div><div class="acct-meters">' + Object.keys(Plans.METERS).filter(k => !Plans.METERS[k].feature || can(Plans.METERS[k].feature)).map(k => meterHTML(k)).join('') + '</div>' +
         '<p class="acct-fine">Only work that succeeds is counted: AI answers that fail and scrapes that collect less than their limit are given back.</p></div>' +
       '<h3 class="acct-h">Plans</h3>' + plansHTML() + '</div>';
     const on = (a, fn) => { const b = container.querySelector('[data-a=' + a + ']'); if (b) b.onclick = () => fn(b); };

@@ -32,7 +32,18 @@ const DEFAULTS = {
   browserEnabled:        true,
   defaultEngine:         'redditapis',  // where the Scraper pages' jobs go unless the user picks another: redditapis | browser | server
   serverTransport:       'auto',   // python | epoxy | auto (Python if found, else epoxy-tls)
-  allowPrivateNetwork:   false
+  allowPrivateNetwork:   false,
+  // Durable jobs (scraper/jobs/job-store.js)
+  persistJobs:           true,
+  maxQueuedJobs:         20,       // waiting to start, server-wide (backpressure: more → 503 queue_full)
+  maxDiskMb:             2048,     // the job folder's size limit
+  pausedRetentionHours:  24,       // paused jobs left alone this long are cancelled
+  maxJobWaits:           6,        // automatic retries of a job after temporary failures…
+  maxJobWaitMinutes:     30,       // …and the longest it waits in total before pausing
+  // Circuit breaker per network provider (scraper/network/circuit-breaker.js)
+  circuitFailures:       5,
+  circuitCooldownSeconds: 30,
+  circuitMaxCooldownSeconds: 300
 };
 
 function bool(env, name, fallback, warnings) {
@@ -136,6 +147,29 @@ function loadScraperConfig(env) {
     warnings.push('SCRAPER_ALLOW_PRIVATE_NETWORK is on: the Wisp proxy may connect to private/loopback addresses. Use this only for testing against a local mock server.');
   }
   if (c.defaultDelayMs < c.minDelayMs) c.defaultDelayMs = c.minDelayMs;
+
+  // Durable jobs: where they're kept, how many may wait, how much disk they may use
+  c.persistJobs          = bool(env, 'SCRAPER_PERSIST_JOBS', DEFAULTS.persistJobs, warnings);
+  c.dataDir              = require('path').resolve(String(env.SCRAPER_DATA_DIR || '').trim() || require('path').join(__dirname, '..', 'scraper-data'));
+  c.maxQueuedJobs        = int(env, 'SCRAPER_MAX_QUEUED_JOBS', DEFAULTS.maxQueuedJobs, 1, 1000, warnings);
+  c.maxDiskMb            = int(env, 'SCRAPER_MAX_DISK_MB', DEFAULTS.maxDiskMb, 16, 1024 * 1024, warnings);
+  c.maxDiskBytes         = c.maxDiskMb * 1024 * 1024;
+  c.pausedRetentionHours = int(env, 'SCRAPER_PAUSED_RETENTION_HOURS', DEFAULTS.pausedRetentionHours, 1, 24 * 90, warnings);
+  c.maxJobWaits          = int(env, 'SCRAPER_MAX_JOB_WAITS', DEFAULTS.maxJobWaits, 0, 50, warnings);
+  c.maxJobWaitMinutes    = int(env, 'SCRAPER_MAX_JOB_WAIT_MINUTES', DEFAULTS.maxJobWaitMinutes, 1, 24 * 60, warnings);
+  c.jobWaitBaseMs        = int(env, 'SCRAPER_JOB_WAIT_BASE_MS', 30000, 10, 600000, warnings);
+  // Network providers (scraper/network/providers.js) — set by the administrator only
+  c.network = {
+    SCRAPER_NETWORK_PROVIDERS: String(env.SCRAPER_NETWORK_PROVIDERS || ''),
+    SCRAPER_NETWORK_FAILOVER: String(env.SCRAPER_NETWORK_FAILOVER || ''),
+    SCRAPER_PROXY_URL: String(env.SCRAPER_PROXY_URL || ''),
+    SCRAPER_VPN_GATEWAY_PROXY_URL: String(env.SCRAPER_VPN_GATEWAY_PROXY_URL || ''),
+    SCRAPER_VPN_GATEWAY_HEALTH_URL: String(env.SCRAPER_VPN_GATEWAY_HEALTH_URL || '')
+  };
+  // Circuit breaker
+  c.circuitFailures      = int(env, 'SCRAPER_CIRCUIT_FAILURES', DEFAULTS.circuitFailures, 1, 100, warnings);
+  c.circuitCooldownMs    = int(env, 'SCRAPER_CIRCUIT_COOLDOWN_SECONDS', DEFAULTS.circuitCooldownSeconds, 1, 3600, warnings) * 1000;
+  c.circuitMaxCooldownMs = Math.max(c.circuitCooldownMs, int(env, 'SCRAPER_CIRCUIT_MAX_COOLDOWN_SECONDS', DEFAULTS.circuitMaxCooldownSeconds, 1, 6 * 3600, warnings) * 1000);
 
   // Hosts the scraper's own requests (standard + custom code) may reach.
   c.apiHosts = Array.from(new Set([

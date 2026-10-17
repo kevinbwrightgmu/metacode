@@ -13,8 +13,20 @@
 //   GET    /api/scraper/jobs/:id/results       records (?offset, limit, type, search)
 //   GET    /api/scraper/jobs/:id/logs          log lines
 //   GET    /api/scraper/jobs/:id/export        download (?format=csv|json|ndjson, type, nested=1)
-//   POST   /api/scraper/jobs/:id/cancel        cancel a queued or running job
-//   DELETE /api/scraper/jobs/:id               cancel if needed, then forget the job
+//   POST   /api/scraper/jobs/:id/cancel        cancel a queued, running, waiting or paused job
+//   POST   /api/scraper/jobs/:id/pause         pause (standard scrapes; continue later from the checkpoint)
+//   POST   /api/scraper/jobs/:id/resume        resume a paused or waiting job (own keys are sent again)
+//   PATCH  /api/scraper/jobs/:id               change a paused job's delay / limits (only lower limits)
+//   GET    /api/scraper/jobs/:id/summary       collection summary (counts, time range, requests, checkpoint)
+//   GET    /api/scraper/jobs/:id/history       the job's recorded events (?offset, limit)
+//   DELETE /api/scraper/jobs/:id               cancel if needed, then forget the job (and its files)
+//   GET    /api/scraper/network                the network route's status (no addresses or credentials)
+//   GET    /api/scraper/admin/network          administrators: providers, circuits, metrics, queue health
+//   POST   /api/scraper/admin/network/:id/check | /reset   administrators: run a health check / close a circuit
+//
+// Jobs are kept on disk (SCRAPER_DATA_DIR, jobs/job-store.js) and survive a
+// restart; requests go through the administrator's network providers
+// (network/providers.js) behind a circuit breaker (network/network-manager.js).
 
 const express = require('express');
 const path = require('path');
@@ -24,6 +36,9 @@ const { createUpgradeHandler, plainHttpHandler, WISP_PATH } = require('./network
 const { EpoxyWispTransport, transportAvailable } = require('./network/epoxy-transport');
 const { PythonTransport, AutoTransport } = require('./network/python-transport');
 const { HostRateLimiter } = require('./network/rate-limiter');
+const { providersFromEnv } = require('./network/providers');
+const { NetworkManager } = require('./network/network-manager');
+const { JobStore } = require('./jobs/job-store');
 const { RedditHttpClient } = require('./network/reddit-http');
 const { RelayHub } = require('./network/browser-relay');
 const credentials = require('./credentials');
@@ -31,7 +46,8 @@ const { RedditApisClient, balanceOf, DASHBOARD_URL } = require('./network/reddit
 const { DEFAULT_USER_AGENT } = require('./config');
 const { normalizeTarget, normalizeOptions } = require('./reddit/targets');
 const { runStandardScrape } = require('./reddit/standard-scraper');
-const { JobManager, FINISHED } = require('./jobs/job-manager');
+const { JobManager, FINISHED, ACTIVE } = require('./jobs/job-manager');
+const crypto = require('crypto');
 const { createCustomRunner, sandboxSupported, validateCode } = require('./sandbox/custom-runner');
 const PYODIDE_VERSION = (() => { try { return require('pyodide/package.json').version; } catch (e) { return 'not installed'; } })();
 const exporter = require('./export');
@@ -66,6 +82,7 @@ function sendError(res, err) {
   if (res.headersSent) return;
   const e = isScraperError(err) ? err : new ScraperError('internal_error', 'Something went wrong in the scraper.', { status: 500 });
   if (!isScraperError(err)) console.error('[scraper] ' + sanitize(err && (err.stack || err.message), 600));
+  if (e.retryAfterMs) res.set('Retry-After', String(Math.ceil(e.retryAfterMs / 1000)));
   res.status(e.status || 500).json({ error: { message: e.message, type: e.type } });
 }
 
@@ -116,7 +133,7 @@ function createScraper(opts) {
 
   // Server-side HTTPS: Python (python/reddit_fetch.py) when available, else
   // epoxy-tls over Wisp — see network/python-transport.js.
-  const transport = opts.transport || new AutoTransport({
+  const baseTransport = opts.transport || new AutoTransport({
     mode: config.serverTransport,
     python: new PythonTransport({ config }),
     epoxy: new EpoxyWispTransport({ getWispUrl, userAgent: config.userAgent, maxResponseBytes: config.maxResponseBytes }),
@@ -125,6 +142,18 @@ function createScraper(opts) {
       if (t.kind === 'python') console.log('[scraper] Server engine: Python ' + t.info.python + ' (' + t.info.command + ')');
       else if (err) console.warn('[scraper] Python engine unavailable (' + err.message + '); using epoxy-tls over Wisp.');
     }
+  });
+  // The routes requests may take (direct, an administrator's proxy, a VPN
+  // gateway) behind a circuit breaker each. Everything below calls `transport`.
+  const net = providersFromEnv(config.network || {}, {
+    transport: baseTransport,
+    rules: { hostPatterns: config.wispHostPatterns, ports: config.wispPorts, allowPlainHttp: !!config.allowPrivateNetwork },
+    maxResponseBytes: config.maxResponseBytes
+  });
+  net.warnings.forEach(w => { if (!config.warnings.includes(w)) config.warnings.push(w); });
+  const transport = new NetworkManager({
+    providers: net.providers, failover: net.failover,
+    breaker: { failureThreshold: config.circuitFailures, cooldownMs: config.circuitCooldownMs, maxCooldownMs: config.circuitMaxCooldownMs }
   });
   const limiter = new HostRateLimiter({ maxConcurrent: config.maxConcurrentRequests });
   const http = new RedditHttpClient({ config, transport, limiter });
@@ -188,15 +217,26 @@ function createScraper(opts) {
   const ai = opts.ai || null;
   const aiProblem = () => (!ai ? 'The AI Scraper isn\'t available on this server.' : ai.problem());
   const runAi = createAiRunner({ ai, env: process.env });
+  // Jobs on disk (SCRAPER_DATA_DIR) unless SCRAPER_PERSIST_JOBS=false
+  const store = config.persistJobs ? new JobStore({ dir: config.dataDir, instanceId: crypto.randomUUID() }) : null;
   const jobs = new JobManager({
-    config, http,
+    config, http, store,
     runners: {
       standard: (job, ctx) => runStandardScrape(job.target, job.options, ctx),
       custom: runCustom,
       ai: runAi
     },
+    // After a restart: a job's HTTP client again. Users' own keys and browser
+    // tabs aren't kept on the server, so those jobs wait for their owner.
+    reattach(job) {
+      if (job.keySource === 'own') return { needs: 'keys' };
+      if (job.keySource === 'browser' || job.engine === 'browser') return { needs: 'browser' };
+      if (job.engine === 'redditapis') return config.redditApisKey ? { http: redditApis } : { needs: 'keys' };
+      return { http: null };
+    },
     logToConsole: opts.logToConsole
   });
+  let recovered = null;
   const onUpgrade = createUpgradeHandler(config);
   // Plans and limits (accounts/): who may scrape, and how much. Without a policy nothing is limited.
   const policy = opts.policy || null;
@@ -207,6 +247,8 @@ function createScraper(opts) {
     }
   });
   jobs.on('removed', job => relay.cancelJob(job.id));
+  // Who may see network diagnostics (accounts.admin(): ADMIN_EMAILS). Without it nobody may.
+  const adminGuard = opts.adminGuard || ((req, res) => sendError(res, new ScraperError('forbidden', 'Only this server\'s administrators can see this.', { status: 403 })));
   relay.ownerOfJob = jobId => { const j = jobs.get(jobId); return j ? j.owner || null : null; };
 
   function status(req) {
@@ -227,6 +269,9 @@ function createScraper(opts) {
       respectRobotsTxt: config.respectRobotsTxt,
       userAgent: config.userAgent,
       userAgentIsDefault: config.userAgent === DEFAULT_USER_AGENT,
+      // The route requests take (no addresses or credentials), and the job store
+      network: transport.publicStatus(),
+      jobStore: { persistent: !!store, maxQueuedJobs: config.maxQueuedJobs, queueDepth: jobs.queue.length },
       transport: Object.assign({
         name: transport.kind === 'python' ? 'Python' : 'epoxy-tls over Wisp',
         kind: transport.kind,
@@ -330,9 +375,10 @@ function createScraper(opts) {
     }
     const options = normalizeOptions(body.options, engine === 'browser' ? browserConfig
       : (engine === 'redditapis' ? redditApisOptionsConfig : (own ? own.config : config)));
-    const engineSpec = engine === 'browser' ? { engine, httpFor: browserHttpFor }
-      : own ? { engine, httpFor: () => own }
-      : engine === 'redditapis' ? { engine, httpFor: () => redditApis } : { engine };
+    const keySource = own ? 'own' : engine === 'browser' ? 'browser' : 'server';
+    const engineSpec = engine === 'browser' ? { engine, keySource, httpFor: browserHttpFor }
+      : own ? { engine, keySource, httpFor: () => own }
+      : engine === 'redditapis' ? { engine, keySource, httpFor: () => redditApis } : { engine, keySource };
     if (mode === 'ai') {
       const problem = aiProblem();
       if (problem) throw new ScraperError('not_available', problem, { status: 503 });
@@ -372,6 +418,29 @@ function createScraper(opts) {
   });
 
   router.get('/status', (req, res) => res.json(status(req)));
+  router.get('/network', (req, res) => res.json({ providers: transport.publicStatus() }));
+
+  // ── Administrators: network diagnostics and queue health ──
+  // Still no credentials: proxies are shown as scheme://host:port.
+  const admin = express.Router();
+  admin.use(adminGuard);
+  admin.get('/network', (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    res.json(Object.assign(transport.adminStatus(), { jobs: jobs.stats(), warnings: config.warnings.filter(w => /SCRAPER_(PROXY|VPN|NETWORK)/.test(w)) }));
+  });
+  admin.post('/network/:id/check', async (req, res) => {
+    try {
+      const r = await transport.checkHealth(String(req.params.id));
+      if (r === null) throw new ScraperError('invalid_request', 'That provider has no health check (only a VPN gateway with SCRAPER_VPN_GATEWAY_HEALTH_URL has one).', { status: 400 });
+      res.json({ health: r, providers: transport.publicStatus() });
+    } catch (err) { sendError(res, err); }
+  });
+  admin.post('/network/:id/reset', (req, res) => {
+    if (!transport.reset(String(req.params.id))) return sendError(res, new ScraperError('not_found', 'No such network provider.', { status: 404 }));
+    res.json({ providers: transport.publicStatus() });
+  });
+  router.use('/admin', admin);
+
   if (policy) {
     router.use((req, res, next) => {
       Promise.resolve(policy.use(req)).then(e => {
@@ -455,9 +524,14 @@ function createScraper(opts) {
   router.post('/redditapis-key', keysMoved);
   router.delete('/redditapis-key', keysMoved);
 
+  // Newest first; ?limit (default 100) and ?before=<createdAt of the last one> page through the rest
   router.get('/jobs', (req, res) => {
     const owner = ownerOf(req);
-    res.json({ jobs: jobs.list().filter(j => (j.owner || null) === owner).map(j => jobs.summary(j)) });
+    const limit = Math.max(1, Math.min(200, Number(req.query.limit) || 100));
+    const before = typeof req.query.before === 'string' ? req.query.before : null;
+    const mine = jobs.list().filter(j => (j.owner || null) === owner && (!before || j.createdAt < before));
+    const page = mine.slice(0, limit);
+    res.json({ jobs: page.map(j => jobs.summary(j)), next: mine.length > limit ? page[page.length - 1].createdAt : null });
   });
 
   router.post('/jobs', async (req, res) => {
@@ -465,7 +539,7 @@ function createScraper(opts) {
       const spec = parseSpec(req.body);
       spec.owner = ownerOf(req);
       if (policy) {
-        const running = jobs.list().filter(j => (j.owner || null) === spec.owner && !FINISHED.has(j.status)).length;
+        const running = jobs.list().filter(j => (j.owner || null) === spec.owner && ACTIVE.has(j.status)).length;
         const e = await policy.job(req, spec, { running });
         if (e) return res.status(e.status).json({ error: Object.assign({ message: e.message, type: e.type }, e.extra || {}) });
       }
@@ -478,8 +552,73 @@ function createScraper(opts) {
     try { res.json({ job: jobs.detail(findJob(req)) }); } catch (err) { sendError(res, err); }
   });
 
+  // ?offset & ?limit page through the log lines (all of them without)
   router.get('/jobs/:id/logs', (req, res) => {
-    try { const job = findJob(req); res.json({ logs: job.logs, dropped: job.logsDropped }); } catch (err) { sendError(res, err); }
+    try {
+      const job = findJob(req);
+      const offset = Math.max(0, Number(req.query.offset) || 0);
+      const limit = req.query.limit === undefined ? job.logs.length : Math.max(1, Math.min(1000, Number(req.query.limit) || 200));
+      res.json({ logs: job.logs.slice(offset, offset + limit), dropped: job.logsDropped, total: job.logs.length, offset });
+    } catch (err) { sendError(res, err); }
+  });
+
+  router.get('/jobs/:id/summary', (req, res) => {
+    try { res.json({ summary: jobs.collectionSummary(findJob(req)) }); } catch (err) { sendError(res, err); }
+  });
+
+  router.get('/jobs/:id/history', (req, res) => {
+    try {
+      const job = findJob(req);
+      const offset = Math.max(0, Number(req.query.offset) || 0);
+      const limit = Math.max(1, Math.min(500, Number(req.query.limit) || 100));
+      res.json(Object.assign({ offset, limit }, jobs.events(job, offset, limit)));
+    } catch (err) { sendError(res, err); }
+  });
+
+  router.post('/jobs/:id/pause', (req, res) => {
+    try { const job = findJob(req); jobs.pause(job.id); res.json({ job: jobs.summary(job) }); } catch (err) { sendError(res, err); }
+  });
+
+  // Resume: the plan must still include the scraper and allow another job at
+  // once; a job on the user's own keys needs them sent again.
+  router.post('/jobs/:id/resume', async (req, res) => {
+    try {
+      const job = findJob(req);
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      let httpFor;
+      if (job.keySource === 'own' || (job.engine === 'redditapis' && !config.redditApisKey)) {
+        if (job.engine === 'redditapis' && body.redditApisKey) {
+          let key;
+          try { key = credentials.validateRedditApisKey(body.redditApisKey); } catch (e) { throw new ScraperError('invalid_request', 'Your RedditAPIs.com key: ' + e.message, { status: 400 }); }
+          const c = ownRedditApisClient(key); httpFor = () => c;
+        } else if (job.engine === 'server' && body.credentials) {
+          let creds;
+          try { creds = credentials.validate(body.credentials); } catch (e) { throw new ScraperError('invalid_request', 'Your Reddit API keys: ' + e.message, { status: 400 }); }
+          const c = ownRedditClient(creds); httpFor = () => c;
+        } else if (job.pausedReason === 'needs_keys') {
+          throw new ScraperError('invalid_request', 'This job used your own API keys, which aren\'t kept on the server. Add them under Reddit API access on the Scraper page and press Resume there.', { status: 400 });
+        }
+      } else if (job.engine === 'browser') {
+        httpFor = browserHttpFor;
+      }
+      if (policy && policy.resume) {
+        const running = jobs.list().filter(j => (j.owner || null) === job.owner && ACTIVE.has(j.status) && j !== job).length;
+        const e = await policy.resume(req, job, { running });
+        if (e) return res.status(e.status).json({ error: Object.assign({ message: e.message, type: e.type }, e.extra || {}) });
+      }
+      jobs.resume(job.id, { httpFor });
+      res.json({ job: jobs.summary(job) });
+    } catch (err) { sendError(res, err); }
+  });
+
+  router.patch('/jobs/:id', (req, res) => {
+    try {
+      const job = findJob(req);
+      const body = req.body && typeof req.body === 'object' ? req.body : {};
+      const floor = job.engine === 'redditapis' || job.keySource === 'own' || http.mode === 'oauth' ? config.minDelayMs : Math.max(config.minDelayMs, config.publicMinDelayMs);
+      jobs.reconfigure(job.id, { delayMs: body.delayMs, maxItems: body.maxItems, maxPages: body.maxPages }, { minDelayMs: floor, maxPages: config.maxPages });
+      res.json({ job: jobs.summary(job) });
+    } catch (err) { sendError(res, err); }
   });
 
   router.get('/jobs/:id/results', (req, res) => {
@@ -494,7 +633,8 @@ function createScraper(opts) {
       const job = findJob(req);
       const format = String(req.query.format || 'json').toLowerCase();
       const type = String(req.query.type || 'all');
-      const records = type === 'all' ? job.records : job.records.filter(r => r.record_type === type);
+      const all = jobs.recordsOf(job);
+      const records = type === 'all' ? all : all.filter(r => r.record_type === type);
       const base = 'reddit_' + (job.target && (job.target.subreddit || job.target.username || job.target.postId || job.target.type) || 'custom')
         .replace(/[^A-Za-z0-9_+-]+/g, '_').slice(0, 40) + '_' + job.id.slice(0, 8) + (type !== 'all' ? '_' + type.replace(/\W/g, '') : '');
       let body, mime, ext;
@@ -651,11 +791,17 @@ function createScraper(opts) {
     },
     setPort(p) {
       port = p;
-      if (typeof transport.choose === 'function') transport.choose().catch(() => {});
+      transport.choose().catch(() => {});
+      transport.startHealthChecks();
+      // Jobs saved before a restart continue once the server can make requests
+      if (!recovered) {
+        try { recovered = jobs.recover(); } catch (e) { console.error('[scraper] Couldn\'t load saved jobs: ' + sanitize(e && e.message, 200)); recovered = { error: true }; }
+      }
     },
+    network: transport,
     shutdown() {
       jobs.shutdown();
-      if (typeof transport.close === 'function') transport.close();
+      transport.close();
     }
   };
 }

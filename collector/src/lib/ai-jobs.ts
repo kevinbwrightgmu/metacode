@@ -15,7 +15,7 @@ const FINISHED = new Set(['completed', 'failed', 'cancelled']);
 export interface ServerJob {
   id: string;
   mode: string;
-  status: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
+  status: 'queued' | 'running' | 'waiting' | 'paused' | 'completed' | 'failed' | 'cancelled';
   label: string;
   createdAt: string;
   startedAt: string | null;
@@ -71,7 +71,8 @@ export const isFinished = (job: Pick<ServerJob, 'status'>) => FINISHED.has(job.s
 
 /** The server's job status → this page's job state. */
 export function stateOf(job: Pick<ServerJob, 'status'>): JobState {
-  return job.status === 'completed' ? 'completed' : job.status === 'failed' ? 'failed' : job.status === 'cancelled' ? 'stopped' : 'running';
+  // (AI jobs can't pause; "paused" and "waiting" only happen to standard scrapes, mapped here for completeness)
+  return job.status === 'completed' ? 'completed' : job.status === 'failed' ? 'failed' : job.status === 'cancelled' ? 'stopped' : job.status === 'paused' ? 'paused' : 'running';
 }
 
 /** Why a finished job ended, in words. */

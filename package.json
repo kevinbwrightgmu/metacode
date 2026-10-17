@@ -9,6 +9,7 @@
     "test": "node --test --test-force-exit \"test/**/*.test.js\"",
     "billing:check": "node accounts/check-billing.js",
     "test:unit": "node --test --test-force-exit test/targets.test.js test/format-export.test.js test/network.test.js test/jobs.test.js test/sandbox.test.js",
+    "typecheck": "tsc -p tsconfig.json",
     "collector:install": "npm --prefix collector install",
     "collector:dev": "npm --prefix collector run dev",
     "collector:build": "npm --prefix collector run build",
@@ -32,6 +33,8 @@
     "node": ">=18.0.0"
   },
   "devDependencies": {
-    "playwright-core": "^1.63.0"
+    "@types/node": "22.20.5",
+    "playwright-core": "^1.63.0",
+    "typescript": "5.9.3"
   }
 }

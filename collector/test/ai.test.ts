@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { fromServerRecord, mergeRecords } from '../src/lib/records';
-import { ACCESS_STORAGE, accessOptions, cleanSettings, initialAccess, readOwnKeys, saveAccess, OWN_KEYS_STORAGE, type ServerInfo } from '../src/lib/settings';
+import { ACCESS_STORAGE, accessOptions, cleanSettings, initialAccess, networkProblemOf, readOwnKeys, saveAccess, OWN_KEYS_STORAGE, type ServerInfo } from '../src/lib/settings';
 import { jobRequest, outcomeOf, stateOf, watchJob, type ServerJob } from '../src/lib/ai-jobs';
 import { AiJobSession, newJobRecord, type SessionStore } from '../src/lib/session';
 import { describeJob } from '../src/lib/jobs';
@@ -62,7 +62,7 @@ describe('settings and your own keys', () => {
   });
 
   it('offers RedditAPIs.com first (with a key, or asking for one), then your keys, then the server', () => {
-    const server: ServerInfo = { problem: null, serverMode: 'public', serverRedditApis: false, defaultEngine: 'redditapis' };
+    const server: ServerInfo = { problem: null, serverMode: 'public', serverRedditApis: false, defaultEngine: 'redditapis', networkProblem: null };
     const none = { reddit: null, redditapis: null };
     const bare = accessOptions(none, server);
     expect(bare.map(a => [a.value, a.ready])).toEqual([['redditapis', false], ['server', true]]);
@@ -80,7 +80,7 @@ describe('settings and your own keys', () => {
   });
 
   it('starts on this browser\'s last choice, else the server\'s default (RedditAPIs.com)', () => {
-    const server: ServerInfo = { problem: null, serverMode: 'public', serverRedditApis: false, defaultEngine: 'redditapis' };
+    const server: ServerInfo = { problem: null, serverMode: 'public', serverRedditApis: false, defaultEngine: 'redditapis', networkProblem: null };
     const mine = { reddit: { clientId: 'i', clientSecret: 's', username: null, hint: '' }, redditapis: null };
     const opts = accessOptions(mine, server);
     const stored = (v: string | null) => ({ getItem: (k: string) => (k === ACCESS_STORAGE ? v : null) });
@@ -93,6 +93,24 @@ describe('settings and your own keys', () => {
     saveAccess('server', { setItem: (k: string, v: string) => { saved[k] = v; } });
     expect(saved).toEqual({ [ACCESS_STORAGE]: 'server' });
     expect(() => saveAccess('server', { setItem: () => { throw new Error('full'); } })).not.toThrow();
+  });
+});
+
+describe('the server\'s network route', () => {
+  it('says nothing while the route works or only had a few failures', () => {
+    expect(networkProblemOf(undefined)).toBeNull();
+    expect(networkProblemOf([{ label: 'MetaCode server (direct)', state: 'ok', active: true }])).toBeNull();
+    expect(networkProblemOf([{ label: 'MetaCode server (direct)', state: 'degraded', active: true }])).toBeNull();
+  });
+  it('explains a paused or misconfigured route, naming the active one', () => {
+    const paused = networkProblemOf([{ label: 'VPN gateway', state: 'unavailable', active: true, retryAt: '2026-10-17T12:00:00Z' }, { label: 'Direct', state: 'ok', active: false }]);
+    expect(paused).toMatch(/VPN gateway/);
+    expect(paused).toMatch(/paused until/);
+    expect(networkProblemOf([{ label: 'Proxy', state: 'misconfigured', active: true }])).toMatch(/isn't configured correctly/);
+  });
+  it('maps the job states only standard scrapes have', () => {
+    expect(stateOf({ status: 'waiting' })).toBe('running');
+    expect(stateOf({ status: 'paused' })).toBe('paused');
   });
 });
 

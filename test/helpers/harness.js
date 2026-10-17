@@ -14,8 +14,14 @@ const path = require('path');
 const TEST_CREDENTIALS_FILE = path.join(os.tmpdir(), 'metacode-test-credentials-' + process.pid + '.json');
 const TEST_REDDITAPIS_KEY_FILE = path.join(os.tmpdir(), 'metacode-test-redditapis-key-' + process.pid + '.json');
 
+// Scraper jobs are kept on disk: each test process gets its own folder, so
+// one test never recovers another's jobs.
+const TEST_SCRAPER_DATA_DIR = path.join(os.tmpdir(), 'metacode-test-scraper-' + process.pid + '-' + Date.now().toString(36));
+
 function testEnv(extra) {
   return Object.assign({
+    SCRAPER_DATA_DIR: TEST_SCRAPER_DATA_DIR,
+    METACODE_LOG: 'off',                // structured log lines (lib/log.js) stay out of test output
     METACODE_ENV_FILE: 'none',          // never read a developer's own .env in tests
     SCRAPER_USER_AGENT: TEST_UA,
     SCRAPER_ALLOW_PRIVATE_NETWORK: 'true',

@@ -172,6 +172,31 @@ function createAccounts(opts) {
     };
   }
 
+  /* ── Administrators (ADMIN_EMAILS) ─────────── */
+  // An administrator is a signed-in account whose *verified* email is listed
+  // in ADMIN_EMAILS. Administrators see operational diagnostics (network
+  // providers, queues). It is not a plan: it grants no features, no limits and
+  // no access to anyone else's projects, jobs or data. With accounts off there
+  // are no administrators (the diagnostics routes answer 403).
+  async function isAdmin(req) {
+    const c = await contextOf(req);
+    if (!c.enabled || !c.user || !c.user.emailConfirmed || !c.user.email) return false;
+    return getConfig().admins.includes(String(c.user.email).toLowerCase());
+  }
+  function admin() {
+    return async (req, res, next) => {
+      try {
+        const c = await contextOf(req);
+        if (!c.enabled) return send(res, fail(403, 'forbidden', 'Administrator pages need accounts to be turned on (SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY and ADMIN_EMAILS).'));
+        const e = needUser(c, 'administrator pages');
+        if (e) return send(res, e);
+        if (!(await isAdmin(req))) return send(res, fail(403, 'forbidden', 'Only this server\'s administrators can see this.'));
+        req.isAdmin = true;
+        next();
+      } catch (err) { next(err); }
+    };
+  }
+
   /* ── Survey Studio (surveys/index.js) ─────── */
   const surveysPolicy = {
     // action: 'create' | 'save' | 'library' | 'publish' | 'reopen'
@@ -248,12 +273,27 @@ function createAccounts(opts) {
       spec.usage = { userId: c.user.id, reserved: items.granted, period: items.period };
       return null;
     },
+    // Resuming a paused job: the plan must still include the scraper (an
+    // expired subscription can't continue a job) and allow one more at once.
+    // No new job or items are charged — they were reserved when it started.
+    async resume(req, job, info) {
+      const c = await contextOf(req);
+      if (!c.enabled) return null;
+      const e = needUser(c, 'the Reddit Scraper') || needFeature(c, 'scraper');
+      if (e) return e;
+      const L = c.plan.limits;
+      if ((info && info.running) >= L.scrapeJobsAtOnce) {
+        return fail(429, 'account_rate_limited', 'The ' + c.plan.name + ' plan runs ' + L.scrapeJobsAtOnce + ' scrape' + (L.scrapeJobsAtOnce === 1 ? '' : 's') + ' at a time. Wait for the current one to finish, or pause it.');
+      }
+      return null;
+    },
     // A finished job is charged for what it collected; the rest of its reservation goes back.
     jobFinished(job) {
       const u = job && job.usage;
       if (!u || u.settled) return;
       u.settled = true;
-      usage.release(u.userId, 'scrapeItems', u.reserved - Math.min(u.reserved, (job.records || []).length), u.period);
+      const collected = Number.isFinite(job.itemCount) ? job.itemCount : (job.records || []).length;
+      usage.release(u.userId, 'scrapeItems', u.reserved - Math.min(u.reserved, collected), u.period);
     }
   };
 
@@ -306,7 +346,8 @@ function createAccounts(opts) {
         features: c.plan.features,
         limits: c.plan.limits,
         usage: Object.assign(usage.summary(c.user.id, c.plan.limits), { publishedSurveys: { limit: c.plan.limits.publishedSurveys } }),
-        billing: { enabled: getConfig().stripe.enabled, canManage: !!i.customer && i.source === 'stripe' }
+        billing: { enabled: getConfig().stripe.enabled, canManage: !!i.customer && i.source === 'stripe' },
+        admin: await isAdmin(req)
       });
     } catch (err) { send(res, fail(500, 'internal_error', 'Something went wrong while loading your account.')); }
   });
@@ -375,7 +416,8 @@ function createAccounts(opts) {
 
   return {
     enabled, config: getConfig, usage, billing, auth, attach, contextOf,
-    aiSingle, aiBatch, feature, surveysPolicy, scraperPolicy, upgradeGuard,
+    aiSingle, aiBatch, feature, surveysPolicy, scraperPolicy, upgradeGuard, isAdmin, admin,
+    needUser, needFeature, limitError, perMinute, send, rate,
     router, billingRouter, webhook,
     onClaim(fn) { claimers.push(fn); },
     flush() { usage.flush(); }

@@ -254,8 +254,21 @@ function normalizeOptions(input, config) {
     // rising) to collect past the ~1,000 items Reddit serves per listing.
     sweepSorts:     o.sweepSorts === true,
     // Load comments hidden behind "load more" (Reddit API only).
-    expandMore:     o.expandMore === true
+    expandMore:     o.expandMore === true,
+    // Incremental collection: only items posted after this time (unix seconds,
+    // or an ISO date); a listing sorted by "new" stops at the first older one.
+    since:          normalizeSince(o.since)
   };
+}
+
+const EARLIEST = Date.UTC(2005, 5, 1) / 1000;      // Reddit's launch
+function normalizeSince(value) {
+  if (value === undefined || value === null || value === '') return null;
+  const n = typeof value === 'number' ? value : (/^\d+(\.\d+)?$/.test(String(value).trim()) ? Number(value) : Date.parse(String(value)) / 1000);
+  if (!Number.isFinite(n) || n < EARLIEST || n > Date.now() / 1000 + 86400) {
+    throw new ScraperError('invalid_request', '"Only items after" must be a date between June 2005 and today.', { status: 400 });
+  }
+  return Math.floor(n);
 }
 
 module.exports = {

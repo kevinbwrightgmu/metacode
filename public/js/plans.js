@@ -9,7 +9,9 @@
    Pro   basic Survey Studio, a tightly limited Reddit Scraper, 2,300 posts.
    Max   full Survey Studio, near-unlimited scraping (custom code and the AI
          Scraper too), social network analysis, 4,000 posts.
-   Ultra everything, with fair-use ceilings instead of limits.
+   Ultra everything, with fair-use ceilings instead of limits, plus the AI
+         Coding Lab (/ultra/ai-lab — Ultra only; the lab* limits below are its
+         fair-use ceilings, see docs/ai-lab.md).
 
    "Per week" means Monday to Sunday (the count resets Monday 00:00 UTC);
    "per month" the calendar month (UTC); "per day" the UTC day.
@@ -28,45 +30,50 @@
     free: {
       id: 'free', name: 'Free', rank: 0,
       tagline: 'Code and analyse your own data',
-      features: { surveys: false, scraper: false, aiScraper: false, customCode: false, network: false, surveyAdvanced: false },
+      features: { surveys: false, scraper: false, aiScraper: false, customCode: false, network: false, surveyAdvanced: false, aiLab: false },
       limits: {
         aiPostsPerWeek: 850, aiRequestsPerDay: 40, aiRequestsPerMinute: 20, aiBatchesAtOnce: 1,
         scrapeJobsPerDay: 0, scrapeItemsPerJob: 0, scrapeItemsPerMonth: 0, scrapeJobsAtOnce: 0,
         publishedSurveys: 0, surveyResponsesPerMonth: 0,
-        networkRunsPerDay: 0
+        networkRunsPerDay: 0,
+        labRequestsPerDay: 0, labTokensPerMonth: 0, labGenerationsAtOnce: 0, labEvalRunsPerDay: 0, labEvalRunsAtOnce: 0, labStorageMb: 0, labFineTunesPerMonth: 0
       }
     },
     pro: {
       id: 'pro', name: 'Pro', rank: 1,
       tagline: 'Surveys and a first taste of scraping',
-      features: { surveys: 'basic', scraper: true, aiScraper: false, customCode: false, network: false, surveyAdvanced: false },
+      features: { surveys: 'basic', scraper: true, aiScraper: false, customCode: false, network: false, surveyAdvanced: false, aiLab: false },
       limits: {
         aiPostsPerWeek: 2300, aiRequestsPerDay: 150, aiRequestsPerMinute: 40, aiBatchesAtOnce: 2,
         scrapeJobsPerDay: 3, scrapeItemsPerJob: 100, scrapeItemsPerMonth: 1000, scrapeJobsAtOnce: 1,
         publishedSurveys: 3, surveyResponsesPerMonth: 300,
-        networkRunsPerDay: 0
+        networkRunsPerDay: 0,
+        labRequestsPerDay: 0, labTokensPerMonth: 0, labGenerationsAtOnce: 0, labEvalRunsPerDay: 0, labEvalRunsAtOnce: 0, labStorageMb: 0, labFineTunesPerMonth: 0
       }
     },
     max: {
       id: 'max', name: 'Max', rank: 2,
       tagline: 'Multiple methods, for serious projects',
-      features: { surveys: 'full', scraper: true, aiScraper: true, customCode: true, network: true, surveyAdvanced: true },
+      features: { surveys: 'full', scraper: true, aiScraper: true, customCode: true, network: true, surveyAdvanced: true, aiLab: false },
       limits: {
         aiPostsPerWeek: 4000, aiRequestsPerDay: 500, aiRequestsPerMinute: 80, aiBatchesAtOnce: 3,
         scrapeJobsPerDay: 100, scrapeItemsPerJob: 5000, scrapeItemsPerMonth: 100000, scrapeJobsAtOnce: 3,
         publishedSurveys: 25, surveyResponsesPerMonth: 5000,
-        networkRunsPerDay: 100
+        networkRunsPerDay: 100,
+        labRequestsPerDay: 0, labTokensPerMonth: 0, labGenerationsAtOnce: 0, labEvalRunsPerDay: 0, labEvalRunsAtOnce: 0, labStorageMb: 0, labFineTunesPerMonth: 0
       }
     },
     ultra: {
       id: 'ultra', name: 'Ultra', rank: 3,
       tagline: 'Unlimited, within fair use',
-      features: { surveys: 'full', scraper: true, aiScraper: true, customCode: true, network: true, surveyAdvanced: true },
+      features: { surveys: 'full', scraper: true, aiScraper: true, customCode: true, network: true, surveyAdvanced: true, aiLab: true },
       limits: {
         aiPostsPerWeek: 100000, aiRequestsPerDay: 5000, aiRequestsPerMinute: 200, aiBatchesAtOnce: 6,
         scrapeJobsPerDay: 1000, scrapeItemsPerJob: 25000, scrapeItemsPerMonth: 2000000, scrapeJobsAtOnce: 5,
         publishedSurveys: 250, surveyResponsesPerMonth: 100000,
-        networkRunsPerDay: 1000
+        networkRunsPerDay: 1000,
+        // AI Coding Lab fair-use ceilings (model calls include evaluation tasks and AI grading)
+        labRequestsPerDay: 2000, labTokensPerMonth: 50000000, labGenerationsAtOnce: 3, labEvalRunsPerDay: 50, labEvalRunsAtOnce: 2, labStorageMb: 500, labFineTunesPerMonth: 5
       }
     }
   };
@@ -78,7 +85,8 @@
     scraper:        { label: 'the Reddit Scraper' },
     aiScraper:      { label: 'the AI Scraper' },
     customCode:     { label: 'custom scraper code' },
-    network:        { label: 'social network analysis' }
+    network:        { label: 'social network analysis' },
+    aiLab:          { label: 'the AI Coding Lab' }
   };
 
   // Usage counters and the limit each one is checked against
@@ -88,7 +96,12 @@
     scrapeJobs:      { limit: 'scrapeJobsPerDay', period: 'day', label: 'Scraper jobs', unit: 'jobs' },
     scrapeItems:     { limit: 'scrapeItemsPerMonth', period: 'month', label: 'Items scraped', unit: 'items' },
     surveyResponses: { limit: 'surveyResponsesPerMonth', period: 'month', label: 'Survey responses', unit: 'responses' },
-    networkRuns:     { limit: 'networkRunsPerDay', period: 'day', label: 'Network analyses', unit: 'runs' }
+    networkRuns:     { limit: 'networkRunsPerDay', period: 'day', label: 'Network analyses', unit: 'runs' },
+    // The AI Coding Lab's meters (only shown on plans that include it: `feature`)
+    labRequests:     { limit: 'labRequestsPerDay', period: 'day', label: 'AI Coding Lab model calls', unit: 'calls', feature: 'aiLab' },
+    labTokens:       { limit: 'labTokensPerMonth', period: 'month', label: 'AI Coding Lab tokens (reported by the provider, or estimated)', unit: 'tokens', feature: 'aiLab' },
+    labEvalRuns:     { limit: 'labEvalRunsPerDay', period: 'day', label: 'Evaluation runs', unit: 'runs', feature: 'aiLab' },
+    labFineTunes:    { limit: 'labFineTunesPerMonth', period: 'month', label: 'Fine-tuning jobs', unit: 'jobs', feature: 'aiLab' }
   };
 
   // "this week", "today"… and how a period is said in a sentence
@@ -111,6 +124,7 @@
     out.push(f.scraper ? 'Reddit Scraper: ' + n(L.scrapeJobsPerDay) + ' jobs / day, ' + n(L.scrapeItemsPerJob) + ' items / job, ' + n(L.scrapeItemsPerMonth) + ' / month' : 'No Reddit Scraper');
     if (f.aiScraper) out.push('AI Scraper and custom scraper code');
     out.push(f.network ? 'Social network analysis (NetworkX, Network Graph)' : 'No network analysis');
+    if (f.aiLab) out.push('AI Coding Lab: coding assistants, knowledge bases, evaluations');
     return out;
   }
 

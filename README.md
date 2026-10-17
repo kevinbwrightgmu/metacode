@@ -223,8 +223,9 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 - **Responsible use**: shared per-host rate limiter with a server-enforced minimum delay, Reddit rate-limit
   headers and `Retry-After` honoured, caps on items/pages, no login/CAPTCHA/age-gate circumvention. The server
   engine checks robots.txt when it reads public pages without credentials.
-- Results are kept in server memory for `SCRAPER_JOB_RETENTION_MINUTES` (default 120): export them or add them
-  to the project.
+- Jobs and results are kept on the server's disk and survive a restart; standard scrapes can be paused and
+  resumed from checkpoints, and wait out temporary network failures (docs/scraper-network.md). Finished jobs are
+  deleted after `SCRAPER_JOB_RETENTION_MINUTES` (default 120): export them or add them to the project.
 
 | Variable | Default | What it does |
 |---|---|---|

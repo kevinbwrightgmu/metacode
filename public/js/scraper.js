@@ -38,7 +38,15 @@ const RedditScraper = (() => {
   };
   const TIMES = ['hour', 'day', 'week', 'month', 'year', 'all'];
   const TYPE_BADGE = { post: 'badge-blue', comment: 'badge-teal', subreddit: 'badge-violet', user: 'badge-amber' };
-  const STATUS_BADGE = { queued: 'badge-gray', running: 'badge-blue', completed: 'badge-green', failed: 'badge-red', cancelled: 'badge-amber' };
+  const STATUS_BADGE = { queued: 'badge-gray', running: 'badge-blue', waiting: 'badge-amber', paused: 'badge-violet', completed: 'badge-green', failed: 'badge-red', cancelled: 'badge-amber' };
+  // Why a job is paused (pausedReason from the server), in words
+  const PAUSED_REASON = {
+    user: 'You paused this job. Resume continues from its last checkpoint.',
+    retry_limit: 'Paused after several automatic retries. Resume tries again from the last checkpoint.',
+    needs_keys: 'The server restarted. This job used your own API keys, which aren\'t kept on the server — press Resume here (this browser has them) to continue.',
+    needs_browser: 'The server restarted. This job fetched Reddit through your browser — press Resume to continue (keep this tab open).',
+    lease_held: 'Another MetaCode server process is running this job.'
+  };
 
   const LANGUAGES = [
     { id: 'python', label: 'Python' },
@@ -780,7 +788,55 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       }
       if (mode !== 'own' && status.userAgentIsDefault) parts.push('<span class="sc-banner-warn">Set SCRAPER_USER_AGENT in .env so Reddit can identify your client.</span>');
     }
+    if (engine !== 'browser') parts.push(networkHTML());
     el.innerHTML = parts.join('');
+  }
+
+  // The server's network route (direct / administrator's proxy / VPN gateway) and whether it works
+  function networkHTML() {
+    const list = (status && status.network) || [];
+    const active = list.find(p => p.active) || list[0];
+    if (!active) return '';
+    const badge = active.state === 'ok' ? 'badge-green' : active.state === 'degraded' ? 'badge-amber' : 'badge-red';
+    const word = { ok: 'working', degraded: 'recent failures', unavailable: 'paused after repeated failures', misconfigured: 'not configured correctly' }[active.state] || active.state;
+    const admin = window.Account && Account.me && Account.me() && Account.me().admin;
+    return '<span class="badge ' + badge + '" title="How this server\'s requests reach Reddit">Network: ' + esc(active.label) + ' · ' + esc(word) + '</span>' +
+      (active.state === 'unavailable' && active.retryAt ? '<span class="text-second">Requests resume after ' + esc(new Date(active.retryAt).toLocaleTimeString()) + '; running jobs wait instead of failing.</span>' : '') +
+      (admin ? '<button class="btn btn-ghost btn-sm" type="button" onclick="RedditScraper.showNetwork()">Network diagnostics</button>' : '');
+  }
+
+  // Administrators (ADMIN_EMAILS): providers, circuits, request metrics, queue health
+  async function showNetwork() {
+    let d;
+    try { d = await api('/admin/network'); } catch (e) { App.notify(e.message, 'error'); return; }
+    const ms = v => (v === null || v === undefined ? '—' : fmtNum(v) + ' ms');
+    const rows = d.providers.map(p => '<tr><td><b>' + esc(p.label) + '</b><div class="text-muted" style="font-size:12px">' + esc(p.id) + (p.details && p.details.proxy ? ' · ' + esc(p.details.proxy) : '') + '</div>' +
+        (p.problems.length ? '<div class="text-error" style="font-size:12px">' + esc(p.problems.join(' ')) + '</div>' : '') + '</td>' +
+      '<td>' + esc(p.circuit.state) + (p.circuit.retryAt ? '<div class="text-muted" style="font-size:12px">retry ' + esc(new Date(p.circuit.retryAt).toLocaleTimeString()) + '</div>' : '') + (p.circuit.forcedOpen ? '<div class="text-muted" style="font-size:12px">' + esc(p.circuit.forcedOpen) + '</div>' : '') + '</td>' +
+      '<td class="sc-cell-num">' + fmtNum(p.metrics.total) + '<div class="text-muted" style="font-size:12px">' + fmtNum(p.metrics.active) + ' active</div></td>' +
+      '<td class="sc-cell-num">' + fmtNum(p.metrics.recent.ok) + ' / ' + fmtNum(p.metrics.recent.failed) + '</td>' +
+      '<td class="sc-cell-num">' + ms(p.metrics.recent.p50Ms) + '<div class="text-muted" style="font-size:12px">p95 ' + ms(p.metrics.recent.p95Ms) + '</div></td>' +
+      '<td class="sc-cell-num">' + fmtNum(p.metrics.timeouts) + ' / ' + fmtNum(p.metrics.rateLimited) + '</td>' +
+      '<td>' + (p.health.checks ? (p.health.last ? (p.health.last.ok ? 'healthy' : esc(p.health.last.detail || 'failing')) + '<div class="text-muted" style="font-size:12px">' + esc(fmtDate(p.health.last.checkedAt)) + '</div>' : 'not checked yet') : '—') + '</td>' +
+      '<td style="white-space:nowrap">' + (p.health.checks ? '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.adminNetwork(\'' + esc(p.id) + '\', \'check\')">Check</button>' : '') +
+        (p.circuit.state !== 'closed' ? '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.adminNetwork(\'' + esc(p.id) + '\', \'reset\')">Close circuit</button>' : '') + '</td></tr>').join('');
+    const j = d.jobs;
+    App.openModal('Network diagnostics', '<p class="text-second" style="font-size:13px">Order: ' + esc(d.order.join(' → ')) + ' · failover ' + (d.failover ? 'on (only while a route is down)' : 'off') + '. Credentials are never shown.</p>' +
+      '<div class="table-wrap"><table class="table"><thead><tr><th>Provider</th><th>Circuit</th><th class="sc-cell-num">Requests</th><th class="sc-cell-num">Recent ok / failed</th><th class="sc-cell-num">Latency p50</th><th class="sc-cell-num">Timeouts / 429s</th><th>Health check</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
+      '<p class="text-second" style="font-size:13px;margin-top:12px">Queue: ' + fmtNum(j.queueDepth) + ' waiting to start (max ' + fmtNum(j.maxQueuedJobs) + '), ' + fmtNum(j.running) + ' running (max ' + fmtNum(j.maxConcurrentJobs) + ')' +
+        (j.oldestQueuedSeconds !== null ? ', oldest queued ' + fmtNum(j.oldestQueuedSeconds) + ' s' : '') + (j.nextRetryAt ? ', next automatic retry ' + esc(new Date(j.nextRetryAt).toLocaleTimeString()) : '') +
+        '. Jobs by status: ' + esc(Object.entries(j.byStatus).map(([k, v]) => k + ' ' + v).join(', ') || 'none') + '.' +
+        (j.persistent ? ' Job storage: ' + fmtNum(Math.round(j.diskBytes / 1048576)) + ' of ' + fmtNum(Math.round(j.maxDiskBytes / 1048576)) + ' MB.' : ' Jobs are kept in memory only.') + '</p>' +
+      (d.warnings.length ? '<div class="sc-banner-warn">' + d.warnings.map(esc).join('<br>') + '</div>' : ''));
+  }
+
+  async function adminNetwork(id, action) {
+    try {
+      await api('/admin/network/' + encodeURIComponent(id) + '/' + action, { method: 'POST' });
+      App.closeModal && App.closeModal();
+      await loadStatus();
+      showNetwork();
+    } catch (e) { App.notify(e.message, 'error'); }
   }
 
   // Which engine makes the server's HTTPS requests (python/reddit_fetch.py, or epoxy-tls).
@@ -1386,6 +1442,82 @@ async def scrape(ctx):
     }
   }
 
+  // A job summary from a request's answer: the live event stream may already
+  // have delivered a newer state, which an older snapshot must not replace.
+  function applySummary(summary) {
+    if (!job || !summary || summary.id !== job.id) return;
+    if (job.updatedAt && summary.updatedAt && summary.updatedAt < job.updatedAt) return;
+    Object.assign(job, summary);
+    renderJob();
+  }
+
+  // Pause at the next safe point (the server keeps a checkpoint); resume from it
+  async function pause() {
+    if (!job) return;
+    try {
+      applySummary((await api('/jobs/' + job.id + '/pause', { method: 'POST' })).job);
+    } catch (e) { App.notify(e.message, 'error'); }
+  }
+
+  async function resume() {
+    if (!job) return;
+    const body = {};
+    // A job on your own keys needs them again (the server never stores them)
+    if (job.keySource === 'own' && job.engine === 'server') {
+      const mine = ownReddit();
+      if (!mine) { App.notify('Add your Reddit API keys under Reddit API access first, then press Resume.', 'warning', 6000); toggleApi(true); return; }
+      body.credentials = { clientId: mine.clientId, clientSecret: mine.clientSecret, username: mine.username || '' };
+    }
+    if (job.engine === 'redditapis' && ownRedditApis()) body.redditApisKey = ownRedditApis().key;
+    try {
+      if (job.engine === 'browser') await ensureRelay();
+      applySummary((await api('/jobs/' + job.id + '/resume', { method: 'POST', body })).job);
+      if (!es) connect(job.id);
+      refreshJobs();
+    } catch (e) { App.notify(e.message, 'error', 6000); }
+  }
+
+  // Incremental collection: a new job for the same listing that keeps only
+  // items posted after the newest one this job collected.
+  async function collectNewer() {
+    if (!job || !job.target) return;
+    const newest = records.reduce((t, r) => (Number(r.created_utc) > t ? Number(r.created_utc) : t), 0);
+    if (!newest) { App.notify('This job has no dated items to continue from.', 'warning'); return; }
+    const body = { mode: 'standard', target: job.target, engine: job.engine, options: Object.assign({}, job.options, { since: newest + 1 }) };
+    const mine = body.engine === 'server' ? ownReddit() : null;
+    if (mine) body.credentials = { clientId: mine.clientId, clientSecret: mine.clientSecret, username: mine.username || '' };
+    const myRapi = body.engine === 'redditapis' ? ownRedditApis() : null;
+    if (myRapi) body.redditApisKey = myRapi.key;
+    try {
+      if (body.engine === 'browser') await ensureRelay();
+      const data = await api('/jobs', { method: 'POST', body });
+      setJob(data.job);
+      App.notify('Collecting items posted after ' + new Date(newest * 1000).toLocaleString(), 'info', 4000);
+      refreshJobs();
+    } catch (e) { App.notify(e.message, 'error', 6000); }
+  }
+
+  // The collection summary (counts, time range, requests) from the server
+  async function showSummary() {
+    if (!job) return;
+    try {
+      const s = (await api('/jobs/' + job.id + '/summary')).summary;
+      const row = (k, v) => '<tr><th style="text-align:left;font-weight:500;padding:4px 12px 4px 0">' + esc(k) + '</th><td>' + v + '</td></tr>';
+      const types = Object.entries(s.byType).map(([k, v]) => esc(k) + ': ' + fmtNum(v)).join(', ') || '—';
+      App.openModal('Collection summary', '<div class="table-wrap"><table class="table"><tbody>' +
+        row('Status', esc(cap(s.status))) + row('Items', fmtNum(s.items) + ' (' + types + ')') +
+        row('Duplicates skipped', fmtNum(s.duplicatesSkipped)) +
+        row('Requests', fmtNum(s.requests.total) + ' · ' + fmtNum(s.requests.ok) + ' succeeded · ' + fmtNum(s.requests.failed) + ' failed · ' + fmtNum(s.requests.retries) + ' retries') +
+        row('Pages', fmtNum(s.pages)) + row('Runs', fmtNum(s.runs) + (s.waits ? ' (' + fmtNum(s.waits) + ' automatic wait' + (s.waits === 1 ? '' : 's') + ')' : '')) +
+        row('Items posted between', s.oldestItemAt ? esc(fmtDate(s.oldestItemAt)) + ' and ' + esc(fmtDate(s.newestItemAt)) : '—') +
+        row('Top subreddits', s.subreddits.length ? s.subreddits.map(x => 'r/' + esc(x.name) + ' (' + fmtNum(x.count) + ')').join(', ') : '—') +
+        row('Last checkpoint', s.checkpoint ? fmtNum(s.checkpoint.items) + ' items, ' + esc(fmtDate(s.checkpoint.at)) : '—') +
+        row('Last item collected', s.lastCollectedAt ? esc(fmtDate(s.lastCollectedAt)) : '—') +
+        (s.lastError ? row('Last problem', esc(s.lastError.message)) : '') +
+        '</tbody></table></div>');
+    } catch (e) { App.notify(e.message, 'error'); }
+  }
+
   /* ── Current job ──────────────────────────── */
   function setJob(summary) {
     if (es) { es.close(); es = null; }
@@ -1529,13 +1661,20 @@ async def scrape(ctx):
           <span class="badge badge-gray">${job.engine === 'browser' ? 'Browser' : 'Server'}</span>
         </div>
         <div class="flex gap-2">
+          ${job.resumable && ['queued', 'running', 'waiting'].includes(job.status) ? '<button class="btn btn-secondary btn-sm" onclick="RedditScraper.pause()">Pause</button>' : ''}
+          ${job.resumable && ['paused', 'waiting'].includes(job.status) ? '<button class="btn btn-primary btn-sm" onclick="RedditScraper.resume()">' + (job.status === 'waiting' ? 'Retry now' : 'Resume') + '</button>' : ''}
           ${running ? '<button class="btn btn-secondary btn-sm" onclick="RedditScraper.cancel()">Cancel</button>' : ''}
+          <button class="btn btn-ghost btn-sm" onclick="RedditScraper.showSummary()">Summary</button>
+          ${!running && job.status === 'completed' && job.mode === 'standard' && job.target && ['subreddit', 'listing', 'search', 'user'].includes(job.target.type) && job.target.sort === 'new'
+            ? '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.collectNewer()" title="A new job for the same listing that keeps only items posted after the newest one here">Collect newer items</button>' : ''}
         </div>
       </div>
-      <div class="progress-wrap"><div class="progress-bar ${running ? 'sc-indeterminate' : ''}" id="sc-progress-bar"
-        style="width:100%;background:${job.status === 'failed' ? 'var(--error)' : job.status === 'cancelled' ? 'var(--warning)' : 'var(--success)'}"></div></div>
+      <div class="progress-wrap" ${running && job.status !== 'paused' ? 'role="progressbar" aria-label="Collecting — the total isn\'t known in advance" aria-busy="true"' : ''}><div class="progress-bar ${job.status === 'running' || job.status === 'queued' ? 'sc-indeterminate' : ''}" id="sc-progress-bar"
+        style="width:100%;background:${job.status === 'failed' ? 'var(--error)' : ['cancelled', 'waiting'].includes(job.status) ? 'var(--warning)' : job.status === 'paused' ? 'var(--tx-muted)' : 'var(--success)'}"></div></div>
       <div class="sc-stats" id="sc-stats"></div>
       <div class="sc-message" id="sc-message"></div>
+      ${job.status === 'waiting' ? '<div class="sc-banner-warn" role="status">Waiting for a permitted retry' + (job.retryAt ? ' at ' + esc(new Date(job.retryAt).toLocaleTimeString()) : '') + ' (automatic retry ' + fmtNum(job.waits) + ')' + (job.lastError ? ': ' + esc(job.lastError.message) : '.') + '</div>' : ''}
+      ${job.status === 'paused' ? '<div class="sc-banner-warn" role="status">' + esc(PAUSED_REASON[job.pausedReason] || 'Paused.') + (job.lastError && job.pausedReason === 'retry_limit' ? ' Last problem: ' + esc(job.lastError.message) : '') + '</div>' : ''}
       ${job.error ? '<div class="sc-error-box" role="alert">' + esc(job.error.message) +
         (job.error.type === 'reddit_blocked' && status && !hasApiKeys()
           ? '<div class="mt-3"><button class="btn btn-secondary btn-sm" onclick="RedditScraper.toggleApi(true)">Add your Reddit API keys</button></div>' : '') +
@@ -1558,12 +1697,17 @@ async def scrape(ctx):
     if (!el || !job) return;
     const p = job.progress || {};
     const stat = (n, l) => '<div class="sc-stat"><div class="sc-stat-num">' + n + '</div><div class="sc-stat-label">' + l + '</div></div>';
+    // Counts of work actually done; the total isn't known in advance, so no percentage
+    const items = p.itemsFound !== undefined ? p.itemsFound : job.itemCount;
     el.innerHTML =
-      stat(fmtNum(p.itemsFound !== undefined ? p.itemsFound : job.itemCount), 'Items') +
+      stat(fmtNum(items) + (job.capacity ? '<span class="sc-stat-of"> / max ' + fmtNum(job.capacity) + '</span>' : ''), 'Items') +
       stat(fmtNum(p.pagesFetched), 'Pages') +
-      stat(fmtNum(p.requests), 'Requests') +
+      stat(fmtNum(p.requestsOk !== undefined ? p.requestsOk : p.requests), 'Requests OK') +
+      stat(fmtNum(p.requestsFailed !== undefined ? p.requestsFailed : p.errors), 'Requests failed') +
+      stat(fmtNum(p.retries || 0), 'Retries') +
       stat(fmtNum(p.duplicates), 'Duplicates skipped') +
-      stat(fmtNum(p.errors), 'Errors') +
+      stat(job.checkpoint ? fmtNum(job.checkpoint.items) + ' items' : '—', job.checkpoint ? 'Checkpoint · ' + new Date(job.checkpoint.at).toLocaleTimeString() : 'Checkpoint') +
+      stat(job.lastCollectedAt ? new Date(job.lastCollectedAt).toLocaleTimeString() : '—', 'Last item') +
       stat(job.startedAt ? new Date(job.startedAt).toLocaleTimeString() : '—', 'Started') +
       stat(fmtDuration(jobDuration(job)), 'Duration');
     const msg = $('sc-message');
@@ -1971,8 +2115,9 @@ async def scrape(ctx):
     }
     if (!$('sc-jobs-list')) return;
     if (!jobsList.length) {
-      el.innerHTML = '<div class="text-muted" style="font-size:12.5px">No jobs yet. Jobs and their results are kept in server memory' +
-        (status ? ' for ' + status.limits.jobRetentionMinutes + ' minutes' : '') + ' — export or add results to the project to keep them.</div>';
+      el.innerHTML = '<div class="text-muted" style="font-size:12.5px">No jobs yet. Jobs and their results are kept on the server' +
+        (status && status.jobStore && !status.jobStore.persistent ? ' (in memory)' : '') +
+        (status ? ' for ' + status.limits.jobRetentionMinutes + ' minutes after they finish' : '') + ' — export or add results to the project to keep them.</div>';
       return;
     }
     el.innerHTML = '<div class="table-wrap"><table class="table"><thead><tr><th>Job</th><th>Mode</th><th>Status</th><th class="sc-cell-num">Items</th><th>Created</th><th></th></tr></thead><tbody>' +
@@ -2168,6 +2313,7 @@ async def scrape(ctx):
 
   return {
     render, setMode, setEngine, toggleApi, connectApi, disconnectApi, toggleRedditApis, saveRedditApisKey, removeRedditApisKey, onTargetType, onField, onOption, checkTarget, start, cancel,
+    pause, resume, collectNewer, showSummary, showNetwork, adminNetwork,
     loadTemplate, setLanguage, onParams, showApi, setTab, onSearch, onType, onSort, showMore,
     showRecord, copyJson, exportAs, addToProject, confirmAdd, refreshJobs, openJob, deleteJob,
     toggleBrowser, browse, browseRecord, useBrowserPage,

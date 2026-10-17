@@ -1,0 +1,23 @@
+{
+  // Type checking for the server's JavaScript (no build step: nothing is emitted).
+  // Only files that start with `// @ts-check` are checked — the newer modules
+  // (lib/, the scraper's network layer and job store, ai-lab/). Shared types
+  // live in types/*.d.ts. Run: npm run typecheck
+  "compilerOptions": {
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "strict": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "target": "ES2022",
+    "lib": ["ES2023"],
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "types": ["node"],
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "maxNodeModuleJsDepth": 0
+  },
+  "include": ["lib/**/*.js", "scraper/**/*.js", "ai-lab/**/*.js", "accounts/**/*.js", "types/**/*.d.ts"]
+}
