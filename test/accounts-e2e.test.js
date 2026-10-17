@@ -88,6 +88,7 @@ test('accounts in the pages: sign up, keep this browser\'s work, plan gates, che
   assert.equal(await page.isVisible('#nav-account'), true);
   assert.equal((await page.textContent('.nav-item[data-view="scraper"] .nav-lock')).trim(), 'Pro');
   assert.equal((await page.textContent('.nav-item[data-view="network"] .nav-lock')).trim(), 'Max');
+  assert.equal((await page.textContent('.nav-item[data-feature="aiLab"] .nav-lock')).trim(), 'Ultra');
   await page.click('.nav-item[data-view="scraper"]');
   await page.waitForSelector('.acct-gate');
   assert.match(await page.textContent('.acct-gate'), /Sign in to use the Reddit Scraper/);

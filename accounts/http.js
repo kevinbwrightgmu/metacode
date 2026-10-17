@@ -35,4 +35,4 @@ async function request(url, opts) {
   return { status: res.status, ok: res.ok, json, text };
 }
 
-module.exports = { request };
+module.exports = { request, dispatcherFor };

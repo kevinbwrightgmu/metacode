@@ -40,6 +40,7 @@ changing a number there changes it everywhere.
 | Scrapes at once | — | 1 | 3 | 5 |
 | AI Scraper (beta) and custom scraper code | — | — | ✓ | ✓ |
 | **Social network analysis** (Analyze CSV / NetworkX runs per day; Network Graph) | — | — | ✓ (100) | ✓ (1,000) |
+| **AI Coding Lab** (model calls per day · tokens per month · evaluation runs per day · storage) — [docs/ai-lab.md](ai-lab.md) | — | — | — | 2,000 · 50M · 50 · 500 MB |
 
 Every account, Free included, can import data, build codebooks, code by hand, compute reliability, see
 metrics and export.

@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <!-- Google tag (gtag.js) -->
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-VYEQCY48SX"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+
+    gtag('config', 'G-VYEQCY48SX');
+  </script>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Coding Lab — MetaCode Ultra</title>
+  <link rel="icon" type="image/png" href="/img/metacode-mark.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/account.css">
+  <link rel="stylesheet" href="/css/ai-lab.css">
+</head>
+<body class="lab-page">
+<a class="lab-skip" href="#lab-main">Skip to content</a>
+<div class="app-shell lab-shell" id="lab-shell">
+
+  <!-- ── Sidebar ── -->
+  <aside class="sidebar lab-sidebar" id="lab-sidebar" aria-label="AI Coding Lab">
+    <a class="sidebar-brand" href="/app.html" title="Back to the MetaCode app">
+      <div class="brand-mark"><img src="/img/metacode-mark.png" alt="MetaCode"></div>
+      <div>
+        <div class="brand-name">AI Coding Lab</div>
+        <div class="brand-sub">MetaCode Ultra</div>
+      </div>
+    </a>
+    <nav class="sidebar-nav" id="lab-nav" hidden>
+      <div class="nav-group">
+        <a class="nav-item" data-view="overview" href="#overview">Overview</a>
+        <a class="nav-item" data-view="projects" href="#projects">Projects</a>
+        <a class="nav-item" data-view="workbench" href="#workbench">AI Workbench</a>
+        <a class="nav-item" data-view="profiles" href="#profiles">Coding Profiles</a>
+        <a class="nav-item" data-view="knowledge" href="#knowledge">Knowledge Base</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-label">Improve</div>
+        <a class="nav-item" data-view="training" href="#training">Training Studio</a>
+        <a class="nav-item" data-view="evaluations" href="#evaluations">Evaluations</a>
+      </div>
+      <div class="nav-group">
+        <div class="nav-group-label">Settings</div>
+        <a class="nav-item" data-view="models" href="#models">Models</a>
+        <a class="nav-item" data-view="usage" href="#usage">Usage</a>
+        <a class="nav-item" data-view="docs" href="#docs">Documentation</a>
+      </div>
+    </nav>
+    <div class="sidebar-footer"><a href="/app.html" class="lab-back">← MetaCode app</a></div>
+  </aside>
+
+  <!-- ── Main ── -->
+  <main class="main-content" id="lab-main-wrap">
+    <header class="topbar">
+      <div class="topbar-left lab-topbar-left">
+        <button type="button" class="lab-menu" id="lab-menu" aria-label="Menu" aria-controls="lab-sidebar" aria-expanded="false">☰</button>
+        <h1 class="topbar-title" id="lab-title">AI Coding Lab</h1>
+      </div>
+      <div class="topbar-right">
+        <label class="lab-project-pick" id="lab-project-pick" hidden>
+          <span class="lab-visually-hidden">Project</span>
+          <select class="form-select" id="lab-project" aria-label="Current project"></select>
+        </label>
+        <span class="lab-model-chip" id="lab-model-chip" hidden title="The model new conversations start with"></span>
+        <span id="lab-account"></span>
+      </div>
+    </header>
+    <div class="view-container" id="lab-main" tabindex="-1" aria-live="polite">
+      <div class="loading-state">Checking your access…</div>
+    </div>
+  </main>
+</div>
+
+<!-- Modal -->
+<div class="modal-backdrop" id="modal-backdrop">
+  <div class="modal lab-modal" id="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-head">
+      <h2 class="modal-title" id="modal-title"></h2>
+      <button class="modal-x" id="modal-close" aria-label="Close">✕</button>
+    </div>
+    <div class="modal-body" id="modal-body"></div>
+    <div class="modal-foot" id="modal-foot"></div>
+  </div>
+</div>
+<div class="notif-stack" id="notif-stack" role="status"></div>
+
+<script src="/js/plans.js"></script>
+<script src="/js/account.js"></script>
+<script src="/js/ai-lab/lab-core.js"></script>
+<script src="/js/ai-lab/lab-markdown.js"></script>
+<script src="/js/ai-lab/lab-views.js"></script>
+<script src="/js/ai-lab/lab-workbench.js"></script>
+<script src="/js/ai-lab/lab-training.js"></script>
+<script src="/js/ai-lab/lab-evals.js"></script>
+<script>Lab.start();</script>
+</body>
+</html>

@@ -93,6 +93,15 @@ class UsageStore {
     return { granted, used: used + granted, limit, period: this.periodKey(meter), resetsAt: nextReset(Plans.METERS[meter].period, this.now()) };
   }
 
+  // Charges n more without a limit check: work already done cost more than was
+  // reserved (an AI answer with more tokens than estimated).
+  add(userId, meter, n) {
+    if (!(n > 0)) return;
+    const b = this.bucket(this.user(userId), meter);
+    b[meter] = (b[meter] || 0) + n;
+    this.changed();
+  }
+
   // Gives back n reserved in `period` (ignored once the period has rolled over).
   release(userId, meter, n, period) {
     if (!(n > 0)) return;
