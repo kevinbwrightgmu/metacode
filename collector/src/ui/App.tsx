@@ -185,6 +185,7 @@ export function App() {
 
       <main className="main single" id="main">
         {fatal ? <Notice tone="error">{fatal}</Notice> : null}
+        {!fatal && server && server.networkProblem ? <Notice tone="warn">{server.networkProblem}</Notice> : null}
         {!store && !fatal ? <p className="muted">Opening local storage…</p> : null}
         {store ? (
           <>

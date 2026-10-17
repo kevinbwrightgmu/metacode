@@ -14,6 +14,7 @@ The front page (`index.html`) introduces the four research methods — Reddit da
 | **Reddit Scraper** | Sidebar → **Scraper**. Collect subreddit, search, post-and-comments and profile data from Reddit (standard mode) or with your own sandboxed Python, JavaScript or TypeScript (custom code mode); live progress, results table/JSON, CSV/JSON export, and **Add to project** to code the posts. Each user can add their own Reddit API keys (kept in their browser). Server requests go through a Python worker (or epoxy-tls over Wisp without Python); an in-app Reddit browser uses Scramjet. See [docs/reddit-scraper.md](docs/reddit-scraper.md) |
 | **AI Scraper (beta)** | Sidebar → **AI Scraper**. Describe the posts you need in a sentence or two; an AI agent on the server (Python) finds where they're discussed, searches, reads posts when unsure and keeps the ones that fit, through Reddit's API. You watch each step; the posts are kept in your browser (IndexedDB), export as JSON, JSON Lines or CSV, and **Add to project** sends them for coding with their engagement. See [collector/README.md](collector/README.md) |
 | **Accounts & plans** | Optional (on when the server has Supabase settings). Sign in with Supabase Auth; your projects and surveys are saved to your account and follow you to any device. Plans from Stripe — **Free** (AI coding of 850 posts a week), **Pro** (basic Survey Studio, a tightly limited Reddit Scraper, 2,300 posts a week), **Max** (full Survey Studio, near-unlimited scraping, social network analysis, 4,000 posts a week), **Ultra** (everything, fair-use ceilings) — with usage limits and request rate limits enforced by the server. See [docs/accounts.md](docs/accounts.md) |
+| **AI Coding Lab (Ultra)** | `/ultra/ai-lab`, linked in the sidebar. Coding assistants configured per project: versioned coding profiles, a project knowledge base with keyword retrieval, a Workbench with streamed answers and a "what was sent" panel, datasets of coding tasks, evaluation suites with deterministic and clearly labelled AI-graded checks, run comparisons with regressions, profile improvements proposed as candidates you accept or reject, and fine-tuning only through a provider that offers it (off by default). Generated code is never run on the server. Access is decided on the server from the Ultra subscription. See [docs/ai-lab.md](docs/ai-lab.md) |
 | **Projects** | Save the open project and keep as many as you like (in your browser — private to you, even on a shared MetaCode server): reopen an earlier one, rename, duplicate, export/import as JSON, delete. A project that's open is saved automatically (Autosave) |
 | **Survey Studio** | Its own page, opened from the front page. A dashboard of your surveys (search, status filter, sort, response counts, quick links to Design / Theme / Preview / Responses). Build surveys on a freeform canvas where every part — down to a single answer choice — can be moved, resized, rotated, scaled, distorted and styled; 30+ element types, layers, groups, components, a theme editor with a live preview and a searchable library of 250+ fonts, Scratch-style block logic (show/hide, skip, branching, variables, formulas, scores, conditional styling, randomization blocks for assigning participants to conditions or messages), device preview and versioned publishing to a public link. An optional **Respondent information** block collects a name or participant code and, if you choose, the IP address and approximate location. **Responses** has a searchable list with a detail view of every answer, an optional disclosed session timeline with step-by-step replay, privacy-conscious CSV/JSON exports and erase/delete controls. Open-text answers can be added to the project for coding. See [docs/survey-studio.md](docs/survey-studio.md) |
 | **Codebook Builder** | Define custom coding dimensions and codes; each code has an optional AI Fine-Tuning Notes field the model reads during Auto-Coding, separate from the Description shown to human coders; import/export as CSV |
@@ -77,6 +78,7 @@ It includes `ecosystem.config.cjs` for pm2 and an nginx config that forwards the
 ```bash
 npm test          # all tests (browser tests need Chromium: set CHROMIUM_PATH, or they are skipped)
 npm run test:unit # without the server/browser tests
+npm run typecheck # TypeScript checks of the server modules marked // @ts-check
 ```
 
 ### AI Scraper (beta)
@@ -223,8 +225,9 @@ Sidebar → **Scraper** collects Reddit data into MetaCode. Full guide: **[docs/
 - **Responsible use**: shared per-host rate limiter with a server-enforced minimum delay, Reddit rate-limit
   headers and `Retry-After` honoured, caps on items/pages, no login/CAPTCHA/age-gate circumvention. The server
   engine checks robots.txt when it reads public pages without credentials.
-- Results are kept in server memory for `SCRAPER_JOB_RETENTION_MINUTES` (default 120): export them or add them
-  to the project.
+- Jobs and results are kept on the server's disk and survive a restart; standard scrapes can be paused and
+  resumed from checkpoints, and wait out temporary network failures (docs/scraper-network.md). Finished jobs are
+  deleted after `SCRAPER_JOB_RETENTION_MINUTES` (default 120): export them or add them to the project.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -318,6 +321,7 @@ MetaCode works as described elsewhere in this README, with no sign-in and no lim
 | Survey Studio | — | Basic: 3 live surveys, 300 responses / month | Full: 25 live, 5,000 / month | Full: 250 live, 100,000 / month |
 | Reddit Scraper | — | 3 jobs / day, 100 items / job, 1,000 / month | 100 jobs / day, 5,000 / job, 100,000 / month, AI Scraper, custom code | 1,000 / day, 25,000 / job, 2,000,000 / month |
 | Social network analysis | — | — | ✓ | ✓ |
+| AI Coding Lab | — | — | — | ✓ (2,000 model calls / day, 50M tokens / month, 50 evaluation runs / day, 500 MB) |
 
 Plus daily limits on other AI requests and per-minute request limits. The server checks every sign-in
 with Supabase and every plan with Stripe — the browser is never trusted for either — and counts only work
@@ -590,6 +594,10 @@ metacode/
 │   ├── src/                    lib/ (AI jobs, records, settings), store/ (IndexedDB), export/, ui/
 │   ├── test/                   Vitest unit tests
 │   └── SCHEMA.md               Record schema and export formats
+├── ai-lab/                     AI Coding Lab (Ultra) server: policy, store, providers, profiles, knowledge,
+│                               datasets, checks, evaluations, optimisation, fine-tuning — see docs/ai-lab.md
+├── lib/log.js                  Structured logging with secret redaction
+├── types/                      Shared type definitions (scraper, AI Lab) for `npm run typecheck`
 ├── scraper/                    Reddit scraper (server side) — see docs/reddit-scraper.md
 │   ├── index.js                /api/scraper routes, SSE, exports, Scramjet file serving
 │   ├── config.js               SCRAPER_* / REDDIT_* settings

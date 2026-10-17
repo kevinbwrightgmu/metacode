@@ -49,20 +49,34 @@ export interface ServerInfo {
   serverRedditApis: boolean;
   /** The way the server's pages reach Reddit unless the user picks another (SCRAPER_DEFAULT_ENGINE). */
   defaultEngine: 'redditapis' | 'browser' | 'server';
+  /** The server's network route to Reddit, when it isn't working (null when it is, or unknown). */
+  networkProblem: string | null;
+}
+
+interface NetworkStatus { label?: string; state?: string; active?: boolean; retryAt?: string | null }
+
+/** A sentence about the server's network route when it isn't working; null when it is. */
+export function networkProblemOf(list: NetworkStatus[] | undefined): string | null {
+  const active = Array.isArray(list) ? (list.find(p => p && p.active) || list[0]) : null;
+  if (!active || !active.state || active.state === 'ok' || active.state === 'degraded') return null;
+  if (active.state === 'misconfigured') return 'The server\'s network route to Reddit (' + (active.label || 'unknown') + ') isn\'t configured correctly, so jobs can\'t reach Reddit. Tell the server\'s administrator.';
+  const when = active.retryAt ? new Date(active.retryAt) : null;
+  return 'The server\'s network route to Reddit (' + (active.label || 'unknown') + ') failed several times in a row, so requests are paused' +
+    (when && !isNaN(when.getTime()) ? ' until ' + when.toLocaleTimeString() : '') + '. New jobs may fail until it recovers.';
 }
 
 /** Reads /api/scraper/status from the MetaCode server that serves the app. */
 export async function fetchServerInfo(fetchFn: typeof fetch = fetch): Promise<ServerInfo> {
-  const none = (problem: string): ServerInfo => ({ problem, serverMode: 'public', serverRedditApis: false, defaultEngine: 'redditapis' });
+  const none = (problem: string): ServerInfo => ({ problem, serverMode: 'public', serverRedditApis: false, defaultEngine: 'redditapis', networkProblem: null });
   try {
     const res = await fetchFn('/api/scraper/status', { headers: { accept: 'application/json' }, credentials: 'same-origin' });
     if (!res.ok) return none(res.status === 404 ? 'This MetaCode server has no scraper (an older version, or SCRAPER_ENABLED=false).' : 'The MetaCode server answered HTTP ' + res.status + '.');
-    const j = await res.json() as { enabled?: boolean; mode?: string; defaultEngine?: string; aiScraper?: { available?: boolean; reason?: string | null }; redditApis?: { configured?: boolean } };
+    const j = await res.json() as { enabled?: boolean; mode?: string; defaultEngine?: string; aiScraper?: { available?: boolean; reason?: string | null }; redditApis?: { configured?: boolean }; network?: NetworkStatus[] };
     const problem = j.enabled === false ? 'The Reddit scraper is turned off on this server (SCRAPER_ENABLED=false).'
       : !j.aiScraper ? 'This MetaCode server is from before the AI Scraper. Update it (git pull, then restart).'
       : j.aiScraper.available ? null : (j.aiScraper.reason || 'The AI Scraper isn\'t available on this server.');
     const defaultEngine = j.defaultEngine === 'browser' || j.defaultEngine === 'server' ? j.defaultEngine : 'redditapis';
-    return { problem, serverMode: j.mode === 'oauth' ? 'oauth' : 'public', serverRedditApis: !!(j.redditApis && j.redditApis.configured), defaultEngine };
+    return { problem, serverMode: j.mode === 'oauth' ? 'oauth' : 'public', serverRedditApis: !!(j.redditApis && j.redditApis.configured), defaultEngine, networkProblem: networkProblemOf(j.network) };
   } catch {
     return none('The MetaCode server couldn\'t be reached. Start it with npm start (this app is served at /collector/).');
   }

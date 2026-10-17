@@ -222,6 +222,41 @@ test('standard scrape: start → progress → results → filter → export → 
   await context.close();
 });
 
+test('scraper job controls: pause at a safe point → paused state with checkpoint → resume → completed → summary', { skip }, async () => {
+  const { page, context, errors } = await openApp('#scraper');
+  mock.state.delayMs = 400;                  // slow pages, so there's time to pause between them
+  try {
+    await page.selectOption('#sc-engine', 'server');
+    await page.selectOption('#sc-target-type', 'subreddit');
+    await page.fill('#sc-f-subreddit', 'test');
+    await page.selectOption('#sc-f-sort', 'new');
+    await page.fill('#sc-o-maxItems', '250');
+    await page.click('#sc-start');
+    await page.waitForSelector('#sc-job-status');
+    // Wait for the first page of 100, then pause
+    await page.waitForFunction(() => /Items/.test(document.querySelector('#sc-stats').textContent) && Number((document.querySelector('#sc-stats .sc-stat-num') || {}).firstChild?.textContent.replace(/\D/g, '')) >= 100, null, { timeout: 30000 });
+    await page.click('#sc-job >> text=Pause');
+    await page.waitForFunction(() => document.querySelector('#sc-job-status').textContent === 'Paused', null, { timeout: 30000 });
+    assert.match(await page.textContent('#sc-job'), /You paused this job/);
+    assert.match(await page.textContent('#sc-stats'), /Checkpoint/);
+    assert.ok(await page.isVisible('#sc-job >> text=Resume'));
+    mock.state.delayMs = 0;
+    await page.click('#sc-job >> text=Resume');
+    await page.waitForFunction(() => document.querySelector('#sc-job-status').textContent === 'Completed', null, { timeout: 30000 });
+    assert.match(await page.textContent('#sc-stats'), /250\s*\/ max 250\s*Items/);
+    await page.click('#sc-job >> text=Summary');
+    await page.waitForSelector('#modal-body table');
+    const summary = await page.textContent('#modal-body');
+    assert.match(summary, /Items250 \(post: 250\)/);
+    assert.match(summary, /Runs2/);
+    await page.click('#modal-close');
+    assert.deepEqual(errors, []);
+  } finally {
+    mock.state.delayMs = 0;
+    await context.close();
+  }
+});
+
 test('custom code: write a scraper, run it in the sandbox, see results', { skip }, async () => {
   const { page, context } = await openApp('#scraper');
   await page.click('.sc-mode[data-mode="custom"]');

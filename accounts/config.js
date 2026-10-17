@@ -14,6 +14,9 @@
 //   STRIPE_PRODUCT_PRO / _MAX / _ULTRA   product ids (defaults below)
 //   STRIPE_PRICE_PRO / _MAX / _ULTRA     price ids (default: each product's default price)
 //   ACCOUNT_PLAN_OVERRIDES    "<user id or verified email>=<plan>, …" — e.g. staff accounts
+//   ADMIN_EMAILS              verified emails of this server's administrators, comma-separated:
+//                             they see network diagnostics and operational metrics. Being an
+//                             administrator grants no plan and no access to other people's data.
 //   ACCOUNT_DATA_DIR          usage counters and Stripe customer links (default account-data/)
 
 const path = require('path');
@@ -88,6 +91,10 @@ function parseOverrides(raw) {
   return out;
 }
 
+function parseAdmins(raw) {
+  return Array.from(new Set(String(raw || '').split(/[,;\s]+/).map(s => s.trim().toLowerCase()).filter(s => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s))));
+}
+
 function accountConfig(env) {
   env = env || process.env;
   const supabaseUrl = cleanValue(env.SUPABASE_URL).replace(/\/+$/, '');
@@ -126,10 +133,11 @@ function accountConfig(env) {
       apiBase, products, prices
     },
     overrides: parseOverrides(env.ACCOUNT_PLAN_OVERRIDES),
+    admins: parseAdmins(env.ADMIN_EMAILS),
     publicUrl,
     dataDir: path.resolve(String(env.ACCOUNT_DATA_DIR || '').trim() || path.join(__dirname, '..', 'account-data')),
     problems
   };
 }
 
-module.exports = { accountConfig, keyProblem, cleanValue, decodeJwtPayload, DEFAULT_PRODUCTS, PAID, isLocalHost };
+module.exports = { accountConfig, keyProblem, cleanValue, decodeJwtPayload, parseAdmins, DEFAULT_PRODUCTS, PAID, isLocalHost };

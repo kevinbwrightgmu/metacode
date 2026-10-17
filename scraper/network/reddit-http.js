@@ -228,6 +228,7 @@ class RedditHttpClient {
         res = await this.transport.request({ url: url.href, method, headers, body: opts.body, timeoutMs, signal });
       } catch (err) {
         release();
+        if (isScraperError(err) && (err.type === 'network_unavailable' || err.type === 'network_misconfigured')) throw err;   // refused by the circuit breaker: nothing was sent
         this.stats.errors++;
         if (isScraperError(err) && err.type === 'cancelled') throw err;
         if (signal && signal.aborted) throw signal.reason || cancelledError();

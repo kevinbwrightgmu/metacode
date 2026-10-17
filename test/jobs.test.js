@@ -177,7 +177,7 @@ test('standard scraper: network failure after retries fails the job with a clear
   const { jobs } = standardHarness(req => {
     if (req.url.endsWith('/robots.txt')) return { status: 404 };
     throw classifyTransportError(new Error('dns error: failed to lookup address information'));
-  });
+  }, { SCRAPER_MAX_JOB_WAITS: '0' });     // no automatic job-level retries (see the waiting tests in scraper-durable.test.js)
   jobs.http.backoff = () => 5;
   const job = jobs.create({ mode: 'standard', target: normalizeTarget({ type: 'search', query: 'x' }), options: normalizeOptions({ retries: 1 }, testConfig()) });
   await done(jobs, job);

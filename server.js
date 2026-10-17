@@ -43,7 +43,7 @@ app.use(statusSite.hostRouter);
 // and the scraper routes make requests to Reddit on this server's behalf, so
 // only MetaCode's own pages (same origin) may call them. The other routes
 // keep the permissive CORS they always had.
-const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?|account(\/.*)?|billing\/(checkout|portal|sync)|network\/analyze)\/?$/i;
+const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?|account(\/.*)?|billing\/(checkout|portal|sync)|network\/analyze|lab(\/.*)?)\/?$/i;
 const corsForAll = cors();
 app.use((req, res, next) => (AI_ROUTE.test(req.path) ? next() : corsForAll(req, res, next)));
 // …and state-changing requests to them must say they come from this site:
@@ -809,8 +809,12 @@ function parseModelsFile(json) {
     const id = safeModelId(rawId);
     if (!id || models.some(m => m.id === id)) { skipped++; return; }
     const meta = entry.models[rawId] && typeof entry.models[rawId] === 'object' ? entry.models[rawId] : {};
+    // limit.context / limit.output (OpenCode's format) when the file states them; never guessed
+    const limit = meta.limit && typeof meta.limit === 'object' ? meta.limit : {};
+    const tokens = v => (Number.isInteger(v) && v > 0 && v < 1e8 ? v : null);
     models.push({ id, name: safeModelName(meta.name) || id, toolCall: capability(meta.tool_call),
-                  reasoning: capability(meta.reasoning), attachment: capability(meta.attachment) });
+                  reasoning: capability(meta.reasoning), attachment: capability(meta.attachment),
+                  context: tokens(limit.context), output: tokens(limit.output) });
   });
   if (!models.length) return { ok: false, problem: MODELS_FILE_NAME + ' lists no usable models.' };
   const options = entry.options && typeof entry.options === 'object' ? entry.options : {};
@@ -2066,7 +2070,94 @@ const scraperAi = {
     return { text: String((c && c.message && c.message.content) || ''), model: out.fallback || out.requested };
   }
 };
-const scraper = createScraper({ ai: scraperAi, policy: accounts.scraperPolicy });
+const scraper = createScraper({ ai: scraperAi, policy: accounts.scraperPolicy, adminGuard: accounts.admin() });
+
+// ── AI Coding Lab (ai-lab/, Ultra) ────────────────────────────────────────────
+// The Lab reaches MetaCode's AI service through this narrow interface, like the
+// AI Scraper: the same keys, quotas and model list, never the key itself. It
+// asks for exactly the model it names — no similar-model switching — so a
+// conversation or an evaluation run records the model that really answered.
+//
+// A response object that collects what streamChat() writes (server-sent
+// events, or a JSON error before the stream starts) and hands each chunk on,
+// so the Lab can stream EMIS's answer without a second streaming client.
+class CapturedResponse extends require('events').EventEmitter {
+  constructor(onText) {
+    super();
+    this.onText = onText;
+    this.statusCode = 200; this.headers = {}; this.headersSent = false;
+    this.writableEnded = false; this.writableFinished = false; this.destroyed = false;
+    this.jsonBody = null;
+  }
+  status(code) { this.statusCode = code; return this; }
+  set(k, v) { this.headers[String(k).toLowerCase()] = v; return this; }
+  setHeader(k, v) { this.headers[String(k).toLowerCase()] = v; }
+  getHeader(k) { return this.headers[String(k).toLowerCase()]; }
+  flushHeaders() { this.headersSent = true; }
+  write(chunk) { if (this.destroyed) return false; this.headersSent = true; this.onText(String(chunk)); return true; }
+  json(obj) { this.headersSent = true; this.jsonBody = obj; this.end(); return this; }
+  end(chunk) { if (chunk) this.write(chunk); if (this.writableEnded) return; this.writableEnded = true; this.writableFinished = true; this.emit('finish'); this.emit('close'); }
+  // The Lab's caller went away (Stop): watchClient() sees the close and cancels the EMIS request
+  destroy() { if (this.destroyed || this.writableEnded) return; this.destroyed = true; this.emit('close'); }
+}
+
+const labAi = {
+  name: 'MetaCode AI service',
+  problem() { const f = notConfigured(); return f ? f.message : null; },
+  // → { ok, models: [{ id, name, toolCall, reasoning, contextWindow, maxOutput }], default } | { ok: false, message }
+  async models() {
+    const notReady = notConfigured();
+    if (notReady) return { ok: false, message: notReady.message };
+    const list = await getModelList(false);
+    if (!list.ok) return { ok: false, message: list.message };
+    const choice = chooseDefaultModel(list.ids, list.source);
+    return {
+      ok: true, default: choice.model || null, source: list.source,
+      models: list.ids.filter(id => !NOT_A_CHAT_MODEL.test(id) || (list.info && list.info.has(id))).map(id => {
+        const info = list.info ? list.info.get(id) : null;
+        return { id, name: info ? info.name : id, toolCall: info ? info.toolCall : null, reasoning: info ? info.reasoning : null,
+          contextWindow: info ? info.context || null : null, maxOutput: info ? info.output || null : null };
+      })
+    };
+  },
+  // One chat request (OpenAI format) → { completion, model } | { failure } | { aborted }
+  async chat(body, opts) {
+    const prep = await prepareChat(body, 'openai', { switchModels: false });
+    if (prep.failure) return { failure: prep.failure };
+    const out = await answerChat(prep, opts && opts.signal);
+    if (out.aborted) return { aborted: true };
+    if (out.failure) return { failure: out.failure };
+    return { completion: out.json, model: out.fallback || prep.ctx.model };
+  },
+  // Streamed: onChunk(chunk) for each chat.completion.chunk → { model } | { failure } | { aborted }
+  async stream(body, opts) {
+    const prep = await prepareChat(Object.assign({}, body, { stream: true }), 'openai', { switchModels: false });
+    if (prep.failure) return { failure: prep.failure };
+    const parser = createSseParser();
+    let failure = null, done = false;
+    const res = new CapturedResponse(text => {
+      for (const ev of parser.push(text)) {
+        if (ev.data.trim() === '[DONE]') { done = true; continue; }
+        const chunk = parseJson(ev.data);
+        if (chunk && chunk.error) failure = { status: 502, type: chunk.error.type || 'upstream_error', message: chunk.error.message || 'The AI stream failed.' };
+        else if (chunk && opts && opts.onChunk) opts.onChunk(chunk);
+      }
+    });
+    const signal = opts && opts.signal;
+    const onAbort = () => res.destroy();
+    if (signal) { if (signal.aborted) return { aborted: true }; signal.addEventListener('abort', onAbort, { once: true }); }
+    try { await streamChat(res, prep); } finally { if (signal) signal.removeEventListener('abort', onAbort); }
+    if (signal && signal.aborted) return { aborted: true };
+    if (res.jsonBody && res.jsonBody.error) return { failure: { status: res.statusCode, type: res.jsonBody.error.type || 'error', message: res.jsonBody.error.message || 'The AI service failed.', retryAfterSeconds: res.jsonBody.error.retryAfterSeconds } };
+    if (failure) return { failure };
+    if (!done) return { failure: { status: 502, type: 'stream_interrupted', message: 'The AI stream ended before the answer was complete.' } };
+    return { model: (res.headers['x-metacode-model-fallback'] || prep.ctx.model) };
+  }
+};
+const { createAiLab } = require('./ai-lab');
+const aiLab = createAiLab({ accounts, ai: labAi });
+app.use('/api/lab', aiLab.router);
+app.get(['/ultra/ai-lab', '/ultra/ai-lab/'], aiLab.page);
 // Signing in moves what this browser made on the server to the account
 accounts.onClaim(async (from, to) => ({ surveys: await surveys.store.reassignOwner(from, to), scraperJobs: scraper.reassignOwner(from, to) }));
 app.use('/api/scraper', scraper.router);
@@ -2220,6 +2311,7 @@ function start(port) {
   return new Promise((resolve, reject) => {
     const server = app.listen(port, () => {
       scraper.setPort(server.address().port);
+      aiLab.start();                                         // AI Coding Lab: reloads saved evaluation runs
       if (emisTransport() !== 'node') emisPython.warm();   // start the Python EMIS worker early
       statusMonitor.start();
       resolve(server);
@@ -2230,6 +2322,7 @@ function start(port) {
     server.close = cb => {
       accounts.flush();
       scraper.shutdown();
+      aiLab.shutdown();
       statusMonitor.stop();
       scraper.onUpgrade.closeAll();
       emisPython.stop();
@@ -2295,4 +2388,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, start, scraper, accounts };
+module.exports = { app, start, scraper, accounts, aiLab };

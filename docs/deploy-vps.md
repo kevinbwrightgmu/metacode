@@ -129,6 +129,17 @@ for surveys that collect them):
 TRUST_PROXY=loopback                  # nginx on this machine forwards to MetaCode
 ```
 
+Administrators (they see the scraper's network diagnostics and the AI Coding Lab's operational metrics; it
+grants no plan and no access to anyone's data):
+
+```ini
+ADMIN_EMAILS=you@example.edu
+```
+
+The AI Coding Lab (Ultra) needs nothing more: it uses the accounts, plans and AI settings above and keeps its
+data in `lab-data/`. Optional settings (a price list for cost estimates, an OpenAI-compatible provider,
+fine-tuning) are in `.env.example` and [docs/ai-lab.md](ai-lab.md).
+
 With Cloudflare in front of nginx, list Cloudflare's ranges too (from cloudflare.com/ips), e.g.
 `TRUST_PROXY=loopback,173.245.48.0/20,103.21.244.0/22,…`, so the address is the visitor's rather than
 Cloudflare's. Surveys that collect country/region also need `SURVEY_GEO_HEADERS=cloudflare` (turn on
@@ -314,9 +325,14 @@ npm run collector:build
 pm2 reload metacode
 ```
 
-Do the reload when no scraping is running: scraper jobs (AI Scraper jobs too) live in the server's memory and stop
-with it. Projects, codebooks and the posts the AI Scraper already copied are stored in each user's browser, so
-they survive restarts.
+A reload is safe while standard scraper jobs run: they are saved under `scraper-data/` with checkpoints and
+continue afterwards (jobs that used someone's own Reddit keys pause until that person presses Resume).
+Custom-code and AI Scraper jobs can't continue part-way: a reload ends them, keeping what they collected.
+AI Coding Lab evaluation runs that were going show **Resume** to their owner. Projects, codebooks and the posts
+the AI Scraper already copied are stored in each user's browser, so they survive restarts.
+
+**Back up** `account-data/`, `survey-data/`, `scraper-data/` and `lab-data/` (or wherever the `*_DATA_DIR`
+settings point). Copying them while MetaCode runs is fine.
 
 ## 11. Troubleshooting
 

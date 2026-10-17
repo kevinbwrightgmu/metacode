@@ -10,6 +10,16 @@
 //   emit(records) → number of items the job can still accept
 //   remaining()   → same, without adding anything
 //   progress(patch), log(level, message), setMeta(key, value)
+//   checkpoint(state)  (optional) called after each page's records were
+//                 emitted — the job manager writes them to disk first — with
+//                 where to continue from (types/scraper.d.ts StandardCheckpoint)
+//   resumeFrom    (optional) the last checkpoint, when the job is resumed
+//   committed()   (optional) the records already collected, when resumed
+//
+// Resuming re-reads at most the page after the checkpoint; records seen again
+// are dropped by their Reddit id. Listings change between runs (new posts push
+// older ones down), so a resumed listing can miss or repeat items near the
+// cursor — repeats are de-duplicated, gaps aren't detectable from the listing.
 
 const F = require('./format');
 const { ScraperError, isScraperError } = require('../errors');
@@ -26,24 +36,51 @@ function readListing(json, what) {
 // `shared` carries the unique items and page count across several listings
 // (the sort sweep), so items seen in an earlier sort aren't counted twice.
 function newShared() { return { collected: 0, keys: new Set(), pages: 0, posts: [] }; }
+function newCheckpoint() { return { v: 1, phase: 'listing', sort: 0, after: null, pages: 0, seen: 0, commentsDone: 0 }; }
 
-async function paginate(ctx, options, path, query, what, shared) {
+// A resumed job: what the earlier runs collected. In the listing phase every
+// record so far is a listing item; afterwards only the posts are needed (for
+// their comment threads).
+function sharedFromCommitted(ctx) {
+  const shared = newShared();
+  const recs = typeof ctx.committed === 'function' ? ctx.committed() : [];
+  recs.forEach(r => {
+    const key = F.recordKey(r);
+    if (key) shared.keys.add(key);
+    if (r.record_type === 'post') shared.posts.push(r);
+  });
+  shared.collected = recs.length;
+  return shared;
+}
+
+function saveCheckpoint(ctx, cp) { if (cp && typeof ctx.checkpoint === 'function') ctx.checkpoint(cp); }
+
+// `cp` (optional) is the job's checkpoint: the listing continues from cp.after,
+// and after every page that isn't the last one the cursor is saved. When the
+// listing ends the caller moves the checkpoint on (next sort, comments, done).
+// options.since (unix seconds): items older than that are skipped, and a
+// listing sorted by "new" stops at the first one (incremental collection).
+async function paginate(ctx, options, path, query, what, shared, cp, sortedByNew) {
   shared = shared || newShared();
-  let after = null;
-  let pages = 0;
-  let seen = 0;
+  let after = cp ? cp.after : null;
+  let pages = cp ? cp.pages : 0;
+  let seen = cp ? cp.seen : 0;
+  const since = Number(options.since) || 0;
   const left = () => Math.min(options.maxItems - shared.collected, ctx.remaining());
+  let reachedOld = false;
   while (pages < options.maxPages && left() > 0) {
     // Ask for a full page when items may repeat from an earlier sort.
     const limit = shared.keys.size ? 100 : Math.min(100, left());
-    const q = Object.assign({}, query, { limit, after, count: seen || undefined });
+    const q = Object.assign({}, query, { limit, after: after || undefined, count: seen || undefined });
     const { json } = await ctx.http.getJson(path, Object.assign({}, ctx.requestOpts, { query: q, context: what }));
     pages++;
     shared.pages++;
     const data = readListing(json, what);
     const fresh = [];
+    let older = 0;
     for (const r of data.children.map(c => F.normalizeThing(c)).filter(Boolean)) {
       if (fresh.length >= left()) break;
+      if (since && Number.isFinite(r.created_utc) && r.created_utc < since) { older++; continue; }
       const key = F.recordKey(r);
       if (key && shared.keys.has(key)) continue;
       if (key) shared.keys.add(key);
@@ -55,14 +92,29 @@ async function paginate(ctx, options, path, query, what, shared) {
     ctx.emit(fresh);
     ctx.progress({ pagesFetched: shared.pages, message: what + ' page ' + pages + ': ' + fresh.length + ' new item' + (fresh.length === 1 ? '' : 's') });
     after = typeof data.after === 'string' && data.after ? data.after : null;
+    if (older && sortedByNew) {
+      reachedOld = true;
+      ctx.log('info', what + ': reached items older than ' + new Date(since * 1000).toISOString().replace('.000Z', 'Z') + ', which an earlier job already covered; stopping.');
+      break;
+    }
     if (!after || data.children.length === 0) {
       ctx.log('info', after ? 'Reddit returned an empty page; stopping.' : 'Reached the end of the listing.');
       break;
     }
+    if (cp) { cp.after = after; cp.pages = pages; cp.seen = seen; saveCheckpoint(ctx, cp); }
   }
-  if (pages >= options.maxPages && after) ctx.log('info', what + ': stopped at the page limit (' + options.maxPages + ').');
-  else if (left() <= 0 && after) ctx.log('info', 'Stopped at the item limit (' + options.maxItems + ').');
+  if (!reachedOld) {
+    if (pages >= options.maxPages && after) ctx.log('info', what + ': stopped at the page limit (' + options.maxPages + ').');
+    else if (left() <= 0 && after) ctx.log('info', 'Stopped at the item limit (' + options.maxItems + ').');
+  }
   return shared.posts;
+}
+
+// The listing is done: the checkpoint moves on to `next` (cursor reset).
+function listingDone(ctx, cp, next) {
+  if (!cp) return;
+  Object.assign(cp, { after: null, pages: 0, seen: 0 }, next);
+  saveCheckpoint(ctx, cp);
 }
 
 // Reddit serves at most ~1,000 items per listing. Other sorts of the same
@@ -72,16 +124,18 @@ async function paginate(ctx, options, path, query, what, shared) {
 const SWEEP_SORTS = [['new'], ['hot'], ['top', 'all'], ['top', 'year'], ['top', 'month'], ['top', 'week'],
   ['controversial', 'all'], ['controversial', 'year'], ['rising']];
 
-async function sweepSubreddit(ctx, options, target) {
-  const shared = newShared();
+async function sweepSubreddit(ctx, options, target, shared, cp) {
+  shared = shared || newShared();
   const order = [[target.sort, target.time]].concat(SWEEP_SORTS.filter(([s, t]) => !(s === target.sort && (t || undefined) === (target.time || undefined))));
   ctx.log('info', 'Combining sorts to get past Reddit\'s ~1,000-item listing limit (up to ' + options.maxPages + ' page(s) per sort).');
-  for (const [sort, time] of order) {
+  for (let i = cp ? cp.sort : 0; i < order.length; i++) {
+    const [sort, time] = order[i];
     if (shared.collected >= options.maxItems || ctx.remaining() <= 0) break;
     const before = shared.collected;
     const label = 'r/' + target.subreddit + '/' + sort + (time ? ' (' + time + ')' : '');
-    await paginate(ctx, options, '/r/' + target.subreddit + '/' + sort, { t: time }, label, shared);
+    await paginate(ctx, options, '/r/' + target.subreddit + '/' + sort, { t: time }, label, shared, cp, sort === 'new');
     ctx.log('info', label + ': ' + (shared.collected - before) + ' new post(s), ' + shared.collected + ' unique so far.');
+    listingDone(ctx, cp, { sort: i + 1 });
   }
   return shared.posts;
 }
@@ -168,39 +222,54 @@ async function addMetadata(ctx, key, path, normalize) {
   }
 }
 
+// A listing target (subreddit, front page / listing, search, user): the
+// listing, then optionally comment threads, each step checkpointed.
+async function runListing(ctx, options, cp, shared, listing) {
+  if (cp.phase === 'listing') {
+    const posts = await listing(shared);
+    shared.posts = posts;
+    listingDone(ctx, cp, { phase: options.includeComments ? 'comments' : 'done' });
+  }
+  if (cp.phase === 'comments') {
+    await addComments(ctx, options, shared.posts, cp);
+    listingDone(ctx, cp, { phase: 'done' });
+  }
+}
+
 async function runStandardScrape(target, options, ctx) {
-  ctx.log('info', 'Target: ' + target.label);
+  const resume = ctx.resumeFrom && ctx.resumeFrom.v === 1 ? ctx.resumeFrom : null;
+  const cp = Object.assign(newCheckpoint(), resume || {});
+  const shared = resume ? sharedFromCommitted(ctx) : newShared();
+  if (resume) {
+    ctx.log('info', 'Continuing from the checkpoint (' + (cp.phase === 'comments' ? 'comment threads, ' + cp.commentsDone + ' done' : cp.phase === 'done' ? 'all steps done' : 'listing, ' + cp.pages + ' page(s) read') + '; ' + shared.collected + ' item(s) already collected).');
+  } else {
+    ctx.log('info', 'Target: ' + target.label);
+  }
   ctx.log('info', 'Mode: ' + (ctx.http.label || (ctx.http.mode === 'oauth' ? 'Reddit Data API (OAuth)' : 'public Reddit pages')) +
     '; at least ' + (ctx.requestOpts.delayMs / 1000) + ' s between requests.');
+  if (options.since) ctx.log('info', 'Only items posted after ' + new Date(options.since * 1000).toISOString().replace('.000Z', 'Z') + ' are collected.');
+  if (cp.phase === 'done') return;
 
   switch (target.type) {
     case 'subreddit': {
-      if (options.includeMetadata && !target.subreddit.includes('+') && !['all', 'popular'].includes(target.subreddit.toLowerCase())) {
+      if (!resume && options.includeMetadata && !target.subreddit.includes('+') && !['all', 'popular'].includes(target.subreddit.toLowerCase())) {
         await addMetadata(ctx, 'subreddit', '/r/' + target.subreddit + '/about', F.normalizeSubreddit);
       }
-      const posts = options.sweepSorts
-        ? await sweepSubreddit(ctx, options, target)
-        : await paginate(ctx, options, target.path, { t: target.time }, 'r/' + target.subreddit);
-      if (options.includeComments) await addComments(ctx, options, posts);
-      return;
+      return runListing(ctx, options, cp, shared, sh => (options.sweepSorts
+        ? sweepSubreddit(ctx, options, target, sh, cp)
+        : paginate(ctx, options, target.path, { t: target.time }, 'r/' + target.subreddit, sh, cp, target.sort === 'new')));
     }
     case 'listing': {
-      const posts = await paginate(ctx, options, target.path, { t: target.time }, target.label);
-      if (options.includeComments) await addComments(ctx, options, posts);
-      return;
+      return runListing(ctx, options, cp, shared, sh => paginate(ctx, options, target.path, { t: target.time }, target.label, sh, cp, target.sort === 'new'));
     }
     case 'search': {
       const query = { q: target.query, sort: target.sort, t: target.time, type: 'link' };
       if (target.subreddit) query.restrict_sr = target.restrictSr ? 'on' : undefined;
-      const posts = await paginate(ctx, options, target.path, query, 'This search');
-      if (options.includeComments) await addComments(ctx, options, posts);
-      return;
+      return runListing(ctx, options, cp, shared, sh => paginate(ctx, options, target.path, query, 'This search', sh, cp, target.sort === 'new'));
     }
     case 'user': {
-      if (options.includeMetadata) await addMetadata(ctx, 'user', '/user/' + target.username + '/about', F.normalizeUser);
-      const posts = await paginate(ctx, options, target.path, { sort: target.sort, t: target.time }, 'u/' + target.username);
-      if (options.includeComments) await addComments(ctx, options, posts);
-      return;
+      if (!resume && options.includeMetadata) await addMetadata(ctx, 'user', '/user/' + target.username + '/about', F.normalizeUser);
+      return runListing(ctx, options, cp, shared, sh => paginate(ctx, options, target.path, { sort: target.sort, t: target.time }, 'u/' + target.username, sh, cp, target.sort === 'new'));
     }
     case 'post': {
       const res = await fetchPostWithComments(ctx, options, target.postId, target);
@@ -233,22 +302,27 @@ async function runStandardScrape(target, options, ctx) {
 }
 
 // Optional: the comments of the first N posts of a listing (one request each).
-async function addComments(ctx, options, posts) {
+// A failure that should stop (and let the job wait or pause), not just skip one thread.
+const STOPS_COMMENTS = new Set(['cancelled', 'network_unavailable', 'network_misconfigured', 'rate_limited', 'auth_error', 'reddit_blocked']);
+
+async function addComments(ctx, options, posts, cp) {
   const list = posts.filter(p => p.post_id).slice(0, options.commentPosts);
   if (!list.length) return;
-  ctx.log('info', 'Fetching comments for ' + list.length + ' post(s)…');
-  let done = 0;
-  for (const p of list) {
+  const start = cp ? Math.min(cp.commentsDone || 0, list.length) : 0;
+  ctx.log('info', 'Fetching comments for ' + (list.length - start) + ' post(s)…');
+  let done = start;
+  for (const p of list.slice(start)) {
     if (ctx.remaining() <= 0) { ctx.log('info', 'Item limit reached; skipping remaining comment threads.'); break; }
     try {
       const res = await fetchPostWithComments(ctx, options, p.post_id, {});
       ctx.emit(res.comments);
     } catch (err) {
-      if (isScraperError(err) && err.type === 'cancelled') throw err;
+      if (isScraperError(err) && STOPS_COMMENTS.has(err.type)) throw err;
       ctx.log('warn', 'Comments for post ' + p.post_id + ' failed: ' + (err.message || 'unknown error'));
       ctx.progress({ errorsDelta: 1 });
     }
     done++;
+    if (cp) { cp.commentsDone = done; saveCheckpoint(ctx, cp); }
     ctx.progress({ message: 'Comments: ' + done + ' of ' + list.length + ' posts' });
   }
 }

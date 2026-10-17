@@ -189,14 +189,41 @@ test('robots.txt disallow stops the job before any page is fetched', async () =>
   }
 });
 
-test('network error: an unreachable Reddit fails the job after retries', async () => {
-  const dead = await startScraperApp({ REDDIT_BASE_URL: 'http://localhost:1', SCRAPER_RESPECT_ROBOTS_TXT: 'false', SCRAPER_REQUEST_TIMEOUT_MS: '3000' });
+test('network error: an unreachable Reddit fails the job after retries (automatic job retries off)', async () => {
+  const dead = await startScraperApp({ REDDIT_BASE_URL: 'http://localhost:1', SCRAPER_RESPECT_ROBOTS_TXT: 'false', SCRAPER_REQUEST_TIMEOUT_MS: '3000', SCRAPER_MAX_JOB_WAITS: '0' });
   try {
     const r = await postJson(dead.api + '/jobs', { target: { type: 'subreddit', subreddit: 'test' }, options: { retries: 0, includeMetadata: false } });
     const job = await waitForJob(dead.api, r.json.job.id, 20000);
     assert.equal(job.status, 'failed');
     assert.ok(['network', 'proxy_blocked', 'timeout'].includes(job.error.type), job.error.type);
     assert.ok(!/localhost:1/.test(job.error.message), 'no internal address in the message');
+  } finally {
+    await dead.close();
+    configureWisp(app.config);
+  }
+});
+
+test('network error: by default the job waits and retries a bounded number of times, then pauses', async () => {
+  const dead = await startScraperApp({ REDDIT_BASE_URL: 'http://localhost:1', SCRAPER_RESPECT_ROBOTS_TXT: 'false', SCRAPER_REQUEST_TIMEOUT_MS: '3000',
+    SCRAPER_MAX_JOB_WAITS: '2', SCRAPER_JOB_WAIT_BASE_MS: '50' });
+  try {
+    const r = await postJson(dead.api + '/jobs', { target: { type: 'subreddit', subreddit: 'test' }, options: { retries: 0, includeMetadata: false } });
+    const id = r.json.job.id;
+    let job;
+    const deadline = Date.now() + 20000;
+    do {
+      await new Promise(res => setTimeout(res, 50));
+      job = (await getJson(dead.api + '/jobs/' + id)).json.job;
+    } while (job.status !== 'paused' && Date.now() < deadline);
+    assert.equal(job.status, 'paused');
+    assert.equal(job.pausedReason, 'retry_limit');
+    assert.equal(job.waits, 2, 'two automatic retries, then it stops');
+    assert.equal(job.attempts, 3);
+    assert.ok(['network', 'proxy_blocked', 'timeout'].includes(job.lastError.type), job.lastError.type);
+    assert.ok(!/localhost:1/.test(job.lastError.message + job.progress.message), 'no internal address in the message');
+    assert.equal(job.error, null, 'paused, not failed');
+    const history = (await getJson(dead.api + '/jobs/' + id + '/history')).json;
+    assert.deepEqual(history.events.filter(e => e.type === 'wait').length, 2);
   } finally {
     await dead.close();
     configureWisp(app.config);
