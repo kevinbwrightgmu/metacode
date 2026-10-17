@@ -189,38 +189,70 @@ grants no plan and no access to other people's jobs.
 
 ## 6. Running a VPN gateway
 
-Don't install a VPN client (Mullvad's app or any other) on the machine that
-serves the website: it takes over the host's routing and firewall
-(see [architecture-map.md](architecture-map.md) §5). Run the VPN as a
-**separate gateway** that MetaCode reaches as an HTTP proxy:
+**The quick way:** `deploy/vpn-gateway/` has a ready-made gateway: gluetun +
+Mullvad over WireGuard in a container on the same server, with a setup script
+that prints the `.env` lines. Its [README](../deploy/vpn-gateway/README.md)
+walks through the whole setup and the common problems.
 
-1. Run the gateway on its own host, VM, or a container with its own network
-   namespace — for example a WireGuard client container that exposes an HTTP
-   proxy and a status endpoint. It needs `NET_ADMIN` (and usually `/dev/net/tun`)
-   *on its side*; MetaCode needs no extra privileges.
-2. Make the proxy reachable from MetaCode only (bind it to a private interface,
-   firewall it); give it credentials if it supports them.
-3. In MetaCode's `.env`:
+Don't install a VPN client (Mullvad's app or any other) directly on the
+machine that serves the website. It takes over the host's routing and
+firewall (see [architecture-map.md](architecture-map.md) §5). Run the VPN as a
+**separate gateway** that MetaCode reaches as an HTTP proxy. That can be the
+kit's container, another host, or a VM:
+
+1. **Run the gateway** in its own network namespace. It needs `NET_ADMIN`
+   (and usually `/dev/net/tun`) *on its side*; MetaCode needs no extra
+   privileges.
+2. **Lock down the proxy.** Make it reachable from MetaCode only (bind it to
+   127.0.0.1 or a private interface, and firewall it), and give it a password.
+3. **In MetaCode's `.env`:**
    ```
-   SCRAPER_VPN_GATEWAY_PROXY_URL=http://user:password@10.0.0.5:8888
-   SCRAPER_VPN_GATEWAY_HEALTH_URL=http://10.0.0.5:8000/v1/vpn/status
-   SCRAPER_NETWORK_PROVIDERS=vpn-gateway
+   SCRAPER_VPN_GATEWAY_PROXY_URL=http://user:password@127.0.0.1:8888
+   SCRAPER_VPN_GATEWAY_HEALTH_URL=http://127.0.0.1:8000/v1/vpn/status
+   SCRAPER_VPN_GATEWAY_IP_URL=http://127.0.0.1:8000/v1/publicip/ip
+   SCRAPER_VPN_GATEWAY_HEALTH_API_KEY=…
    ```
-   then `pm2 reload metacode`.
-4. Verify as an administrator: Scraper page → **Network diagnostics** → the
-   gateway is listed, its health check is "healthy", and a small test job
-   completes. Stop the tunnel on the gateway and check that the gateway turns
-   *unavailable* and jobs wait instead of using the direct route.
+   Then run `pm2 reload metacode`.
+   - **Default route.** A configured gateway is used by default. You only need
+     `SCRAPER_NETWORK_PROVIDERS` to choose a different order, for example
+     `vpn-gateway,direct` together with `SCRAPER_NETWORK_FAILOVER=on`. If that
+     setting is present but leaves out a configured gateway, Network
+     diagnostics shows a warning.
+   - **Protected status page.** gluetun v3.40 and later protect its status
+     routes. Send the key from its auth file
+     (`SCRAPER_VPN_GATEWAY_HEALTH_API_KEY`, sent as `X-API-Key`), or put
+     `user:password` in the URL for basic auth.
+   - **What a failed status check does.** A status endpoint that refuses
+     MetaCode (401/403) or doesn't exist (404) is reported as a configuration
+     problem and does not stop traffic. A gateway that is unreachable, or one
+     that reports its tunnel down, stops traffic: jobs wait instead of using
+     the direct route.
+4. **Verify** as an administrator (`ADMIN_EMAILS`). Open Scraper page →
+   **Network diagnostics**:
+   - the gateway is listed as healthy, with its exit address;
+   - **Test route** sends one request to reddit.com/robots.txt through it and
+     says what came back.
 
-Who owns what: the gateway's operator manages its software, VPN account,
-credentials and updates; MetaCode only uses the proxy and reads the status URL.
-A VPN changes the route and address requests come from — it doesn't make Reddit
-accept them, and the VPN provider's own terms may restrict automated traffic.
-Check them.
+   Then stop the tunnel. The gateway should turn *unavailable*, and jobs should
+   wait.
 
-**Not verified here:** the provider code is tested against a local `CONNECT`
-proxy and a mock gateway status endpoint (`test/scraper-durable.test.js`), not
-against a real VPN gateway or proxy product.
+**Who owns what.** The gateway's operator manages its software, VPN account,
+credentials and updates. MetaCode only uses the proxy and reads the status
+URLs.
+
+**What a VPN does and doesn't do.** It changes the route and the address
+requests come from. It doesn't make Reddit accept them: a 403 through the
+gateway means Reddit refuses that address, and MetaCode doesn't cycle through
+addresses to get past it. The VPN provider's own terms may restrict automated
+traffic, so check them.
+
+**Verified.**
+- The provider code is tested against a local `CONNECT` proxy and a mock
+  status endpoint, with and without its API key (`test/scraper-durable.test.js`).
+- The kit's setting names, routes and header were checked against gluetun's
+  source.
+
+**Not verified.** It wasn't run against a live VPN here.
 
 ## 7. Recovery procedures
 

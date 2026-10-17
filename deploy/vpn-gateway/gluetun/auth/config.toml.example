@@ -1,0 +1,8 @@
+# gluetun control-server access (since gluetun v3.40 its routes need a role).
+# MetaCode only reads the tunnel status and the exit address, with this key
+# (sent as the X-API-Key header). ./setup.sh writes config.toml for you.
+[[roles]]
+name = "metacode"
+auth = "apikey"
+apikey = "REPLACE-WITH-A-LONG-RANDOM-KEY"
+routes = ["GET /v1/vpn/status", "GET /v1/publicip/ip"]

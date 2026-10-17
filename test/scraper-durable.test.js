@@ -249,6 +249,113 @@ test('network manager: a VPN gateway that reports its tunnel down fails closed �
   }
 });
 
+test('VPN gateway: configuring it is enough to use it; an explicit list that leaves it out is reported', () => {
+  const transport = new FakeTransport(() => ({ status: 200 }));
+  const deps = { transport, rules: RULES, maxResponseBytes: 1024 };
+  let r = providersFromEnv({ SCRAPER_VPN_GATEWAY_PROXY_URL: 'http://127.0.0.1:8888' }, deps);
+  assert.deepEqual(r.order, ['vpn-gateway'], 'the gateway is used without SCRAPER_NETWORK_PROVIDERS');
+  assert.deepEqual(r.warnings, []);
+  r.providers.forEach(p => p.close && p.close());
+  r = providersFromEnv({ SCRAPER_PROXY_URL: 'http://127.0.0.1:3128' }, deps);
+  assert.deepEqual(r.order, ['proxy']);
+  r.providers.forEach(p => p.close && p.close());
+  r = providersFromEnv({ SCRAPER_VPN_GATEWAY_PROXY_URL: 'http://127.0.0.1:8888', SCRAPER_NETWORK_PROVIDERS: 'direct' }, deps);
+  assert.deepEqual(r.order, ['direct'], 'the administrator\'s explicit choice wins');
+  assert.ok(r.warnings.some(w => /doesn't list "vpn-gateway"/.test(w)), r.warnings.join(' | '));
+  r = providersFromEnv({ SCRAPER_VPN_GATEWAY_HEALTH_URL: 'http://127.0.0.1:8000/v1/vpn/status' }, deps);
+  assert.deepEqual(r.order, ['direct']);
+  assert.ok(r.warnings.some(w => /without SCRAPER_VPN_GATEWAY_PROXY_URL/.test(w)));
+});
+
+test('VPN gateway: a protected status endpoint (gluetun-style API key or basic auth) works with credentials; without them it is reported, not a reason to stop traffic', async () => {
+  const seen = [];
+  const control = await startOrigin((req, res) => {
+    seen.push({ url: req.url, key: req.headers['x-api-key'] || null, auth: req.headers.authorization || null });
+    const authed = req.headers['x-api-key'] === 'k3y-123' || req.headers.authorization === 'Basic ' + Buffer.from('ops:pw').toString('base64');
+    if (!authed) { res.writeHead(401); res.end('unauthorized'); return; }
+    const body = req.url === '/v1/publicip/ip' ? { public_ip: '185.65.135.7', country: 'Sweden', city: 'Stockholm' } : req.url === '/v1/vpn/status' ? { status: 'running' } : null;
+    if (!body) { res.writeHead(404); res.end(); return; }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(body));
+  });
+  const origin = await startOrigin((req, res) => { res.writeHead(200); res.end('User-agent: *'); });
+  const proxy = await startConnectProxy();
+  const rules = Object.assign({}, RULES, { ports: [origin.port] });
+  const make = env => providersFromEnv(Object.assign({ SCRAPER_VPN_GATEWAY_PROXY_URL: proxy.url, SCRAPER_VPN_GATEWAY_HEALTH_URL: control.url + '/v1/vpn/status',
+    SCRAPER_VPN_GATEWAY_IP_URL: control.url + '/v1/publicip/ip' }, env), { transport: new FakeTransport(() => ({ status: 200 })), rules, maxResponseBytes: 4096 });
+  const req = { url: origin.url + '/robots.txt', method: 'GET', headers: {}, timeoutMs: 3000 };
+  const managers = [];
+  try {
+    // No credentials: a configuration problem — reported, traffic still flows
+    const bare = make({});
+    const m1 = new NetworkManager({ providers: bare.providers });
+    managers.push(m1);
+    const h1 = await m1.checkHealth('vpn-gateway');
+    assert.equal(h1.ok, false);
+    assert.equal(h1.kind, 'config');
+    assert.match(h1.detail, /SCRAPER_VPN_GATEWAY_HEALTH_API_KEY/);
+    assert.equal((await m1.request(req)).provider, 'vpn-gateway', 'a misconfigured status endpoint doesn\'t block requests');
+    assert.equal(m1.publicStatus()[0].circuit, 'closed');
+    // API key → healthy, with the exit address
+    const keyed = make({ SCRAPER_VPN_GATEWAY_HEALTH_API_KEY: 'k3y-123' });
+    const m2 = new NetworkManager({ providers: keyed.providers });
+    managers.push(m2);
+    const h2 = await m2.checkHealth('vpn-gateway');
+    assert.equal(h2.ok, true, JSON.stringify(h2));
+    assert.equal(h2.exitIp, '185.65.135.7');
+    assert.equal(h2.exitLocation, 'Stockholm, Sweden');
+    assert.equal(seen.filter(x => x.key === 'k3y-123').length, 2, 'the key went to both status endpoints');
+    const shown = JSON.stringify(m2.adminStatus());
+    assert.ok(!/k3y-123/.test(shown), 'the key is never shown');
+    assert.match(shown, /"statusAuth":"API key"/);
+    // user:password in the URL → basic auth; the stored URL keeps no credentials
+    const basic = make({ SCRAPER_VPN_GATEWAY_HEALTH_URL: control.url.replace('//', '//ops:pw@') + '/v1/vpn/status', SCRAPER_VPN_GATEWAY_IP_URL: '' });
+    const m3 = new NetworkManager({ providers: basic.providers });
+    managers.push(m3);
+    assert.equal((await m3.checkHealth('vpn-gateway')).ok, true);
+    assert.ok(!/ops|pw@/.test(JSON.stringify(m3.adminStatus())));
+    // A wrong path is a configuration problem too
+    const wrong = make({ SCRAPER_VPN_GATEWAY_HEALTH_API_KEY: 'k3y-123', SCRAPER_VPN_GATEWAY_HEALTH_URL: control.url + '/v1/nope', SCRAPER_VPN_GATEWAY_IP_URL: '' });
+    const m4 = new NetworkManager({ providers: wrong.providers });
+    managers.push(m4);
+    const h4 = await m4.checkHealth('vpn-gateway');
+    assert.equal(h4.kind, 'config');
+    assert.match(h4.detail, /HTTP 404/);
+    // The gateway itself unreachable: that is an outage, and it stops traffic
+    const gone = make({ SCRAPER_VPN_GATEWAY_HEALTH_URL: 'http://127.0.0.1:1/v1/vpn/status', SCRAPER_VPN_GATEWAY_IP_URL: '' });
+    const m5 = new NetworkManager({ providers: gone.providers });
+    managers.push(m5);
+    const h5 = await m5.checkHealth('vpn-gateway');
+    assert.equal(h5.kind, 'down');
+    await assert.rejects(m5.request(req), e => e.type === 'network_unavailable');
+  } finally {
+    managers.forEach(m => m.close()); proxy.server.close(); origin.server.close(); control.server.close();
+  }
+});
+
+test('route test: one real request through a route says whether it works end to end, without touching its circuit', async () => {
+  const origin = await startOrigin((req, res) => { if (req.url === '/blocked') { res.writeHead(403); res.end(); return; } res.writeHead(200); res.end('ok'); });
+  const proxy = await startConnectProxy();
+  const rules = Object.assign({}, RULES, { ports: [origin.port] });
+  const net = providersFromEnv({ SCRAPER_VPN_GATEWAY_PROXY_URL: proxy.url }, { transport: new FakeTransport(() => ({ status: 200 })), rules, maxResponseBytes: 4096 });
+  const m = new NetworkManager({ providers: net.providers });
+  const bad = new NetworkManager({ providers: providersFromEnv({ SCRAPER_VPN_GATEWAY_PROXY_URL: 'http://127.0.0.1:1' }, { transport: new FakeTransport(() => ({ status: 200 })), rules, maxResponseBytes: 4096 }).providers });
+  try {
+    const ok = await m.test('vpn-gateway', { url: origin.url + '/robots.txt' });
+    assert.equal(ok.ok, true);
+    assert.equal(ok.status, 200);
+    assert.match(ok.detail, /through the VPN gateway/);
+    const refused = await m.test('vpn-gateway', { url: origin.url + '/blocked' });
+    assert.equal(refused.ok, true, 'the route works even when the site refuses the address');
+    assert.match(refused.detail, /refused this address \(HTTP 403\)/);
+    const down = await bad.test('vpn-gateway', { url: origin.url + '/robots.txt' });
+    assert.equal(down.ok, false);
+    assert.match(down.detail, /Couldn't reach the VPN gateway/);
+    assert.equal(bad.publicStatus()[0].circuit, 'closed', 'tests don\'t count towards the circuit');
+    assert.equal(await m.test('nope', { url: origin.url }), null);
+  } finally { m.close(); bad.close(); proxy.server.close(); origin.server.close(); }
+});
+
 /* ── Durable jobs ────────────────────────────────────────────── */
 
 // A scripted subreddit of `total` posts served 100 per page; `failAfter`: pages before the "network" dies.

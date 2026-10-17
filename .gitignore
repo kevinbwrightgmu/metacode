@@ -11,3 +11,9 @@ project-data/
 account-data/
 scraper-data/
 lab-data/
+# VPN gateway kit: the generated secrets and gluetun's state
+deploy/vpn-gateway/vpn.env
+deploy/vpn-gateway/gluetun/*
+!deploy/vpn-gateway/gluetun/auth/
+deploy/vpn-gateway/gluetun/auth/*
+!deploy/vpn-gateway/gluetun/auth/config.toml.example

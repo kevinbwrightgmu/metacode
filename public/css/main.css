@@ -683,6 +683,7 @@ svg { flex-shrink: 0; }
 .text-ai      { color: var(--violet); }
 .text-human   { color: var(--teal); }
 .text-success { color: var(--success); }
+.text-warn    { color: #92400E; }
 .text-error   { color: var(--error); }
 .font-mono    { font-family: var(--f-mono); }
 .fw-600       { font-weight: 600; }

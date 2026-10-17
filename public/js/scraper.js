@@ -817,8 +817,11 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       '<td class="sc-cell-num">' + fmtNum(p.metrics.recent.ok) + ' / ' + fmtNum(p.metrics.recent.failed) + '</td>' +
       '<td class="sc-cell-num">' + ms(p.metrics.recent.p50Ms) + '<div class="text-muted" style="font-size:12px">p95 ' + ms(p.metrics.recent.p95Ms) + '</div></td>' +
       '<td class="sc-cell-num">' + fmtNum(p.metrics.timeouts) + ' / ' + fmtNum(p.metrics.rateLimited) + '</td>' +
-      '<td>' + (p.health.checks ? (p.health.last ? (p.health.last.ok ? 'healthy' : esc(p.health.last.detail || 'failing')) + '<div class="text-muted" style="font-size:12px">' + esc(fmtDate(p.health.last.checkedAt)) + '</div>' : 'not checked yet') : '—') + '</td>' +
-      '<td style="white-space:nowrap">' + (p.health.checks ? '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.adminNetwork(\'' + esc(p.id) + '\', \'check\')">Check</button>' : '') +
+      '<td>' + (p.health.checks ? (p.health.last ? (p.health.last.ok ? 'healthy' + (p.health.last.exitIp ? '<div style="font-size:12px">exit ' + esc(p.health.last.exitIp) + (p.health.last.exitLocation ? ' · ' + esc(p.health.last.exitLocation) : '') + '</div>' : '')
+          : '<span class="' + (p.health.last.kind === 'config' ? 'text-warn' : 'text-error') + '">' + esc(p.health.last.detail || 'failing') + '</span>') + '<div class="text-muted" style="font-size:12px">' + esc(fmtDate(p.health.last.checkedAt)) + '</div>' : 'not checked yet') : '—') +
+        (lastTests[p.id] ? '<div style="font-size:12px;margin-top:4px" class="' + (lastTests[p.id].ok ? 'text-success' : 'text-error') + '">Test: ' + esc(lastTests[p.id].detail) + (lastTests[p.id].latencyMs !== null ? ' (' + fmtNum(lastTests[p.id].latencyMs) + ' ms)' : '') + '</div>' : '') + '</td>' +
+      '<td style="white-space:nowrap"><button class="btn btn-ghost btn-sm" title="Send one request to reddit.com/robots.txt through this route" onclick="RedditScraper.adminNetwork(\'' + esc(p.id) + '\', \'test\')">Test route</button>' +
+        (p.health.checks ? '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.adminNetwork(\'' + esc(p.id) + '\', \'check\')">Check</button>' : '') +
         (p.circuit.state !== 'closed' ? '<button class="btn btn-ghost btn-sm" onclick="RedditScraper.adminNetwork(\'' + esc(p.id) + '\', \'reset\')">Close circuit</button>' : '') + '</td></tr>').join('');
     const j = d.jobs;
     App.openModal('Network diagnostics', '<p class="text-second" style="font-size:13px">Order: ' + esc(d.order.join(' → ')) + ' · failover ' + (d.failover ? 'on (only while a route is down)' : 'off') + '. Credentials are never shown.</p>' +
@@ -830,9 +833,11 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       (d.warnings.length ? '<div class="sc-banner-warn">' + d.warnings.map(esc).join('<br>') + '</div>' : ''));
   }
 
+  const lastTests = {};
   async function adminNetwork(id, action) {
     try {
-      await api('/admin/network/' + encodeURIComponent(id) + '/' + action, { method: 'POST' });
+      const r = await api('/admin/network/' + encodeURIComponent(id) + '/' + action, { method: 'POST' });
+      if (action === 'test' && r && r.test) lastTests[id] = r.test;
       App.closeModal && App.closeModal();
       await loadStatus();
       showNetwork();
@@ -842,6 +847,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
   // Which engine makes the server's HTTPS requests (python/reddit_fetch.py, or epoxy-tls).
   function transportLabel() {
     const t = status.transport || {};
+    if (t.kind === 'vpn-gateway' || t.kind === 'http-proxy') return t.name;
     if (t.kind === 'python' && t.python) return 'Python ' + t.python.version;
     if (t.kind === 'epoxy') return 'epoxy-tls over Wisp' + (t.setting === 'auto' && t.pythonError ? ' (Python not found)' : '');
     return t.setting === 'epoxy' ? 'epoxy-tls over Wisp' : 'Python engine';

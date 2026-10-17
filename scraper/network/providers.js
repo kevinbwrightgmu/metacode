@@ -13,10 +13,15 @@
 //   vpn-gateway  a separately managed VPN gateway (another host, VM or
 //                container) that exposes an HTTP proxy
 //                (SCRAPER_VPN_GATEWAY_PROXY_URL) and, optionally, a status URL
-//                (SCRAPER_VPN_GATEWAY_HEALTH_URL) MetaCode checks before and
-//                while using it. MetaCode never starts, stops or configures the
-//                VPN itself — see docs/scraper-network.md.
+//                (SCRAPER_VPN_GATEWAY_HEALTH_URL, with an API key or user:password
+//                when the gateway protects it) MetaCode checks before and while
+//                using it, and an exit-address URL (SCRAPER_VPN_GATEWAY_IP_URL).
+//                MetaCode never starts, stops or configures the VPN itself — see
+//                docs/scraper-network.md and deploy/vpn-gateway/.
 //
+// Which route is used: SCRAPER_NETWORK_PROVIDERS when it is set; otherwise a
+// configured VPN gateway, else a configured proxy, else the direct connection.
+// Setting up a gateway is enough to use it.
 // Only the administrator configures providers, in .env; nothing a user sends
 // can add a route or change where one points. SOCKS proxies aren't offered:
 // the HTTP client MetaCode uses (undici 6) can't tunnel through them, and a
@@ -179,6 +184,8 @@ class ProxyProvider {
    * @param {'proxy' | 'vpn-gateway'} opts.id
    * @param {string} opts.proxyUrl
    * @param {string} [opts.healthUrl]          VPN gateway only: its status endpoint
+   * @param {string} [opts.healthApiKey]       sent as X-API-Key to the status endpoints (gluetun's "apikey" auth)
+   * @param {string} [opts.ipUrl]              VPN gateway only: an endpoint reporting its public (exit) address
    * @param {DestinationRules} opts.rules
    * @param {number} opts.maxResponseBytes
    * @param {number} [opts.connectTimeoutMs]
@@ -200,14 +207,27 @@ class ProxyProvider {
     this.proxy = parsed.url;
     /** @type {URL | null} */
     this.health = null;
-    if (opts.healthUrl) {
+    /** @type {URL | null} */
+    this.ipEndpoint = null;
+    /** @type {Record<string, string>} headers for the status endpoints (credentials; never shown) */
+    this.statusHeaders = {};
+    if (opts.healthApiKey) this.statusHeaders['x-api-key'] = String(opts.healthApiKey);
+    /** @param {string} raw @param {string} name */
+    const statusUrl = (raw, name) => {
       let h = null;
-      try { h = new URL(opts.healthUrl); } catch (e) { h = null; }
-      if (!h || !['http:', 'https:'].includes(h.protocol)) this.problems.push('SCRAPER_VPN_GATEWAY_HEALTH_URL must be an http(s) URL.');
-      else this.health = h;
-    }
+      try { h = new URL(raw); } catch (e) { h = null; }
+      if (!h || !['http:', 'https:'].includes(h.protocol)) { this.problems.push(name + ' must be an http(s) URL.'); return null; }
+      // user:password in the URL → HTTP basic auth (gluetun's "basic" auth); the URL itself keeps no credentials
+      if (h.username || h.password) {
+        this.statusHeaders.authorization = 'Basic ' + Buffer.from(decodeURIComponent(h.username) + ':' + decodeURIComponent(h.password)).toString('base64');
+        h.username = ''; h.password = '';
+      }
+      return h;
+    };
+    if (opts.healthUrl) this.health = statusUrl(opts.healthUrl, 'SCRAPER_VPN_GATEWAY_HEALTH_URL');
+    if (opts.ipUrl) this.ipEndpoint = statusUrl(opts.ipUrl, 'SCRAPER_VPN_GATEWAY_IP_URL');
     /** @type {ProviderCapabilities} */
-    this.capabilities = { https: true, httpProxy: true, socks: false, healthCheck: !!this.health, remoteDns: true, changesEgressIp: true };
+    this.capabilities = { https: true, httpProxy: true, socks: false, healthCheck: !!(this.health || this.ipEndpoint), remoteDns: true, changesEgressIp: true };
     /** @type {import('undici').ProxyAgent | null} */
     this.agent = null;
     if (this.proxy) {
@@ -222,7 +242,7 @@ class ProxyProvider {
         proxyTls: { rejectUnauthorized: true }
       });
     }
-    this.healthCheck = this.health ? (/** @param {AbortSignal} [signal] */ signal => this.checkGateway(signal)) : undefined;
+    this.healthCheck = this.health || this.ipEndpoint ? (/** @param {AbortSignal} [signal] */ signal => this.checkGateway(signal)) : undefined;
   }
 
   /** @param {URL} url */
@@ -271,32 +291,75 @@ class ProxyProvider {
   }
 
   /**
-   * The gateway's own status endpoint: healthy when it answers 2xx and, if it
-   * reports a JSON `status`, that status says the tunnel is up.
+   * Fetches one of the gateway's status endpoints. → { status, json } or a failure kind
+   * @param {URL} url
+   * @param {AbortSignal | undefined} signal
+   * @returns {Promise<{ ok: true, status: number, json: any } | { ok: false, kind: 'down' | 'config', detail: string }>}
+   */
+  async statusJson(url, signal) {
+    const timeout = AbortSignal.timeout(5000);
+    try {
+      const res = await this.undici.request(url, { method: 'GET', headers: Object.assign({ accept: 'application/json' }, this.statusHeaders),
+        signal: signal ? AbortSignal.any([signal, timeout]) : timeout, headersTimeout: 5000, bodyTimeout: 5000, maxRedirections: 0 });
+      const text = await readBody(res.body, '', 64 * 1024);
+      const code = res.statusCode;
+      if (code === 401 || code === 403) {
+        return { ok: false, kind: 'config', detail: 'The gateway\'s status endpoint refused MetaCode (HTTP ' + code + '): it needs credentials. Set SCRAPER_VPN_GATEWAY_HEALTH_API_KEY ' +
+          '(gluetun: an "apikey" role for this route in its control-server auth file) or put user:password in the URL. Requests still go through the gateway meanwhile.' };
+      }
+      if (code === 404) return { ok: false, kind: 'config', detail: 'The gateway has no status page at that address (HTTP 404). Check the path (gluetun: /v1/vpn/status, or /v1/openvpn/status on older versions).' };
+      if (code < 200 || code >= 300) return { ok: false, kind: 'down', detail: 'The gateway\'s status endpoint answered HTTP ' + code + '.' };
+      let json = null;
+      try { json = JSON.parse(text); } catch (e) { json = null; }
+      return { ok: true, status: code, json };
+    } catch (err) {
+      return { ok: false, kind: 'down', detail: timeout.aborted ? 'The gateway\'s status endpoint didn\'t answer within 5 s.' : 'The gateway\'s status endpoint couldn\'t be reached (is the gateway running?).' };
+    }
+  }
+
+  /**
+   * The gateway's own status: healthy when its status endpoint answers 2xx
+   * and, if it reports a JSON `status`, that status says the tunnel is up.
+   * The exit address comes from SCRAPER_VPN_GATEWAY_IP_URL (or a `public_ip`
+   * field in the status answer). A status endpoint that is set up wrongly
+   * (401/403/404) is a configuration problem, reported without stopping
+   * traffic; an unreachable gateway or a tunnel reported down stops it.
    * @param {AbortSignal} [signal]
    * @returns {Promise<HealthResult>}
    */
   async checkGateway(signal) {
     const started = Date.now();
-    const done = /** @param {boolean} ok @param {string | null} detail */ (ok, detail) => ({ ok, checkedAt: new Date().toISOString(), latencyMs: Date.now() - started, detail });
-    if (!this.health) return done(false, 'No status URL is configured.');
-    const timeout = AbortSignal.timeout(5000);
-    try {
-      const res = await this.undici.request(this.health, { method: 'GET', signal: signal ? AbortSignal.any([signal, timeout]) : timeout, headersTimeout: 5000, bodyTimeout: 5000, maxRedirections: 0 });
-      const text = await readBody(res.body, '', 64 * 1024);
-      if (res.statusCode < 200 || res.statusCode >= 300) return done(false, 'The gateway\'s status endpoint answered HTTP ' + res.statusCode + '.');
-      let json = null;
-      try { json = JSON.parse(text); } catch (e) { json = null; }
-      const status = json && typeof json === 'object' && typeof json.status === 'string' ? json.status.toLowerCase() : null;
-      if (status && !['running', 'connected', 'up', 'ok', 'healthy'].includes(status)) return done(false, 'The gateway reports its tunnel as "' + sanitize(status, 30) + '".');
-      return done(true, null);
-    } catch (err) {
-      return done(false, timeout.aborted ? 'The gateway\'s status endpoint didn\'t answer within 5 s.' : 'The gateway\'s status endpoint couldn\'t be reached.');
+    /** @param {boolean} ok @param {'ok' | 'down' | 'config'} kind @param {string | null} detail @param {{ ip?: string | null, where?: string | null }} [exit] */
+    const done = (ok, kind, detail, exit) => ({ ok, kind, checkedAt: new Date().toISOString(), latencyMs: Date.now() - started, detail,
+      exitIp: exit && exit.ip ? exit.ip : null, exitLocation: exit && exit.where ? exit.where : null });
+    /** @param {any} j */
+    const exitOf = j => {
+      if (!j || typeof j !== 'object') return {};
+      const ip = typeof j.public_ip === 'string' ? j.public_ip : typeof j.ip === 'string' ? j.ip : null;
+      const where = [j.city, j.region, j.country].filter(x => typeof x === 'string' && x).map(x => sanitize(x, 40)).join(', ');
+      return { ip: ip && /^[0-9a-fA-F:.]{3,45}$/.test(ip) ? ip : null, where: where || null };
+    };
+    let exit = {};
+    if (this.health) {
+      const r = await this.statusJson(this.health, signal);
+      if (!r.ok) return done(false, r.kind, r.detail);
+      const j = r.json;
+      const status = j && typeof j === 'object' && typeof j.status === 'string' ? j.status.toLowerCase() : null;
+      if (status && !['running', 'connected', 'up', 'ok', 'healthy'].includes(status)) return done(false, 'down', 'The gateway reports its tunnel as "' + sanitize(status, 30) + '".');
+      exit = exitOf(j);
     }
+    if (this.ipEndpoint) {
+      const r = await this.statusJson(this.ipEndpoint, signal);
+      if (r.ok) exit = exitOf(r.json);
+      else if (!this.health) return done(false, r.kind, r.detail);
+    }
+    return done(true, 'ok', null, exit);
   }
 
   adminDetails() {
-    return { proxy: proxyLabel(this.proxy), healthEndpoint: this.health ? this.health.protocol + '//' + this.health.host + this.health.pathname : null, problems: this.problems.slice() };
+    const where = /** @param {URL | null} u */ u => (u ? u.protocol + '//' + u.host + u.pathname : null);
+    return { proxy: proxyLabel(this.proxy), healthEndpoint: where(this.health), ipEndpoint: where(this.ipEndpoint),
+      statusAuth: this.statusHeaders['x-api-key'] ? 'API key' : this.statusHeaders.authorization ? 'user and password' : 'none', problems: this.problems.slice() };
   }
 
   close() { if (this.agent) this.agent.close().catch(() => {}); }
@@ -317,15 +380,24 @@ function providersFromEnv(env, deps) {
   const proxyUrl = String(env.SCRAPER_PROXY_URL || '').trim();
   if (proxyUrl) all.set('proxy', new ProxyProvider({ id: 'proxy', proxyUrl, rules: deps.rules, maxResponseBytes: deps.maxResponseBytes, undici: deps.undici }));
   const gwUrl = String(env.SCRAPER_VPN_GATEWAY_PROXY_URL || '').trim();
+  const opt = /** @param {string} k */ k => String(env[k] || '').trim() || undefined;
   if (gwUrl) {
-    all.set('vpn-gateway', new ProxyProvider({ id: 'vpn-gateway', proxyUrl: gwUrl, healthUrl: String(env.SCRAPER_VPN_GATEWAY_HEALTH_URL || '').trim() || undefined,
+    all.set('vpn-gateway', new ProxyProvider({ id: 'vpn-gateway', proxyUrl: gwUrl, healthUrl: opt('SCRAPER_VPN_GATEWAY_HEALTH_URL'),
+      healthApiKey: opt('SCRAPER_VPN_GATEWAY_HEALTH_API_KEY'), ipUrl: opt('SCRAPER_VPN_GATEWAY_IP_URL'),
       rules: deps.rules, maxResponseBytes: deps.maxResponseBytes, undici: deps.undici }));
-  } else if (String(env.SCRAPER_VPN_GATEWAY_HEALTH_URL || '').trim()) {
-    warnings.push('SCRAPER_VPN_GATEWAY_HEALTH_URL is set without SCRAPER_VPN_GATEWAY_PROXY_URL; the VPN gateway isn\'t used.');
+  } else if (opt('SCRAPER_VPN_GATEWAY_HEALTH_URL') || opt('SCRAPER_VPN_GATEWAY_IP_URL')) {
+    warnings.push('SCRAPER_VPN_GATEWAY_HEALTH_URL / _IP_URL are set without SCRAPER_VPN_GATEWAY_PROXY_URL (the gateway\'s proxy address); the VPN gateway isn\'t used.');
   }
   // SCRAPER_NETWORK_PROVIDERS: the order to use them in, e.g. "vpn-gateway" or "vpn-gateway,direct".
+  // Unset: the gateway if one is configured, else the proxy, else the direct connection.
   const raw = String(env.SCRAPER_NETWORK_PROVIDERS || '').trim();
-  let order = raw ? raw.split(/[\s,]+/).map(s => s.toLowerCase()).filter(Boolean) : ['direct'];
+  let order = raw ? raw.split(/[\s,]+/).map(s => s.toLowerCase()).filter(Boolean) : [all.has('vpn-gateway') ? 'vpn-gateway' : all.has('proxy') ? 'proxy' : 'direct'];
+  if (raw) {
+    ['vpn-gateway', 'proxy'].forEach(id => {
+      if (all.has(id) && !order.includes(id)) warnings.push((id === 'vpn-gateway' ? 'A VPN gateway is configured (SCRAPER_VPN_GATEWAY_PROXY_URL)' : 'A proxy is configured (SCRAPER_PROXY_URL)') +
+        ', but SCRAPER_NETWORK_PROVIDERS="' + raw + '" doesn\'t list "' + id + '", so it isn\'t used. Add it, or remove SCRAPER_NETWORK_PROVIDERS to use it by default.');
+    });
+  }
   const unknown = order.filter(id => !all.has(id));
   if (unknown.length) warnings.push('SCRAPER_NETWORK_PROVIDERS names ' + unknown.join(', ') + ', which ' + (unknown.length === 1 ? 'isn\'t' : 'aren\'t') + ' configured; ' + (unknown.length === 1 ? 'it is' : 'they are') + ' skipped.');
   order = Array.from(new Set(order.filter(id => all.has(id)))).slice(0, 3);

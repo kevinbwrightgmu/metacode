@@ -151,6 +151,10 @@ function createScraper(opts) {
     maxResponseBytes: config.maxResponseBytes
   });
   net.warnings.forEach(w => { if (!config.warnings.includes(w)) config.warnings.push(w); });
+  if (net.order[0] !== 'direct' && opts.logToConsole !== false) {
+    const first = net.providers[0];
+    console.log('[scraper] Network route: ' + first.label + (first.problems.length ? ' — NOT USABLE: ' + first.problems.join(' ') : '') + (net.failover ? ' (failover: ' + net.order.slice(1).join(', ') + ')' : ''));
+  }
   const transport = new NetworkManager({
     providers: net.providers, failover: net.failover,
     breaker: { failureThreshold: config.circuitFailures, cooldownMs: config.circuitCooldownMs, maxCooldownMs: config.circuitMaxCooldownMs }
@@ -273,9 +277,9 @@ function createScraper(opts) {
       network: transport.publicStatus(),
       jobStore: { persistent: !!store, maxQueuedJobs: config.maxQueuedJobs, queueDepth: jobs.queue.length },
       transport: Object.assign({
-        name: transport.kind === 'python' ? 'Python' : 'epoxy-tls over Wisp',
+        name: transport.kind === 'python' ? 'Python' : transport.kind === 'vpn-gateway' ? 'VPN gateway' : transport.kind === 'http-proxy' ? 'Proxy' : 'epoxy-tls over Wisp',
         kind: transport.kind,
-        available: transport.kind === 'python' || transportAvailable(),
+        available: transport.kind !== 'epoxy' && transport.kind !== 'pending' ? true : transportAvailable(),
         epoxyVersion: transport.info ? transport.info.version : null,
         wispPath: WISP_PATH
       }, typeof transport.status === 'function' ? transport.status() : {}),
@@ -431,8 +435,16 @@ function createScraper(opts) {
   admin.post('/network/:id/check', async (req, res) => {
     try {
       const r = await transport.checkHealth(String(req.params.id));
-      if (r === null) throw new ScraperError('invalid_request', 'That provider has no health check (only a VPN gateway with SCRAPER_VPN_GATEWAY_HEALTH_URL has one).', { status: 400 });
+      if (r === null) throw new ScraperError('invalid_request', 'That provider has no health check (only a VPN gateway with SCRAPER_VPN_GATEWAY_HEALTH_URL or _IP_URL has one). Use "Test route" instead.', { status: 400 });
       res.json({ health: r, providers: transport.publicStatus() });
+    } catch (err) { sendError(res, err); }
+  });
+  // A real request through one route, to a small allow-listed page: does the route work end to end?
+  admin.post('/network/:id/test', async (req, res) => {
+    try {
+      const r = await transport.test(String(req.params.id), { url: 'https://www.reddit.com/robots.txt', headers: { 'user-agent': config.userAgent, accept: 'text/plain' } });
+      if (r === null) throw new ScraperError('not_found', 'No such network provider.', { status: 404 });
+      res.json({ test: r, providers: transport.publicStatus() });
     } catch (err) { sendError(res, err); }
   });
   admin.post('/network/:id/reset', (req, res) => {
