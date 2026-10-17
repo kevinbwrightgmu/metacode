@@ -30,6 +30,7 @@ function createYouTubeMock() {
       return { items: items.slice(start, start + size), nextPageToken: next, pageInfo: { totalResults: items.length } };
     };
     if (resource === 'channels') {
+      if (q.get('forHandle') === '@livechan') return send(200, { items: [{ id: 'UClivechannel0000000000aa' }] });
       const ok = q.get('forHandle') === '@testchan' || (q.get('id') || '').split(',').includes(CH);
       if (!ok) return send(200, { items: [] });
       return send(200, { items: [{ id: CH, snippet: { title: 'Test Channel', customUrl: '@testchan', description: 'A channel', publishedAt: '2015-01-01T00:00:00Z', country: 'US' },
@@ -46,10 +47,15 @@ function createYouTubeMock() {
       return send(200, page(ids.map(id => ({ contentDetails: { videoId: id } })), 4));
     }
     if (resource === 'videos') {
-      const items = (q.get('id') || '').split(',').filter(id => /^vid\d{8}$/.test(id) || id === 'livevideo01' || id === 'endedvideo1').map(id => {
+      const LIVE = {
+        livevideo01: { activeLiveChatId: 'chat-1', actualStartTime: '2026-10-17T10:00:00Z', concurrentViewers: '321' },
+        endingvid01: { activeLiveChatId: 'chat-ends', actualStartTime: '2026-10-17T10:00:00Z' },
+        memberlive1: { activeLiveChatId: 'chat-members', actualStartTime: '2026-10-17T10:00:00Z' },
+        endedvideo1: { actualStartTime: '2026-10-01T10:00:00Z', actualEndTime: '2026-10-01T12:00:00Z' }
+      };
+      const items = (q.get('id') || '').split(',').filter(id => /^vid\d{8}$/.test(id) || LIVE[id]).map(id => {
         const n = /^vid/.test(id) ? Number(id.slice(3)) : 0;
-        const live = id === 'livevideo01' ? { activeLiveChatId: 'chat-1', actualStartTime: '2026-10-17T10:00:00Z', concurrentViewers: '321' }
-          : id === 'endedvideo1' ? { actualStartTime: '2026-10-01T10:00:00Z', actualEndTime: '2026-10-01T12:00:00Z' } : undefined;
+        const live = LIVE[id];
         return { id, snippet: { title: 'Video ' + n + (n % 2 ? ' about cats' : ' about dogs'), description: 'Description ' + n, channelId: CH, channelTitle: 'Test Channel',
           publishedAt: new Date(Date.UTC(2020, 0, 1 + n)).toISOString(), tags: ['t' + n], categoryId: '22', thumbnails: { high: { url: 'https://i.ytimg.com/vi/' + id + '/hq.jpg' } } },
           statistics: { viewCount: String(VIEWS[n] || 10), likeCount: String(10 + n), commentCount: String(3) }, contentDetails: { duration: 'PT1H2M3S', definition: 'hd', caption: 'false' },
@@ -58,6 +64,10 @@ function createYouTubeMock() {
       return send(200, { items });
     }
     if (resource === 'search') {
+      if (q.get('eventType') === 'live') {
+        seen.liveSearches = (seen.liveSearches || 0) + 1;
+        return send(200, { items: q.get('channelId') === 'UClivechannel0000000000aa' ? [{ id: { kind: 'youtube#video', videoId: 'livevideo01' } }] : [] });
+      }
       const all = [vid(5), vid(1), vid(3), vid(2), vid(7), vid(9)];
       const p = page(all.map(id => { const n = Number(id.slice(3)); return { id: { kind: 'youtube#video', videoId: id }, snippet: { title: 'Video ' + n + (n % 2 ? ' about cats' : ' about dogs'), publishedAt: new Date(Date.UTC(2020, 0, 1 + n)).toISOString() } }; }), 4);
       return send(200, p);
@@ -74,8 +84,17 @@ function createYouTubeMock() {
       const parent = q.get('parentId');
       return send(200, page([1, 2, 3].map(i => ({ id: 'r-' + parent.slice(2) + '-' + i, snippet: { textOriginal: 'Reply ' + i, authorDisplayName: 'replier', likeCount: 0, parentId: parent, publishedAt: '2021-02-0' + i + 'T00:00:00Z' } })), 100));
     }
-    if (resource === 'liveChatMessages') {
-      if (q.get('liveChatId') !== 'chat-1') return fail(404, 'liveChatNotFound', 'The live chat that you are trying to retrieve cannot be found.');
+    // YouTube's path for liveChatMessages.list is /liveChat/messages (not /liveChatMessages)
+    if (resource === 'liveChat/messages') {
+      const chat = q.get('liveChatId');
+      if (chat === 'chat-members') return fail(403, 'forbidden', 'The requester is not allowed to access the requested live chat.');
+      if (chat === 'chat-ends') {
+        return send(200, { pollingIntervalMillis: 10, nextPageToken: 'end1', items: [
+          { id: 'e1', snippet: { type: 'textMessageEvent', displayMessage: 'Last words', publishedAt: '2026-10-17T10:10:00Z' }, authorDetails: { displayName: 'viewer1', channelId: 'UCviewer1' } },
+          { id: 'e2', snippet: { type: 'tombstone', publishedAt: '2026-10-17T10:10:01Z' }, authorDetails: { displayName: 'viewer2', channelId: 'UCviewer2' } },
+          { id: 'e3', snippet: { type: 'chatEndedEvent', publishedAt: '2026-10-17T10:10:02Z' }, authorDetails: { displayName: 'Test Channel', channelId: CH } }] });
+      }
+      if (chat !== 'chat-1') return fail(404, 'liveChatNotFound', 'The live chat that you are trying to retrieve cannot be found.');
       state.liveCalls++;
       const n = state.liveCalls;
       const msgs = [1, 2].map(i => ({ id: 'm' + n + '-' + i, snippet: { type: i === 2 && n === 1 ? 'superChatEvent' : 'textMessageEvent', displayMessage: 'Hello ' + n + '-' + i, publishedAt: '2026-10-17T10:0' + n + ':0' + i + 'Z',
@@ -83,7 +102,9 @@ function createYouTubeMock() {
         authorDetails: { displayName: 'viewer' + i, channelId: 'UCviewer' + i, isChatModerator: i === 1, isChatOwner: false, isChatSponsor: false, isVerified: false } }));
       return send(200, { items: msgs, nextPageToken: 'tok' + n, pollingIntervalMillis: 10, offlineAt: n >= 2 ? '2026-10-17T11:00:00Z' : undefined });
     }
-    send(404, { error: { code: 404, message: 'Unknown', errors: [{ reason: 'notFound' }] } });
+    // Like Google: an unknown path is an HTML 404 page, not a JSON error
+    res.writeHead(404, { 'content-type': 'text/html; charset=UTF-8' });
+    res.end('<!DOCTYPE html><html><title>Error 404 (Not Found)!!1</title><p>The requested URL <code>' + u.pathname + '</code> was not found on this server.</p></html>');
   });
   return {
     seen, state, CH, vid, VIEWS,

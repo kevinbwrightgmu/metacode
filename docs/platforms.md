@@ -41,7 +41,7 @@ in Google Cloud Console and create a new one.
 | **Specific videos** | Videos by URL or ID (watch, youtu.be, Shorts, live and embed links), up to 500 | Sunil02324's scrape-by-ID script |
 | **A channel** | The channel's details (subscribers, views, video count, country, creation date), optionally its playlists, and its uploads | CriticalHunter's *scrape a channel* |
 | **A playlist** | The playlist and its videos | CriticalHunter's *scrape a playlist* |
-| **Live chat** | The chat of a stream that is **live now**: messages, Super Chats and Super Stickers (amount, currency, tier), and author flags (owner, moderator, member, verified). Followed until the stream ends or your limits | ohn0's live-chat scraper (see below) |
+| **Live chat** | The chat of a stream that is **live now**, from the stream's link or from a channel (`youtube.com/@name/live` or `@name`: the job finds the stream it has live, a 100-unit search). You get messages, Super Chats and Super Stickers (amount, currency, tier), and author flags (owner, moderator, member, verified). The job follows the chat until the stream or chat ends or your limits are reached. Members-only and restricted chats are refused with the reason | ohn0's live-chat scraper (see below) |
 
 **Every video record** has:
 - title, description, channel, publication time;

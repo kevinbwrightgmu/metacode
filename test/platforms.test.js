@@ -217,10 +217,43 @@ test('YouTube live chat: follows a live stream\'s chat until it goes offline; an
   assert.equal(sc.amount, '$5.00');
   assert.equal(chat.find(c => c.author === 'viewer1').is_moderator, true);
   assert.equal(recs.filter(x => x.record_type === 'post').length, 1, 'the stream itself');
+  assert.ok(yt.seen.requests.some(q => q.startsWith('liveChat/messages?') && /liveChatId=chat-1/.test(q) && /part=snippet%2CauthorDetails/.test(q)), 'YouTube\'s real path for chat messages: /liveChat/messages');
   r = await start({ platform: 'youtube', target: { type: 'livechat', video: 'endedvideo1' } });
   job = await waitForJob(app.api, r.json.job.id);
   assert.equal(job.status, 'failed');
   assert.match((job.lastError || job.error).message, /has ended.*only serves the chat of streams that are live now/);
+});
+
+test('YouTube live chat from a channel link (@name/live) finds its current stream; a chat that ends stops the job; restricted chats are explained', async () => {
+  yt.state.liveCalls = 0;
+  let r = await start({ platform: 'youtube', target: { type: 'livechat', video: 'https://www.youtube.com/@livechan/live' }, options: { maxChatMinutes: 2 } });
+  assert.equal(r.status, 202, JSON.stringify(r.json));
+  let job = await waitForJob(app.api, r.json.job.id, 20000);
+  assert.equal(job.status, 'completed', JSON.stringify(job.lastError));
+  let recs = (await results(job.id)).records;
+  assert.equal(recs.find(x => x.record_type === 'post').video_id, 'livevideo01', 'the channel\'s live stream was found');
+  assert.equal(recs.filter(x => x.source === 'live_chat').length, 4);
+  const detail = (await getJson(app.api + '/jobs/' + job.id)).json.job;
+  assert.ok(detail.meta.youtubeQuota >= 100, 'the live search is counted (100 units): ' + detail.meta.youtubeQuota);
+  // A channel that isn't live
+  r = await start({ platform: 'youtube', target: { type: 'livechat', video: '@testchan' } });
+  job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'failed');
+  assert.match((job.lastError || job.error).message, /isn't streaming live right now/);
+  // chatEndedEvent: the job stops at once; deleted-message placeholders are left out
+  r = await start({ platform: 'youtube', target: { type: 'livechat', video: 'https://youtu.be/endingvid01' }, options: { maxChatMinutes: 5 } });
+  job = await waitForJob(app.api, r.json.job.id, 10000);
+  assert.equal(job.status, 'completed');
+  recs = (await results(job.id)).records.filter(x => x.source === 'live_chat');
+  assert.deepEqual(recs.map(x => x.body), ['Last words']);
+  // Members-only / restricted chat
+  r = await start({ platform: 'youtube', target: { type: 'livechat', video: 'memberlive1' } });
+  job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'failed');
+  assert.match((job.lastError || job.error).message, /limited to members or subscribers/);
+  // Not a stream link or a channel
+  r = await start({ platform: 'youtube', target: { type: 'livechat', video: 'https://example.com/x' } });
+  assert.equal(r.status, 400);
 });
 
 test('X: search (Latest → recency), a user\'s posts without replies, posts by URL — with the bearer token, and plan refusals explained', async () => {

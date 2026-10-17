@@ -104,8 +104,8 @@ const ScraperPlatforms = (() => {
       target = field('pf-youtube-channel', 'Channel', text(P, 'channel', '@handle, youtube.com/@handle or youtube.com/channel/UC…')) + check(P, 'includePlaylists', 'Also list the channel\'s playlists');
     } else if (f.type === 'playlist') target = field('pf-youtube-playlist', 'Playlist', text(P, 'playlist', 'https://www.youtube.com/playlist?list=…'));
     else if (f.type === 'livechat') {
-      target = field('pf-youtube-video', 'Live stream', text(P, 'video', 'URL of a stream that is live now')) +
-        '<div class="form-hint">YouTube\'s API serves a chat only while the stream is live; the job follows it until the stream ends or the limits below. The chat of a past stream (a replay) can\'t be collected through the API.</div>';
+      target = field('pf-youtube-video', 'Live stream', text(P, 'video', 'Stream link (youtube.com/watch?v=… or /live/…) or channel (@name or youtube.com/@name/live)')) +
+        '<div class="form-hint">YouTube\'s API serves a chat only while the stream is live; the job follows it until the stream ends or the limits below. With a channel, the job finds the stream it has live now (a search: 100 quota units). The chat of a past stream (a replay) can\'t be collected through the API.</div>';
     }
     let opts = '';
     if (f.type === 'livechat') {
