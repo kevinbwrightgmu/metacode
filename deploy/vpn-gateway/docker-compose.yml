@@ -1,0 +1,33 @@
+# MetaCode's VPN gateway: gluetun (https://github.com/qdm12/gluetun) connected
+# to a VPN provider (Mullvad over WireGuard by default) in its own container,
+# with an HTTP proxy the scraper sends its requests through.
+#
+#   ./setup.sh            asks for your WireGuard key, writes vpn.env and the
+#                         status API key, and prints the lines for MetaCode's .env
+#   docker compose up -d  starts the gateway (NET_ADMIN stays inside this container;
+#                         the host's own routing and firewall aren't touched)
+#
+# Both ports are published on 127.0.0.1 only: nothing outside this machine can
+# use the proxy or read the status. See README.md.
+name: metacode-vpn
+services:
+  gluetun:
+    image: qmcgaw/gluetun:v3
+    container_name: metacode-vpn
+    cap_add:
+      - NET_ADMIN
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    env_file: vpn.env
+    environment:
+      HTTPPROXY: "on"
+      HTTPPROXY_LISTENING_ADDRESS: ":8888"
+      HTTP_CONTROL_SERVER_ADDRESS: ":8000"
+      HTTP_CONTROL_SERVER_AUTH_CONFIG_FILEPATH: /gluetun/auth/config.toml
+      TZ: UTC
+    volumes:
+      - ./gluetun:/gluetun
+    ports:
+      - "127.0.0.1:8888:8888/tcp"   # HTTP proxy → SCRAPER_VPN_GATEWAY_PROXY_URL
+      - "127.0.0.1:8000:8000/tcp"   # status → SCRAPER_VPN_GATEWAY_HEALTH_URL / _IP_URL
+    restart: unless-stopped

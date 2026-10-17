@@ -164,7 +164,9 @@ function loadScraperConfig(env) {
     SCRAPER_NETWORK_FAILOVER: String(env.SCRAPER_NETWORK_FAILOVER || ''),
     SCRAPER_PROXY_URL: String(env.SCRAPER_PROXY_URL || ''),
     SCRAPER_VPN_GATEWAY_PROXY_URL: String(env.SCRAPER_VPN_GATEWAY_PROXY_URL || ''),
-    SCRAPER_VPN_GATEWAY_HEALTH_URL: String(env.SCRAPER_VPN_GATEWAY_HEALTH_URL || '')
+    SCRAPER_VPN_GATEWAY_HEALTH_URL: String(env.SCRAPER_VPN_GATEWAY_HEALTH_URL || ''),
+    SCRAPER_VPN_GATEWAY_HEALTH_API_KEY: String(env.SCRAPER_VPN_GATEWAY_HEALTH_API_KEY || ''),
+    SCRAPER_VPN_GATEWAY_IP_URL: String(env.SCRAPER_VPN_GATEWAY_IP_URL || '')
   };
   // Circuit breaker
   c.circuitFailures      = int(env, 'SCRAPER_CIRCUIT_FAILURES', DEFAULTS.circuitFailures, 1, 100, warnings);
@@ -198,6 +200,14 @@ function loadScraperConfig(env) {
     ports.add(url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80));
   });
   c.wispPorts = Array.from(ports);
+
+  // YouTube and X (platforms/config.js): official APIs, through the same network route.
+  // Their hosts join the providers' allow-list, but not the Wisp proxy's (the in-app browser stays Reddit-only).
+  const { platformConfig } = require('./platforms/config');
+  c.platforms = platformConfig(env, { allowPrivateNetwork: c.allowPrivateNetwork });
+  c.platforms.warnings.forEach(w => warnings.push(w));
+  c.egressHostPatterns = c.wispHostPatterns.concat(c.platforms.hostPatterns);
+  c.egressPorts = Array.from(new Set(c.wispPorts.concat(c.platforms.ports)));
   return c;
 }
 

@@ -72,7 +72,7 @@ test('sidebar: Scraper opens the Reddit scraper; AI Scraper (beta) opens the col
   await nav.click();
   await page.waitForSelector('#sc-target-type');
   assert.equal(new URL(page.url()).hash, '#scraper');
-  assert.equal(await page.textContent('#topbar-title'), 'Reddit Scraper');
+  assert.equal(await page.textContent('#topbar-title'), 'Scraper');
   assert.ok(await nav.evaluate(el => el.classList.contains('active')));
   await page.waitForFunction(() => /RedditAPIs\.com|This browser|Public pages|Reddit Data API/.test(document.querySelector('#sc-status').textContent));
   assert.deepEqual(await page.$$eval('#sc-target-type option', o => o.map(x => x.value)),

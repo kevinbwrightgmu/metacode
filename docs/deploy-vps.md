@@ -136,6 +136,10 @@ grants no plan and no access to anyone's data):
 ADMIN_EMAILS=you@example.edu
 ```
 
+To send the scraper's requests through a VPN (Mullvad by default), follow
+[deploy/vpn-gateway/README.md](../deploy/vpn-gateway/README.md): a small Docker container with the VPN, a setup
+script, and four `.env` lines. The website's own traffic keeps using the server's normal connection.
+
 The AI Coding Lab (Ultra) needs nothing more: it uses the accounts, plans and AI settings above and keeps its
 data in `lab-data/`. Optional settings (a price list for cost estimates, an OpenAI-compatible provider,
 fine-tuning) are in `.env.example` and [docs/ai-lab.md](ai-lab.md).

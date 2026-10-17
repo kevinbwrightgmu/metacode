@@ -58,6 +58,27 @@ export interface HealthResult {
   latencyMs: number | null;
   /** A short, non-sensitive reason (never addresses or credentials). */
   detail: string | null;
+  /**
+   * Why it failed: the route is down (`down`), or the status endpoint is set
+   * up wrongly — wrong address, missing credentials (`config`). Only `down`
+   * stops traffic; a `config` problem is reported without blocking requests.
+   */
+  kind?: 'ok' | 'down' | 'config';
+  /** The address the gateway's traffic leaves from, when its status endpoint reports it. */
+  exitIp?: string | null;
+  /** Where the exit is, when reported (country, city). */
+  exitLocation?: string | null;
+}
+
+/** An administrator's end-to-end test of one route (a real request through it). */
+export interface RouteTestResult {
+  provider: string;
+  ok: boolean;
+  status: number | null;
+  latencyMs: number | null;
+  testedAt: string;
+  /** What the result means, in plain words. */
+  detail: string;
 }
 
 export type CircuitState = 'closed' | 'open' | 'half_open';

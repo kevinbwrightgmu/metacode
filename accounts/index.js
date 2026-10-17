@@ -244,14 +244,14 @@ function createAccounts(opts) {
     async use(req) {
       const c = await contextOf(req);
       if (!c.enabled) return null;
-      return needUser(c, 'the Reddit Scraper') || needFeature(c, 'scraper');
+      return needUser(c, 'the Scraper') || needFeature(c, 'scraper');
     },
     // Before a job starts: mode, jobs at once and per day, and items — the job's
     // item cap is lowered to what the plan allows (per job and left this month).
     async job(req, spec, info) {
       const c = await contextOf(req);
       if (!c.enabled) return null;
-      let e = needUser(c, 'the Reddit Scraper') || needFeature(c, 'scraper') ||
+      let e = needUser(c, 'the Scraper') || needFeature(c, 'scraper') ||
         (spec.mode === 'ai' ? needFeature(c, 'aiScraper') : spec.mode === 'custom' ? needFeature(c, 'customCode') : null);
       if (e) return e;
       const L = c.plan.limits;
@@ -279,7 +279,7 @@ function createAccounts(opts) {
     async resume(req, job, info) {
       const c = await contextOf(req);
       if (!c.enabled) return null;
-      const e = needUser(c, 'the Reddit Scraper') || needFeature(c, 'scraper');
+      const e = needUser(c, 'the Scraper') || needFeature(c, 'scraper');
       if (e) return e;
       const L = c.plan.limits;
       if ((info && info.running) >= L.scrapeJobsAtOnce) {

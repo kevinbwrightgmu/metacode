@@ -162,8 +162,44 @@ class NetworkManager {
     const r = await e.provider.healthCheck();
     e.lastHealth = r;
     if (r.ok) { e.lastHealthOk = r; e.breaker.force(null); }
-    else { e.lastHealthFailure = r; e.breaker.force(r.detail || 'its health check failed'); log.warn('provider.unhealthy', { provider: id, detail: r.detail }); }
+    else if (r.kind === 'config') {
+      // The status endpoint is set up wrongly (address, credentials): say so, but
+      // let requests decide whether the route itself works.
+      e.lastHealthFailure = r;
+      e.breaker.force(null);
+      log.warn('provider.health_misconfigured', { provider: id, detail: r.detail });
+    } else { e.lastHealthFailure = r; e.breaker.force(r.detail || 'its health check failed'); log.warn('provider.unhealthy', { provider: id, detail: r.detail }); }
     return r;
+  }
+
+  /**
+   * An administrator's end-to-end test: one real request through one route
+   * (it doesn't count towards the circuit breaker or job metrics).
+   * @param {string} id
+   * @param {{ url: string, headers?: Record<string, string>, timeoutMs?: number }} probe
+   * @returns {Promise<import('../../types/scraper').RouteTestResult | null>}
+   */
+  async test(id, probe) {
+    const e = this.entry(id);
+    if (!e) return null;
+    const started = this.now();
+    const testedAt = new Date(started).toISOString();
+    const via = e.provider.kind === 'vpn-gateway' ? 'through the VPN gateway' : e.provider.kind === 'http-proxy' ? 'through the proxy' : 'directly';
+    if (e.provider.problems.length) return { provider: id, ok: false, status: null, latencyMs: null, testedAt, detail: 'Not configured correctly: ' + e.provider.problems.join(' ') };
+    try {
+      const res = await e.provider.request({ url: probe.url, method: 'GET', headers: probe.headers || {}, timeoutMs: probe.timeoutMs || 15000 });
+      const ms = this.now() - started;
+      const host = hostOf(probe.url);
+      if (res.status >= 200 && res.status < 400) return { provider: id, ok: true, status: res.status, latencyMs: ms, testedAt, detail: 'Reached ' + host + ' ' + via + ' (HTTP ' + res.status + ').' };
+      if (res.status === 403 || res.status === 429) {
+        return { provider: id, ok: true, status: res.status, latencyMs: ms, testedAt, detail: 'The route works — ' + host + ' answered ' + via + ' — but it refused this address (HTTP ' + res.status + '). ' +
+          'That is the site\'s decision; MetaCode respects it rather than trying other addresses.' };
+      }
+      return { provider: id, ok: true, status: res.status, latencyMs: ms, testedAt, detail: 'The route works; ' + host + ' answered HTTP ' + res.status + ' ' + via + '.' };
+    } catch (err) {
+      const se = /** @type {{ message?: string }} */ (err || {});
+      return { provider: id, ok: false, status: null, latencyMs: this.now() - started, testedAt, detail: String(se.message || 'The request failed.') };
+    }
   }
 
   /** Starts the periodic health checks of providers that have one. */
