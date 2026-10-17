@@ -37,7 +37,9 @@ const RedditScraper = (() => {
     comments:  ['confidence', 'top', 'new', 'controversial', 'old', 'qa']
   };
   const TIMES = ['hour', 'day', 'week', 'month', 'year', 'all'];
-  const TYPE_BADGE = { post: 'badge-blue', comment: 'badge-teal', subreddit: 'badge-violet', user: 'badge-amber' };
+  const TYPE_BADGE = { post: 'badge-blue', comment: 'badge-teal', subreddit: 'badge-violet', user: 'badge-amber', channel: 'badge-violet', playlist: 'badge-amber' };
+  const PLATFORMS = [['reddit', 'Reddit'], ['youtube', 'YouTube'], ['x', 'X (Twitter)'], ['linkedin', 'LinkedIn']];
+  const PLATFORM_NAME = { reddit: 'Reddit', youtube: 'YouTube', x: 'X' };
   const STATUS_BADGE = { queued: 'badge-gray', running: 'badge-blue', waiting: 'badge-amber', paused: 'badge-violet', completed: 'badge-green', failed: 'badge-red', cancelled: 'badge-amber' };
   // Why a job is paused (pausedReason from the server), in words
   const PAUSED_REASON = {
@@ -313,6 +315,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       code: TEMPLATES['py-subreddit-posts'].code,
       params: '{\n  "subreddit": "AskScience"\n}',
       engine: null,             // null = the server's default (browser without API credentials)
+      platform: 'reddit',       // the platform menu: reddit | youtube | x | linkedin
       lastJobId: null
     };
   }
@@ -389,19 +392,29 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     container.innerHTML = `
       <div class="view-header">
         <div>
-          <div class="view-title">Reddit Scraper</div>
-          <div class="view-subtitle">Collect Reddit posts and comments, then code them like any other posts</div>
+          <div class="view-title">Scraper</div>
+          <div class="view-subtitle">Collect posts and comments from Reddit, YouTube or X, then code them like any other posts</div>
         </div>
         <div class="view-actions">
-          <a class="btn btn-ghost" href="#scraper-beta" title="Describe what you want; an AI finds and picks the posts">Try the AI Scraper (beta)</a>
-          <button class="btn btn-secondary" id="sc-browser-toggle" onclick="RedditScraper.toggleBrowser()">
+          <a class="btn btn-ghost" href="#scraper-beta" title="Describe what you want; an AI finds and picks Reddit posts">Try the AI Scraper (beta)</a>
+          <button class="btn btn-secondary" id="sc-browser-toggle" data-reddit-only onclick="RedditScraper.toggleBrowser()">
             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
             Browse Reddit
           </button>
         </div>
       </div>
-      ${window.Account && Account.enabled() && Account.signedIn() ? '<div class="sc-plan">' + Account.noteHTML('scrapeItems', 'the Reddit Scraper') + '</div>' : ''}
+      ${window.Account && Account.enabled() && Account.signedIn() ? '<div class="sc-plan">' + Account.noteHTML('scrapeItems', 'the Scraper') + '</div>' : ''}
 
+      <div class="sc-platforms">
+        <span class="form-label">Platform</span>
+        <div class="sc-modes" role="tablist" aria-label="Platform">
+          ${PLATFORMS.map(([id, label]) => '<button class="sc-mode sc-platform-btn' + (id === 'linkedin' ? ' is-off' : '') + '" role="tab" data-platform="' + id + '" onclick="RedditScraper.setPlatform(\'' + id + '\')">' + label + '</button>').join('')}
+        </div>
+      </div>
+
+      <div id="sc-platform" hidden></div>
+
+      <div id="sc-reddit">
       <div class="card sc-banner" id="sc-status"><span class="text-muted">Checking the scraper…</span></div>
 
       <div class="card" id="sc-api" style="margin-bottom:16px" hidden></div>
@@ -447,6 +460,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
         <button class="btn btn-secondary" id="sc-cancel" onclick="RedditScraper.cancel()" hidden>Cancel job</button>
         <div class="form-error" id="sc-form-error" role="alert"></div>
       </div>
+      </div>
 
       <div class="card" id="sc-job" style="margin-bottom:16px" hidden></div>
 
@@ -462,6 +476,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     renderTargetType();
     renderEngine();
     renderOptions();
+    renderPlatform();
     loadStatus();
     refreshJobs();
     if (job) { renderJob(); if (!FINISHED.includes(job.status) && !es) connect(job.id); }
@@ -483,6 +498,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
     }
     RedditBrowser.configure({ allowedHosts: status.allowedHosts });
     if (!isActive()) return;
+    if (form.platform && form.platform !== 'reddit') ScraperPlatforms.render(form.platform);
     renderEngine();
     renderStatus();
     renderApiAccess();
@@ -864,7 +880,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
   }
 
   function renderMode() {
-    document.querySelectorAll('.sc-mode').forEach(b => {
+    document.querySelectorAll('.sc-mode[data-mode]').forEach(b => {
       const on = b.dataset.mode === form.mode;
       b.classList.toggle('active', on);
       b.setAttribute('aria-selected', on ? 'true' : 'false');
@@ -1394,6 +1410,29 @@ async def scrape(ctx):
   }
 
   /* ── Start / cancel ───────────────────────── */
+  /* ── Platform menu ─────────────────────────── */
+  function setPlatform(p) {
+    form.platform = PLATFORMS.some(x => x[0] === p) ? p : 'reddit';
+    saveForm();
+    renderPlatform();
+  }
+  function renderPlatform() {
+    const p = form.platform || 'reddit';
+    document.querySelectorAll('.sc-platform-btn').forEach(b => { const on = b.dataset.platform === p; b.classList.toggle('active', on); b.setAttribute('aria-selected', String(on)); });
+    const reddit = $('sc-reddit'), other = $('sc-platform');
+    if (reddit) reddit.hidden = p !== 'reddit';
+    if (other) other.hidden = p === 'reddit';
+    document.querySelectorAll('[data-reddit-only]').forEach(el => { el.hidden = p !== 'reddit'; });
+    if (p !== 'reddit') ScraperPlatforms.render(p);
+  }
+  // YouTube / X: the platform panel builds the body; the job then shows like any other
+  async function startJob(body) {
+    const data = await api('/jobs', { method: 'POST', body });
+    setJob(data.job);
+    App.notify((PLATFORM_NAME[body.platform] || 'Scraper') + ' job started', 'info');
+    refreshJobs();
+  }
+
   async function start() {
     setFormError('');
     let body;
@@ -1469,12 +1508,17 @@ async def scrape(ctx):
     if (!job) return;
     const body = {};
     // A job on your own keys needs them again (the server never stores them)
-    if (job.keySource === 'own' && job.engine === 'server') {
+    if (job.keySource === 'own' && job.engine === 'server' && job.mode !== 'platform') {
       const mine = ownReddit();
       if (!mine) { App.notify('Add your Reddit API keys under Reddit API access first, then press Resume.', 'warning', 6000); toggleApi(true); return; }
       body.credentials = { clientId: mine.clientId, clientSecret: mine.clientSecret, username: mine.username || '' };
     }
     if (job.engine === 'redditapis' && ownRedditApis()) body.redditApisKey = ownRedditApis().key;
+    if (job.mode === 'platform') {
+      const extra = ScraperPlatforms.resumeFields(job);
+      if (!extra) { App.notify('Add your ' + (job.target.platform === 'x' ? 'X bearer token' : 'YouTube API key') + ' again under ' + PLATFORM_NAME[job.target.platform] + ' on the Scraper page, then press Resume.', 'warning', 6000); setPlatform(job.target.platform); return; }
+      Object.assign(body, extra);
+    }
     try {
       if (job.engine === 'browser') await ensureRelay();
       applySummary((await api('/jobs/' + job.id + '/resume', { method: 'POST', body })).job);
@@ -1780,7 +1824,17 @@ async def scrape(ctx):
     if (r.record_type === 'comment') return r.body || '';
     if (r.record_type === 'subreddit') return (r.name ? 'r/' + r.name : '') + (r.title ? ' — ' + r.title : '');
     if (r.record_type === 'user') return r.name ? 'u/' + r.name : '';
+    if (r.record_type === 'channel') return (r.name || '') + (r.subscriber_count !== null && r.subscriber_count !== undefined ? ' — ' + fmtNum(r.subscriber_count) + ' subscribers' : '');
+    if (r.record_type === 'playlist') return (r.title || '') + (r.item_count ? ' — ' + fmtNum(r.item_count) + ' videos' : '');
     return r.title || r.body || r.text || r.name || JSON.stringify(r).slice(0, 200);
+  }
+
+  // The "Where" column: r/subreddit, a YouTube channel, X
+  function whereOf(r) {
+    if (r.subreddit) return 'r/' + esc(r.subreddit);
+    if (r.platform === 'youtube') return esc(r.channel_title || 'YouTube');
+    if (r.platform === 'x') return 'X';
+    return '—';
   }
 
   function renderResults(el) {
@@ -1827,7 +1881,7 @@ async def scrape(ctx):
     const index = new Map(records.map((r, i) => [r, i]));
     el.innerHTML = toolbar + averagesOf(rows) + `
       <div class="table-wrap"><table class="table sc-table">
-        <thead><tr><th>Type</th><th>Title / text</th><th>Author</th><th>Subreddit</th><th class="sc-cell-num">Score</th><th class="sc-cell-num">Comments</th><th>Created</th></tr></thead>
+        <thead><tr><th>Type</th><th>Title / text</th><th>Author</th><th>Where</th><th class="sc-cell-num">Score</th><th class="sc-cell-num">Comments</th><th>Created</th></tr></thead>
         <tbody>${visible.map(r => {
           const i = index.get(r);
           return '<tr tabindex="0" onclick="RedditScraper.showRecord(' + i + ')" onkeydown="if(event.key===\'Enter\')RedditScraper.showRecord(' + i + ')">' +
@@ -1837,7 +1891,7 @@ async def scrape(ctx):
                 (postRest(r) ? '<div class="sc-cell-text sc-cell-sub">' + esc(postRest(r).slice(0, 300)) + '</div>' : '')
               : '<div class="sc-cell-text" title="' + esc(textOf(r).slice(0, 300)) + '">' + esc(textOf(r).slice(0, 300) || '—') + '</div>') + '</td>' +
             '<td>' + esc(r.author || '—') + '</td>' +
-            '<td>' + (r.subreddit ? 'r/' + esc(r.subreddit) : '—') + '</td>' +
+            '<td>' + whereOf(r) + '</td>' +
             '<td class="sc-cell-num">' + fmtNum(r.score) + '</td>' +
             '<td class="sc-cell-num">' + fmtNum(r.num_comments) + '</td>' +
             '<td style="white-space:nowrap">' + fmtDate(r.created_at) + '</td></tr>';
@@ -1863,7 +1917,7 @@ async def scrape(ctx):
       const vals = eng.map(e => e[key]).filter(v => v !== null);
       const value = vals.length ? Number((vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1)).toLocaleString() : null;
       return '<div class="sc-avg-tile" data-metric="' + key + '">' + (value === null
-        ? '<div class="sc-avg-value is-empty">' + (key === 'views' && what === 'post' ? 'Not provided by Reddit' : 'No data') + '</div>'
+        ? '<div class="sc-avg-value is-empty">' + (key === 'views' && what === 'post' ? 'Not provided by ' + (PLATFORM_NAME[base[0].platform] || 'Reddit') : 'No data') + '</div>'
         : '<div class="sc-avg-value" style="color:' + color + '">' + value + '</div>') +
         '<div class="sc-avg-label">' + label + (note ? ' <span>(' + note + ')</span>' : '') + '</div></div>';
     }).join('') + '</div>' +
@@ -1953,10 +2007,11 @@ async def scrape(ctx):
     body += '<div class="card-title mt-4">All fields</div>' + kv(r);
     // The URL comes from scraped data, so it's looked up by record index —
     // never embedded in the inline handler.
-    const browse = link && status && status.browser.enabled
+    const onReddit = !r.platform || r.platform === 'reddit';
+    const browse = link && onReddit && status && status.browser.enabled
       ? '<button class="btn btn-secondary" onclick="App.closeModal(); RedditScraper.browseRecord(' + i + ')">Open in Reddit browser</button>' : '';
     App.openModal(cap(r.record_type || 'Record') + (r.author ? ' by ' + r.author : ''), body,
-      browse + (link ? '<a class="btn btn-secondary" href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">Open on Reddit</a>' : '') +
+      browse + (link ? '<a class="btn btn-secondary" href="' + esc(link) + '" target="_blank" rel="noopener noreferrer">Open on ' + (PLATFORM_NAME[r.platform] || 'Reddit') + '</a>' : '') +
       '<button class="btn btn-primary" onclick="App.closeModal()">Close</button>');
   }
 
@@ -2022,7 +2077,7 @@ async def scrape(ctx):
   function engagementOf(r) {
     const n = x => (typeof x === 'number' && isFinite(x) ? x : null);
     if (r.record_type === 'post') {
-      return { likes: n(r.score), shares: n(r.num_crossposts), comments: n(r.num_comments), views: n(r.view_count),
+      return { likes: n(r.score), shares: n(r.num_crossposts) !== null ? n(r.num_crossposts) : n(r.retweet_count), comments: n(r.num_comments), views: n(r.view_count),
         upvoteRatio: n(r.upvote_ratio), awards: n(r.total_awards) };
     }
     return { likes: n(r.score), shares: null, comments: null, views: null };
@@ -2030,15 +2085,28 @@ async def scrape(ctx):
 
   // Scraped record → MetaCode post (the same shape Import Data creates).
   function toPost(r) {
+    const platform = r.platform || 'reddit';
     if (r.record_type === 'post') {
       return {
-        id: 'reddit_' + r.post_id,
+        id: platform + '_' + r.post_id,
         text: postText(r),
         author: r.author || '',
         timestamp: r.created_at || '',
         engagement: engagementOf(r),
         humanCodes: {}, aiCodes: {},
-        source: { platform: 'reddit', type: 'post', subreddit: r.subreddit, permalink: r.permalink }
+        source: platform === 'reddit' ? { platform: 'reddit', type: 'post', subreddit: r.subreddit, permalink: r.permalink }
+          : { platform, type: platform === 'youtube' ? 'video' : 'post', channel: r.channel_title || null, permalink: r.permalink }
+      };
+    }
+    if (platform !== 'reddit') {
+      return {
+        id: platform + '_c_' + r.comment_id,
+        text: r.body || '',
+        author: r.author || '',
+        timestamp: r.created_at || '',
+        engagement: engagementOf(r),
+        humanCodes: {}, aiCodes: {},
+        source: { platform, type: r.source === 'live_chat' ? 'live_chat' : 'comment', permalink: r.permalink, post_id: r.post_id, parent_id: r.parent_id || null }
       };
     }
     return {
@@ -2317,8 +2385,10 @@ async def scrape(ctx):
     } catch (e) { /* server unreachable: nothing to resume */ }
   }, 0);
 
+  if (typeof ScraperPlatforms !== 'undefined') ScraperPlatforms.attach({ api, status: () => status, startJob });
+
   return {
-    render, setMode, setEngine, toggleApi, connectApi, disconnectApi, toggleRedditApis, saveRedditApisKey, removeRedditApisKey, onTargetType, onField, onOption, checkTarget, start, cancel,
+    render, setMode, setEngine, setPlatform, toggleApi, connectApi, disconnectApi, toggleRedditApis, saveRedditApisKey, removeRedditApisKey, onTargetType, onField, onOption, checkTarget, start, cancel,
     pause, resume, collectNewer, showSummary, showNetwork, adminNetwork,
     loadTemplate, setLanguage, onParams, showApi, setTab, onSearch, onType, onSort, showMore,
     showRecord, copyJson, exportAs, addToProject, confirmAdd, refreshJobs, openJob, deleteJob,

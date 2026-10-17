@@ -198,14 +198,14 @@ class JobManager extends EventEmitter {
       meta: {},
       error: null, lastError: null,
       checkpoint: null, attempts: 0, waits: 0, waitedMs: 0, retryAt: null, pausedReason: null, lastCollectedAt: null,
-      resumable: spec.mode === 'standard',
+      resumable: spec.mode === 'standard' || spec.mode === 'platform',
       controller: new AbortController(),
       http: null, timer: null, heartbeat: null, stopReason: null
     };
     job.http = typeof spec.httpFor === 'function' ? spec.httpFor(id) : null;
     this.jobs.set(id, job);
     this.counters.created++;
-    this.log(job, 'info', 'Job created (' + (job.mode === 'custom' ? 'custom code' : job.mode === 'ai' ? 'AI Scraper' : 'standard scraper') + ').');
+    this.log(job, 'info', 'Job created (' + (job.mode === 'custom' ? 'custom code' : job.mode === 'ai' ? 'AI Scraper' : job.mode === 'platform' ? (job.target && job.target.platform === 'x' ? 'X' : 'YouTube') : 'standard scraper') + ').');
     this.event(job, 'created', { mode: job.mode, engine: job.engine, keys: job.keySource });
     this.persist(job, true);
     this.queue.push(job);
@@ -784,7 +784,7 @@ class JobManager extends EventEmitter {
         retryAt: null, pausedReason: null, lastCollectedAt: null, keySource: 'server', itemCount: 0
       }, s, {
         records: null, keys: new Set(), controller: new AbortController(), http: null, timer: null, heartbeat: null, stopReason: null,
-        resumable: s.mode === 'standard'
+        resumable: s.mode === 'standard' || s.mode === 'platform'
       });
       ['requestsOk', 'requestsFailed', 'retries'].forEach(k => { if (!Number.isFinite(job.progress[/** @type {'retries'} */ (k)])) job.progress[/** @type {'retries'} */ (k)] = 0; });
       this.jobs.set(job.id, job);

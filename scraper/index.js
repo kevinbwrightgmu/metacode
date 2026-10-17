@@ -53,6 +53,7 @@ const PYODIDE_VERSION = (() => { try { return require('pyodide/package.json').ve
 const exporter = require('./export');
 const { ownerOf } = require('../owner');
 const { createAiRunner, normalizeAiOptions, normalizeGoal } = require('./ai/agent-runner');
+const { createPlatforms } = require('./platforms');
 
 const SCRAMJET_FILES = {
   'scramjet.js':          ['@mercuryworkshop/scramjet', 'dist/scramjet.js'],
@@ -147,7 +148,8 @@ function createScraper(opts) {
   // gateway) behind a circuit breaker each. Everything below calls `transport`.
   const net = providersFromEnv(config.network || {}, {
     transport: baseTransport,
-    rules: { hostPatterns: config.wispHostPatterns, ports: config.wispPorts, allowPlainHttp: !!config.allowPrivateNetwork },
+    rules: { hostPatterns: config.egressHostPatterns, ports: config.egressPorts, allowPlainHttp: !!config.allowPrivateNetwork },
+    transportHosts: config.wispHostPatterns,
     maxResponseBytes: config.maxResponseBytes
   });
   net.warnings.forEach(w => { if (!config.warnings.includes(w)) config.warnings.push(w); });
@@ -161,6 +163,8 @@ function createScraper(opts) {
   });
   const limiter = new HostRateLimiter({ maxConcurrent: config.maxConcurrentRequests });
   const http = new RedditHttpClient({ config, transport, limiter });
+  // YouTube and X (official APIs), through the same route and limiter
+  const platforms = createPlatforms({ config, transport, limiter });
 
   // "This browser (Scramjet)" engine: requests are fetched by an open MetaCode
   // tab (see network/browser-relay.js). They are the user's own browser
@@ -228,7 +232,8 @@ function createScraper(opts) {
     runners: {
       standard: (job, ctx) => runStandardScrape(job.target, job.options, ctx),
       custom: runCustom,
-      ai: runAi
+      ai: runAi,
+      platform: (job, ctx) => platforms.run(job, ctx)
     },
     // After a restart: a job's HTTP client again. Users' own keys and browser
     // tabs aren't kept on the server, so those jobs wait for their owner.
@@ -284,6 +289,7 @@ function createScraper(opts) {
         wispPath: WISP_PATH
       }, typeof transport.status === 'function' ? transport.status() : {}),
       allowedHosts: config.apiHosts,
+      platforms: platforms.status(),
       customCode: {
         enabled: config.customCodeEnabled,
         available: config.customCodeEnabled && (sandbox.ok || pySandbox.ok),
@@ -355,8 +361,9 @@ function createScraper(opts) {
 
   function parseSpec(body) {
     if (!body || typeof body !== 'object' || Array.isArray(body)) throw new ScraperError('invalid_request', 'The request body must be a JSON object.', { status: 400 });
+    if (body.mode === 'platform') return platforms.parseSpec(body);
     const mode = ['custom', 'ai'].includes(body.mode) ? body.mode : (body.mode === undefined || body.mode === 'standard' ? 'standard' : null);
-    if (!mode) throw new ScraperError('invalid_request', 'mode must be "standard", "custom" or "ai".', { status: 400 });
+    if (!mode) throw new ScraperError('invalid_request', 'mode must be "standard", "custom", "ai" or "platform".', { status: 400 });
     const engine = body.engine === undefined || body.engine === 'server' ? 'server' : (['browser', 'redditapis'].includes(body.engine) ? body.engine : null);
     if (!engine) throw new ScraperError('invalid_request', 'engine must be "browser", "server" or "redditapis".', { status: 400 });
     // The user's own keys, when sent: the job runs on their own API limit.
@@ -598,7 +605,13 @@ function createScraper(opts) {
       const job = findJob(req);
       const body = req.body && typeof req.body === 'object' ? req.body : {};
       let httpFor;
-      if (job.keySource === 'own' || (job.engine === 'redditapis' && !config.redditApisKey)) {
+      if (job.mode === 'platform') {
+        const cred = platforms.resumeCredential(job, body);
+        if (cred) httpFor = () => cred;
+        else if (job.keySource === 'own' && (job.pausedReason === 'needs_keys' || !job.http)) {
+          throw new ScraperError('invalid_request', 'This job used your own ' + (job.target.platform === 'x' ? 'X bearer token' : 'YouTube API key') + ', which isn\'t kept on the server. Add it again on the Scraper page and press Resume there.', { status: 400 });
+        }
+      } else if (job.keySource === 'own' || (job.engine === 'redditapis' && !config.redditApisKey)) {
         if (job.engine === 'redditapis' && body.redditApisKey) {
           let key;
           try { key = credentials.validateRedditApisKey(body.redditApisKey); } catch (e) { throw new ScraperError('invalid_request', 'Your RedditAPIs.com key: ' + e.message, { status: 400 }); }
@@ -647,7 +660,7 @@ function createScraper(opts) {
       const type = String(req.query.type || 'all');
       const all = jobs.recordsOf(job);
       const records = type === 'all' ? all : all.filter(r => r.record_type === type);
-      const base = 'reddit_' + (job.target && (job.target.subreddit || job.target.username || job.target.postId || job.target.type) || 'custom')
+      const base = (job.mode === 'platform' ? job.target.platform : 'reddit') + '_' + (job.target && (job.target.subreddit || job.target.username || job.target.postId || job.target.query || job.target.type) || 'custom')
         .replace(/[^A-Za-z0-9_+-]+/g, '_').slice(0, 40) + '_' + job.id.slice(0, 8) + (type !== 'all' ? '_' + type.replace(/\W/g, '') : '');
       let body, mime, ext;
       if (format === 'csv') { body = exporter.toCSV(records); mime = 'text/csv; charset=utf-8'; ext = 'csv'; }

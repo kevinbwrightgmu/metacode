@@ -1,5 +1,7 @@
 # Reddit Scraper
 
+> The Scraper page also collects from **YouTube** and **X** through their official APIs (platform menu at the top) — see [platforms.md](platforms.md).
+
 The **Scraper** page (sidebar → **Scraper**) collects Reddit posts, comments, subreddit and profile
 information so you can code them in MetaCode like any imported posts. It has two modes:
 

@@ -62,9 +62,27 @@ const { ScraperError, cancelledError, sanitize } = require('../errors');
  * @property {boolean} allowPlainHttp   only for a local test mock (SCRAPER_ALLOW_PRIVATE_NETWORK)
  */
 
-/** The existing transport (Python worker, or epoxy-tls over Wisp), as a provider. */
+/** An HTTPS proxy from HTTPS_PROXY / NO_PROXY, when this server must use one to reach the internet. */
+/** @type {import('undici').EnvHttpProxyAgent | null} */
+let envAgent = null;
+let envKey = '';
+/** @param {typeof import('undici')} undici @param {URL} url */
+function envDispatcher(undici, url) {
+  if (/^(localhost|127\.\d+\.\d+\.\d+|\[::1\])$/i.test(url.hostname)) return undefined;
+  const key = ['HTTPS_PROXY', 'https_proxy', 'NO_PROXY', 'no_proxy'].map(k => process.env[k] || '').join('|');
+  if (!/[^|]/.test(key)) return undefined;
+  if (key !== envKey) { envAgent = new undici.EnvHttpProxyAgent(); envKey = key; }
+  return envAgent || undefined;
+}
+
+/**
+ * The existing transport (Python worker, or epoxy-tls over Wisp), as a
+ * provider. Those engines are built for Reddit; the official platform APIs
+ * (YouTube, X — `rules.hostPatterns` beyond `transportHosts`) go straight out
+ * with Node's own HTTP client, with the same checks and limits.
+ */
 class DirectProvider {
-  /** @param {{ transport: Transport }} opts */
+  /** @param {{ transport: Transport, rules?: DestinationRules, transportHosts?: RegExp[], maxResponseBytes?: number, undici?: typeof import('undici') }} opts */
   constructor(opts) {
     this.id = 'direct';
     /** @type {ProviderKind} */
@@ -77,10 +95,25 @@ class DirectProvider {
     this.problems = [];
     /** @type {((signal?: AbortSignal) => Promise<HealthResult>) | undefined} */
     this.healthCheck = undefined;
+    this.rules = opts.rules || null;
+    this.transportHosts = opts.transportHosts || null;
+    this.maxResponseBytes = opts.maxResponseBytes || 8 * 1024 * 1024;
+    this.undici = opts.undici || null;
   }
 
   /** @param {TransportRequest} req */
-  request(req) { return this.transport.request(req); }
+  request(req) {
+    if (this.rules && this.transportHosts) {
+      let url = null;
+      try { url = new URL(req.url); } catch (e) { url = null; }
+      if (url && !this.transportHosts.some(re => re.test(url.hostname))) {
+        checkDestination(url, this.rules);
+        const undici = this.undici || (this.undici = require('undici'));
+        return sendUndici(undici, envDispatcher(undici, url), url, req, this.maxResponseBytes, 'this server\'s connection');
+      }
+    }
+    return this.transport.request(req);
+  }
 
   adminDetails() {
     const t = this.transport;
@@ -177,6 +210,58 @@ async function readBody(body, encoding, maxBytes) {
   return buf.toString('utf8');
 }
 
+/**
+ * The allow-list, enforced again by every provider.
+ * @param {URL} url @param {DestinationRules} rules
+ */
+function checkDestination(url, rules) {
+  const httpOk = url.protocol === 'https:' || (url.protocol === 'http:' && rules.allowPlainHttp);
+  const port = url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80);
+  if (!httpOk || url.username || url.password || !rules.hostPatterns.some(re => re.test(url.hostname)) || !rules.ports.includes(port)) {
+    throw new ScraperError('host_not_allowed', 'That destination isn\'t on the scraper\'s allow-list.', { status: 400 });
+  }
+}
+
+/**
+ * One request with undici (through `dispatcher`: a proxy agent, or none for a
+ * direct connection): no redirects, TLS verified, size-limited, timed out.
+ * @param {typeof import('undici')} undici
+ * @param {import('undici').Dispatcher | undefined} dispatcher
+ * @param {URL} url
+ * @param {TransportRequest} req
+ * @param {number} maxBytes
+ * @param {string} via   for messages: "the proxy", "the VPN gateway", "this server's connection"
+ * @returns {Promise<TransportResponse>}
+ */
+async function sendUndici(undici, dispatcher, url, req, maxBytes, via) {
+  if (req.signal && req.signal.aborted) throw req.signal.reason instanceof ScraperError ? req.signal.reason : cancelledError();
+  const timeout = AbortSignal.timeout(Math.max(1000, req.timeoutMs || 20000));
+  const signal = req.signal ? AbortSignal.any([req.signal, timeout]) : timeout;
+  try {
+    const res = await undici.request(url, {
+      method: /** @type {import('undici').Dispatcher.HttpMethod} */ (req.method || 'GET'),
+      headers: req.headers,
+      body: req.body === undefined || req.body === null ? undefined : String(req.body),
+      dispatcher,
+      signal,
+      headersTimeout: req.timeoutMs,
+      bodyTimeout: req.timeoutMs,
+      maxRedirections: 0
+    });
+    /** @type {Record<string, string>} */
+    const headers = {};
+    Object.entries(res.headers).forEach(([k, v]) => { if (v !== undefined) headers[k.toLowerCase()] = Array.isArray(v) ? v.join(', ') : String(v); });
+    const body = await readBody(res.body, headers['content-encoding'] || '', maxBytes);
+    return { status: res.statusCode, statusText: '', headers, body, url: url.href };
+  } catch (err) {
+    if (err instanceof ScraperError) throw err;
+    if (timeout.aborted && !(req.signal && req.signal.aborted)) {
+      throw new ScraperError('timeout', 'The site didn\'t answer in time (through ' + via + ').', { status: 504, retryable: true });
+    }
+    throw classifyUndiciError(err, req.signal, via);
+  }
+}
+
 /** An HTTP(S) proxy configured by the administrator — on its own, or as a VPN gateway's proxy. */
 class ProxyProvider {
   /**
@@ -246,13 +331,7 @@ class ProxyProvider {
   }
 
   /** @param {URL} url */
-  checkDestination(url) {
-    const httpOk = url.protocol === 'https:' || (url.protocol === 'http:' && this.rules.allowPlainHttp);
-    const port = url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80);
-    if (!httpOk || url.username || url.password || !this.rules.hostPatterns.some(re => re.test(url.hostname)) || !this.rules.ports.includes(port)) {
-      throw new ScraperError('host_not_allowed', 'That destination isn\'t on the scraper\'s allow-list.', { status: 400 });
-    }
-  }
+  checkDestination(url) { checkDestination(url, this.rules); }
 
   /**
    * @param {TransportRequest} req
@@ -261,33 +340,8 @@ class ProxyProvider {
   async request(req) {
     if (!this.agent) throw new ScraperError('proxy_unavailable', 'The ' + (this.kind === 'vpn-gateway' ? 'VPN gateway' : 'proxy') + ' isn\'t configured correctly: ' + this.problems.join(' '), { status: 503 });
     const url = new URL(req.url);
-    this.checkDestination(url);
-    if (req.signal && req.signal.aborted) throw req.signal.reason instanceof ScraperError ? req.signal.reason : cancelledError();
-    const timeout = AbortSignal.timeout(Math.max(1000, req.timeoutMs || 20000));
-    const signal = req.signal ? AbortSignal.any([req.signal, timeout]) : timeout;
-    try {
-      const res = await this.undici.request(url, {
-        method: /** @type {import('undici').Dispatcher.HttpMethod} */ (req.method || 'GET'),
-        headers: req.headers,
-        body: req.body === undefined || req.body === null ? undefined : String(req.body),
-        dispatcher: this.agent,
-        signal,
-        headersTimeout: req.timeoutMs,
-        bodyTimeout: req.timeoutMs,
-        maxRedirections: 0
-      });
-      /** @type {Record<string, string>} */
-      const headers = {};
-      Object.entries(res.headers).forEach(([k, v]) => { if (v !== undefined) headers[k.toLowerCase()] = Array.isArray(v) ? v.join(', ') : String(v); });
-      const body = await readBody(res.body, headers['content-encoding'] || '', this.maxResponseBytes);
-      return { status: res.statusCode, statusText: '', headers, body, url: url.href };
-    } catch (err) {
-      if (err instanceof ScraperError) throw err;
-      if (timeout.aborted && !(req.signal && req.signal.aborted)) {
-        throw new ScraperError('timeout', 'Reddit didn\'t answer in time (through ' + this.via + ').', { status: 504, retryable: true });
-      }
-      throw classifyUndiciError(err, req.signal, this.via);
-    }
+    checkDestination(url, this.rules);
+    return sendUndici(this.undici, this.agent, url, req, this.maxResponseBytes, this.via);
   }
 
   /**
@@ -368,7 +422,8 @@ class ProxyProvider {
 /**
  * The providers this server's settings describe, in the administrator's order.
  * @param {NodeJS.ProcessEnv} env
- * @param {{ transport: Transport, rules: DestinationRules, maxResponseBytes: number, undici?: typeof import('undici') }} deps
+ * @param {{ transport: Transport, rules: DestinationRules, transportHosts?: RegExp[], maxResponseBytes: number, undici?: typeof import('undici') }} deps
+ *   transportHosts: the hosts the direct transport (Python / epoxy) serves; others in `rules` go out with Node's client
  * @returns {{ providers: NetworkProvider[], order: string[], failover: boolean, warnings: string[] }}
  */
 function providersFromEnv(env, deps) {
@@ -376,7 +431,7 @@ function providersFromEnv(env, deps) {
   const warnings = [];
   /** @type {Map<string, NetworkProvider>} */
   const all = new Map();
-  all.set('direct', new DirectProvider({ transport: deps.transport }));
+  all.set('direct', new DirectProvider({ transport: deps.transport, rules: deps.rules, transportHosts: deps.transportHosts, maxResponseBytes: deps.maxResponseBytes, undici: deps.undici }));
   const proxyUrl = String(env.SCRAPER_PROXY_URL || '').trim();
   if (proxyUrl) all.set('proxy', new ProxyProvider({ id: 'proxy', proxyUrl, rules: deps.rules, maxResponseBytes: deps.maxResponseBytes, undici: deps.undici }));
   const gwUrl = String(env.SCRAPER_VPN_GATEWAY_PROXY_URL || '').trim();
@@ -412,4 +467,4 @@ function providersFromEnv(env, deps) {
   return { providers, order, failover: failover && order.length > 1, warnings };
 }
 
-module.exports = { DirectProvider, ProxyProvider, providersFromEnv, parseProxyUrl, classifyUndiciError, readBody };
+module.exports = { DirectProvider, ProxyProvider, providersFromEnv, parseProxyUrl, classifyUndiciError, readBody, checkDestination, sendUndici };

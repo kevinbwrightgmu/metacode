@@ -91,7 +91,7 @@ test('accounts in the pages: sign up, keep this browser\'s work, plan gates, che
   assert.equal((await page.textContent('.nav-item[data-feature="aiLab"] .nav-lock')).trim(), 'Ultra');
   await page.click('.nav-item[data-view="scraper"]');
   await page.waitForSelector('.acct-gate');
-  assert.match(await page.textContent('.acct-gate'), /Sign in to use the Reddit Scraper/);
+  assert.match(await page.textContent('.acct-gate'), /Sign in to use the Scraper/);
 
   // An API answer that needs sign-in opens the sign-in dialog by itself
   await page.evaluate(() => fetch('/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"messages":[]}' }));
@@ -132,7 +132,7 @@ test('accounts in the pages: sign up, keep this browser\'s work, plan gates, che
   // Free plan: the scraper is a Pro feature; AI coding shows what's left
   await page.click('.nav-item[data-view="scraper"]');
   await page.waitForSelector('.acct-gate');
-  assert.match(await page.textContent('.acct-gate'), /the Reddit Scraper is part of the Pro, Max and Ultra plans/i);
+  assert.match(await page.textContent('.acct-gate'), /the Scraper \(Reddit, YouTube, X\) is part of the Pro, Max and Ultra plans/i);
   await page.click('.nav-item[data-view="ai-coding"]');
   await page.waitForSelector('#ai-plan-note .acct-note');
   assert.match(await page.textContent('#ai-plan-note'), /Free plan: 850 of 850 posts left this week/);
@@ -322,6 +322,6 @@ test('with accounts off, the pages work as before (no sign-in, no locks)', { ski
   assert.equal(await page.isVisible('#nav-account'), false);
   assert.equal(await page.$('.nav-lock'), null);
   assert.equal(await page.$('.acct-gate'), null);
-  assert.match(await page.textContent('.view-title'), /Reddit Scraper/);
+  assert.match(await page.textContent('.view-title'), /^Scraper$/);
   await c.close();
 });

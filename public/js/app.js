@@ -72,7 +72,7 @@ const App = (() => {
   };
 
   const TITLES = {
-    'dashboard':'Dashboard','projects':'Projects','settings':'Settings','import':'Import Data','scraper':'Reddit Scraper','scraper-beta':'AI Scraper (beta)',
+    'dashboard':'Dashboard','projects':'Projects','settings':'Settings','import':'Import Data','scraper':'Scraper','scraper-beta':'AI Scraper (beta)',
     'codebook':'Codebook','ai-coding':'AI Coding','human-coding':'Human Coding',
     'reliability':'Reliability Analysis','csv-analyzer':'Analyze CSV (NetworkX)',
     'network':'Network Graph',
