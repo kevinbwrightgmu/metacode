@@ -37,7 +37,9 @@ function desktopConfig(env) {
     withoutAccounts: /^(true|on|yes|1)$/i.test(String(env.DESKTOP_WITHOUT_ACCOUNTS || '').trim()),
     offlineHours: Number.isFinite(hours) && hours >= 1 && hours <= 336 ? hours : DEFAULT_OFFLINE_HOURS,
     minVersion: /^\d+\.\d+\.\d+$/.test(String(env.DESKTOP_MIN_VERSION || '').trim()) ? String(env.DESKTOP_MIN_VERSION).trim() : null,
-    downloadUrl: /^https:\/\//i.test(String(env.DESKTOP_DOWNLOAD_URL || '').trim()) ? String(env.DESKTOP_DOWNLOAD_URL).trim() : null
+    downloadUrl: /^https:\/\//i.test(String(env.DESKTOP_DOWNLOAD_URL || '').trim()) ? String(env.DESKTOP_DOWNLOAD_URL).trim() : null,
+    // the app may offer "email me a sign-in link": Supabase's redirect URLs include metacode-sheets://auth-callback
+    emailLink: /^(true|on|yes|1)$/i.test(String(env.DESKTOP_EMAIL_LINK || '').trim())
   };
 }
 
@@ -96,7 +98,7 @@ function createDesktopApi(deps) {
       app: 'metacode-sheets',
       server: origin,
       available: !u, reason: u ? u.message : null,
-      accounts: accounts.enabled() ? { enabled: true, supabaseUrl: a.supabaseUrl, publishableKey: a.publishableKey } : { enabled: false, withoutAccounts: c.withoutAccounts },
+      accounts: accounts.enabled() ? { enabled: true, supabaseUrl: a.supabaseUrl, publishableKey: a.publishableKey, emailLink: c.emailLink } : { enabled: false, withoutAccounts: c.withoutAccounts },
       lease, offlineHours: c.offlineHours, minVersion: c.minVersion, downloadUrl: c.downloadUrl,
       plansWithDesktop: Plans.ORDER.filter(id => Plans.has(id, 'desktop')),
       upgradeUrl: origin + '/app.html#account',
