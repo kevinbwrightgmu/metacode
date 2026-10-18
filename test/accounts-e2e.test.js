@@ -132,7 +132,7 @@ test('accounts in the pages: sign up, keep this browser\'s work, plan gates, che
   // Free plan: the scraper is a Pro feature; AI coding shows what's left
   await page.click('.nav-item[data-view="scraper"]');
   await page.waitForSelector('.acct-gate');
-  assert.match(await page.textContent('.acct-gate'), /the Scraper \(Reddit, YouTube, X\) is part of the Pro, Max and Ultra plans/i);
+  assert.match(await page.textContent('.acct-gate'), /the Scraper \(Reddit, YouTube, X, LinkedIn\) is part of the Pro, Max and Ultra plans/i);
   await page.click('.nav-item[data-view="ai-coding"]');
   await page.waitForSelector('#ai-plan-note .acct-note');
   assert.match(await page.textContent('#ai-plan-note'), /Free plan: 850 of 850 posts left this week/);

@@ -95,6 +95,7 @@ class PythonTransport {
   async tryCandidates(candidates) {
     let last = null;
     for (const c of candidates) {
+      if (this.closed) throw new ScraperError('not_available', 'The scraper is shutting down.', { status: 503 });
       try { return await this.spawnWorker(c); } catch (err) { last = err; }
     }
     throw new ScraperError('not_available', 'Python 3.8+ wasn\'t found for the Python scraper engine (tried ' +
@@ -130,6 +131,8 @@ class PythonTransport {
         if (!ready) {
           clearTimeout(timer);
           if (!msg.ready) { child.kill(); return reject(new Error(msg.error || 'the Python worker failed to start')); }
+          // Closed while it was starting: don't leave it running
+          if (this.closed) { child.stdin.end(); child.kill(); return reject(new ScraperError('not_available', 'The scraper is shutting down.', { status: 503 })); }
           ready = true;
           this.child = child;
           this.info = { python: msg.python, ssl: msg.ssl, command: [candidate.cmd].concat(candidate.args).join(' ') };

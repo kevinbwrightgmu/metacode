@@ -1,9 +1,10 @@
-// YouTube and X in the scraper: target parsing, record shapes, viral scores
-// and error classification (unit), then jobs through the real scraper API,
-// job manager and network route against stand-ins for the YouTube Data API
-// and X API v2 (test/helpers/platform-mocks.js). The stand-ins show that
-// MetaCode's requests, paging, records, quota accounting and refusals are
-// handled; they don't show what Google or X answer today.
+// YouTube, X and LinkedIn in the scraper: target parsing, record shapes, viral
+// scores, LinkedIn archives and error classification (unit), then jobs through
+// the real scraper API, job manager and network route against stand-ins for
+// the YouTube Data API, X API v2 and LinkedIn's REST API
+// (test/helpers/platform-mocks.js). The stand-ins show that MetaCode's
+// requests, paging, records, quota accounting and refusals are handled; they
+// don't show what Google, X or LinkedIn answer today.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -11,12 +12,14 @@ const path = require('path');
 const http = require('http');
 const net = require('net');
 const { startScraperApp, postJson, getJson, waitForJob } = require('./helpers/harness');
-const { createYouTubeMock, createXMock } = require('./helpers/platform-mocks');
+const { createYouTubeMock, createXMock, createLinkedInMock } = require('./helpers/platform-mocks');
 const YT = require('../scraper/platforms/youtube');
 const X = require('../scraper/platforms/x');
+const LI = require('../scraper/platforms/linkedin');
 
 const SERVER_YT_KEY = 'server-youtube-key-0000000000';
 const SERVER_X_TOKEN = 'server-x-token-000000000000';
+const SERVER_LI_TOKEN = 'li-server-token-000000000000000000';
 
 /* ── Unit ────────────────────────────────────────── */
 
@@ -92,20 +95,99 @@ test('X targets and errors: post URLs, usernames; a plan without access is said 
   assert.equal(t.sort, 'top');
 });
 
+// A LinkedIn "Get a copy of your data" archive, as its CSV files read
+const ARCHIVE = {
+  shares: '﻿Date,ShareLink,ShareCommentary,SharedUrl,MediaUrl,Visibility\r\n' +
+    '2024-03-05 14:22:31,https://www.linkedin.com/feed/update/urn%3Ali%3Ashare%3A7171/,"First line, with a comma\r\n""Quoted"" second line",https://example.org/a,,MEMBER_NETWORK\r\n' +
+    '2023-01-02 08:00:00,https://www.linkedin.com/feed/update/urn%3Ali%3AugcPost%3A6262/,An older post,,,PUBLIC\r\n',
+  comments: 'Date,Link,Message\n2024-04-01 10:00:00,https://www.linkedin.com/feed/update/urn:li:activity:999/?commentUrn=urn%3Ali%3Acomment%3A%28activity%3A999%2C555%29,"Nice, thanks"\n' +
+    '2024-04-03 09:30:00,https://www.linkedin.com/feed/update/urn:li:activity:998/,"Second comment"\n',
+  reactions: 'Date,Type,Link\n2024-04-02 11:00:00,PRAISE,https://www.linkedin.com/feed/update/urn:li:activity:888\n2024-04-02 11:05:00,LIKE,https://www.linkedin.com/feed/update/urn:li:activity:887\n',
+  reposts: 'Date,Link\n2024-05-01 12:00:00,https://www.linkedin.com/feed/update/urn:li:activity:777\n',
+  profile: 'First Name,Last Name,Maiden Name,Address,Birth Date,Headline,Summary\nAda,Lovelace,,"12 Private Road, London",Dec 10 1815,Analyst,"Multi\nline summary"\n'
+};
+const archiveFiles = () => [
+  { name: 'Basic_LinkedInDataExport_10-01-2026/Shares.csv', text: ARCHIVE.shares }, { name: 'Comments.csv', text: ARCHIVE.comments },
+  { name: 'Reactions.csv', text: ARCHIVE.reactions }, { name: 'InstantReposts.csv', text: ARCHIVE.reposts }, { name: 'Profile.csv', text: ARCHIVE.profile }
+];
+
+test('LinkedIn: Page references, little-text commentary, Rest.li encoding and API versions', () => {
+  assert.deepEqual(LI.parseOrganization('https://www.linkedin.com/company/acme-research/'), { by: 'vanity', value: 'acme-research' });
+  assert.deepEqual(LI.parseOrganization('linkedin.com/company/12345/admin/page-posts/published/'), { by: 'id', value: '12345' });
+  assert.deepEqual(LI.parseOrganization('https://de.linkedin.com/showcase/acme-labs?trk=x'), { by: 'vanity', value: 'acme-labs' });
+  assert.deepEqual(LI.parseOrganization('urn:li:organization:777'), { by: 'id', value: '777' });
+  assert.deepEqual(LI.parseOrganization('Acme-Research'), { by: 'vanity', value: 'acme-research' });
+  assert.equal(LI.parseOrganization('https://www.linkedin.com/in/someone'), null, 'a person\'s profile isn\'t a Page');
+  assert.throws(() => LI.normalizeLinkedInTarget({ type: 'posts', organization: 'https://www.linkedin.com/in/someone' }), /Enter a LinkedIn Page/);
+  assert.throws(() => LI.normalizeLinkedInTarget({ type: 'profiles' }), /Pages you manage, a Page's posts or your LinkedIn data archive/);
+  assert.equal(LI.plainText('Our {hashtag|\\#|Research} with @[Acme Labs](urn:li:organization:1002) \\(new\\)'), 'Our #Research with @Acme Labs (new)');
+  // As LinkedIn's client encodes them: URL encoding plus Rest.li's ( ) '
+  assert.equal(LI.enc('urn:li:share:123'), 'urn%3Ali%3Ashare%3A123');
+  assert.equal(LI.restliList(['urn:li:share:1', 'urn:li:ugcPost:2']), 'List(urn%3Ali%3Ashare%3A1,urn%3Ali%3AugcPost%3A2)');
+  assert.equal(LI.enc("a(b)'c,d"), 'a%28b%29%27c%2Cd');
+  assert.equal(LI.versionFor(Date.UTC(2026, 9, 17), 1), '202609');
+  assert.equal(LI.versionFor(Date.UTC(2026, 0, 5), 1), '202512');
+  assert.deepEqual(LI.linkUrns('https://www.linkedin.com/feed/update/urn:li:activity:999/?commentUrn=urn%3Ali%3Acomment%3A%28activity%3A999%2C555%29'), { post: 'urn:li:activity:999', comment: '555' });
+  assert.deepEqual(LI.linkUrns('https://www.linkedin.com/feed/update/urn%3Ali%3Augcpost%3A42/'), { post: 'urn:li:ugcPost:42', comment: null });
+});
+
+test('LinkedIn errors: an inactive API version, expired and invalid tokens, missing permissions — said plainly', () => {
+  assert.equal(LI.classifyLinkedIn(426, { status: 426, code: 'NONEXISTENT_VERSION', message: 'Requested version 202610 is not active' }).type, 'version_unsupported');
+  const expired = LI.classifyLinkedIn(401, { serviceErrorCode: 65601, code: 'EXPIRED_ACCESS_TOKEN', message: 'The token used in the request has expired' });
+  assert.equal(expired.type, 'auth_error');
+  assert.match(expired.message, /expired \(they last 60 days\)/);
+  assert.match(LI.classifyLinkedIn(401, { code: 'INVALID_ACCESS_TOKEN' }).message, /didn't accept the access token/);
+  const denied = LI.classifyLinkedIn(403, { code: 'ACCESS_DENIED', message: 'Not enough permissions to access: partnerApiPostsExternal.FINDER-author.20260801' });
+  assert.equal(denied.type, 'forbidden');
+  assert.match(denied.message, /Community Management API.*r_organization_social.*admin of the Page/);
+  assert.equal(LI.classifyLinkedIn(429, {}).type, 'rate_limited');
+});
+
+test('LinkedIn data archive: posts with line breaks and quotes, comments, reactions and reposts; dates filter; only the name is taken from Profile.csv', () => {
+  const a = LI.parseArchive({ type: 'archive', files: archiveFiles().concat([{ name: 'messages.csv', text: 'FROM,TO,CONTENT\nsomeone,me,private' }]) }, { reactions: true, since: '2024-01-01' });
+  assert.equal(a.target.owner, 'Ada Lovelace');
+  assert.deepEqual(a.target.counts, { posts: 1, comments: 2, reactions: 3, outOfRange: 1 });
+  assert.deepEqual(a.target.files, ['Shares.csv', 'Comments.csv', 'Reactions.csv', 'InstantReposts.csv']);
+  const post = a.records.find(r => r.record_type === 'post');
+  assert.equal(post.post_id, 'urn:li:share:7171');
+  assert.equal(post.selftext, 'First line, with a comma\n"Quoted" second line');
+  assert.equal(post.full_text, 'First line, with a comma\n"Quoted" second line\n\nhttps://example.org/a');
+  assert.equal(post.created_at, '2024-03-05T14:22:31.000Z');
+  assert.equal(post.author, 'Ada Lovelace');
+  const c = a.records.filter(r => r.record_type === 'comment');
+  assert.deepEqual(c.map(x => [x.comment_id.startsWith('archive:') ? 'hash' : x.comment_id, x.post_id, x.body]), [['555', 'urn:li:activity:999', 'Nice, thanks'], ['hash', 'urn:li:activity:998', 'Second comment']]);
+  assert.deepEqual(a.records.filter(r => r.record_type === 'reaction').map(x => x.reaction).sort(), ['Celebrate', 'Like', 'Repost']);
+  const kept = JSON.stringify(a);
+  assert.ok(!kept.includes('Private Road') && !kept.includes('1815') && !kept.includes('private'), 'nothing else from Profile.csv, and no other files, is kept');
+  // Reactions are left out unless asked for; an empty choice or range is refused
+  assert.equal(LI.parseArchive({ type: 'archive', files: archiveFiles() }, {}).records.filter(r => r.record_type === 'reaction').length, 0);
+  assert.throws(() => LI.parseArchive({ type: 'archive', files: archiveFiles() }, { since: '2025-01-01' }), /Nothing in the archive falls between the dates/);
+  assert.throws(() => LI.parseArchive({ type: 'archive', files: [{ name: 'Connections.csv', text: 'First Name\nX' }] }, {}), /Shares\.csv, Comments\.csv, Reactions\.csv/);
+  assert.throws(() => LI.parseArchive({ type: 'archive', files: [] }, {}), /Choose your LinkedIn data archive/);
+  // Only web links are kept from the files
+  const odd = LI.parseArchive({ type: 'archive', files: [{ name: 'Shares.csv', text: 'Date,ShareLink,ShareCommentary,SharedUrl\n2024-01-01 00:00:00,javascript:alert(1),Hi,https://ok.example/x\n' }] }, {});
+  assert.equal(odd.records[0].url, null);
+  assert.equal(odd.records[0].shared_url, 'https://ok.example/x');
+});
+
 /* ── Through the scraper API ─────────────────────── */
 
-let yt, xm, app, ytBase, xBase;
+let yt, xm, li, app, ytBase, xBase, liBase;
 test.before(async () => {
   yt = createYouTubeMock();
   xm = createXMock();
+  li = createLinkedInMock();
   ytBase = await yt.listen();
   xBase = await xm.listen();
-  app = await startScraperApp({ YOUTUBE_API_BASE_URL: ytBase, X_API_BASE_URL: xBase, YOUTUBE_API_KEY: SERVER_YT_KEY, X_BEARER_TOKEN: SERVER_X_TOKEN, YOUTUBE_MIN_DELAY_MS: '0', X_MIN_DELAY_MS: '0' });
+  liBase = await li.listen();
+  app = await startScraperApp({ YOUTUBE_API_BASE_URL: ytBase, X_API_BASE_URL: xBase, LINKEDIN_API_BASE_URL: liBase, YOUTUBE_API_KEY: SERVER_YT_KEY, X_BEARER_TOKEN: SERVER_X_TOKEN,
+    LINKEDIN_ACCESS_TOKEN: SERVER_LI_TOKEN, YOUTUBE_MIN_DELAY_MS: '0', X_MIN_DELAY_MS: '0', LINKEDIN_MIN_DELAY_MS: '0' });
 });
 test.after(async () => {
   if (app) await app.close();
   if (yt) await yt.close();
   if (xm) await xm.close();
+  if (li) await li.close();
 });
 
 const start = body => postJson(app.api + '/jobs', Object.assign({ mode: 'platform' }, body));
@@ -115,11 +197,14 @@ test('status: which platforms work, never the keys', async () => {
   const { json } = await getJson(app.api + '/status');
   assert.equal(json.platforms.youtube.serverKey, true);
   assert.equal(json.platforms.x.serverToken, true);
-  assert.equal(json.platforms.linkedin.enabled, false);
-  assert.ok(!JSON.stringify(json).includes(SERVER_YT_KEY) && !JSON.stringify(json).includes(SERVER_X_TOKEN));
-  const r = await start({ platform: 'linkedin', target: {} });
+  assert.equal(json.platforms.linkedin.enabled, true);
+  assert.equal(json.platforms.linkedin.serverToken, true);
+  const shown = JSON.stringify(json);
+  assert.ok(!shown.includes(SERVER_YT_KEY) && !shown.includes(SERVER_X_TOKEN) && !shown.includes(SERVER_LI_TOKEN));
+  const r = await start({ platform: 'linkedin', target: { type: 'profiles', profile: 'https://www.linkedin.com/in/someone' } });
   assert.equal(r.status, 400);
-  assert.match(r.json.error.message, /LinkedIn isn't available/);
+  assert.match(r.json.error.message, /Pages you manage, a Page's posts or your LinkedIn data archive/);
+  assert.equal((await start({ platform: 'myspace', target: {} })).status, 400);
 });
 
 test('YouTube channel: details, playlists, every upload with stats and viral scores, comments with replies; quota counted; key never shown', async () => {
@@ -297,6 +382,153 @@ test('X: search (Latest → recency), a user\'s posts without replies, posts by 
   job = await waitForJob(app.api, r.json.job.id);
   assert.equal(job.status, 'failed');
   assert.match((job.lastError || job.error).message, /plan doesn't include this endpoint/);
+});
+
+test('LinkedIn: the Pages you manage, with their names, your roles and followers — through the official API, stepping back to an active API version', async () => {
+  const from = li.seen.requests.length;
+  const r = await start({ platform: 'linkedin', target: { type: 'pages' } });
+  assert.equal(r.status, 202, JSON.stringify(r.json));
+  const job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'completed', JSON.stringify(job.lastError));
+  const pages = (await results(job.id)).records;
+  assert.deepEqual(pages.map(p => [p.record_type, p.name, p.roles, p.follower_count, p.url]), [
+    ['page', 'Acme Research', 'ADMINISTRATOR, ANALYST', 4321, 'https://www.linkedin.com/company/acme-research/'],
+    ['page', 'Acme Labs', 'ANALYST', 12, 'https://www.linkedin.com/company/acme-labs/']
+  ]);
+  // As LinkedIn's client sends them: Rest.li 2.0, the method, a version; one that isn't active is stepped back from
+  const versions = li.seen.versions.slice(from);
+  assert.equal(versions[0], li.monthsBack(1), 'it starts at last month\'s version');
+  assert.ok(versions.slice(1).every(v => v === li.state.latestVersion), 'then uses the active one: ' + versions.join(', '));
+  assert.ok(li.seen.methods.slice(from).includes('finder') && li.seen.methods.slice(from).includes('batch_get'));
+  assert.ok(li.seen.auth.slice(from).every(a => a === 'Bearer ' + SERVER_LI_TOKEN));
+  const logs = (await getJson(app.api + '/jobs/' + job.id + '/logs')).json.logs.map(l => l.message).join('\n');
+  assert.match(logs, /doesn't serve API version \d{6}; trying \d{6}/);
+  const detail = JSON.stringify((await getJson(app.api + '/jobs/' + job.id)).json) + logs;
+  assert.ok(!detail.includes(SERVER_LI_TOKEN), 'the token never appears in the job or its logs');
+});
+
+test('LinkedIn: a Page\'s posts with reactions, comment counts, statistics and comments; little text made plain; URNs encoded as Rest.li requires', async () => {
+  const r = await start({ platform: 'linkedin', target: { type: 'posts', organization: 'https://www.linkedin.com/company/acme-research/' },
+    options: { maxPosts: 5, includeComments: true, commentPosts: 1, commentsPerPost: 3, includeStats: true } });
+  assert.equal(r.status, 202, JSON.stringify(r.json));
+  const job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'completed', JSON.stringify(job.lastError));
+  const recs = (await results(job.id)).records;
+  assert.deepEqual(recs.map(x => x.record_type), ['page', 'post', 'post', 'post', 'post', 'post', 'comment', 'comment', 'comment']);
+  const posts = recs.filter(x => x.record_type === 'post');
+  assert.deepEqual(posts.map(p => p.post_id), ['urn:li:share:7001', 'urn:li:share:7002', 'urn:li:ugcPost:7003', 'urn:li:share:7004', 'urn:li:share:7005'], 'two pages of posts');
+  const p1 = posts[0];
+  assert.equal(p1.selftext, 'Our #Research with @Acme Labs (new)');
+  assert.equal(p1.author, 'Acme Research');
+  assert.equal(p1.platform, 'linkedin');
+  assert.equal(p1.reaction_count, 3);
+  assert.equal(p1.reactions, 'Like 2, Celebrate 1');
+  assert.equal(p1.score, 3);
+  assert.equal(p1.num_comments, 5);
+  assert.equal(p1.impression_count, 1000);
+  assert.equal(p1.view_count, 1000);
+  assert.equal(p1.share_count, 1);
+  assert.equal(p1.url, 'https://www.linkedin.com/feed/update/urn:li:share:7001/');
+  assert.equal(p1.created_at, new Date(Date.UTC(2026, 8, 29, 12)).toISOString());
+  assert.equal(posts[1].content_type, 'article');
+  assert.equal(posts[1].article_url, 'https://acme.example/report');
+  assert.equal(posts[2].impression_count, 3000, 'ugcPosts get statistics too');
+  assert.equal(posts[3].poll_question, 'Which?');
+  assert.equal(posts[3].poll_options, 'A | B');
+  assert.equal(posts[4].is_repost, true);
+  const comments = recs.filter(x => x.record_type === 'comment');
+  assert.deepEqual(comments.map(c => [c.comment_id, c.post_id, c.body, c.author, c.score]), [
+    ['901', 'urn:li:share:7001', 'Comment 1', 'urn:li:person:member1', 1],
+    ['902', 'urn:li:share:7001', 'Comment 2', 'Acme Research', 2],
+    ['903', 'urn:li:share:7001', 'Comment 3', 'urn:li:person:member3', 3]
+  ], 'the first 3 comments over two pages; the Page\'s own comment is named');
+  const sent = li.seen.requests.join('\n');
+  assert.match(sent, /\/posts\?author=urn%3Ali%3Aorganization%3A1001&q=author/);
+  assert.match(sent, /\/socialActions\/urn%3Ali%3Ashare%3A7001\/comments/);
+  assert.match(sent, /shares=List\(urn%3Ali%3Ashare%3A7001,urn%3Ali%3Ashare%3A7002\)&ugcPosts=List\(urn%3Ali%3AugcPost%3A7003\)/);
+});
+
+test('LinkedIn: statistics the token may not read are left out with the reason; a Page the member can\'t read and an expired token fail with what to do', async () => {
+  li.state.statsForbidden = true;
+  try {
+    const r = await start({ platform: 'linkedin', target: { type: 'posts', organization: '1001' }, options: { maxPosts: 2, includeStats: true } });
+    const job = await waitForJob(app.api, r.json.job.id);
+    assert.equal(job.status, 'completed', JSON.stringify(job.lastError));
+    const posts = (await results(job.id)).records.filter(x => x.record_type === 'post');
+    assert.equal(posts.length, 2);
+    assert.equal(posts[0].impression_count, null);
+    assert.equal(posts[0].reaction_count, 3, 'reactions are still there');
+    const logs = (await getJson(app.api + '/jobs/' + job.id + '/logs')).json.logs.map(l => l.message).join('\n');
+    assert.match(logs, /didn't give post statistics.*rw_organization_admin/);
+  } finally { li.state.statsForbidden = false; }
+  let r = await start({ platform: 'linkedin', target: { type: 'posts', organization: 'https://www.linkedin.com/company/acme-labs/' } });
+  let job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'failed');
+  assert.match((job.lastError || job.error).message, /refused.*Community Management API/);
+  r = await start({ platform: 'linkedin', target: { type: 'posts', organization: 'no-such-page' } });
+  job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'failed');
+  assert.match((job.lastError || job.error).message, /no Page at linkedin\.com\/company\/no-such-page/);
+  r = await start({ platform: 'linkedin', linkedinAccessToken: 'li-expired-token-00000000000000', target: { type: 'pages' } });
+  job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'failed');
+  assert.match((job.lastError || job.error).message, /expired \(they last 60 days\)/);
+  assert.equal((await start({ platform: 'linkedin', linkedinAccessToken: 'not a token', target: { type: 'pages' } })).status, 400);
+});
+
+test('LinkedIn with the user\'s own access token: used for their job only and never written to disk', async () => {
+  const mine = 'li-users-own-token-1234567890abcdef';
+  const from = li.seen.auth.length;
+  const r = await start({ platform: 'linkedin', linkedinAccessToken: 'Bearer ' + mine, target: { type: 'pages' } });
+  assert.equal(r.status, 202, JSON.stringify(r.json));
+  assert.equal(r.json.job.keySource, 'own');
+  const job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'completed', JSON.stringify(job.lastError));
+  assert.ok(li.seen.auth.slice(from).length > 0 && li.seen.auth.slice(from).every(a => a === 'Bearer ' + mine));
+  const dir = path.join(app.config.dataDir, 'jobs', job.id);
+  const onDisk = fs.readdirSync(dir).map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+  assert.ok(onDisk.length > 0 && !onDisk.includes(mine), 'the token is not in the job\'s files');
+});
+
+test('LinkedIn data archive import: no token or request to LinkedIn; records kept, the uploaded files are not', async () => {
+  const from = li.seen.requests.length;
+  const r = await start({ platform: 'linkedin', target: { type: 'archive', files: archiveFiles() }, options: { reactions: true } });
+  assert.equal(r.status, 202, JSON.stringify(r.json));
+  assert.equal(r.json.job.keySource, 'upload');
+  const job = await waitForJob(app.api, r.json.job.id);
+  assert.equal(job.status, 'completed', JSON.stringify(job.lastError));
+  const recs = (await results(job.id)).records;
+  assert.deepEqual(recs.map(x => x.record_type), ['post', 'post', 'comment', 'comment', 'reaction', 'reaction', 'reaction']);
+  assert.ok(recs.every(x => x.platform === 'linkedin' && x.source === 'archive' && x.author === 'Ada Lovelace'));
+  assert.equal(li.seen.requests.length, from, 'nothing was requested from LinkedIn');
+  const detail = (await getJson(app.api + '/jobs/' + job.id)).json.job;
+  assert.equal(detail.target.type, 'archive');
+  assert.deepEqual(detail.target.counts, { posts: 2, comments: 2, reactions: 3, outOfRange: 0 });
+  const dir = path.join(app.config.dataDir, 'jobs', job.id);
+  const onDisk = fs.readdirSync(dir).map(f => fs.readFileSync(path.join(dir, f), 'utf8')).join('\n');
+  assert.ok(onDisk.includes('Nice, thanks'), 'the imported records are kept');
+  assert.ok(!onDisk.includes('Private Road') && !onDisk.includes('ShareCommentary'), 'the uploaded files themselves are not');
+  // CSV export of the imported records
+  const csv = await fetch(app.api + '/jobs/' + job.id + '/export?format=csv&type=post');
+  assert.equal(csv.status, 200);
+  assert.match(await csv.text(), /First line, with a comma/);
+  // Nothing usable → refused at once, with the reason
+  const bad = await start({ platform: 'linkedin', target: { type: 'archive', files: [{ name: 'Connections.csv', text: 'First Name,Last Name\nA,B' }] } });
+  assert.equal(bad.status, 400);
+  assert.match(bad.json.error.message, /Request the archive with Posts, Comments and Reactions/);
+});
+
+test('LinkedIn data archive import stops at the server\'s item limit and says how many were left out', async () => {
+  const small = await startScraperApp({ SCRAPER_MAX_ITEMS: '3' });
+  try {
+    const r = await postJson(small.api + '/jobs', { mode: 'platform', platform: 'linkedin', target: { type: 'archive', files: archiveFiles() }, options: { reactions: true } });
+    assert.equal(r.status, 202, JSON.stringify(r.json));
+    const job = await waitForJob(small.api, r.json.job.id);
+    assert.equal(job.status, 'completed', JSON.stringify(job.lastError));
+    assert.equal((await getJson(small.api + '/jobs/' + job.id + '/results?limit=100')).json.records.length, 3);
+    const logs = (await getJson(small.api + '/jobs/' + job.id + '/logs')).json.logs.map(l => l.message).join('\n');
+    assert.match(logs, /The archive has 2 posts, 2 comments, 3 reactions and reposts; 4 of them didn't fit in this job's limit/);
+  } finally { await small.close(); }
 });
 
 /* ── The VPN gateway carries platform requests too ── */

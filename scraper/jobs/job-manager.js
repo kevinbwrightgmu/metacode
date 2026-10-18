@@ -205,7 +205,7 @@ class JobManager extends EventEmitter {
     job.http = typeof spec.httpFor === 'function' ? spec.httpFor(id) : null;
     this.jobs.set(id, job);
     this.counters.created++;
-    this.log(job, 'info', 'Job created (' + (job.mode === 'custom' ? 'custom code' : job.mode === 'ai' ? 'AI Scraper' : job.mode === 'platform' ? (job.target && job.target.platform === 'x' ? 'X' : 'YouTube') : 'standard scraper') + ').');
+    this.log(job, 'info', 'Job created (' + (job.mode === 'custom' ? 'custom code' : job.mode === 'ai' ? 'AI Scraper' : job.mode === 'platform' ? (/** @type {Record<string, string>} */ ({ x: 'X', youtube: 'YouTube', linkedin: 'LinkedIn' })[String(job.target && job.target.platform)] || 'platform') : 'standard scraper') + ').');
     this.event(job, 'created', { mode: job.mode, engine: job.engine, keys: job.keySource });
     this.persist(job, true);
     this.queue.push(job);
