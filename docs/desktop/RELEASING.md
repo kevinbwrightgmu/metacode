@@ -45,8 +45,11 @@ electron-builder's `win.azureSignOptions` / a custom sign hook instead.)
 
 - `CSC_LINK` / `CSC_KEY_PASSWORD` — the `.p12` export, base64, and password
 
-Unsigned builds work but show SmartScreen (Windows) or Gatekeeper (macOS)
-warnings.
+Without these secrets the builds still work. Empty secrets count as not set.
+Windows installers are unsigned and SmartScreen warns once. Mac apps are
+ad-hoc signed (Apple silicon won't open an unsigned app at all), and macOS asks
+people to allow them once in System Settings › Privacy & Security ›
+Open Anyway; the download page explains both.
 
 ## 3. macOS notarization
 
