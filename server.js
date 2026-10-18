@@ -43,7 +43,7 @@ app.use(statusSite.hostRouter);
 // and the scraper routes make requests to Reddit on this server's behalf, so
 // only MetaCode's own pages (same origin) may call them. The other routes
 // keep the permissive CORS they always had.
-const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?|account(\/.*)?|billing\/(checkout|portal|sync)|network\/analyze|lab(\/.*)?)\/?$/i;
+const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?|account(\/.*)?|billing\/(checkout|portal|sync)|network\/analyze|lab(\/.*)?|desktop(\/.*)?)\/?$/i;
 const corsForAll = cors();
 app.use((req, res, next) => (AI_ROUTE.test(req.path) ? next() : corsForAll(req, res, next)));
 // …and state-changing requests to them must say they come from this site:
@@ -1765,7 +1765,9 @@ function aiMaxParallel() {
   const n = parseInt(process.env.AI_MAX_PARALLEL, 10);
   return Number.isFinite(n) && n >= 1 ? Math.min(n, 64) : 16;
 }
-app.post('/api/ai/batch', accounts.aiBatch, async (req, res) => {
+app.post('/api/ai/batch', accounts.aiBatch, (req, res) => aiBatchRoute(req, res));
+// (also behind the desktop app's guard: /api/desktop/ai/batch, desktop-api/)
+async function aiBatchRoute(req, res) {
   const list = req.body && Array.isArray(req.body.requests) ? req.body.requests : null;
   if (!list || !list.length) return sendFailure(res, fail(400, 'invalid_request', 'Send a non-empty "requests" list.'));
   if (list.length > AI_BATCH_MAX_REQUESTS) return sendFailure(res, fail(400, 'invalid_request', 'At most ' + AI_BATCH_MAX_REQUESTS + ' requests per batch.'));
@@ -1873,7 +1875,7 @@ app.post('/api/ai/batch', accounts.aiBatch, async (req, res) => {
     client.release();
     if (!res.writableEnded) res.end();
   }
-});
+}
 
 // Batch failures worth a pause and another try: EMIS server errors (and dropped connections, flagged `transient`).
 // Timeouts aren't: each one already took EMIS_TIMEOUT_MS.
@@ -2158,6 +2160,10 @@ const { createAiLab } = require('./ai-lab');
 const aiLab = createAiLab({ accounts, ai: labAi });
 app.use('/api/lab', aiLab.router);
 app.get(['/ultra/ai-lab', '/ultra/ai-lab/'], aiLab.page);
+// MetaCode Sheets, the desktop app (desktop/): its entitlement, leases and AI routes
+const { createDesktopApi } = require('./desktop-api');
+const desktopApi = createDesktopApi({ accounts, ai: labAi, aiBatchRoute });
+app.use('/api/desktop', desktopApi.router);
 // Signing in moves what this browser made on the server to the account
 accounts.onClaim(async (from, to) => ({ surveys: await surveys.store.reassignOwner(from, to), scraperJobs: scraper.reassignOwner(from, to) }));
 app.use('/api/scraper', scraper.router);
@@ -2388,4 +2394,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, start, scraper, accounts, aiLab };
+module.exports = { app, start, scraper, accounts, aiLab, desktopApi };
