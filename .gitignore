@@ -17,3 +17,6 @@ deploy/vpn-gateway/gluetun/*
 !deploy/vpn-gateway/gluetun/auth/
 deploy/vpn-gateway/gluetun/auth/*
 !deploy/vpn-gateway/gluetun/auth/config.toml.example
+# MetaCode Sheets build output
+desktop/dist/
+desktop/build/.cache/

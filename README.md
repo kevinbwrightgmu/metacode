@@ -302,6 +302,16 @@ locations aren't recorded; nothing is guessed.
 
 ---
 
+## MetaCode Sheets (desktop app)
+
+A desktop spreadsheet for Windows, macOS and Linux with MetaCode's AI tools,
+AI Coding and reliability statistics built in — part of the Pro, Max and Ultra
+plans, checked by this server (`/api/desktop`, `desktop-api/`). The app is in
+`desktop/`: `cd desktop && npm ci && npm start`. Architecture, features,
+access rules, building installers and server settings:
+[docs/desktop/README.md](docs/desktop/README.md); releasing and signing:
+[docs/desktop/RELEASING.md](docs/desktop/RELEASING.md).
+
 ## Accounts and Plans
 
 Accounts are **off** unless the server's `.env` has `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`; then

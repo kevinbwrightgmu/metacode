@@ -71,10 +71,16 @@ function mockSupabase(opts) {
     }
     return v;
   }
+  // PostgREST select: col, alias:col, col->>key and alias:col->>key (text from a JSON column)
   function project(row, select) {
     if (!select || select === '*') return Object.assign({}, row);
     const out = {};
-    select.split(',').forEach(c => { out[c.trim()] = row[c.trim()]; });
+    select.split(',').forEach(c => {
+      const m = c.trim().match(/^(?:([\w]+):)?([\w]+)(?:->>([\w]+))?$/);
+      if (!m) return;
+      const v = m[3] ? (row[m[2]] && row[m[2]][m[3]] !== undefined && row[m[2]][m[3]] !== null ? String(row[m[2]][m[3]]) : null) : row[m[2]];
+      out[m[1] || m[3] || m[2]] = v;
+    });
     return out;
   }
 

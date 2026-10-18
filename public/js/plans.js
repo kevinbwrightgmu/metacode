@@ -5,8 +5,9 @@
    pages (account.js, which shows it), so what people see is what they get.
 
    Free  (an account, no subscription): AI coding up to 850 posts a week; no
-         Survey Studio, no scraping, no network analysis.
-   Pro   basic Survey Studio, a tightly limited Reddit Scraper, 2,300 posts.
+         Survey Studio, no scraping, no network analysis, no desktop app.
+   Pro   basic Survey Studio, a tightly limited Reddit Scraper, 2,300 posts,
+         and the MetaCode Sheets desktop app (as do Max and Ultra).
    Max   full Survey Studio, near-unlimited scraping (custom code and the AI
          Scraper too), social network analysis, 4,000 posts.
    Ultra everything, with fair-use ceilings instead of limits, plus the AI
@@ -30,7 +31,7 @@
     free: {
       id: 'free', name: 'Free', rank: 0,
       tagline: 'Code and analyse your own data',
-      features: { surveys: false, scraper: false, aiScraper: false, customCode: false, network: false, surveyAdvanced: false, aiLab: false },
+      features: { surveys: false, scraper: false, aiScraper: false, customCode: false, network: false, surveyAdvanced: false, aiLab: false, desktop: false },
       limits: {
         aiPostsPerWeek: 850, aiRequestsPerDay: 40, aiRequestsPerMinute: 20, aiBatchesAtOnce: 1,
         scrapeJobsPerDay: 0, scrapeItemsPerJob: 0, scrapeItemsPerMonth: 0, scrapeJobsAtOnce: 0,
@@ -42,7 +43,7 @@
     pro: {
       id: 'pro', name: 'Pro', rank: 1,
       tagline: 'Surveys and a first taste of scraping',
-      features: { surveys: 'basic', scraper: true, aiScraper: false, customCode: false, network: false, surveyAdvanced: false, aiLab: false },
+      features: { surveys: 'basic', scraper: true, aiScraper: false, customCode: false, network: false, surveyAdvanced: false, aiLab: false, desktop: true },
       limits: {
         aiPostsPerWeek: 2300, aiRequestsPerDay: 150, aiRequestsPerMinute: 40, aiBatchesAtOnce: 2,
         scrapeJobsPerDay: 3, scrapeItemsPerJob: 100, scrapeItemsPerMonth: 1000, scrapeJobsAtOnce: 1,
@@ -54,7 +55,7 @@
     max: {
       id: 'max', name: 'Max', rank: 2,
       tagline: 'Multiple methods, for serious projects',
-      features: { surveys: 'full', scraper: true, aiScraper: true, customCode: true, network: true, surveyAdvanced: true, aiLab: false },
+      features: { surveys: 'full', scraper: true, aiScraper: true, customCode: true, network: true, surveyAdvanced: true, aiLab: false, desktop: true },
       limits: {
         aiPostsPerWeek: 4000, aiRequestsPerDay: 500, aiRequestsPerMinute: 80, aiBatchesAtOnce: 3,
         scrapeJobsPerDay: 100, scrapeItemsPerJob: 5000, scrapeItemsPerMonth: 100000, scrapeJobsAtOnce: 3,
@@ -66,7 +67,7 @@
     ultra: {
       id: 'ultra', name: 'Ultra', rank: 3,
       tagline: 'Unlimited, within fair use',
-      features: { surveys: 'full', scraper: true, aiScraper: true, customCode: true, network: true, surveyAdvanced: true, aiLab: true },
+      features: { surveys: 'full', scraper: true, aiScraper: true, customCode: true, network: true, surveyAdvanced: true, aiLab: true, desktop: true },
       limits: {
         aiPostsPerWeek: 100000, aiRequestsPerDay: 5000, aiRequestsPerMinute: 200, aiBatchesAtOnce: 6,
         scrapeJobsPerDay: 1000, scrapeItemsPerJob: 25000, scrapeItemsPerMonth: 2000000, scrapeJobsAtOnce: 5,
@@ -86,7 +87,8 @@
     aiScraper:      { label: 'the AI Scraper' },
     customCode:     { label: 'custom scraper code' },
     network:        { label: 'social network analysis' },
-    aiLab:          { label: 'the AI Coding Lab' }
+    aiLab:          { label: 'the AI Coding Lab' },
+    desktop:        { label: 'MetaCode Sheets, the desktop app' }
   };
 
   // Usage counters and the limit each one is checked against
@@ -125,6 +127,7 @@
     if (f.aiScraper) out.push('AI Scraper and custom scraper code');
     out.push(f.network ? 'Social network analysis (NetworkX, Network Graph)' : 'No network analysis');
     if (f.aiLab) out.push('AI Coding Lab: coding assistants, knowledge bases, evaluations');
+    if (f.desktop) out.push('MetaCode Sheets desktop app (Windows, macOS, Linux)');
     return out;
   }
 

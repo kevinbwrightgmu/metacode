@@ -19,5 +19,5 @@
     "resolveJsonModule": true,
     "maxNodeModuleJsDepth": 0
   },
-  "include": ["lib/**/*.js", "scraper/**/*.js", "ai-lab/**/*.js", "accounts/**/*.js", "types/**/*.d.ts"]
+  "include": ["lib/**/*.js", "scraper/**/*.js", "ai-lab/**/*.js", "accounts/**/*.js", "desktop-api/**/*.js", "types/**/*.d.ts"]
 }
