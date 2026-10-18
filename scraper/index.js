@@ -609,7 +609,8 @@ function createScraper(opts) {
         const cred = platforms.resumeCredential(job, body);
         if (cred) httpFor = () => cred;
         else if (job.keySource === 'own' && (job.pausedReason === 'needs_keys' || !job.http)) {
-          throw new ScraperError('invalid_request', 'This job used your own ' + (job.target.platform === 'x' ? 'X bearer token' : 'YouTube API key') + ', which isn\'t kept on the server. Add it again on the Scraper page and press Resume there.', { status: 400 });
+          const what = { x: 'X bearer token', youtube: 'YouTube API key', linkedin: 'LinkedIn access token' }[/** @type {string} */ (job.target.platform)] || 'API key';
+          throw new ScraperError('invalid_request', 'This job used your own ' + what + ', which isn\'t kept on the server. Add it again on the Scraper page and press Resume there.', { status: 400 });
         }
       } else if (job.keySource === 'own' || (job.engine === 'redditapis' && !config.redditApisKey)) {
         if (job.engine === 'redditapis' && body.redditApisKey) {

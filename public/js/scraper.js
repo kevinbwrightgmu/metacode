@@ -37,9 +37,9 @@ const RedditScraper = (() => {
     comments:  ['confidence', 'top', 'new', 'controversial', 'old', 'qa']
   };
   const TIMES = ['hour', 'day', 'week', 'month', 'year', 'all'];
-  const TYPE_BADGE = { post: 'badge-blue', comment: 'badge-teal', subreddit: 'badge-violet', user: 'badge-amber', channel: 'badge-violet', playlist: 'badge-amber' };
+  const TYPE_BADGE = { post: 'badge-blue', comment: 'badge-teal', subreddit: 'badge-violet', user: 'badge-amber', channel: 'badge-violet', playlist: 'badge-amber', page: 'badge-violet', reaction: 'badge-amber' };
   const PLATFORMS = [['reddit', 'Reddit'], ['youtube', 'YouTube'], ['x', 'X (Twitter)'], ['linkedin', 'LinkedIn']];
-  const PLATFORM_NAME = { reddit: 'Reddit', youtube: 'YouTube', x: 'X' };
+  const PLATFORM_NAME = { reddit: 'Reddit', youtube: 'YouTube', x: 'X', linkedin: 'LinkedIn' };
   const STATUS_BADGE = { queued: 'badge-gray', running: 'badge-blue', waiting: 'badge-amber', paused: 'badge-violet', completed: 'badge-green', failed: 'badge-red', cancelled: 'badge-amber' };
   // Why a job is paused (pausedReason from the server), in words
   const PAUSED_REASON = {
@@ -393,7 +393,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       <div class="view-header">
         <div>
           <div class="view-title">Scraper</div>
-          <div class="view-subtitle">Collect posts and comments from Reddit, YouTube or X, then code them like any other posts</div>
+          <div class="view-subtitle">Collect posts and comments from Reddit, YouTube, X or LinkedIn, then code them like any other posts</div>
         </div>
         <div class="view-actions">
           <a class="btn btn-ghost" href="#scraper-beta" title="Describe what you want; an AI finds and picks Reddit posts">Try the AI Scraper (beta)</a>
@@ -408,7 +408,7 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
       <div class="sc-platforms">
         <span class="form-label">Platform</span>
         <div class="sc-modes" role="tablist" aria-label="Platform">
-          ${PLATFORMS.map(([id, label]) => '<button class="sc-mode sc-platform-btn' + (id === 'linkedin' ? ' is-off' : '') + '" role="tab" data-platform="' + id + '" onclick="RedditScraper.setPlatform(\'' + id + '\')">' + label + '</button>').join('')}
+          ${PLATFORMS.map(([id, label]) => '<button class="sc-mode sc-platform-btn" role="tab" data-platform="' + id + '" onclick="RedditScraper.setPlatform(\'' + id + '\')">' + label + '</button>').join('')}
         </div>
       </div>
 
@@ -1425,7 +1425,7 @@ async def scrape(ctx):
     document.querySelectorAll('[data-reddit-only]').forEach(el => { el.hidden = p !== 'reddit'; });
     if (p !== 'reddit') ScraperPlatforms.render(p);
   }
-  // YouTube / X: the platform panel builds the body; the job then shows like any other
+  // YouTube, X, LinkedIn: the platform panel builds the body; the job then shows like any other
   async function startJob(body) {
     const data = await api('/jobs', { method: 'POST', body });
     setJob(data.job);
@@ -1516,7 +1516,7 @@ async def scrape(ctx):
     if (job.engine === 'redditapis' && ownRedditApis()) body.redditApisKey = ownRedditApis().key;
     if (job.mode === 'platform') {
       const extra = ScraperPlatforms.resumeFields(job);
-      if (!extra) { App.notify('Add your ' + (job.target.platform === 'x' ? 'X bearer token' : 'YouTube API key') + ' again under ' + PLATFORM_NAME[job.target.platform] + ' on the Scraper page, then press Resume.', 'warning', 6000); setPlatform(job.target.platform); return; }
+      if (!extra) { App.notify('Add your ' + ({ x: 'X bearer token', youtube: 'YouTube API key', linkedin: 'LinkedIn access token' }[job.target.platform] || 'API key') + ' again under ' + PLATFORM_NAME[job.target.platform] + ' on the Scraper page, then press Resume.', 'warning', 6000); setPlatform(job.target.platform); return; }
       Object.assign(body, extra);
     }
     try {
@@ -1826,6 +1826,8 @@ async def scrape(ctx):
     if (r.record_type === 'user') return r.name ? 'u/' + r.name : '';
     if (r.record_type === 'channel') return (r.name || '') + (r.subscriber_count !== null && r.subscriber_count !== undefined ? ' — ' + fmtNum(r.subscriber_count) + ' subscribers' : '');
     if (r.record_type === 'playlist') return (r.title || '') + (r.item_count ? ' — ' + fmtNum(r.item_count) + ' videos' : '');
+    if (r.record_type === 'page') return (r.name || r.vanity_name || r.page_id || '') + (r.follower_count !== null && r.follower_count !== undefined ? ' — ' + fmtNum(r.follower_count) + ' followers' : '');
+    if (r.record_type === 'reaction') return (r.reaction || r.reaction_type || 'Reaction') + (r.url ? ' — ' + r.url : '');
     return r.title || r.body || r.text || r.name || JSON.stringify(r).slice(0, 200);
   }
 
@@ -1834,6 +1836,7 @@ async def scrape(ctx):
     if (r.subreddit) return 'r/' + esc(r.subreddit);
     if (r.platform === 'youtube') return esc(r.channel_title || 'YouTube');
     if (r.platform === 'x') return 'X';
+    if (r.platform === 'linkedin') return r.source === 'archive' ? 'LinkedIn (archive)' : 'LinkedIn';
     return '—';
   }
 
@@ -2077,7 +2080,8 @@ async def scrape(ctx):
   function engagementOf(r) {
     const n = x => (typeof x === 'number' && isFinite(x) ? x : null);
     if (r.record_type === 'post') {
-      return { likes: n(r.score), shares: n(r.num_crossposts) !== null ? n(r.num_crossposts) : n(r.retweet_count), comments: n(r.num_comments), views: n(r.view_count),
+      const shares = [r.num_crossposts, r.retweet_count, r.share_count].map(n).find(v => v !== null);
+      return { likes: n(r.score), shares: shares === undefined ? null : shares, comments: n(r.num_comments), views: n(r.view_count),
         upvoteRatio: n(r.upvote_ratio), awards: n(r.total_awards) };
     }
     return { likes: n(r.score), shares: null, comments: null, views: null };

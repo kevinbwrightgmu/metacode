@@ -1,16 +1,41 @@
 // The Scraper page's platform menu in a real browser, against the full server
-// and stand-ins for the YouTube Data API and X API v2: Reddit stays the
-// default; YouTube with the user's own key (kept in the browser) collects a
-// channel with viral scores and comments; the results, Add to project and
-// the job list are shared; X uses the server's token; LinkedIn explains why
-// it isn't offered; the choice of platform is remembered.
+// and stand-ins for the YouTube Data API, X API v2 and LinkedIn's REST API:
+// Reddit stays the default; YouTube with the user's own key (kept in the
+// browser) collects a channel with viral scores and comments; the results,
+// Add to project and the job list are shared; X uses the server's token;
+// LinkedIn reads a Page's posts with the user's own token and imports a data
+// archive (.zip, read in the browser: only the needed tables are sent); the
+// choice of platform is remembered.
 // Skipped when no Chromium is available (set CHROMIUM_PATH to point at one).
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
 const { testEnv } = require('./helpers/harness');
-const { createYouTubeMock, createXMock } = require('./helpers/platform-mocks');
+const zlib = require('zlib');
+const { createYouTubeMock, createXMock, createLinkedInMock } = require('./helpers/platform-mocks');
+
+// A .zip like LinkedIn's archive: deflated entries in a folder, with tables
+// the import must not send (messages, connections)
+function makeZip(entries) {
+  const locals = [], centrals = [];
+  let offset = 0;
+  for (const e of entries) {
+    const name = Buffer.from(e.name), raw = Buffer.from(e.text), data = zlib.deflateRawSync(raw), crc = zlib.crc32(raw);
+    const lh = Buffer.alloc(30);
+    lh.writeUInt32LE(0x04034b50, 0); lh.writeUInt16LE(20, 4); lh.writeUInt16LE(0x0800, 6); lh.writeUInt16LE(8, 8);
+    lh.writeUInt32LE(crc, 14); lh.writeUInt32LE(data.length, 18); lh.writeUInt32LE(raw.length, 22); lh.writeUInt16LE(name.length, 26);
+    const ch = Buffer.alloc(46);
+    ch.writeUInt32LE(0x02014b50, 0); ch.writeUInt16LE(20, 4); ch.writeUInt16LE(20, 6); ch.writeUInt16LE(0x0800, 8); ch.writeUInt16LE(8, 10);
+    ch.writeUInt32LE(crc, 16); ch.writeUInt32LE(data.length, 20); ch.writeUInt32LE(raw.length, 24); ch.writeUInt16LE(name.length, 28); ch.writeUInt32LE(offset, 42);
+    locals.push(lh, name, data); centrals.push(ch, name);
+    offset += 30 + name.length + data.length;
+  }
+  const cd = Buffer.concat(centrals);
+  const end = Buffer.alloc(22);
+  end.writeUInt32LE(0x06054b50, 0); end.writeUInt16LE(entries.length, 8); end.writeUInt16LE(entries.length, 10); end.writeUInt32LE(cd.length, 12); end.writeUInt32LE(offset, 16);
+  return Buffer.concat(locals.concat([cd, end]));
+}
 
 function findChromium() {
   const candidates = [];
@@ -23,17 +48,21 @@ function findChromium() {
 const chromiumPath = findChromium();
 const skip = !chromiumPath && 'no Chromium found (set CHROMIUM_PATH)';
 const MY_KEY = 'users-own-youtube-key-123456';
-let yt, xm, server, baseUrl, browser;
+const MY_LI_TOKEN = 'li-users-own-token-e2e-000000000000';
+let yt, xm, li, server, baseUrl, browser;
 
 test.before(async () => {
   if (skip) return;
   yt = createYouTubeMock();
   xm = createXMock();
+  li = createLinkedInMock();
   const ytBase = await yt.listen();
   const xBase = await xm.listen();
-  Object.assign(process.env, testEnv({ YOUTUBE_API_BASE_URL: ytBase, X_API_BASE_URL: xBase, X_BEARER_TOKEN: 'server-x-token-000000000000',
-    YOUTUBE_MIN_DELAY_MS: '0', X_MIN_DELAY_MS: '0', EMIS_API_KEY: '' }));
+  const liBase = await li.listen();
+  Object.assign(process.env, testEnv({ YOUTUBE_API_BASE_URL: ytBase, X_API_BASE_URL: xBase, LINKEDIN_API_BASE_URL: liBase, X_BEARER_TOKEN: 'server-x-token-000000000000',
+    YOUTUBE_MIN_DELAY_MS: '0', X_MIN_DELAY_MS: '0', LINKEDIN_MIN_DELAY_MS: '0', EMIS_API_KEY: '' }));
   delete process.env.YOUTUBE_API_KEY;
+  delete process.env.LINKEDIN_ACCESS_TOKEN;
   const { start } = require('../server');
   server = await start(0);
   baseUrl = 'http://localhost:' + server.address().port;
@@ -44,9 +73,10 @@ test.after(async () => {
   if (server) { server.closeAllConnections(); await new Promise(r => server.close(r)); }
   if (yt) await yt.close();
   if (xm) await xm.close();
+  if (li) await li.close();
 });
 
-test('platform menu: Reddit by default; YouTube with your own key; X with the server token; LinkedIn explained; shared results and Add to project', { skip, timeout: 120000 }, async () => {
+test('platform menu: Reddit by default; YouTube with your own key; X with the server token; LinkedIn posts and archive import; shared results and Add to project', { skip, timeout: 120000 }, async () => {
   const context = await browser.newContext({ viewport: { width: 1400, height: 1000 } });
   await context.addInitScript(() => { try { localStorage.setItem('metacode_tour_app', 'done'); } catch (e) { /* */ } });
   const page = await context.newPage();
@@ -108,15 +138,56 @@ test('platform menu: Reddit by default; YouTube with your own key; X with the se
   await page.waitForSelector('.sc-table td:has-text("Post number 1")', { timeout: 30000 });
   assert.ok(await page.isVisible('.sc-table td:has-text("testuser")'));
 
-  // LinkedIn: explained, nothing to start
+  // LinkedIn: no token on the server → add your own; a Page's posts with comments
   await page.click('.sc-platform-btn[data-platform="linkedin"]');
-  await page.waitForSelector('#sc-platform:has-text("LinkedIn isn\'t available")');
-  assert.equal(await page.isVisible('#pf-start'), false);
+  await page.waitForSelector('#sc-platform:not([hidden]) .badge:has-text("No LinkedIn access token")');
+  await page.fill('#pf-li-key', MY_LI_TOKEN);
+  await page.click('text=Save token');
+  await page.waitForSelector('.badge:has-text("Your LinkedIn access token")');
+  await page.fill('#pf-linkedin-organization', 'https://www.linkedin.com/company/acme-research/');
+  await page.fill('#pf-linkedin-maxPosts', '3');
+  await page.check('#pf-linkedin-includeComments');
+  await page.fill('#pf-linkedin-commentPosts', '1');
+  await page.fill('#pf-linkedin-commentsPerPost', '2');
+  await page.click('#pf-start');
+  await page.waitForSelector('.sc-table td:has-text("Our #Research with @Acme Labs (new)")', { timeout: 30000 });
+  assert.ok(li.seen.auth.length > 0 && li.seen.auth.every(a => a === 'Bearer ' + MY_LI_TOKEN), 'your token went with your job');
+  assert.ok(await page.isVisible('.sc-table .badge:has-text("page")'));
+  assert.ok(await page.isVisible('.sc-table td:has-text("Comment 2")'));
+  await page.click('.sc-table td:has-text("Our #Research")');
+  await page.waitForSelector('#modal-body:has-text("Like 2, Celebrate 1")');
+  assert.ok(await page.isVisible('.modal-foot a:has-text("Open on LinkedIn")'));
+  await page.click('.modal-foot button:has-text("Close")');
+
+  // LinkedIn data archive: the .zip is read here and only the needed tables are sent
+  await page.selectOption('#pf-linkedin-type', 'archive');
+  assert.equal(await page.isVisible('#pf-li-key'), false, 'no token needed for an archive');
+  const sent = [];
+  page.on('request', r => { if (r.method() === 'POST' && /\/api\/scraper\/jobs$/.test(r.url())) sent.push(r.postData() || ''); });
+  await page.setInputFiles('#pf-li-archive', { name: 'Basic_LinkedInDataExport_10-01-2026.zip', mimeType: 'application/zip', buffer: makeZip([
+    { name: 'Basic_LinkedInDataExport_10-01-2026/Shares.csv', text: 'Date,ShareLink,ShareCommentary,SharedUrl,MediaUrl,Visibility\n2024-03-05 14:22:31,https://www.linkedin.com/feed/update/urn%3Ali%3Ashare%3A7171/,"Archive post, line one\nline two",,,PUBLIC\n' },
+    { name: 'Basic_LinkedInDataExport_10-01-2026/Comments.csv', text: 'Date,Link,Message\n2024-04-01 10:00:00,https://www.linkedin.com/feed/update/urn:li:activity:999/,"An archived comment"\n' },
+    { name: 'Basic_LinkedInDataExport_10-01-2026/Profile.csv', text: 'First Name,Last Name,Address\nAda,Lovelace,"12 Private Road, London"\n' },
+    { name: 'Basic_LinkedInDataExport_10-01-2026/messages.csv', text: 'FROM,TO,CONTENT\nsomeone,me,a private message\n' },
+    { name: 'Basic_LinkedInDataExport_10-01-2026/Connections.csv', text: 'First Name,Last Name,Email Address\nBob,Smith,bob@example.org\n' }
+  ]) });
+  await page.waitForSelector('#pf-li-archive-summary .badge:has-text("Ready")');
+  assert.match(await page.textContent('#pf-li-archive-summary'), /Shares\.csv.*Comments\.csv.*Profile\.csv/);
+  await page.click('#pf-start');
+  await page.waitForSelector('.sc-table td:has-text("Archive post, line one")', { timeout: 30000 });
+  assert.ok(await page.isVisible('.sc-table td:has-text("An archived comment")'));
+  assert.ok(await page.isVisible('.sc-table td:has-text("Ada Lovelace")'));
+  assert.ok(await page.isVisible('.sc-table td:has-text("LinkedIn (archive)")'));
+  assert.equal(sent.length, 1);
+  assert.ok(!/private message|bob@example\.org/.test(sent[0]), 'messages and connections never left the browser');
+  assert.ok(!sent[0].includes('Private Road') && sent[0].includes('Lovelace'), 'from Profile.csv, only the name was sent');
 
   // Jobs from every platform are in one list; the platform choice is remembered
   const list = await page.textContent('#sc-jobs-list');
   assert.match(list, /YouTube · channel @testchan/);
   assert.match(list, /X · search "research"/);
+  assert.match(list, /LinkedIn · \/company\/acme-research/);
+  assert.match(list, /LinkedIn · your data archive \(Ada Lovelace\)/);
   await page.click('.sc-platform-btn[data-platform="youtube"]');
   await page.reload();
   await page.waitForSelector('.sc-platform-btn[data-platform="youtube"].active');

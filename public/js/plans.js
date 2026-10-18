@@ -82,7 +82,7 @@
   const FEATURES = {
     surveys:        { label: 'Survey Studio' },
     surveyAdvanced: { label: 'IP address, location and session timelines in surveys' },
-    scraper:        { label: 'the Scraper (Reddit, YouTube, X)' },
+    scraper:        { label: 'the Scraper (Reddit, YouTube, X, LinkedIn)' },
     aiScraper:      { label: 'the AI Scraper' },
     customCode:     { label: 'custom scraper code' },
     network:        { label: 'social network analysis' },
@@ -121,7 +121,7 @@
     out.push(f.surveys === 'full' ? 'Survey Studio: full — ' + n(L.publishedSurveys) + ' live surveys, ' + n(L.surveyResponsesPerMonth) + ' responses / month'
       : f.surveys === 'basic' ? 'Survey Studio: basic — ' + n(L.publishedSurveys) + ' live surveys, ' + n(L.surveyResponsesPerMonth) + ' responses / month'
       : 'No Survey Studio');
-    out.push(f.scraper ? 'Scraper (Reddit, YouTube, X): ' + n(L.scrapeJobsPerDay) + ' jobs / day, ' + n(L.scrapeItemsPerJob) + ' items / job, ' + n(L.scrapeItemsPerMonth) + ' / month' : 'No Scraper');
+    out.push(f.scraper ? 'Scraper (Reddit, YouTube, X, LinkedIn): ' + n(L.scrapeJobsPerDay) + ' jobs / day, ' + n(L.scrapeItemsPerJob) + ' items / job, ' + n(L.scrapeItemsPerMonth) + ' / month' : 'No Scraper');
     if (f.aiScraper) out.push('AI Scraper and custom scraper code');
     out.push(f.network ? 'Social network analysis (NetworkX, Network Graph)' : 'No network analysis');
     if (f.aiLab) out.push('AI Coding Lab: coding assistants, knowledge bases, evaluations');

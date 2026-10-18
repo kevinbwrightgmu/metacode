@@ -1,6 +1,7 @@
 // @ts-check
 // ── Other platforms: settings ─────────────────────────────────────────────────
-// YouTube and X (Twitter) are collected through their official APIs only:
+// YouTube, X (Twitter) and LinkedIn are collected through their official APIs
+// only:
 //
 //   YouTube  YouTube Data API v3 with an API key. The server's key
 //            (YOUTUBE_API_KEY) or the user's own, sent per job from their
@@ -8,6 +9,10 @@
 //   X        X API v2 with a bearer token (X_BEARER_TOKEN, or the user's own).
 //            Reading posts needs an X developer plan that includes search;
 //            X bills for it.
+//   LinkedIn LinkedIn's versioned REST API with a member access token
+//            (LINKEDIN_ACCESS_TOKEN, or the user's own) from an app with the
+//            Community Management API: the Pages the member manages and their
+//            posts. Data-archive imports need no token.
 //
 // Their requests take the same network route as Reddit's (direct, the
 // administrator's proxy or the VPN gateway — network/providers.js), so the
@@ -19,11 +24,15 @@ const DEFAULTS = {
   youtubeDailyQuota: 10000,       // Google's default daily quota per project, in units
   youtubeMinDelayMs: 250,
   xBaseUrl: 'https://api.x.com/2',
-  xMinDelayMs: 1000
+  xMinDelayMs: 1000,
+  linkedinBaseUrl: 'https://api.linkedin.com/rest',
+  linkedinMinDelayMs: 500
 };
 
 const YOUTUBE_KEY_RE = /^[A-Za-z0-9_-]{20,100}$/;
 const X_TOKEN_RE = /^[A-Za-z0-9%._~+/=-]{20,400}$/;
+const LINKEDIN_TOKEN_RE = /^[A-Za-z0-9._~+/=-]{20,2000}$/;
+const LINKEDIN_VERSION_RE = /^20\d{2}(0[1-9]|1[0-2])(\.\d{2})?$/;
 
 /** @param {Record<string, string | undefined>} env @param {string} name @param {boolean} fallback */
 function flag(env, name, fallback) {
@@ -62,6 +71,10 @@ function platformConfig(env, o) {
   if (ytKey && !YOUTUBE_KEY_RE.test(ytKey)) warnings.push('YOUTUBE_API_KEY doesn\'t look like a Google API key; it is ignored.');
   const xToken = String(env.X_BEARER_TOKEN || '').trim();
   if (xToken && !X_TOKEN_RE.test(xToken)) warnings.push('X_BEARER_TOKEN doesn\'t look like an X API bearer token; it is ignored.');
+  const liToken = String(env.LINKEDIN_ACCESS_TOKEN || '').trim().replace(/^Bearer\s+/i, '');
+  if (liToken && !LINKEDIN_TOKEN_RE.test(liToken)) warnings.push('LINKEDIN_ACCESS_TOKEN doesn\'t look like a LinkedIn access token; it is ignored.');
+  const liVersion = String(env.LINKEDIN_API_VERSION || '').trim();
+  if (liVersion && !LINKEDIN_VERSION_RE.test(liVersion)) warnings.push('LINKEDIN_API_VERSION must look like 202509 (YYYYMM); choosing a recent version automatically.');
   const youtube = {
     enabled: flag(env, 'YOUTUBE_ENABLED', true),
     apiKey: ytKey && YOUTUBE_KEY_RE.test(ytKey) ? ytKey : null,
@@ -75,15 +88,22 @@ function platformConfig(env, o) {
     baseUrl: baseUrl('X_API_BASE_URL', DEFAULTS.xBaseUrl),
     minDelayMs: int(env, 'X_MIN_DELAY_MS', DEFAULTS.xMinDelayMs, 0, 60000)
   };
+  const linkedin = {
+    enabled: flag(env, 'LINKEDIN_ENABLED', true),
+    accessToken: liToken && LINKEDIN_TOKEN_RE.test(liToken) ? liToken : null,
+    baseUrl: baseUrl('LINKEDIN_API_BASE_URL', DEFAULTS.linkedinBaseUrl),
+    apiVersion: liVersion && LINKEDIN_VERSION_RE.test(liVersion) ? liVersion : null,
+    minDelayMs: int(env, 'LINKEDIN_MIN_DELAY_MS', DEFAULTS.linkedinMinDelayMs, 0, 60000)
+  };
   /** @type {RegExp[]} */
   const hostPatterns = [];
   const ports = new Set();
-  [youtube.baseUrl, x.baseUrl].forEach(b => {
+  [youtube.baseUrl, x.baseUrl, linkedin.baseUrl].forEach(b => {
     const u = new URL(b);
     hostPatterns.push(new RegExp('^' + u.hostname.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i'));
     ports.add(u.port ? Number(u.port) : (u.protocol === 'https:' ? 443 : 80));
   });
-  return { youtube, x, hostPatterns, ports: Array.from(ports), warnings };
+  return { youtube, x, linkedin, hostPatterns, ports: Array.from(ports), warnings };
 }
 
-module.exports = { platformConfig, YOUTUBE_KEY_RE, X_TOKEN_RE, DEFAULTS };
+module.exports = { platformConfig, YOUTUBE_KEY_RE, X_TOKEN_RE, LINKEDIN_TOKEN_RE, DEFAULTS };

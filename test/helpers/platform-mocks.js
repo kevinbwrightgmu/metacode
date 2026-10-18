@@ -158,4 +158,107 @@ function createXMock() {
   };
 }
 
-module.exports = { createYouTubeMock, createXMock };
+// A stand-in for LinkedIn's versioned REST API (/rest): it insists on what the
+// real one does — a Bearer token, X-RestLi-Protocol-Version 2.0.0, an active
+// LinkedIn-Version (newer than `state.latestVersion` is refused with 426, as
+// LinkedIn refuses versions it doesn't serve) and Rest.li-encoded URNs.
+function createLinkedInMock() {
+  const seen = { requests: [], versions: [], methods: [], auth: [] };
+  const monthsBack = n => { const d = new Date(); const m = d.getUTCFullYear() * 12 + d.getUTCMonth() - n; return String(Math.floor(m / 12)) + String((m % 12) + 1).padStart(2, '0'); };
+  const state = { latestVersion: monthsBack(2), statsForbidden: false, metaForbidden: false };
+  const ORGS = {
+    1001: { id: 1001, localizedName: 'Acme Research', vanityName: 'acme-research', localizedWebsite: 'https://acme.example', name: { localized: { en_US: 'Acme Research' }, preferredLocale: { country: 'US', language: 'en' } } },
+    1002: { id: 1002, localizedName: 'Acme Labs', vanityName: 'acme-labs' }
+  };
+  const ORG1 = 'urn:li:organization:1001';
+  const postUrn = n => (n % 3 === 0 ? 'urn:li:ugcPost:' : 'urn:li:share:') + (7000 + n);
+  const POSTS = [1, 2, 3, 4, 5, 6, 7].map(n => ({
+    id: postUrn(n), author: ORG1, visibility: 'PUBLIC', lifecycleState: 'PUBLISHED',
+    commentary: n === 1 ? 'Our {hashtag|\\#|Research} with @[Acme Labs](urn:li:organization:1002) \\(new\\)' : 'Post ' + n,
+    publishedAt: Date.UTC(2026, 8, 30 - n, 12), createdAt: Date.UTC(2026, 8, 30 - n, 11), lastModifiedAt: Date.UTC(2026, 8, 30 - n, 13),
+    content: n === 2 ? { article: { source: 'https://acme.example/report', title: 'The report', description: 'D' } } : n === 4 ? { poll: { question: 'Which?', options: [{ text: 'A' }, { text: 'B' }] } } : undefined,
+    reshareContext: n === 5 ? { parent: 'urn:li:share:6000', root: 'urn:li:share:6000' } : undefined,
+    distribution: { feedDistribution: 'MAIN_FEED' }
+  }));
+  const COMMENTS = [1, 2, 3, 4, 5].map(n => ({
+    id: String(900 + n), commentUrn: 'urn:li:comment:(urn:li:activity:7001,' + (900 + n) + ')', object: 'urn:li:activity:7001',
+    actor: n === 2 ? ORG1 : 'urn:li:person:member' + n, message: { text: 'Comment ' + n }, created: { actor: 'urn:li:person:member' + n, time: Date.UTC(2026, 9, 1, n) },
+    likesSummary: { totalLikes: n, likedByCurrentUser: false }, commentsSummary: { totalFirstLevelComments: n - 1, aggregatedTotalComments: n - 1 },
+    parentComment: n === 5 ? 'urn:li:comment:(urn:li:activity:7001,901)' : undefined
+  }));
+  const listOf = v => { const m = /^List\((.*)\)$/.exec(v || ''); return m ? (m[1] ? m[1].split(',') : []) : null; };
+  const server = http.createServer((req, res) => {
+    const u = new URL(req.url, 'http://x');
+    const q = u.searchParams;
+    const path = decodeURIComponent(u.pathname.replace(/^\/rest/, ''));
+    seen.requests.push(req.url.replace(/^\/rest/, ''));
+    seen.versions.push(req.headers['linkedin-version'] || null);
+    seen.methods.push(req.headers['x-restli-method'] || null);
+    seen.auth.push(req.headers.authorization || null);
+    const send = (status, body) => { res.writeHead(status, { 'content-type': 'application/json', 'x-restli-protocol-version': '2.0.0' }); res.end(JSON.stringify(body)); };
+    const err = (status, code, message, service) => send(status, { status, serviceErrorCode: service || 0, code, message });
+    const auth = req.headers.authorization || '';
+    if (auth === 'Bearer li-expired-token-00000000000000') return err(401, 'EXPIRED_ACCESS_TOKEN', 'The token used in the request has expired', 65601);
+    if (!/^Bearer li-[\w-]{20,}$/.test(auth)) return err(401, 'INVALID_ACCESS_TOKEN', 'Invalid access token', 65600);
+    if (req.headers['x-restli-protocol-version'] !== '2.0.0') return err(400, 'ILLEGAL_ARGUMENT', 'Rest.li protocol version 2.0.0 is required');
+    const v = req.headers['linkedin-version'] || '';
+    if (!/^\d{6}$/.test(v)) return err(400, 'VERSION_MISSING', 'A version must be present. Please specify a version by adding the LinkedIn-Version header.');
+    if (v > state.latestVersion) return err(426, 'NONEXISTENT_VERSION', 'Requested version ' + v + ' is not active');
+    const page = (all, size) => {
+      const start = Number(q.get('start') || 0), count = Number(q.get('count') || 10);
+      const n = Math.min(size, count);
+      const els = all.slice(start, start + n);
+      return { elements: els, paging: { start, count: n, total: all.length, links: start + n < all.length ? [{ type: 'application/json', rel: 'next', href: '/rest' + path + '?start=' + (start + n) }] : [] } };
+    };
+    if (path === '/organizationAcls' && q.get('q') === 'roleAssignee') {
+      return send(200, page([
+        { roleAssignee: 'urn:li:person:me', state: 'APPROVED', role: 'ADMINISTRATOR', organization: ORG1 },
+        { roleAssignee: 'urn:li:person:me', state: 'APPROVED', role: 'ANALYST', organization: ORG1 },
+        { roleAssignee: 'urn:li:person:me', state: 'APPROVED', role: 'ANALYST', organization: 'urn:li:organization:1002' }
+      ], 2));
+    }
+    if (path === '/organizations' && q.get('q') === 'vanityName') return send(200, { elements: Object.values(ORGS).filter(o => o.vanityName === q.get('vanityName')), paging: { start: 0, count: 10 } });
+    if (path === '/organizations' && q.get('ids')) {
+      const ids = listOf(q.get('ids')) || [];
+      return send(200, { results: Object.fromEntries(ids.filter(id => ORGS[id]).map(id => [id, ORGS[id]])), statuses: {}, errors: {} });
+    }
+    let m = /^\/organizations\/(\d+)$/.exec(path);
+    if (m) return ORGS[m[1]] ? send(200, ORGS[m[1]]) : err(404, 'NOT_FOUND', 'Organization ' + m[1] + ' not found');
+    m = /^\/networkSizes\/urn:li:organization:(\d+)$/.exec(path);
+    if (m && q.get('edgeType') === 'COMPANY_FOLLOWED_BY_MEMBER') return send(200, { firstDegreeSize: Number(m[1]) === 1001 ? 4321 : 12 });
+    if (path === '/posts' && q.get('q') === 'author') {
+      // Rest.li needs the URN encoded in the query (urn%3Ali%3A…), as LinkedIn's client sends it
+      if (!/[?&]author=urn%3Ali%3Aorganization%3A\d+(&|$)/.test(req.url)) return err(400, 'PARAM_INVALID', 'Invalid param author');
+      if (q.get('author') === 'urn:li:organization:1002') return err(403, 'ACCESS_DENIED', 'Not enough permissions to access: partnerApiPostsExternal.FINDER-author.' + v + '01', 100);
+      if (q.get('author') !== ORG1) return send(200, { elements: [], paging: { start: 0, count: 0, total: 0 } });
+      return send(200, page(POSTS, 3));
+    }
+    if (path === '/socialMetadata') {
+      if (state.metaForbidden) return err(403, 'ACCESS_DENIED', 'Not enough permissions to access: socialMetadata.BATCH_GET', 100);
+      const ids = listOf(q.get('ids'));
+      if (!ids) return err(400, 'PARAM_INVALID', 'ids must be a Rest.li list');
+      // Keyed by the encoded entity key, as LinkedIn's batch responses are
+      return send(200, { results: Object.fromEntries(ids.map(id => { const n = Number(id.split(':').pop()) - 7000; return [encodeURIComponent(id), { entity: id, reactionSummaries: { LIKE: { reactionType: 'LIKE', count: n * 2 }, PRAISE: { reactionType: 'PRAISE', count: n } }, commentsState: 'OPEN', commentSummary: { count: n === 1 ? 5 : n, topLevelCount: n } }]; })), statuses: {}, errors: {} });
+    }
+    if (path === '/organizationalEntityShareStatistics' && q.get('q') === 'organizationalEntity') {
+      if (state.statsForbidden) return err(403, 'ACCESS_DENIED', 'Not enough permissions to access: organizationalEntityShareStatistics.FINDER-organizationalEntity', 100);
+      if (!/[?&]organizationalEntity=urn%3Ali%3Aorganization%3A1001(&|$)/.test(req.url)) return err(400, 'PARAM_INVALID', 'Invalid param organizationalEntity');
+      const shares = listOf(q.get('shares')) || [], ugc = listOf(q.get('ugcPosts')) || [];
+      const stat = id => { const n = Number(id.split(':').pop()) - 7000; return { impressionCount: 1000 * n, uniqueImpressionsCount: 800 * n, clickCount: 10 * n, likeCount: 3 * n, commentCount: n, shareCount: n, engagement: 0.05 }; };
+      return send(200, { elements: shares.map(id => ({ organizationalEntity: ORG1, share: id, totalShareStatistics: stat(id) })).concat(ugc.map(id => ({ organizationalEntity: ORG1, ugcPost: id, totalShareStatistics: stat(id) }))), paging: { start: 0, count: 10 } });
+    }
+    m = /^\/socialActions\/(urn:li:[A-Za-z]+:\d+)\/comments$/.exec(path);
+    if (m) {
+      if (!/^\/rest\/socialActions\/urn%3Ali%3A/.test(req.url)) return err(400, 'PARAM_INVALID', 'The URN in the path must be encoded');
+      return send(200, page(m[1] === 'urn:li:share:7001' ? COMMENTS : [], 2));
+    }
+    err(404, 'NOT_FOUND', 'No resource ' + path);
+  });
+  return {
+    seen, state, POSTS, COMMENTS, monthsBack,
+    listen: () => new Promise(r => server.listen(0, '127.0.0.1', () => r('http://127.0.0.1:' + server.address().port + '/rest'))),
+    close: () => new Promise(r => { server.closeAllConnections(); server.close(r); })
+  };
+}
+
+module.exports = { createYouTubeMock, createXMock, createLinkedInMock };

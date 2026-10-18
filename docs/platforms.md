@@ -1,17 +1,17 @@
-# YouTube and X in the Scraper
+# YouTube, X and LinkedIn in the Scraper
 
 Sidebar → **Scraper** has a platform menu: **Reddit**, **YouTube**,
 **X (Twitter)** and **LinkedIn**.
 
 - **Reddit** is the existing scraper ([reddit-scraper.md](reddit-scraper.md)).
-- **YouTube and X** collect through each platform's **official API**. Their jobs
-  run in the same job system as Reddit's, so the same features apply:
+- **YouTube, X and LinkedIn** collect through each platform's **official API**
+  (LinkedIn also imports your own data archive). Their jobs run in the same job
+  system as Reddit's, so the same features apply:
   - progress and logs, pause and resume, durable records;
   - CSV / JSON / NDJSON export and **Add to project**;
   - your plan's scrape limits;
   - the server's network route (direct, proxy or VPN gateway — see
     [scraper-network.md](scraper-network.md)).
-- **LinkedIn** isn't offered (see the end of this page).
 
 ## YouTube (YouTube Data API v3)
 
@@ -150,16 +150,101 @@ The official API gives the same fields reliably.
 
 ## LinkedIn
 
-LinkedIn isn't offered.
-- **No API.** It has no API for reading other people's profiles or posts.
-- **Terms.** Its User Agreement forbids automated collection behind its login.
-- **How existing tools work.** Tools that scrape profiles, such as the
-  linked linkedin-profile-scraper-api, run a headless browser on someone's
-  logged-in session (their `li_at` cookie), and LinkedIn restricts accounts for
-  it.
+LinkedIn has no API for reading just anyone's profile or posts. The Scraper
+offers the two ways LinkedIn does allow:
 
-If you have LinkedIn posts in a spreadsheet, for example your own posts from
-LinkedIn's *Get a copy of your data*, use **Import Data**.
+| Choice | What you get | Needs |
+|---|---|---|
+| **Pages you manage** | The LinkedIn Pages the token's member helps manage: name, address, website, follower count, your role(s) | An access token |
+| **A Page's posts** | A Page's posts, newest first (or recently edited first): text, date, kind (text, article, images, video, poll, repost), article link, poll options, visibility, reactions by type (Like, Celebrate, Love, Insightful, Support, Funny), comment count. Optionally impressions, unique impressions, clicks, reposts and engagement rate, and the comments of the first N posts (text, date, likes, replies) | An access token from a member who is an admin of the Page |
+| **Your LinkedIn data archive** | Your own posts, comments, reactions and reposts, from LinkedIn's *Get a copy of your data* | Nothing: no token, no request to LinkedIn |
+
+### Access token (Pages and their posts)
+
+LinkedIn's Community Management API serves these. Choose one, or both:
+- **Server token.** Set `LINKEDIN_ACCESS_TOKEN` in `.env`. Jobs then read the
+  Pages that token's member manages.
+- **Your own token.** Scraper → LinkedIn → *Use your own LinkedIn access token*.
+  It is kept in your browser and sent only with your jobs.
+
+To get a token:
+1. LinkedIn Developer Portal (developer.linkedin.com) → **Create app**, linked
+   to a LinkedIn Page you are an admin of. Verify the app with the Page.
+2. Products → request the **Community Management API**. LinkedIn reviews the
+   request, and it must be the only product on the app.
+3. Docs and tools → **OAuth Token Tools** → Create token. Pick the app, tick the
+   scopes it offers that start with `r_organization` or `rw_organization`, sign
+   in and copy the token. Tokens last 60 days; then make a new one.
+
+What a token can read:
+- **Posts** need `r_organization_social`.
+- **Statistics** (impressions, clicks…) need `rw_organization_admin` or
+  `r_organization_admin` and an admin or analyst role on the Page. Without
+  them, the job collects the posts and logs that statistics were left out.
+- **Commenters** are LinkedIn member IDs (`urn:li:person:…`), not names: the API
+  doesn't give other members' names. The Page's own comments are named.
+
+**Requests.** They follow LinkedIn's own client library
+([linkedin-developers/linkedin-api-js-client](https://github.com/linkedin-developers/linkedin-api-js-client)):
+- the versioned API (`https://api.linkedin.com/rest`);
+- Rest.li protocol 2.0.0 and its URN encoding;
+- a `LinkedIn-Version` header.
+
+**API version.** LinkedIn retires API versions after about a year. MetaCode
+starts at last month's version. If LinkedIn doesn't serve a version, MetaCode
+steps back a month at a time, for up to six months, and later jobs reuse the
+version that worked. To pin one, set `LINKEDIN_API_VERSION=YYYYMM`.
+
+**Errors.** An expired or revoked token, a missing permission, an unknown Page
+and LinkedIn's daily limits (HTTP 429, reset at midnight UTC) each stop the
+job with what to do.
+
+### Your data archive
+
+1. linkedin.com → **Me** → Settings & Privacy → Data privacy → **Get a copy of
+   your data**.
+2. Choose *Want something in particular?* and tick **Posts**, **Comments** and
+   **Reactions**, plus **Profile** for your name. Then press *Request archive*.
+   LinkedIn emails a download link, usually within minutes; the full archive
+   takes up to a day.
+3. Scraper → LinkedIn → *Your LinkedIn data archive*. Choose the .zip, or the
+   CSV files in it, and press **Import archive**.
+
+What the import does:
+- **Reading happens in your browser.** It unzips the archive and sends only
+  `Shares.csv`, `Comments.csv`, `Reactions.csv` and `InstantReposts.csv`, plus
+  your first and last name from `Profile.csv`. Messages, connections and
+  everything else stay on your computer.
+- **Choose what to import.** Your posts, your comments, and/or your reactions
+  and reposts (reactions have no text). You can limit it to a date range.
+- **The server keeps the records, not the files.** The uploaded tables are held
+  in memory for the import only. If the import is interrupted, start a new one.
+- **Records.**
+  - Posts and comments are `post` and `comment` records with
+    `source: "archive"`; you are their author.
+  - Reactions and reposts are `reaction` records (`reaction_type`, the post's
+    link).
+
+### Why MetaCode doesn't log in to linkedin.com
+
+Some tools on GitHub read LinkedIn by logging in as a member, for example the
+linkedin-profile-scraper-api, joeyism/linkedin_scraper and tomquirk/linkedin-api.
+They use a password or the `li_at` session cookie and read linkedin.com's pages
+or its internal API. MetaCode doesn't, for these reasons:
+- **Terms.** LinkedIn's User Agreement forbids it.
+- **robots.txt.** It disallows automated access.
+- **Account risk.** LinkedIn restricts the accounts used.
+- **It would mean getting around LinkedIn's checks.** From a server, these tools
+  meet LinkedIn's login and bot checks. Getting past them is what this
+  project's rules exclude.
+
+**Records.** LinkedIn records have `platform: "linkedin"`:
+- posts are `post` records;
+- comments are `comment` records;
+- Pages are `page` records.
+
+Add to project turns posts and comments into project posts. Their reactions,
+comments, reposts and impressions go to Metrics.
 
 ## Settings (`.env`)
 
@@ -172,6 +257,10 @@ LinkedIn's *Get a copy of your data*, use **Import Data**.
 | `X_BEARER_TOKEN` | — | The server's X bearer token (**secret**) |
 | `X_ENABLED` | true | Turns X off when false |
 | `X_MIN_DELAY_MS` | 1000 | Minimum gap between two X requests |
+| `LINKEDIN_ACCESS_TOKEN` | — | The server's LinkedIn access token (**secret**) |
+| `LINKEDIN_API_VERSION` | last month | The LinkedIn API version (`YYYYMM`); steps back when inactive |
+| `LINKEDIN_ENABLED` | true | Turns LinkedIn off when false |
+| `LINKEDIN_MIN_DELAY_MS` | 500 | Minimum gap between two LinkedIn requests |
 
 ## API
 
@@ -192,6 +281,19 @@ These platforms use the scraper API, with `POST /api/scraper/jobs` and
   "xBearerToken": "optional: your own token" }
 ```
 
+```json
+{ "mode": "platform", "platform": "linkedin",
+  "target": { "type": "posts", "organization": "https://www.linkedin.com/company/acme/" },
+  "options": { "maxPosts": 200, "includeStats": true, "includeComments": true, "commentPosts": 20, "commentsPerPost": 100 },
+  "linkedinAccessToken": "optional: your own token" }
+```
+
+```json
+{ "mode": "platform", "platform": "linkedin",
+  "target": { "type": "archive", "files": [{ "name": "Shares.csv", "text": "Date,ShareLink,ShareCommentary,…" }] },
+  "options": { "posts": true, "comments": true, "reactions": false, "since": "2024-01-01", "until": null } }
+```
+
 The rest is the same as for Reddit jobs: job status, events, results, export,
 pause and resume. Resuming a job that used your own key needs the key again.
 
@@ -199,9 +301,19 @@ pause and resume. Resuming a job that used your own key needs the key again.
 
 - **Covered by tests.** Requests, paging, records, quota accounting, error
   handling, own keys staying off disk, and routing through the VPN gateway.
-  They are tested against local stand-ins for the YouTube Data API and the X
-  API (`test/platforms.test.js`, `test/platforms-e2e.test.js`).
-- **Not verified.** The stand-ins can't show what Google and X answer today,
-  and live calls weren't possible from the development environment. The
-  endpoints, parameters and error reasons follow the two APIs' documentation.
-  Run one small job of each kind after deploying.
+  They are tested against local stand-ins for the YouTube Data API, the X API
+  and LinkedIn's REST API (`test/platforms.test.js`,
+  `test/platforms-e2e.test.js`).
+  - The LinkedIn stand-in insists on what LinkedIn does: the Rest.li headers, an
+    active version and encoded URNs.
+  - The archive import is tested in a browser with a .zip, including that
+    messages, connections and the rest of `Profile.csv` aren't sent.
+- **Verified against the real API.** YouTube live chat was run against the real
+  YouTube API with a real key.
+- **Not verified live.**
+  - The stand-ins can't show what X and LinkedIn answer today: live calls to
+    them weren't possible from the development environment.
+  - The LinkedIn endpoints and parameters follow LinkedIn's documentation and
+    its official client library.
+  - The archive's file and column names follow LinkedIn's export as of 2025.
+- **After deploying.** Run one small job of each kind.
