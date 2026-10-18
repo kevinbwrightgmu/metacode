@@ -63,8 +63,12 @@ only JIT and outgoing network):
 
 ## 4. Building a release
 
-1. Set `"version"` in `desktop/package.json` (e.g. `1.1.0`), commit.
-2. Tag and push: `git tag desktop-v1.1.0 && git push origin desktop-v1.1.0`.
+1. Set `"version"` in `desktop/package.json` (e.g. `1.1.0`), commit to main.
+2. Start the build, either way:
+   - on GitHub: **Actions › Desktop app › Run workflow** on `main`, with
+     **create a draft release** ticked (no tag needed: publishing the draft
+     creates `desktop-v1.1.0` on that commit), or
+   - with git: `git tag desktop-v1.1.0 && git push origin desktop-v1.1.0`.
 3. The **Desktop app** workflow runs the tests, builds on Windows, macOS and
    Linux, and creates a **draft** GitHub release with the installers and
    `SHA256SUMS.txt`.
