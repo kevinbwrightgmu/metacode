@@ -11,6 +11,12 @@
 //     key the server publishes over HTTPS (a warning is printed).
 //   • METACODE_SHEETS_SERVER_URL (optional) builds for another server.
 // app-config.json is put back as it was afterwards.
+//
+// Signing: signing settings that are set but empty count as not set (GitHub
+// passes a secret that doesn't exist as ""; electron-builder would read "" as
+// a certificate path). A Mac build without a certificate (CSC_LINK / CSC_NAME)
+// is ad-hoc signed — Apple silicon Macs don't open unsigned apps at all — and
+// macOS asks people to allow it once (docs/desktop/RELEASING.md).
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -18,6 +24,26 @@ const crypto = require('crypto');
 
 const ROOT = path.join(__dirname, '..');
 const CONFIG = path.join(ROOT, 'app-config.json');
+const BUILDER_CONFIG = path.join(ROOT, 'electron-builder.yml');
+const SIGNING_ENV = ['CSC_LINK', 'CSC_KEY_PASSWORD', 'CSC_NAME', 'WIN_CSC_LINK', 'WIN_CSC_KEY_PASSWORD',
+  'APPLE_ID', 'APPLE_APP_SPECIFIC_PASSWORD', 'APPLE_TEAM_ID', 'APPLE_API_KEY', 'APPLE_API_KEY_ID', 'APPLE_API_ISSUER'];
+
+/** Removes signing settings that are set but empty @param {Record<string, string | undefined>} env */
+function dropEmptySigningEnv(env) {
+  for (const k of SIGNING_ENV) if (k in env && !String(env[k]).trim()) delete env[k];
+}
+
+/**
+ * electron-builder's configuration: electron-builder.yml, and for a Mac build
+ * without a certificate, ad-hoc signing (hardened runtime is for notarized
+ * builds; with an ad-hoc signature it would reject Electron's own frameworks).
+ * @param {Record<string, string | undefined>} env @param {boolean} forMac
+ */
+function builderConfig(env, forMac) {
+  if (!forMac || env.CSC_LINK || env.CSC_NAME || env.CSC_IDENTITY_AUTO_DISCOVERY === 'true') return BUILDER_CONFIG;
+  console.warn('⚠ No macOS signing certificate (CSC_LINK): the Mac app is ad-hoc signed. It opens after people allow it in System Settings › Privacy & Security.');
+  return { extends: BUILDER_CONFIG, mac: { identity: '-', hardenedRuntime: false } };
+}
 
 function checkVendor() {
   const { FILES, ROOT: REPO } = require('./sync-vendor');
@@ -47,6 +73,7 @@ function pinnedConfig() {
 
 async function main() {
   const args = process.argv.slice(2);
+  dropEmptySigningEnv(process.env);
   checkVendor();
   const original = fs.readFileSync(CONFIG, 'utf8');
   const cfg = pinnedConfig();
@@ -66,7 +93,8 @@ async function main() {
       }
       for (const [k, v] of one) targets.set(k, v);
     }
-    const opts = { projectDir: ROOT, config: path.join(ROOT, 'electron-builder.yml'), publish: 'never' };
+    const forMac = targets.size ? targets.has(builder.Platform.MAC) : process.platform === 'darwin';
+    const opts = { projectDir: ROOT, config: builderConfig(process.env, forMac), publish: 'never' };
     if (targets.size) opts.targets = targets;
     const out = await builder.build(opts);
     console.log('\nBuilt:\n' + out.map(f => '  ' + path.relative(ROOT, f)).join('\n'));
@@ -75,4 +103,6 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error(e && e.message ? e.message : e); process.exit(1); });
+if (require.main === module) main().catch(e => { console.error(e && e.message ? e.message : e); process.exit(1); });
+
+module.exports = { dropEmptySigningEnv, builderConfig };
