@@ -2164,6 +2164,9 @@ app.get(['/ultra/ai-lab', '/ultra/ai-lab/'], aiLab.page);
 const { createDesktopApi } = require('./desktop-api');
 const desktopApi = createDesktopApi({ accounts, ai: labAi, aiBatchRoute });
 app.use('/api/desktop', desktopApi.router);
+// …and downloading it: the download page and stable links to the installers
+app.get('/download', (req, res) => { res.set('Cache-Control', 'no-cache'); res.sendFile(path.join(__dirname, 'public', 'download.html')); });
+app.use('/download', desktopApi.downloads.files);
 // Signing in moves what this browser made on the server to the account
 accounts.onClaim(async (from, to) => ({ surveys: await surveys.store.reassignOwner(from, to), scraperJobs: scraper.reassignOwner(from, to) }));
 app.use('/api/scraper', scraper.router);

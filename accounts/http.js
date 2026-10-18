@@ -12,7 +12,7 @@ function dispatcherFor(url) {
   return proxyAgent;
 }
 
-// → { status, ok, json, text } — never throws for HTTP errors; throws { network: true } on failure to connect.
+// → { status, ok, json, text, headers } — never throws for HTTP errors; throws { network: true } on failure to connect.
 async function request(url, opts) {
   opts = opts || {};
   let res;
@@ -32,7 +32,7 @@ async function request(url, opts) {
   const text = await res.text();
   let json = null;
   try { json = text ? JSON.parse(text) : null; } catch (e) { json = null; }
-  return { status: res.status, ok: res.ok, json, text };
+  return { status: res.status, ok: res.ok, json, text, headers: res.headers };
 }
 
 module.exports = { request, dispatcherFor };

@@ -188,6 +188,13 @@
   .checks strong { display: block; font-weight: 600; margin-bottom: 3px; }
   .checks p { font-size: var(--t-sm); color: var(--muted); }
 
+  /* Desktop app band */
+  .desk-row { display: flex; align-items: center; gap: 40px; justify-content: space-between; }
+  .desk-row > div:first-child { max-width: 720px; }
+  .desk-row h2 { margin-bottom: 12px; }
+  .desk-row p:not(.eyebrow) { color: var(--ink-2); font-size: var(--t-lg); }
+  .desktop-band { padding: 72px 0; }
+
   /* Final CTA + footer */
   .final { text-align: center; padding: 88px 0; }
   .final h2 { max-width: 760px; margin: 0 auto 14px; }
@@ -212,6 +219,7 @@
   @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 
   /* ── Responsive ── */
+  @media (max-width: 1180px) { .head-actions .head-desk { display: none; } }
   @media (max-width: 1080px) {
     .methods { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .flow { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -221,6 +229,7 @@
     .values { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   }
   @media (max-width: 900px) {
+    .desk-row { flex-direction: column; align-items: flex-start; gap: 24px; }
     .hero-grid { grid-template-columns: 1fr; gap: 44px; }
     .integrity { grid-template-columns: 1fr; gap: 28px; }
     .site-nav { display: none; }
@@ -263,6 +272,7 @@
     <div class="head-actions">
       <a class="btn btn-quiet" href="app.html#account" data-accounts hidden>Sign in</a>
       <a class="btn btn-quiet" href="studio.html">Survey Studio</a>
+      <a class="btn btn-quiet head-desk" href="/download">Desktop app</a>
       <a class="btn btn-primary" href="app.html">Open the platform</a>
     </div>
   </div>
@@ -479,6 +489,18 @@
     </div>
   </section>
 
+  <!-- ── Desktop app (download.html) ── -->
+  <section class="section soft desktop-band" aria-labelledby="desk-title">
+    <div class="wrap desk-row">
+      <div>
+        <p class="eyebrow">Desktop app</p>
+        <h2 id="desk-title">MetaCode Sheets: a spreadsheet with AI coding built in.</h2>
+        <p>Open Excel and CSV files on your computer, ask for formulas, code a text column with your codebook and report intercoder reliability. For Windows, macOS and Linux<span data-accounts hidden> — included with <span id="desk-plans">Pro, Max and Ultra</span></span>.</p>
+      </div>
+      <div class="cta-row"><a class="btn btn-primary btn-lg" href="/download">Download MetaCode Sheets</a></div>
+    </div>
+  </section>
+
   <!-- ── Final CTA ── -->
   <section class="final" aria-labelledby="final-title">
     <div class="wrap">
@@ -499,6 +521,7 @@
     <nav class="foot-links" aria-label="Footer">
       <a href="app.html">Platform</a>
       <a href="studio.html">Survey Studio</a>
+      <a href="/download">Desktop app</a>
       <a href="app.html?tour=1">Guided tour</a>
       <a href="/status">System status</a>
     </nav>
@@ -513,6 +536,7 @@
     if (!cfg || !cfg.enabled) return;
     document.querySelectorAll('[data-accounts]').forEach(el => { el.hidden = false; });
     document.querySelectorAll('[data-accounts-text]').forEach(el => { el.textContent = el.getAttribute('data-accounts-text'); });
+    document.getElementById('desk-plans').textContent = MetaPlans.listNames(MetaPlans.ORDER.filter(id => MetaPlans.has(id, 'desktop')).map(id => MetaPlans.get(id).name));
     let prices = {};
     try { const r = await fetch('/api/account/prices'); prices = r.ok ? (await r.json()).prices || {} : {}; } catch (e) { prices = {}; }
     const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;');

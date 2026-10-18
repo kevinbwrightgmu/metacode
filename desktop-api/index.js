@@ -16,6 +16,8 @@
 //                        "other AI requests"
 //   POST /ai/batch      AI Coding of many rows — desktop plans only, counted
 //                        like the website's AI Coding (posts per week)
+//   GET  /downloads     public: the installers of the newest published version
+//                        (downloads.js, which also serves /download/desktop/:id)
 //
 // With accounts off (no SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY) the server
 // can't tell who is asking, so desktop access is off — unless the
@@ -26,6 +28,7 @@
 const express = require('express');
 const Plans = require('../public/js/plans.js');
 const { loadLeaseKey, signLease } = require('./lease');
+const { createDownloads } = require('./downloads');
 
 const DEFAULT_OFFLINE_HOURS = 72;
 
@@ -57,6 +60,7 @@ function createDesktopApi(deps) {
   /** @type {ReturnType<typeof loadLeaseKey> | null} */
   let key = null;
   const leaseKey = () => key || (key = loadLeaseKey({ env: env(), dataDir: accounts.config().dataDir }));
+  const downloads = createDownloads({ env: deps.env });
 
   /** @param {number} status @param {string} type @param {string} message @param {any} [extra] */
   const fail = (status, type, message, extra) => ({ status, type, message, extra: extra || null });
@@ -99,7 +103,8 @@ function createDesktopApi(deps) {
       server: origin,
       available: !u, reason: u ? u.message : null,
       accounts: accounts.enabled() ? { enabled: true, supabaseUrl: a.supabaseUrl, publishableKey: a.publishableKey, emailLink: c.emailLink } : { enabled: false, withoutAccounts: c.withoutAccounts },
-      lease, offlineHours: c.offlineHours, minVersion: c.minVersion, downloadUrl: c.downloadUrl,
+      // where an outdated app sends you for the new version: this site's download page, unless DESKTOP_DOWNLOAD_URL says otherwise
+      lease, offlineHours: c.offlineHours, minVersion: c.minVersion, downloadUrl: c.downloadUrl || (downloads.enabled() ? origin + '/download' : null),
       plansWithDesktop: Plans.ORDER.filter(id => Plans.has(id, 'desktop')),
       upgradeUrl: origin + '/app.html#account',
       accountUrl: origin + '/app.html#account',
@@ -170,7 +175,9 @@ function createDesktopApi(deps) {
   // AI Coding of many rows: the website's batch route, behind the desktop guard
   router.post('/ai/batch', requireDesktop(), accounts.aiBatch, (/** @type {any} */ req, /** @type {any} */ res) => deps.aiBatchRoute(req, res));
 
-  return { router, config: cfg, leaseKey, requireDesktop };
+  router.use(downloads.api);
+
+  return { router, config: cfg, leaseKey, requireDesktop, downloads };
 }
 
 module.exports = { createDesktopApi, desktopConfig };
