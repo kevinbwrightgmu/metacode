@@ -77,6 +77,11 @@ function createEntitlement(o) {
     if (ms) timer = timers.setTimeout(() => { api.check('timer').catch(() => {}); }, ms);
   }
 
+  /** A private server without accounts (remembered for offline starts) */
+  const localMode = () => o.store.get().localServer === o.server;
+  /** Who a lease must be for: the signed-in account, or "local" on a server without accounts */
+  const currentUser = () => o.auth.user() || (localMode() ? { id: 'local', email: null } : null);
+
   /** The time the app last saw, never going back */
   function touchClock() {
     const seen = Number(o.store.get().lastSeen) || 0;
@@ -109,7 +114,7 @@ function createEntitlement(o) {
    */
   function offlineLease() {
     const kept = o.store.get().lease;
-    const u = o.auth.user();
+    const u = currentUser();
     if (!kept || typeof kept.token !== 'string') return { problem: 'none' };
     if (!u) return { problem: 'signed-out' };
     let payload = null;
@@ -129,7 +134,7 @@ function createEntitlement(o) {
     const l = offlineLease();
     if ('payload' in l) {
       touchClock();
-      return set({ status: 'offline', user: o.auth.user(), plan: { id: l.payload.plan, name: (state.plan && state.plan.name) || l.payload.plan }, offlineUntil: new Date(l.payload.exp * 1000).toISOString(),
+      return set({ status: 'offline', user: currentUser(), plan: { id: l.payload.plan, name: (state.plan && state.plan.name) || l.payload.plan }, offlineUntil: new Date(l.payload.exp * 1000).toISOString(),
         message: why + ' You can keep working offline until ' + new Date(l.payload.exp * 1000).toLocaleString() + '; the app checks again when it can.' });
     }
     const reason = l.problem === 'expired' ? ' Your offline access has run out — connect to the internet so MetaCode can confirm your subscription.'
@@ -140,30 +145,35 @@ function createEntitlement(o) {
   }
 
   async function run() {
-    if (!o.auth.signedIn()) {
-      // a signed-out app shows the sign-in screen; the config tells it how
-      try { const c = await getConfig(); if (!c.available) return set({ status: 'unavailable', message: c.reason }); } catch (e) { /* the sign-in screen says if signing in fails */ }
-      return set({ status: 'signed-out' });
-    }
     let c;
     try { c = await getConfig(); }
-    catch (e) { return goOffline(e instanceof NetError && e.kind === 'bad_response' ? e.message : 'Can\'t reach MetaCode right now.'); }
+    catch (e) {
+      // a signed-out app shows the sign-in screen (which says if signing in fails)
+      if (!o.auth.signedIn() && !localMode()) return set({ status: 'signed-out' });
+      return goOffline(e instanceof NetError && e.kind === 'bad_response' ? e.message : 'Can\'t reach MetaCode right now.');
+    }
     if (!c.available) return set({ status: 'unavailable', message: c.reason || 'The desktop app isn\'t available on this server.' });
     if (c.minVersion && compareVersions(o.appVersion, c.minVersion) < 0) {
       return set({ status: 'update-required', message: 'This version of MetaCode Sheets (' + o.appVersion + ') is too old for the server. Install version ' + c.minVersion + ' or later.' });
     }
+    // a private server without accounts (DESKTOP_WITHOUT_ACCOUNTS): no sign-in, the server still decides
+    const local = !!(c.accounts && c.accounts.enabled === false);
+    if (local !== localMode()) o.store.update({ localServer: local ? o.server : undefined });
+    if (!local && !o.auth.signedIn()) return set({ status: 'signed-out' });
     if (!o.pinnedKeys.length && c.lease && typeof c.lease.publicKey === 'string') {
       // fetched over HTTPS from the configured server (no pinned keys in this build)
       const kept = o.store.get().leaseKey;
       if (!kept || kept.publicKey !== c.lease.publicKey || kept.server !== o.server) o.store.update({ leaseKey: { server: o.server, publicKey: c.lease.publicKey } });
     }
     for (let attempt = 0; attempt < 2; attempt++) {
-      let token;
-      try { token = await o.auth.accessToken({ force: attempt > 0 }); }
-      catch (e) { return goOffline('Can\'t reach MetaCode\'s sign-in service right now.'); }
-      if (!token) { clearLease(); return set({ status: 'signed-out', message: 'Your session ended. Sign in again.' }); }
+      let token = null;
+      if (!local) {
+        try { token = await o.auth.accessToken({ force: attempt > 0 }); }
+        catch (e) { return goOffline('Can\'t reach MetaCode\'s sign-in service right now.'); }
+        if (!token) { clearLease(); return set({ status: 'signed-out', message: 'Your session ended. Sign in again.' }); }
+      }
       let r;
-      try { r = await o.http.request(o.server + '/api/desktop/entitlement', { headers: { Authorization: 'Bearer ' + token }, timeoutMs: 20000 }); }
+      try { r = await o.http.request(o.server + '/api/desktop/entitlement', { headers: token ? { Authorization: 'Bearer ' + token } : {}, timeoutMs: 20000 }); }
       catch (e) { return goOffline('Can\'t reach MetaCode right now.'); }
       if (r.status === 401) continue;                           // token refused: refresh once, then ask again
       if (r.status === 403 && r.json && r.json.error && r.json.error.type === 'desktop_unavailable') { clearLease(); return set({ status: 'unavailable', message: errorMessage(r, 'The desktop app isn\'t available on this server.') }); }
@@ -174,7 +184,7 @@ function createEntitlement(o) {
         const lease = j.lease && typeof j.lease.token === 'string' ? j.lease.token : null;
         let payload = null;
         if (lease) for (const k of trustedKeys()) { payload = verifyLease(lease, k); if (payload) break; }
-        const u = o.auth.user();
+        const u = currentUser();
         if (payload && u && payload.sub === u.id && payload.srv === o.server) o.store.update({ lease: { token: lease, receivedAt: now() } });
         else clearLease();                                         // works online; no offline access from a lease we can't check
         touchClock();
@@ -210,7 +220,7 @@ function createEntitlement(o) {
     unlocked: () => state.status === 'active' || state.status === 'offline',
     /** May server features be called? (the server checks again) */
     online: () => state.status === 'active',
-    async signedOut() { clearLease(); return set({ status: 'signed-out' }); },
+    async signedOut() { clearLease(); if (localMode()) return run(); return set({ status: 'signed-out' }); },
     stop() { if (timer) timers.clearTimeout(timer); timer = null; }
   };
   return api;

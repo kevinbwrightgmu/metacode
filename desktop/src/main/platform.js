@@ -149,7 +149,9 @@ function createPlatform(o) {
      */
     async createProject(project) {
       if (!project || typeof project !== 'object' || typeof project.name !== 'string' || !project.data || typeof project.data !== 'object') throw new PlatformError('invalid', 'The project is incomplete.');
-      const id = 'p_' + Date.now().toString(36) + crypto.randomBytes(4).toString('hex');
+      // the website's id format (public/js/projects.js)
+      const ALPHA = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+      const id = 'pr_' + Array.from(crypto.randomBytes(12), b => ALPHA[b % 62]).join('');
       const at = new Date().toISOString();
       const data = Object.assign({}, project, { id, createdAt: at, savedAt: at, revision: 1 });
       const body = JSON.stringify([{ kind: 'projects', id, data }]);

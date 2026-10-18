@@ -1,9 +1,10 @@
 // @ts-check
 // ── app://sheets — the window's own files ─────────────────────────────────────
 // The window loads only files packaged with the app, through this protocol:
-//   app://sheets/…           src/renderer/…
+//   app://sheets/renderer/…  src/renderer/… (the window: index.html, js, css)
 //   app://sheets/shared/…    src/shared/… (the spreadsheet engine, file formats)
-// Paths can't leave those folders. Every response carries the Content
+// Nothing else under src/ (the main process, the preload) is served, and
+// paths can't leave those two folders. Every response carries the Content
 // Security Policy below: scripts only from the app itself (no inline code, no
 // eval), no network access at all from the window (connect-src 'none') — it
 // reaches MetaCode only through the main process — and no frames, plugins or
@@ -34,6 +35,8 @@ const CSP = [
   "frame-ancestors 'none'"
 ].join('; ');
 
+const SERVED = ['renderer', 'shared'];
+
 const TYPES = /** @type {Record<string, string>} */ ({
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8', '.json': 'application/json; charset=utf-8', '.svg': 'image/svg+xml',
@@ -42,7 +45,7 @@ const TYPES = /** @type {Record<string, string>} */ ({
 
 /**
  * Which file a URL maps to (null: not one of the app's files)
- * @param {string} url @param {{ renderer: string, shared: string }} roots
+ * @param {string} url @param {{ src: string }} roots  src: the folder holding renderer/ and shared/
  */
 function fileFor(url, roots) {
   let u;
@@ -51,11 +54,13 @@ function fileFor(url, roots) {
   let p;
   try { p = decodeURIComponent(u.pathname); } catch (e) { return null; }
   if (p.includes('\0') || p.includes('\\')) return null;
-  if (p === '/' || p === '') p = '/index.html';
-  let root = roots.renderer;
-  if (p.startsWith('/shared/')) { root = roots.shared; p = p.slice('/shared'.length); }
-  const file = path.resolve(root, '.' + path.posix.normalize(p));
-  if (!file.startsWith(path.resolve(root) + path.sep)) return null;
+  if (p === '/' || p === '') p = '/renderer/index.html';
+  const clean = path.posix.normalize(p);
+  const top = clean.split('/')[1];
+  if (!SERVED.includes(top)) return null;
+  const base = path.resolve(roots.src, top);
+  const file = path.resolve(roots.src, '.' + clean);
+  if (!file.startsWith(base + path.sep)) return null;
   return file;
 }
 
@@ -64,7 +69,7 @@ function registerScheme(protocol) {
   protocol.registerSchemesAsPrivileged([{ scheme: SCHEME, privileges: { standard: true, secure: true, supportFetchAPI: true, codeCache: true } }]);
 }
 
-/** @param {any} protocol @param {{ renderer: string, shared: string }} roots */
+/** @param {any} protocol @param {{ src: string }} roots */
 function handleProtocol(protocol, roots) {
   protocol.handle(SCHEME, async (/** @type {Request} */ req) => {
     const headers = { 'Content-Security-Policy': CSP, 'X-Content-Type-Options': 'nosniff', 'Cross-Origin-Opener-Policy': 'same-origin', 'Cross-Origin-Resource-Policy': 'same-origin', 'Referrer-Policy': 'no-referrer', 'Cache-Control': 'no-cache' };

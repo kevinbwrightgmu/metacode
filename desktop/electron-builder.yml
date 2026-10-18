@@ -1,0 +1,92 @@
+# MetaCode Sheets — installers (electron-builder). Run through scripts/build.js
+# (npm run dist / dist:linux / dist:win / dist:mac), which pins the server's
+# lease keys into app-config.json first. Signing and notarization: see
+# docs/desktop/RELEASING.md.
+appId: de.metac0.sheets
+productName: MetaCode Sheets
+copyright: Copyright © 2026 MetaCode
+artifactName: MetaCode-Sheets-${version}-${os}-${arch}.${ext}
+directories:
+  output: dist
+  buildResources: build
+files:
+  - package.json
+  - app-config.json
+  - src/main/**/*
+  - src/preload/**/*
+  - src/renderer/**/*
+  - src/shared/**/*
+  - "!**/*.map"
+asar: true
+# Electron's own hardening switches, flipped in the packaged binary
+electronFuses:
+  runAsNode: false
+  enableCookieEncryption: true
+  enableNodeOptionsEnvironmentVariable: false
+  enableNodeCliInspectArguments: false
+  enableEmbeddedAsarIntegrityValidation: true
+  onlyLoadAppFromAsar: true
+  grantFileProtocolExtraPrivileges: false
+fileAssociations:
+  - ext: mcsheet
+    name: MetaCode Sheets workbook
+    description: MetaCode Sheets workbook
+    mimeType: application/x-metacode-sheets
+    role: Editor
+protocols:
+  - name: MetaCode Sheets sign-in link
+    schemes: [metacode-sheets]
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+    - target: msi
+      arch: [x64]
+  icon: build/icon.png
+  # Signing: CSC_LINK / CSC_KEY_PASSWORD (or Azure Trusted Signing), see RELEASING.md
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: MetaCode Sheets
+msi:
+  oneClick: false
+  perMachine: false
+  createDesktopShortcut: true
+
+mac:
+  target:
+    - target: dmg
+      arch: [x64, arm64]
+    - target: zip
+      arch: [x64, arm64]
+  category: public.app-category.productivity
+  icon: build/icon.png
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  # Notarization runs when APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD and APPLE_TEAM_ID are set
+dmg:
+  sign: false
+
+linux:
+  target:
+    - target: AppImage
+      arch: [x64]
+    - target: deb
+      arch: [x64]
+  category: Office
+  icon: build/icon.png
+  maintainer: MetaCode <support@metac0.de>
+  synopsis: The MetaCode desktop spreadsheet
+  description: MetaCode Sheets — a spreadsheet with MetaCode's AI coding and reliability tools, for Pro, Max and Ultra subscribers.
+  mimeTypes: [application/x-metacode-sheets]
+deb:
+  # libsecret: the system keychain that keeps the session encrypted
+  depends: [libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0]
+
+publish: null

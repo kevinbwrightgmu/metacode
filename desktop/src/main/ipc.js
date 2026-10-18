@@ -47,10 +47,10 @@ function errorOut(e) {
 }
 
 /**
- * @param {{ ipcMain: any, dialog: any, shell: any, clipboard: any, getWindow: () => any, app: any,
+ * @param {{ ipcMain: any, dialog: any, shell: any, clipboard: any, ClipboardItem?: any, getWindow: () => any, app: any,
  *           auth: ReturnType<typeof import('./auth').createAuth>, entitlement: ReturnType<typeof import('./entitlement').createEntitlement>,
  *           files: ReturnType<typeof import('./files').createFiles>, platform: ReturnType<typeof import('./platform').createPlatform>,
- *           settings: { get: () => any, set: (patch: any) => any }, info: () => any, quitReady: () => void, quitAck: () => void, quitCancel: () => void }} d
+ *           settings: { get: () => any, set: (patch: any) => any }, info: () => any, rendererReady?: () => void, quitReady: () => void, quitAck: () => void, quitCancel: () => void }} d
  */
 function registerIpc(d) {
   /** @type {Map<string, AbortController>} */
@@ -158,8 +158,21 @@ function registerIpc(d) {
   handle('recovery:discard', a => d.files.discardRecovery(a.docId));
 
   /* ── Clipboard (for "paste values"; normal copy/paste uses the page's events) ── */
-  handle('clipboard:read', () => ({ text: String(d.clipboard.readText() || '').slice(0, 64 * 1024 * 1024), html: String(d.clipboard.readHTML() || '').slice(0, 64 * 1024 * 1024) }), { unlocked: true });
-  handle('clipboard:write', a => { d.clipboard.write({ text: check.str(a.text, 'Text', 64 * 1024 * 1024), html: typeof a.html === 'string' ? a.html.slice(0, 64 * 1024 * 1024) : undefined }); return true; }, { unlocked: true });
+  // Electron's clipboard is asynchronous (W3C-style: readText, read, write of ClipboardItems)
+  handle('clipboard:read', async () => {
+    const text = String((await d.clipboard.readText()) || '').slice(0, 64 * 1024 * 1024);
+    let html = '';
+    try {
+      for (const item of await d.clipboard.read()) if (item.types.includes('text/html')) { const b = await item.getType('text/html'); html = typeof b === 'string' ? b : await b.text(); break; }
+    } catch (e) { html = ''; }
+    return { text, html: html.slice(0, 64 * 1024 * 1024) };
+  }, { unlocked: true });
+  handle('clipboard:write', async a => {
+    const text = check.str(a.text, 'Text', 64 * 1024 * 1024);
+    if (typeof a.html === 'string' && a.html && d.ClipboardItem) await d.clipboard.write([new d.ClipboardItem({ 'text/plain': text, 'text/html': a.html.slice(0, 64 * 1024 * 1024) })]);
+    else await d.clipboard.writeText(text);
+    return true;
+  }, { unlocked: true });
 
   /* ── MetaCode features (the server checks the plan on every call) ── */
   handle('ai:run', a => {
@@ -195,6 +208,7 @@ function registerIpc(d) {
     if (process.platform === 'darwin') { w.setDocumentEdited(!!a.dirty); if (typeof a.path === 'string') w.setRepresentedFilename(a.path); }
     return true;
   });
+  handle('app:ready', () => { if (d.rendererReady) d.rendererReady(); return true; });
   handle('app:quitReady', () => { d.quitReady(); return true; });
   handle('app:quitAck', () => { d.quitAck(); return true; });
   handle('app:quitCancel', () => { d.quitCancel(); return true; });

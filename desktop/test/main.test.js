@@ -451,15 +451,18 @@ test('files: recovery snapshots and the crash marker', async () => {
 
 /* ── app:// and the IPC gate ─────────────────────── */
 
-test('app:// maps only to the app\'s own files; the CSP forbids network, inline scripts and frames', () => {
-  const roots = { renderer: path.resolve('/app/src/renderer'), shared: path.resolve('/app/src/shared') };
-  assert.equal(fileFor('app://sheets/', roots), path.join(roots.renderer, 'index.html'));
-  assert.equal(fileFor('app://sheets/js/app.js', roots), path.join(roots.renderer, 'js', 'app.js'));
-  assert.equal(fileFor('app://sheets/shared/engine/index.js', roots), path.join(roots.shared, 'engine', 'index.js'));
-  for (const bad of ['app://sheets/../main/main.js', 'app://sheets/%2e%2e/main/main.js', 'app://sheets/..%2fmain%2fmain.js', 'app://sheets/shared/../../main/main.js',
-    'app://other/index.html', 'file:///etc/passwd', 'app://sheets/%00x', 'app://sheets/a\\..\\..\\x']) {
+test('app:// maps only to the window\'s and the engine\'s files; the CSP forbids network, inline scripts and frames', () => {
+  const src = path.resolve('/app/src');
+  const roots = { src };
+  assert.equal(fileFor('app://sheets/', roots), path.join(src, 'renderer', 'index.html'));
+  assert.equal(fileFor('app://sheets/renderer/js/app.js', roots), path.join(src, 'renderer', 'js', 'app.js'));
+  assert.equal(fileFor('app://sheets/shared/engine/index.js', roots), path.join(src, 'shared', 'engine', 'index.js'));
+  for (const bad of ['app://sheets/main/main.js', 'app://sheets/preload/preload.js', 'app://sheets/renderer/../main/main.js', 'app://sheets/renderer/%2e%2e/main/main.js',
+    'app://sheets/renderer/..%2fmain%2fmain.js', 'app://sheets/shared/../../package.json', 'app://sheets/../app-config.json', 'app://other/renderer/index.html',
+    'file:///etc/passwd', 'app://sheets/renderer/%00x', 'app://sheets/renderer/a\\..\\..\\main\\main.js']) {
     const f = fileFor(bad, roots);
-    assert.ok(f === null || f.startsWith(roots.renderer + path.sep) || f.startsWith(roots.shared + path.sep), bad + ' → ' + f);
+    assert.ok(f === null || f.startsWith(path.join(src, 'renderer') + path.sep) || f.startsWith(path.join(src, 'shared') + path.sep), bad + ' → ' + f);
+    assert.ok(f === null || !/[\\/](main|preload)[\\/]/.test(f.slice(src.length)), bad + ' reached ' + f);
   }
   assert.match(CSP, /connect-src 'none'/);
   assert.match(CSP, /script-src 'self'(;|$)/);
@@ -475,7 +478,7 @@ test('ipc: only the app\'s page may call; locked apps refuse workbook access but
   let unlocked = false;
   const put = [];
   registerIpc({
-    ipcMain, dialog: {}, shell: {}, clipboard: { readText: () => 'x', readHTML: () => '' }, app: {}, getWindow: () => win,
+    ipcMain, dialog: {}, shell: {}, clipboard: { readText: async () => 'x', read: async () => [], writeText: async () => {} }, app: {}, getWindow: () => win,
     auth: {}, entitlement: { unlocked: () => unlocked, state: () => ({ status: unlocked ? 'active' : 'plan-required', server: SERVER }) },
     files: { library: async () => ['a'], putRecovery: async (id, meta, text) => { put.push(id); return { ok: true }; } },
     platform: { ai: async b => ({ text: 'ok', model: null }) },

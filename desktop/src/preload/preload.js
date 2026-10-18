@@ -5,13 +5,13 @@
 'use strict';
 const { contextBridge, ipcRenderer } = require('electron');
 
+// Failures reach the window as { name, message, code } (an Error's extra
+// fields don't survive the bridge between the two worlds)
 /** @param {string} channel */
 const call = channel => async (/** @type {any} */ args) => {
   const r = await ipcRenderer.invoke(channel, args);
   if (r && r.ok) return r.value;
-  const e = new Error((r && r.error && r.error.message) || 'Something went wrong.');
-  /** @type {any} */ (e).code = (r && r.error && r.error.code) || 'error';
-  throw e;
+  throw { name: 'SheetsError', message: (r && r.error && r.error.message) || 'Something went wrong.', code: (r && r.error && r.error.code) || 'error' };
 };
 const EVENTS = ['auth:changed', 'auth:linkError', 'menu:command', 'app:openFile', 'app:beforeQuit', 'ai:batchLine', 'theme:changed'];
 /** @param {string} channel @param {(data: any) => void} fn */
@@ -33,7 +33,7 @@ const channels = {
   ai: 'ai:run', aiModels: 'ai:models', aiBatchStart: 'ai:batchStart', aiBatchStop: 'ai:batchStop',
   projects: 'platform:projects', project: 'platform:project', createProject: 'platform:createProject',
   scraperJobs: 'platform:scraperJobs', scraperResults: 'platform:scraperResults',
-  windowState: 'window:state', quitReady: 'app:quitReady', quitAck: 'app:quitAck', quitCancel: 'app:quitCancel'
+  windowState: 'window:state', ready: 'app:ready', quitReady: 'app:quitReady', quitAck: 'app:quitAck', quitCancel: 'app:quitCancel'
 };
 /** @type {Record<string, any>} */
 const api = { on, platform: process.platform };

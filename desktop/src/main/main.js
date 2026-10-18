@@ -7,7 +7,8 @@
 // (src/renderer) is sandboxed, has no Node.js and no network access, and can
 // only ask for the things listed in ipc.js.
 'use strict';
-const { app, BrowserWindow, Menu, dialog, shell, clipboard, ipcMain, net, protocol, session, nativeTheme, powerMonitor, safeStorage } = require('electron');
+const electron = require('electron');
+const { app, BrowserWindow, Menu, dialog, shell, clipboard, ipcMain, net, protocol, session, nativeTheme, powerMonitor, safeStorage } = electron;
 const path = require('path');
 const fs = require('fs');
 
@@ -32,7 +33,10 @@ const dev = devFlag('--dev');
 const userDataOverride = devValue('--user-data');
 if (userDataOverride) app.setPath('userData', path.resolve(userDataOverride));
 app.setName('MetaCode Sheets');
-app.enableSandbox();
+// Every process sandboxed by the operating system — unless the sandbox was
+// switched off explicitly (Linux containers running as root need
+// --no-sandbox); the window's own sandbox (webPreferences.sandbox) stays on.
+if (!app.commandLine.hasSwitch('no-sandbox')) app.enableSandbox();
 registerScheme(protocol);
 
 if (!app.requestSingleInstanceLock()) {
@@ -43,7 +47,7 @@ if (!app.requestSingleInstanceLock()) {
 
 function start() {
   const cfg = loadAppConfig({ appRoot: APP_ROOT, isPackaged: app.isPackaged, argv: process.argv });
-  /** @type {BrowserWindow | null} */
+  /** @type {Electron.BrowserWindow | null} */
   let win = null;
   let quitting = false, quitConfirmed = false, rendererReady = false;
   /** @type {string[]} */
@@ -116,7 +120,7 @@ function start() {
     // …and gets no camera, microphone, notifications, location…
     ui.setPermissionRequestHandler((_wc, permission, cb) => cb(permission === 'clipboard-sanitized-write'));
     ui.setPermissionCheckHandler((_wc, permission) => permission === 'clipboard-sanitized-write');
-    handleProtocol(ui.protocol, { renderer: path.join(APP_ROOT, 'src', 'renderer'), shared: path.join(APP_ROOT, 'src', 'shared') });
+    handleProtocol(ui.protocol, { src: path.join(APP_ROOT, 'src') });
 
     const bounds = settings.bounds && Number.isFinite(settings.bounds.width) ? settings.bounds : { width: 1360, height: 860 };
     win = new BrowserWindow({
@@ -137,7 +141,8 @@ function start() {
     win.webContents.on('will-navigate', (e, url) => { if (!url.startsWith(ORIGIN + '/')) e.preventDefault(); });
     win.webContents.on('will-redirect', (e, url) => { if (!url.startsWith(ORIGIN + '/')) e.preventDefault(); });
     win.webContents.on('will-attach-webview', e => e.preventDefault());
-    win.webContents.on('did-finish-load', () => { rendererReady = true; flush(); });
+    // the window says when it listens (app:ready); until then files and links wait
+    win.webContents.on('did-start-loading', () => { rendererReady = false; });
     win.webContents.on('render-process-gone', (_e, details) => {
       if (details.reason === 'clean-exit') return;
       rendererReady = false;
@@ -158,7 +163,7 @@ function start() {
       askToQuit();
     });
     win.on('closed', () => { win = null; });
-    win.loadURL(ORIGIN + '/index.html');
+    win.loadURL(ORIGIN + '/renderer/index.html');
   }
 
   /** The window saves or discards unsaved work, then answers with app:quitReady */
@@ -175,14 +180,14 @@ function start() {
   let quitTimer = null;
 
   registerIpc({
-    ipcMain, dialog, shell, clipboard, app, auth, entitlement, files, platform,
+    ipcMain, dialog, shell, clipboard, ClipboardItem: /** @type {any} */ (electron).ClipboardItem, app, auth, entitlement, files, platform,
     getWindow: () => win,
     settings: {
-      get: () => ({ theme: settings.theme || 'system', zoom: Number(settings.zoom) || 1, gridlines: settings.gridlines !== false, formulaBar: settings.formulaBar !== false, sidebar: settings.sidebar !== false, aiModel: typeof settings.aiModel === 'string' ? settings.aiModel : '' }),
+      get: () => ({ theme: settings.theme || 'system', zoom: Number(settings.zoom) || 1, gridlines: settings.gridlines !== false, formulaBar: settings.formulaBar !== false, sidebar: settings.sidebar !== false, autosave: settings.autosave !== false, aiModel: typeof settings.aiModel === 'string' ? settings.aiModel : '' }),
       set: patch => {
         if (['system', 'light', 'dark'].includes(patch.theme)) settings.theme = patch.theme;
         if (Number.isFinite(patch.zoom)) settings.zoom = Math.max(0.5, Math.min(2, Number(patch.zoom)));
-        for (const k of ['gridlines', 'formulaBar', 'sidebar']) if (typeof patch[k] === 'boolean') settings[k] = patch[k];
+        for (const k of ['gridlines', 'formulaBar', 'sidebar', 'autosave']) if (typeof patch[k] === 'boolean') settings[k] = patch[k];
         if (typeof patch.aiModel === 'string' && patch.aiModel.length <= 200) settings.aiModel = patch.aiModel;
         writeSettings();
         applyTheme();
@@ -194,6 +199,7 @@ function start() {
       server: cfg.serverUrl, serverSource: cfg.source, pinned: cfg.pinned, dev, crashed, storage: store.kind(),
       library: files.libraryDir(), dark: nativeTheme.shouldUseDarkColors
     }),
+    rendererReady: () => { rendererReady = true; flush(); },
     quitReady: () => { clearTimeout(quitTimer); quitConfirmed = true; app.quit(); },
     quitAck: () => { clearTimeout(quitTimer); },
     quitCancel: () => { clearTimeout(quitTimer); quitting = false; }
