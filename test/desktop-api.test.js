@@ -101,7 +101,7 @@ test('config: public settings only — the Supabase project, the lease public ke
   const r = await api('GET', '/api/desktop/config');
   assert.equal(r.status, 200);
   assert.equal(r.json.available, true);
-  assert.deepEqual(r.json.accounts, { enabled: true, supabaseUrl: sb.url, publishableKey: KEY });
+  assert.deepEqual(r.json.accounts, { enabled: true, supabaseUrl: sb.url, publishableKey: KEY, emailLink: false }, 'the email sign-in link is off unless DESKTOP_EMAIL_LINK=true');
   assert.equal(r.json.lease.alg, 'Ed25519');
   assert.match(r.json.lease.publicKey, /^[A-Za-z0-9+/=]{40,}$/);
   assert.equal(r.json.offlineHours, 48);
