@@ -133,6 +133,33 @@ the sheet only when you apply it — as one step that Undo reverses. Each tool
 says what it sends before it sends it. Offline, these tools say they need a
 connection; nothing is simulated.
 
+## Downloading the app
+
+People download MetaCode Sheets from the website: **`/download`** (linked from
+the homepage, its footer, and the account page of Pro, Max and Ultra
+accounts). The page picks the installer for the visitor's computer and lists
+every platform with sizes and SHA-256 checksums.
+
+The files come from the newest **published** GitHub release tagged
+`desktop-v<version>` (see [RELEASING.md](RELEASING.md)); drafts and
+pre-releases never appear. The server looks the release up through GitHub's
+API (cached 10 minutes, kept when GitHub can't be reached, retried at most
+once a minute) and gives each file a stable link that always means the
+current version:
+
+| Link | File |
+|---|---|
+| `/download/desktop/windows` | Windows installer (`.exe`) |
+| `/download/desktop/windows-msi` | Windows `.msi` (IT deployment) |
+| `/download/desktop/mac-arm64`, `/download/desktop/mac-x64` | macOS `.dmg` (Apple silicon, Intel) |
+| `/download/desktop/linux-appimage`, `/download/desktop/linux-deb` | Linux AppImage, `.deb` |
+| `/download/desktop/checksums` | `SHA256SUMS.txt` |
+
+`GET /api/desktop/downloads` returns the version, date and file list the page
+shows. When nothing is published yet, the page says so instead of showing
+buttons. To serve installers from the server instead of GitHub, put them in a
+folder and set `DESKTOP_DOWNLOADS_DIR`.
+
 ## Build and install
 
 Requirements: Node.js 22, npm. From the repository root:
@@ -171,7 +198,7 @@ start and can't open offline.
 CI: `.github/workflows/desktop.yml` runs the tests on Linux, Windows and macOS
 for every change to the app or its API, builds the installers on each
 platform on demand (`workflow_dispatch`) and for tags `desktop-v*`, and
-attaches them to a draft release.
+attaches them to a draft release — once published, it's what `/download` offers.
 
 ## Server settings
 
@@ -183,7 +210,10 @@ Set on the MetaCode server (`.env`; see `.env.example`):
 | `DESKTOP_OFFLINE_HOURS` | how long a lease lasts offline (1–336, default 72) |
 | `DESKTOP_LEASE_PRIVATE_KEY` | Ed25519 private key (PEM) that signs leases; generated into `ACCOUNT_DATA_DIR` if unset. **Secret.** |
 | `DESKTOP_MIN_VERSION` | older app versions are asked to update |
-| `DESKTOP_DOWNLOAD_URL` | where "Download the new version" points |
+| `DESKTOP_RELEASES_REPO` | GitHub repository whose published `desktop-v*` releases the download page offers (default `kevinbwrightgmu/metacode`; `off` turns downloads off) |
+| `DESKTOP_GITHUB_TOKEN` | optional, raises GitHub's rate limit for the release lookup. **Secret.** |
+| `DESKTOP_DOWNLOADS_DIR` | optional: serve installers from this folder on the server instead of GitHub |
+| `DESKTOP_DOWNLOAD_URL` | where "Download the new version" points (default: this site's `/download`) |
 | `DESKTOP_EMAIL_LINK` | offer "email me a sign-in link" (needs `metacode-sheets://auth-callback` in Supabase's redirect URLs) |
 | `DESKTOP_WITHOUT_ACCOUNTS` | private single-user servers only: no sign-in |
 

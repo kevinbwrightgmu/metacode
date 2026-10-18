@@ -567,6 +567,8 @@
           (me.billing && me.billing.enabled ? '<button type="button" class="acct-secondary" data-a="refresh" title="Check Stripe for changes now">Refresh</button>' : '') + '</div></div>' +
         '<div class="card"><div class="card-title">Your data</div><div id="acct-sync">' + (sync ? syncHTML(sync) : '<p class="text-muted">Saved in this browser.</p>') + '</div></div>' +
       '</div>' +
+      (can('desktop') ? '<div class="card acct-desktop"><div class="card-title">MetaCode Sheets</div><p>Your plan includes the desktop spreadsheet for Windows, macOS and Linux. Install it, then sign in with this account.</p>' +
+        '<div class="acct-row"><a class="acct-primary" href="/download">Download MetaCode Sheets</a></div></div>' : '') +
       '<div class="card"><div class="card-title">Usage</div><div class="acct-meters">' + Object.keys(Plans.METERS).filter(k => !Plans.METERS[k].feature || can(Plans.METERS[k].feature)).map(k => meterHTML(k)).join('') + '</div>' +
         '<p class="acct-fine">Only work that succeeds is counted: AI answers that fail and scrapes that collect less than their limit are given back.</p></div>' +
       '<h3 class="acct-h">Plans</h3>' + plansHTML() + '</div>';

@@ -6,7 +6,7 @@ name: Desktop app
 
 on:
   pull_request:
-    paths: ['desktop/**', 'desktop-api/**', 'public/js/plans.js', 'public/js/reliability-stats.js', 'public/js/ai-coding.js', '.github/workflows/desktop.yml']
+    paths: ['desktop/**', 'desktop-api/**', 'public/js/plans.js', 'public/js/reliability-stats.js', 'public/js/ai-coding.js', 'public/download.html', 'test/desktop-*.test.js', '.github/workflows/desktop.yml']
   push:
     tags: ['desktop-v*']
   workflow_dispatch:
@@ -35,8 +35,8 @@ jobs:
       - name: Unit tests (engine, files, CSV/.xlsx, main process, access rules)
         run: npm test
         working-directory: desktop
-      - name: Server tests for the desktop API
-        run: node --test --test-force-exit test/desktop-api.test.js
+      - name: Server tests for the desktop API and downloads
+        run: node --test --test-force-exit test/desktop-api.test.js test/desktop-downloads.test.js
       - name: End-to-end tests (Electron, Linux)
         if: runner.os == 'Linux'
         working-directory: desktop

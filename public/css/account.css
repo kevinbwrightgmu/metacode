@@ -25,6 +25,7 @@
 }
 .acct-primary { background: var(--acct-accent); color: var(--acct-accent-ink); }
 .acct-primary:hover { background: #1D4ED8; }
+a.acct-primary, a.acct-secondary { text-decoration: none; }
 .acct-secondary { background: var(--acct-surface); color: var(--acct-ink); border-color: var(--acct-line); }
 .acct-secondary:hover { background: var(--acct-soft); }
 .acct-primary:disabled, .acct-secondary:disabled { opacity: .6; cursor: default; }

@@ -67,9 +67,12 @@ only JIT and outgoing network):
    `SHA256SUMS.txt`.
 4. Check the draft (install on each OS: sign in with a Pro account, open a
    workbook, sign in with a Free account and see the upgrade screen), then
-   publish it.
-5. Point `DESKTOP_DOWNLOAD_URL` at the release page, and raise
-   `DESKTOP_MIN_VERSION` only when older versions must stop working.
+   publish it. Leave "Set as a pre-release" unticked: pre-releases aren't offered.
+5. Within 10 minutes the website's download page (`/download`) offers the new
+   version; its links (`/download/desktop/windows` …) now lead to the new
+   files. Raise `DESKTOP_MIN_VERSION` only when older versions must stop
+   working: those apps then send people to `/download` (or to
+   `DESKTOP_DOWNLOAD_URL`, if set).
 
 Manual builds: `cd desktop && npm ci && npm run dist:<linux|win|mac>`.
 Windows installers need Windows (or Wine), `.dmg` files need macOS.
@@ -77,7 +80,7 @@ Windows installers need Windows (or Wine), `.dmg` files need macOS.
 ## 5. Updates
 
 This version has no auto-updater: people install new versions from the
-release page, and the server can require a minimum version
+website's download page, and the server can require a minimum version
 (`DESKTOP_MIN_VERSION`), which shows "Update MetaCode Sheets" with a download
 link. Adding signed auto-updates (electron-updater, which checks the
 publisher's signature on Windows and macOS) is the next step on the roadmap;

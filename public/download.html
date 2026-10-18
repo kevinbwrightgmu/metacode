@@ -1,0 +1,434 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<!-- Google tag (gtag.js) -->
+<script async src="https://www.googletagmanager.com/gtag/js?id=G-VYEQCY48SX"></script>
+<script>
+  window.dataLayer = window.dataLayer || [];
+  function gtag(){dataLayer.push(arguments);}
+  gtag('js', new Date());
+
+  gtag('config', 'G-VYEQCY48SX');
+</script>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Download MetaCode Sheets — MetaCode</title>
+<meta name="description" content="Download MetaCode Sheets, the MetaCode desktop spreadsheet for Windows, macOS and Linux — Excel and CSV files, AI formulas, AI coding and intercoder reliability.">
+<link rel="icon" type="image/png" href="img/metacode-mark.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  /* ── Design tokens (as on the homepage) ── */
+  :root {
+    --ink: #0B1220; --ink-2: #334155; --muted: #5B6B80;
+    --line: #E3E7EE; --line-2: #CBD3DF;
+    --bg: #FFFFFF; --bg-soft: #F5F7FA;
+    --brand: #2563EB; --brand-lt: #EFF6FF;
+    --ok: #0F766E; --ok-lt: #EFFAF8;
+    --warn: #B45309; --warn-lt: #FFFBEB;
+    --f-display: 'Space Grotesk', system-ui, sans-serif;
+    --f-body: 'Inter', system-ui, sans-serif;
+    --r: 10px; --r-lg: 14px; --wrap: 1160px; --gut: 24px;
+    --t-xs: 12.5px; --t-sm: 14px; --t-md: 16px; --t-lg: 18px;
+    --t-h3: 19px; --t-h2: clamp(26px, 3vw, 34px); --t-h1: clamp(36px, 4.6vw, 54px);
+  }
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; -webkit-text-size-adjust: 100%; }
+  body { background: var(--bg); color: var(--ink); font: 400 var(--t-md)/1.6 var(--f-body); -webkit-font-smoothing: antialiased; }
+  img, svg { display: block; }
+  a { color: inherit; }
+  code { font: 500 12px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  :focus-visible { outline: 3px solid var(--brand); outline-offset: 3px; border-radius: 6px; }
+  .wrap { max-width: var(--wrap); margin: 0 auto; padding: 0 var(--gut); }
+  .skip { position: absolute; left: 12px; top: -48px; background: var(--ink); color: #fff; padding: 10px 14px; border-radius: 8px; z-index: 100; text-decoration: none; font-weight: 600; }
+  .skip:focus { top: 12px; }
+  [hidden] { display: none !important; }
+
+  /* ── Buttons ── */
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; font: 600 var(--t-sm)/1 var(--f-body);
+    padding: 11px 16px; border-radius: var(--r); text-decoration: none; border: 1px solid transparent; cursor: pointer; transition: background .15s, border-color .15s, color .15s; white-space: nowrap; background: none; }
+  .btn-lg { font-size: 15.5px; padding: 15px 22px; }
+  .btn-primary { background: var(--ink); color: #fff; }
+  .btn-primary:hover { background: #1E293B; }
+  .btn-outline { border-color: var(--line-2); color: var(--ink); background: #fff; }
+  .btn-outline:hover { border-color: var(--ink); }
+  .btn-quiet { color: var(--ink-2); }
+  .btn-quiet:hover { color: var(--ink); background: var(--bg-soft); }
+  .btn svg { width: 18px; height: 18px; }
+
+  /* ── Header ── */
+  .site-head { position: sticky; top: 0; z-index: 50; background: rgba(255,255,255,.92); backdrop-filter: saturate(1.4) blur(8px); border-bottom: 1px solid var(--line); }
+  .head-row { display: flex; align-items: center; gap: 28px; height: 64px; }
+  .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font: 700 18px/1 var(--f-display); letter-spacing: -.01em; }
+  .brand img { width: 30px; height: 30px; border-radius: 8px; }
+  .site-nav { display: flex; gap: 4px; }
+  .site-nav a { text-decoration: none; color: var(--ink-2); font-size: var(--t-sm); font-weight: 500; padding: 8px 10px; border-radius: 8px; }
+  .site-nav a:hover { color: var(--ink); background: var(--bg-soft); }
+  .site-nav a[aria-current] { color: var(--ink); }
+  .head-actions { display: flex; gap: 8px; align-items: center; margin-left: auto; }
+
+  /* ── Hero ── */
+  .hero { padding: 64px 0 72px; border-bottom: 1px solid var(--line);
+    background: radial-gradient(1100px 500px at 90% -10%, #EEF3FF 0%, rgba(238,243,255,0) 60%), #fff; }
+  .hero-grid { display: grid; grid-template-columns: minmax(0, .95fr) minmax(0, 1.05fr); gap: 56px; align-items: center; }
+  .eyebrow { font: 600 var(--t-xs)/1.2 var(--f-body); letter-spacing: .08em; text-transform: uppercase; color: var(--brand); margin-bottom: 14px; }
+  h1 { font: 700 var(--t-h1)/1.04 var(--f-display); letter-spacing: -.025em; margin-bottom: 18px; }
+  .lede { font-size: var(--t-lg); color: var(--ink-2); max-width: 560px; margin-bottom: 28px; }
+  .primary { min-height: 112px; }
+  .primary .cta-row { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+  .primary .meta { margin-top: 12px; font-size: var(--t-sm); color: var(--muted); }
+  .primary .alts { margin-top: 6px; font-size: var(--t-sm); color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 16px; }
+  .primary .alts a { color: var(--brand); font-weight: 500; text-decoration: none; }
+  .primary .alts a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .loading { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: var(--t-sm); padding: 14px 0; }
+  .spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--line-2); border-top-color: var(--ink); animation: spin .8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .notice { border: 1px solid var(--line); background: var(--bg-soft); border-radius: var(--r); padding: 14px 16px; font-size: var(--t-sm); color: var(--ink-2); margin-bottom: 16px; max-width: 560px; }
+  .notice strong { color: var(--ink); display: block; margin-bottom: 2px; }
+  .notice.warn { background: var(--warn-lt); border-color: #FCD9A8; }
+  .hero-note { margin-top: 22px; font-size: var(--t-xs); color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 14px; }
+  .hero-note > * + *::before { content: '·'; margin-right: 14px; color: var(--line-2); }
+  .hero-note a { color: var(--brand); font-weight: 600; text-decoration: none; }
+
+  .shot { margin: 0; }
+  .shot img { width: 100%; height: auto; border-radius: 12px; border: 1px solid var(--line); box-shadow: 0 30px 60px -28px rgba(15,23,42,.32), 0 2px 6px rgba(15,23,42,.06); background: var(--bg-soft); }
+  .shot figcaption { margin-top: 10px; font-size: var(--t-xs); color: var(--muted); text-align: center; }
+
+  /* ── Sections ── */
+  .section { padding: 80px 0; }
+  .section.soft { background: var(--bg-soft); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+  .section-head { max-width: 760px; margin-bottom: 36px; }
+  h2 { font: 700 var(--t-h2)/1.12 var(--f-display); letter-spacing: -.02em; margin-bottom: 12px; }
+  .section-head p { font-size: var(--t-lg); color: var(--ink-2); }
+  .section-head p a { color: var(--brand); font-weight: 500; }
+  h3 { font: 600 var(--t-h3)/1.3 var(--f-display); letter-spacing: -.01em; }
+
+  /* What's inside */
+  .features { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 20px; }
+  .feature { border: 1px solid var(--line); border-radius: var(--r-lg); padding: 20px; background: #fff; }
+  .feature h3 { font-size: 16.5px; margin-bottom: 6px; }
+  .feature p { font-size: var(--t-sm); color: var(--ink-2); }
+
+  /* Platforms */
+  .platforms { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+  .platform { background: #fff; border: 1px solid var(--line); border-radius: var(--r-lg); padding: 22px; display: flex; flex-direction: column; gap: 14px; }
+  .platform.is-yours { border-color: var(--ink); box-shadow: 0 0 0 1px var(--ink); }
+  .platform-h { display: flex; align-items: center; gap: 10px; }
+  .platform-h .tag { margin-left: auto; font-size: 11.5px; font-weight: 600; color: var(--ok); background: var(--ok-lt); border: 1px solid #B7E4DD; border-radius: 99px; padding: 2px 9px; }
+  .platform .req { font-size: var(--t-xs); color: var(--muted); }
+  .files { list-style: none; display: flex; flex-direction: column; gap: 10px; }
+  .file { border-top: 1px solid var(--line); padding-top: 10px; }
+  .file-row { display: flex; flex-direction: column; gap: 2px; }
+  .file-row a { font-weight: 600; font-size: var(--t-sm); color: var(--brand); text-decoration: none; width: max-content; max-width: 100%; }
+  .file-row a:hover { text-decoration: underline; text-underline-offset: 3px; }
+  .file-row span { font-size: var(--t-xs); color: var(--muted); }
+  .file details { margin-top: 4px; font-size: var(--t-xs); color: var(--muted); }
+  .file summary { cursor: pointer; width: max-content; }
+  .file details code { display: block; word-break: break-all; margin-top: 4px; color: var(--ink-2); }
+  .file .none { font-size: var(--t-sm); color: var(--muted); }
+  .fine { margin-top: 20px; font-size: var(--t-sm); color: var(--muted); }
+  .fine a { color: var(--brand); font-weight: 500; }
+
+  /* Install steps */
+  .steps { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; }
+  .step { background: #fff; border: 1px solid var(--line); border-radius: var(--r-lg); padding: 22px; }
+  .step h3 { margin-bottom: 10px; }
+  .step ol { padding-left: 20px; display: flex; flex-direction: column; gap: 8px; font-size: var(--t-sm); color: var(--ink-2); }
+  .step code { background: var(--bg-soft); border: 1px solid var(--line); border-radius: 5px; padding: 1px 5px; overflow-wrap: anywhere; }
+  .step .warnline { margin-top: 12px; font-size: var(--t-xs); color: var(--muted); border-top: 1px dashed var(--line); padding-top: 10px; }
+  .signin { margin-top: 28px; display: flex; gap: 16px; align-items: flex-start; background: #fff; border: 1px solid var(--line); border-radius: var(--r-lg); padding: 20px 22px; }
+  .signin svg { flex: none; width: 22px; height: 22px; color: var(--brand); margin-top: 2px; }
+  .signin p { font-size: var(--t-sm); color: var(--ink-2); }
+  .signin p + p { margin-top: 6px; }
+  .signin a { color: var(--brand); font-weight: 500; }
+
+  footer { border-top: 1px solid var(--line); padding: 28px 0 36px; font-size: 13px; color: var(--muted); }
+  .foot-row { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+  .foot-row .brand { font-size: 15px; }
+  .foot-row .brand img { width: 24px; height: 24px; border-radius: 6px; }
+  .foot-links { display: flex; gap: 16px; flex-wrap: wrap; margin-left: auto; }
+  .foot-links a { text-decoration: none; color: var(--ink-2); }
+  .foot-links a:hover { color: var(--ink); text-decoration: underline; text-underline-offset: 3px; }
+
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .spinner { animation: none; } }
+  @media (max-width: 1000px) {
+    .features { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .platforms, .steps { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 900px) {
+    .hero-grid { grid-template-columns: 1fr; gap: 40px; }
+    .site-nav { display: none; }
+  }
+  @media (max-width: 600px) {
+    :root { --gut: 16px; }
+    .hero { padding: 40px 0 52px; }
+    .section { padding: 56px 0; }
+    .head-row { gap: 12px; }
+    .head-actions .btn-quiet { display: none; }
+    .btn-lg { width: 100%; }
+    .features { grid-template-columns: 1fr; }
+    .foot-links { margin-left: 0; }
+    .hero-note { flex-direction: column; gap: 4px; }
+    .hero-note > * + *::before { display: none; }
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<header class="site-head">
+  <div class="wrap head-row">
+    <a class="brand" href="index.html" aria-label="MetaCode home"><img src="img/metacode-mark.png" alt="" width="30" height="30"><span>MetaCode</span></a>
+    <nav class="site-nav" aria-label="Site">
+      <a href="index.html">Home</a>
+      <a href="index.html#plans">Plans</a>
+      <a href="/download" aria-current="page">Desktop app</a>
+    </nav>
+    <div class="head-actions">
+      <a class="btn btn-quiet" href="studio.html">Survey Studio</a>
+      <a class="btn btn-primary" href="app.html">Open the platform</a>
+    </div>
+  </div>
+</header>
+
+<main id="main">
+  <section class="hero" aria-labelledby="hero-title">
+    <div class="wrap hero-grid">
+      <div>
+        <p class="eyebrow">Desktop app</p>
+        <h1 id="hero-title">MetaCode Sheets</h1>
+        <p class="lede">The MetaCode spreadsheet for your computer. Open Excel and CSV files, ask the AI Assistant for a formula, code a column of text with your codebook and report intercoder reliability — with your workbooks kept on your own disk.</p>
+        <div id="missing" class="notice warn" role="status" hidden></div>
+        <div class="primary" id="primary" aria-live="polite">
+          <div class="loading"><span class="spinner" aria-hidden="true"></span>Finding the download for your computer…</div>
+        </div>
+        <p class="hero-note">
+          <span>Included with <span id="plan-names">Pro, Max and Ultra</span> — <a href="index.html#plans">see plans</a></span>
+          <span>Windows · macOS · Linux</span>
+        </p>
+      </div>
+      <figure class="shot">
+        <img src="img/sheets-screenshot.png" width="1280" height="800" alt="MetaCode Sheets with a sheet of Reddit posts coded by two coders, and the intercoder reliability panel showing percent agreement, Cohen's kappa and Krippendorff's alpha">
+        <figcaption>MetaCode Sheets on Linux: two coders' codes and their reliability, computed on the computer</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="inside-title">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">What's inside</p>
+        <h2 id="inside-title">A spreadsheet that knows your research workflow.</h2>
+      </div>
+      <div class="features">
+        <div class="feature"><h3>A real spreadsheet</h3><p>About 160 functions, sorting and filters, number formats, frozen panes and undo — fast with 100,000-row sheets.</p></div>
+        <div class="feature"><h3>Excel and CSV</h3><p>Opens and saves .xlsx and CSV. Formulas in imported files are calculated, never run as code or macros.</p></div>
+        <div class="feature"><h3>AI tools</h3><p>Formula suggestions and AI clean-up of a column — every change is previewed first, and one undo reverts it.</p></div>
+        <div class="feature"><h3>Coding and reliability</h3><p>AI Coding with your codebook, percent agreement and Cohen's κ as live formulas, and your MetaCode projects.</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section soft" id="all" aria-labelledby="all-title">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">All downloads</p>
+        <h2 id="all-title">Choose your computer</h2>
+        <p id="release-line">Loading the current version…</p>
+      </div>
+      <div class="platforms" id="platforms"></div>
+      <p class="fine" id="verify" hidden></p>
+    </div>
+  </section>
+
+  <section class="section" id="install" aria-labelledby="install-title">
+    <div class="wrap">
+      <div class="section-head">
+        <p class="eyebrow">Installing</p>
+        <h2 id="install-title">Install, then sign in with your MetaCode account.</h2>
+      </div>
+      <div class="steps">
+        <div class="step"><h3>Windows</h3>
+          <ol><li>Open the downloaded <b>.exe</b>.</li><li>Choose where to install it, then <b>Install</b>. No administrator rights are needed.</li><li>Open <b>MetaCode Sheets</b> from the Start menu or the desktop.</li></ol>
+          <p class="warnline">If Windows SmartScreen says it doesn't recognise the app, first check the file's SHA-256 against this page, then choose <b>More info → Run anyway</b>. IT departments can deploy the <b>.msi</b> instead.</p></div>
+        <div class="step"><h3>macOS</h3>
+          <ol><li>Open the downloaded <b>.dmg</b>.</li><li>Drag <b>MetaCode Sheets</b> into <b>Applications</b>.</li><li>Open it from Applications or Launchpad.</li></ol>
+          <p class="warnline">If macOS says it can't check the app for malicious software, check the file's SHA-256 against this page, then go to <b>System Settings → Privacy &amp; Security</b> and choose <b>Open Anyway</b>.</p></div>
+        <div class="step"><h3>Linux</h3>
+          <ol><li><b>AppImage:</b> make it executable and run it — <code>chmod +x MetaCode-Sheets-*.AppImage</code>, then <code>./MetaCode-Sheets-*.AppImage</code>.</li><li><b>Debian / Ubuntu:</b> <code>sudo apt install ./MetaCode-Sheets-*.deb</code>, then open it from your applications.</li></ol>
+          <p class="warnline">Your session is kept in the system keychain (libsecret / GNOME Keyring or KWallet). Without one you sign in each time you open the app.</p></div>
+      </div>
+      <div class="signin">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+        <div>
+          <p><b>Sign in with the same email and password you use on this website.</b> MetaCode Sheets checks your plan with MetaCode, then keeps working offline for up to <span id="offline-hours">a few days</span> between checks. AI features need a connection.</p>
+          <p>No paid plan yet? The app will offer you the upgrade; <a href="app.html#account">create a free account</a> or <a href="index.html#plans">compare plans</a> first.</p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot-row">
+    <a class="brand" href="index.html"><img src="img/metacode-mark.png" alt="" width="24" height="24"><span>MetaCode</span></a>
+    <span>A self-hosted, multi-method social media research platform.</span>
+    <nav class="foot-links" aria-label="Footer">
+      <a href="app.html">Platform</a>
+      <a href="studio.html">Survey Studio</a>
+      <a href="/download">Desktop app</a>
+      <a href="/status">System status</a>
+    </nav>
+  </div>
+</footer>
+<script src="js/plans.js"></script>
+<script>
+  // The installers of the newest published version (GET /api/desktop/downloads,
+  // desktop-api/downloads.js). Every button links to a file that exists; when
+  // nothing is published the page says so instead of showing buttons.
+  (function () {
+    const $ = id => document.getElementById(id);
+    const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+    const OS = {
+      windows: { name: 'Windows', req: '64-bit Windows 10 or 11' },
+      mac: { name: 'macOS', req: 'macOS 12 Monterey or later — Apple silicon or Intel' },
+      linux: { name: 'Linux', req: '64-bit Linux; the .deb is for Debian, Ubuntu and their relatives' }
+    };
+    const ARCH = { x64: 'x64', arm64: 'Apple silicon / ARM64', universal: 'Universal' };
+    const archLabel = (f) => f.os === 'mac' ? (f.arch === 'arm64' ? 'Apple silicon (M1 and later)' : f.arch === 'x64' ? 'Intel' : ARCH[f.arch] || f.arch) : (ARCH[f.arch] || f.arch);
+    const size = n => !n ? '' : n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : Math.max(1, Math.round(n / 1e6)) + ' MB';
+    const ext = name => (/\.([A-Za-z]+)$/.exec(name) || [, ''])[1];
+
+    // Plan names from plans.js, and the offline period from this server
+    try {
+      const names = MetaPlans.ORDER.filter(id => MetaPlans.has(id, 'desktop')).map(id => MetaPlans.get(id).name);
+      if (names.length) $('plan-names').textContent = MetaPlans.listNames(names);
+    } catch (e) { /* keep the default text */ }
+    fetch('/api/desktop/config').then(r => (r.ok ? r.json() : null)).then(c => {
+      const h = c && Number(c.offlineHours);
+      if (h) $('offline-hours').textContent = h % 24 === 0 ? (h / 24) + ' day' + (h === 24 ? '' : 's') : h + ' hours';
+    }).catch(() => {});
+
+    function detectOs() {
+      const ua = navigator.userAgent || '';
+      const p = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+      if (/iPhone|iPad|iPod|Android/i.test(ua) || (/Mac/i.test(p) && navigator.maxTouchPoints > 1)) return 'mobile';
+      if (/Win/i.test(p) || /Windows/i.test(ua)) return 'windows';
+      if (/Mac/i.test(p) || /Mac OS X/i.test(ua)) return 'mac';
+      if (/Linux|X11|CrOS/i.test(p + ' ' + ua)) return 'linux';
+      return 'unknown';
+    }
+    // Apple silicon or Intel? Chromium browsers say; elsewhere the graphics chip's name may tell. null = can't tell.
+    async function macArch() {
+      try {
+        if (navigator.userAgentData && navigator.userAgentData.getHighEntropyValues) {
+          const v = await navigator.userAgentData.getHighEntropyValues(['architecture']);
+          if (v && v.architecture) return /arm/i.test(v.architecture) ? 'arm64' : 'x64';
+        }
+      } catch (e) { /* not available */ }
+      try {
+        const gl = document.createElement('canvas').getContext('webgl');
+        const ext = gl && gl.getExtension('WEBGL_debug_renderer_info');
+        const r = ext ? String(gl.getParameter(ext.UNMASKED_RENDERER_WEBGL)) : '';
+        if (/Apple M\d/i.test(r)) return 'arm64';
+        if (/Intel|AMD|Radeon/i.test(r)) return 'x64';
+      } catch (e) { /* no WebGL */ }
+      return null;
+    }
+
+    const missing = new URLSearchParams(location.search).get('missing');
+    if (missing && /^[a-z0-9-]{1,40}$/.test(missing)) {
+      $('missing').hidden = false;
+      $('missing').innerHTML = '<strong>That download isn\'t part of the current version.</strong>Choose another file below.';
+    }
+
+    async function renderPrimary(data, os) {
+      const box = $('primary');
+      const files = data.files.filter(f => f.kind !== 'checksums');
+      const byId = id => files.find(f => f.id === id);
+      if (os === 'mobile') {
+        box.innerHTML = '<div class="notice"><strong>MetaCode Sheets is for Windows, Mac and Linux computers.</strong>Open this page on your computer to download it, or use MetaCode in your browser.</div>' +
+          '<div class="cta-row"><a class="btn btn-primary btn-lg" href="app.html">Open the platform</a><a class="btn btn-outline btn-lg" href="#all">See all downloads</a></div>';
+        return;
+      }
+      let main = null, alts = [], note = '';
+      if (os === 'windows') { main = byId('windows') || byId('windows-msi'); alts = [byId('windows-msi')]; }
+      if (os === 'linux') { main = byId('linux-appimage') || byId('linux-deb'); alts = [byId('linux-deb')]; }
+      if (os === 'mac') {
+        const arch = await macArch();
+        const arm = byId('mac-arm64'), intel = byId('mac-x64');
+        main = arch === 'x64' ? (intel || arm) : (arm || intel);
+        alts = [main === arm ? intel : arm];
+        if (!arch && arm && intel) note = 'Not sure which Mac you have? Apple menu → About This Mac: “Chip: Apple M…” is Apple silicon, “Processor: Intel” is Intel.';
+      }
+      alts = alts.filter(f => f && f !== main);
+      if (!main) {
+        box.innerHTML = (os === 'unknown' ? '' : '<div class="notice"><strong>There\'s no ' + esc(OS[os] ? OS[os].name : '') + ' download in this version.</strong>The files for other computers are listed below.</div>') +
+          '<div class="cta-row"><a class="btn btn-primary btn-lg" href="#all">Choose your computer</a></div>';
+        return;
+      }
+      const forWhat = os === 'mac' ? 'Mac' + (byId('mac-arm64') && byId('mac-x64') ? ' (' + archLabel(main) + ')' : '') : OS[os].name;
+      box.innerHTML = '<div class="cta-row"><a class="btn btn-primary btn-lg" id="primary-download" href="' + esc(main.url) + '">' +
+          '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12"/><polyline points="7 10 12 15 17 10"/><path d="M5 21h14"/></svg>' +
+          'Download for ' + esc(forWhat) + '</a></div>' +
+        '<p class="meta">Version ' + esc(data.version) + ' · .' + esc(ext(main.name)) + (main.size ? ' · ' + esc(size(main.size)) : '') + '</p>' +
+        '<p class="alts">' + alts.map(f => '<a href="' + esc(f.url) + '">' + (f.os === 'mac' ? 'For ' + esc(archLabel(f)) + ' Macs' : esc(f.label)) + '</a>').join('') + '<a href="#all">Other computers</a></p>' +
+        (note ? '<p class="meta">' + esc(note) + '</p>' : '');
+    }
+
+    function renderAll(data, os) {
+      const when = data.publishedAt ? new Date(data.publishedAt).toLocaleDateString(undefined, { year: 'numeric', month: 'long', day: 'numeric' }) : null;
+      $('release-line').innerHTML = 'Version ' + esc(data.version) + (when ? ', published ' + esc(when) : '') +
+        (data.notesUrl ? ' · <a href="' + esc(data.notesUrl) + '" rel="noopener">What\'s new</a>' : '');
+      $('platforms').innerHTML = ['windows', 'mac', 'linux'].map(key => {
+        const files = data.files.filter(f => f.os === key);
+        return '<div class="platform' + (key === os ? ' is-yours' : '') + '"><div class="platform-h"><h3>' + esc(OS[key].name) + '</h3>' + (key === os ? '<span class="tag">Your computer</span>' : '') + '</div>' +
+          '<p class="req">' + esc(OS[key].req) + '</p><ul class="files">' +
+          (files.length ? files.map(f => '<li class="file"><div class="file-row"><a href="' + esc(f.url) + '">' + esc(f.label) + '</a><span>' + esc(archLabel(f)) + (f.size ? ' · ' + esc(size(f.size)) : '') + '</span></div>' +
+            (f.sha256 ? '<details><summary>SHA-256</summary><code>' + esc(f.sha256) + '</code></details>' : '') + '</li>').join('')
+            : '<li class="file"><p class="none">Not available in this version.</p></li>') +
+          '</ul></div>';
+      }).join('');
+      const sums = data.files.find(f => f.kind === 'checksums');
+      const v = $('verify');
+      v.hidden = false;
+      v.innerHTML = 'Each link downloads the file from MetaCode\'s published release' + (sums ? '. Checksums for every file: <a href="' + esc(sums.url) + '">' + esc(sums.name) + '</a>.' : '.') +
+        ' To check a download: <code>certutil -hashfile &lt;file&gt; SHA256</code> on Windows, <code>shasum -a 256 &lt;file&gt;</code> on macOS, <code>sha256sum &lt;file&gt;</code> on Linux.';
+    }
+
+    function renderNone(data, retry) {
+      $('platforms').innerHTML = '';
+      $('verify').hidden = true;
+      $('install').hidden = true;
+      if (data && data.reason === 'unreachable') {
+        $('release-line').textContent = 'The list of downloads couldn\'t be loaded.';
+        $('primary').innerHTML = '<div class="notice warn"><strong>The downloads couldn\'t be loaded just now.</strong>' + esc(data.hint || 'Try again in a minute.') + '</div>' +
+          '<div class="cta-row"><button type="button" class="btn btn-primary btn-lg" id="retry">Try again</button></div>';
+        $('retry').onclick = retry;
+        return;
+      }
+      $('release-line').textContent = 'Nothing to download yet.';
+      $('primary').innerHTML = '<div class="notice"><strong>' + (data && data.reason === 'off' ? 'Downloads aren\'t offered on this server.' : 'MetaCode Sheets hasn\'t been published yet.') + '</strong>' +
+        (data && data.reason === 'off' ? esc(data.message || '') : 'The installers appear here as soon as the first version is released. Until then, everything is available in your browser.') + '</div>' +
+        '<div class="cta-row"><a class="btn btn-primary btn-lg" href="app.html">Open the platform</a></div>';
+    }
+
+    async function load() {
+      $('primary').innerHTML = '<div class="loading"><span class="spinner" aria-hidden="true"></span>Finding the download for your computer…</div>';
+      let data = null;
+      try {
+        const r = await fetch('/api/desktop/downloads', { cache: 'no-store' });
+        data = await r.json().catch(() => null);
+        if (!data) data = { available: false, reason: 'unreachable', hint: 'The server answered ' + r.status + '. Try again in a minute.' };
+      } catch (e) { data = { available: false, reason: 'unreachable', hint: 'Check your connection, then try again.' }; }
+      if (!data.available || !Array.isArray(data.files)) return renderNone(data, load);
+      $('install').hidden = false;
+      const os = detectOs();
+      renderAll(data, os);
+      await renderPrimary(data, os);
+    }
+    load();
+  })();
+</script>
+</body>
+</html>
