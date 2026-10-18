@@ -1,0 +1,5 @@
+{
+  "type": "module",
+  "private": true,
+  "description": "Shared, dependency-free modules of MetaCode Sheets (engine, file formats) — ES modules used by the app's window, its workers and the tests."
+}

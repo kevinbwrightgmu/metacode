@@ -1,0 +1,19 @@
+{
+  // Type-checks the desktop app's JavaScript (files with // @ts-check):
+  // npm run typecheck (uses the repository's TypeScript).
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "allowJs": true,
+    "checkJs": false,
+    "noEmit": true,
+    "strict": true,
+    "noImplicitAny": true,
+    "skipLibCheck": true,
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "types": ["node"],
+    "typeRoots": ["../node_modules/@types"]
+  },
+  "include": ["src/shared/**/*.js"]
+}
