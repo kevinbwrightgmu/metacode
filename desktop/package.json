@@ -1,8 +1,9 @@
 {
   "name": "metacode-sheets",
   "productName": "MetaCode Sheets",
+  "desktopName": "metacode-sheets.desktop",
   "version": "1.0.0",
-  "description": "MetaCode Sheets — the MetaCode desktop spreadsheet for Pro, Max and Ultra subscribers",
+  "description": "MetaCode Sheets \u2014 the MetaCode desktop spreadsheet for Pro, Max and Ultra subscribers",
   "main": "src/main/main.js",
   "private": true,
   "author": "MetaCode",

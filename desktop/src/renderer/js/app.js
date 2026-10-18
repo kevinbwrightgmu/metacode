@@ -62,7 +62,8 @@ class App {
     // files opened from the system (double-click, command line) wait until access is confirmed
     sheets.on('app:openFile', (/** @type {any} */ f) => { if (this.unlocked()) this.openAny(f.path); else this.pendingFiles.push(f.path); });
     sheets.on('app:beforeQuit', () => this.beforeQuit());
-    sheets.on('theme:changed', () => { this.ws.grid.colors = this.ws.grid.readColors(); this.ws.grid.invalidate(); });
+    sheets.on('theme:changed', (/** @type {any} */ t) => this.applyTheme(!!t.dark));
+    this.applyTheme(!!this.info.dark);
     window.addEventListener('keydown', e => {
       if (e.defaultPrevented) return;
       const cmd = commandFor(e, isMac);
@@ -86,6 +87,11 @@ class App {
   }
   /** @param {string} theme */
   async setTheme(theme) { await sheets.setSettings({ theme }); this.applySettings(await sheets.getSettings()); }
+  /** Light or dark, as the main process decides (system setting or View › Theme) @param {boolean} dark */
+  applyTheme(dark) {
+    document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+    if (this.ws) { this.ws.grid.colors = this.ws.grid.readColors(); this.ws.grid.invalidate(); }
+  }
 
   unlocked() { return this.state.status === 'active' || this.state.status === 'offline'; }
 
@@ -120,7 +126,7 @@ class App {
   renderTabs() {
     const bar = this.els.tabs;
     bar.replaceChildren();
-    const home = h('button.doc-tab.home', { role: 'tab', 'aria-selected': this.current ? 'false' : 'true', title: 'Home', html: icon('home') }, h('span.name', null, 'Home'));
+    const home = h('button.doc-tab.home-tab', { role: 'tab', 'aria-selected': this.current ? 'false' : 'true', title: 'Home', html: icon('home') }, h('span.name', null, 'Home'));
     home.onclick = () => this.showHome();
     bar.append(home);
     for (const d of this.docs) {

@@ -81,7 +81,6 @@ export class Grid {
     this.editor.addEventListener('click', () => this.emit('editInput', { text: this.editor.value, caret: this.editor.selectionStart }));
     this.editor.addEventListener('blur', () => { if (this.editing && !this.keepEditing) setTimeout(() => { if (this.editing && document.activeElement !== this.editor && !this.keepEditing && !this.el.contains(document.activeElement) && !this.formulaBarFocused()) this.commitEdit(null); }, 0); });
     new ResizeObserver(() => this.layout()).observe(host);
-    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => { this.colors = this.readColors(); this.invalidate(); });
   }
 
   formulaBarFocused() { const a = document.activeElement; return !!a && a.classList.contains('formula-input'); }
@@ -89,7 +88,7 @@ export class Grid {
   readColors() {
     const cs = getComputedStyle(document.documentElement);
     const v = (/** @type {string} */ n) => cs.getPropertyValue(n).trim();
-    return { bg: v('--grid-bg'), line: v('--grid-line'), text: v('--grid-text'), header: v('--grid-header'), headerText: v('--grid-header-text'), headerActive: v('--grid-header-active'), headerActiveText: v('--grid-header-active-text'), sel: v('--grid-sel'), selBorder: v('--grid-sel-border'), freeze: v('--grid-freeze'), find: v('--grid-find'), font: v('--font'), dark: matchMedia('(prefers-color-scheme: dark)').matches };
+    return { bg: v('--grid-bg'), line: v('--grid-line'), text: v('--grid-text'), header: v('--grid-header'), headerText: v('--grid-header-text'), headerActive: v('--grid-header-active'), headerActiveText: v('--grid-header-active-text'), sel: v('--grid-sel'), selBorder: v('--grid-sel-border'), freeze: v('--grid-freeze'), find: v('--grid-find'), font: v('--font'), dark: document.documentElement.dataset.theme === 'dark' };
   }
 
   /* ── Binding to a document ─────────────────── */
@@ -331,9 +330,11 @@ export class Grid {
           }
           const ty = valign === 'top' ? y + 2 + (st.size || 11) * PT * 0.6 : valign === 'middle' ? y + hgt / 2 : y + hgt - 2 - (st.size || 11) * PT * 0.55;
           if (isNum && tw > wdt - 6) {
-            // a number that doesn't fit is shown as ### (as in Excel), never cut off
+            // General numbers lose decimals to fit (as in Excel); a formatted
+            // number that doesn't fit is shown as ###, never cut off
+            const fitted = !st.numFmt || st.numFmt === 'General' ? this.fitGeneral(/** @type {number} */ (v), wdt - 6, ctx.font) : null;
             ctx.save(); ctx.beginPath(); ctx.rect(x, y, wdt, hgt); ctx.clip();
-            this.fillText('#'.repeat(Math.max(1, Math.floor((wdt - 6) / Math.max(4, this.measure('#', ctx.font))))), 'right', x, wdt, 4, ty);
+            this.fillText(fitted || '#'.repeat(Math.max(1, Math.floor((wdt - 6) / Math.max(4, this.measure('#', ctx.font))))), 'right', x, wdt, 4, ty);
             ctx.restore();
           } else if (tw > room - pad || align !== 'left') {
             ctx.save(); ctx.beginPath(); ctx.rect(x, y, align === 'left' ? room : wdt, hgt); ctx.clip();
@@ -396,6 +397,16 @@ export class Grid {
         ctx.beginPath(); ctx.moveTo(bx + 4, by + 6); ctx.lineTo(bx + 12, by + 6); ctx.lineTo(bx + 8, by + 11); ctx.closePath(); ctx.fill();
       }
     }
+  }
+
+  /** A General number in fewer digits so it fits a width (null when it can't) @param {number} v @param {number} width @param {string} font */
+  fitGeneral(v, width, font) {
+    for (let digits = 10; digits >= 1; digits--) {
+      let t = Number(v.toPrecision(digits)).toString();
+      if (/e/.test(t) || Math.abs(v) >= 1e11) t = v.toExponential(Math.max(0, digits - 1)).replace(/e([+-])(\d)$/, 'E$10$2').replace('e', 'E');
+      if (this.measure(t, font) <= width) return t;
+    }
+    return null;
   }
 
   /** @param {string} text @param {string} align @param {number} x @param {number} w @param {number} pad @param {number} y */

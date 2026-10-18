@@ -1,4 +1,5 @@
 // Builds the installers: node scripts/build.js [--linux] [--win] [--mac] [--dir]
+// A platform can name its targets: --win=nsis (MSI needs Windows or Wine).
 //
 // Before packaging:
 //   • checks that the vendored website scripts are current (npm run sync)
@@ -52,12 +53,21 @@ async function main() {
   fs.writeFileSync(CONFIG, JSON.stringify(cfg, null, 2) + '\n');
   try {
     const builder = require('electron-builder');
-    const targets = [];
-    if (args.includes('--linux')) targets.push(builder.Platform.LINUX);
-    if (args.includes('--win')) targets.push(builder.Platform.WINDOWS);
-    if (args.includes('--mac')) targets.push(builder.Platform.MAC);
+    /** @type {Map<any, any>} */
+    const targets = new Map();
+    for (const [flag, platform] of [['--linux', builder.Platform.LINUX], ['--win', builder.Platform.WINDOWS], ['--mac', builder.Platform.MAC]]) {
+      const a = args.find(x => x === flag || x.startsWith(flag + '='));
+      if (!a) continue;
+      const names = a.includes('=') ? a.split('=')[1].split(',').filter(Boolean) : null;
+      const one = builder.createTargets([platform], args.includes('--dir') ? 'dir' : (names ? names[0] : null));
+      if (names && names.length > 1) {
+        const archMap = one.get(platform);
+        for (const [arch, list] of archMap) archMap.set(arch, names.length ? names : list);
+      }
+      for (const [k, v] of one) targets.set(k, v);
+    }
     const opts = { projectDir: ROOT, config: path.join(ROOT, 'electron-builder.yml'), publish: 'never' };
-    if (targets.length) opts.targets = builder.createTargets(targets, args.includes('--dir') ? 'dir' : null);
+    if (targets.size) opts.targets = targets;
     const out = await builder.build(opts);
     console.log('\nBuilt:\n' + out.map(f => '  ' + path.relative(ROOT, f)).join('\n'));
   } finally {

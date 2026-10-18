@@ -85,6 +85,7 @@ linux:
   synopsis: The MetaCode desktop spreadsheet
   description: MetaCode Sheets — a spreadsheet with MetaCode's AI coding and reliability tools, for Pro, Max and Ultra subscribers.
   mimeTypes: [application/x-metacode-sheets]
+  syncDesktopName: true
 deb:
   # libsecret: the system keychain that keeps the session encrypted
   depends: [libgtk-3-0, libnotify4, libnss3, libxss1, libxtst6, xdg-utils, libatspi2.0-0, libuuid1, libsecret-1-0]

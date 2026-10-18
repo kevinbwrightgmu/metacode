@@ -1,0 +1,112 @@
+# MetaCode Sheets (desktop/): tests on every change to the app or its server
+# API, installers for Windows, macOS and Linux on demand and for tags
+# desktop-v*. Signing and notarization use the secrets described in
+# docs/desktop/RELEASING.md; without them the installers are built unsigned.
+name: Desktop app
+
+on:
+  pull_request:
+    paths: ['desktop/**', 'desktop-api/**', 'public/js/plans.js', 'public/js/reliability-stats.js', 'public/js/ai-coding.js', '.github/workflows/desktop.yml']
+  push:
+    tags: ['desktop-v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+      - run: npm ci
+        working-directory: desktop
+      - name: Type check
+        run: npm run typecheck
+        working-directory: desktop
+      - name: Unit tests (engine, files, CSV/.xlsx, main process, access rules)
+        run: npm test
+        working-directory: desktop
+      - name: Server tests for the desktop API
+        run: node --test --test-force-exit test/desktop-api.test.js
+      - name: End-to-end tests (Electron, Linux)
+        if: runner.os == 'Linux'
+        working-directory: desktop
+        run: |
+          # Ubuntu 24.04 restricts the user namespaces Chromium's sandbox needs
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo apt-get update && sudo apt-get install -y xvfb
+          pip install openpyxl==3.1.5 || true
+          xvfb-run -a -s "-screen 0 1440x900x24" npm run test:e2e
+
+  build:
+    name: Installers (${{ matrix.os }})
+    needs: test
+    if: github.event_name != 'pull_request'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            script: dist:linux
+          - os: windows-latest
+            script: dist:win
+          - os: macos-latest
+            script: dist:mac
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm ci
+        working-directory: desktop
+      - name: Build
+        working-directory: desktop
+        env:
+          # the server's lease public key(s) (not secret): pinned into the app
+          DESKTOP_LEASE_PUBLIC_KEYS: ${{ vars.DESKTOP_LEASE_PUBLIC_KEYS }}
+          # Windows / macOS code signing (optional)
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          CSC_IDENTITY_AUTO_DISCOVERY: ${{ secrets.CSC_LINK != '' }}
+          # macOS notarization (optional)
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: npm run ${{ matrix.script }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: metacode-sheets-${{ runner.os }}
+          path: |
+            desktop/dist/*.exe
+            desktop/dist/*.msi
+            desktop/dist/*.dmg
+            desktop/dist/*.zip
+            desktop/dist/*.AppImage
+            desktop/dist/*.deb
+          if-no-files-found: error
+
+  release:
+    name: Draft release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/desktop-v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - name: Checksums
+        run: cd artifacts && sha256sum * > SHA256SUMS.txt
+      - name: Create a draft release (published by a person after checking it)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" artifacts/* --repo "${GITHUB_REPOSITORY}" --draft --title "MetaCode Sheets ${GITHUB_REF_NAME#desktop-v}" --notes "Installers for Windows, macOS and Linux. See docs/desktop/README.md."
