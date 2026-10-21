@@ -18,6 +18,7 @@ project-data/
 account-data/
 scraper-data/
 lab-data/
+collab-data/
 # VPN gateway kit: the generated secrets and gluetun's state
 deploy/vpn-gateway/vpn.env
 deploy/vpn-gateway/gluetun/*

@@ -22,6 +22,8 @@ const App = (() => {
     if (window.CloudSync) { try { CloudSync.noteWorkspace(); } catch (e) { /* never block saving */ } }
     // Autosave to the linked saved project (Projects page), if any
     if (typeof ProjectsView !== 'undefined') { try { ProjectsView.noteChange(); } catch (e) { /* never block saving */ } }
+    // A shared project: send what changed to the server (collab.js)
+    if (typeof Collab !== 'undefined') { try { Collab.noteChange(); } catch (e) { /* never block saving */ } }
   }
   function load() {
     try {
@@ -67,6 +69,7 @@ const App = (() => {
     'metrics':      () => EngagementViz.render(),
     'export':       renderExport,
     'account':      param => Account.renderPage(document.getElementById('view-container'), param),
+    'invite':       param => Collab.renderInvite(document.getElementById('view-container'), param),   // an invitation to a shared project
     // Survey Studio has its own page now; old #surveys links go there.
     'surveys':      param => { location.replace('studio.html' + (param ? '#' + param : '')); }
   };
@@ -76,7 +79,7 @@ const App = (() => {
     'codebook':'Codebook','ai-coding':'AI Coding','human-coding':'Human Coding',
     'reliability':'Reliability Analysis','csv-analyzer':'Analyze CSV (NetworkX)',
     'network':'Network Graph',
-    'metrics':'Metrics','export':'Export Data','surveys':'Survey Studio','account':'Account & plan'
+    'metrics':'Metrics','export':'Export Data','surveys':'Survey Studio','account':'Account & plan','invite':'Invitation'
   };
 
   // Former route ids that must keep working (bookmarks, browser history).
@@ -354,7 +357,7 @@ const App = (() => {
   function saveProject() {
     const name = document.getElementById('s-name').value.trim() || 'Untitled Project';
     const desc = document.getElementById('s-desc').value.trim();
-    setState({ project: { name, description: desc } });
+    setState({ project: Object.assign({}, state.project, { name, description: desc }) });   // (keeps a shared project's link, collab.js)
     document.getElementById('topbar-project').textContent = name;
     notify('Project saved', 'success');
   }
@@ -981,7 +984,7 @@ const App = (() => {
         document.getElementById('nav-account').hidden = !on;
         // Who is signed in or their plan changed (or just became known): redraw pages that show it
         const now = !on ? 'off' : !me ? 'unknown' : me.signedIn ? me.user.id + ':' + me.plan.id : 'out';
-        if (now !== seen && now !== 'off' && now !== 'unknown' && ['account', 'ai-coding', 'scraper', 'scraper-beta', 'csv-analyzer', 'network'].includes(currentView)) navigate(location.hash.slice(1) || currentView);
+        if (now !== seen && now !== 'off' && now !== 'unknown' && ['account', 'ai-coding', 'scraper', 'scraper-beta', 'csv-analyzer', 'network', 'invite', 'projects'].includes(currentView)) navigate(location.hash.slice(1) || currentView);
         seen = now;
       });
     }

@@ -187,6 +187,17 @@ const ProjectsView = (() => {
     return r;
   }
 
+  // Saves the open project as a new saved project without linking to it (a
+  // private copy of a shared project; the shared one stays open)
+  async function saveCopy(name) {
+    const s = App.getState();
+    const project = { name: name || s.project.name, description: s.project.description || '' };
+    const r = await api('', { method: 'POST', body: { name: project.name, description: project.description, data: Object.assign(snapshot(), { project }) } });
+    App.notify('Saved a private copy “' + r.project.name + '”', 'success');
+    refreshListIfShown();
+    return r;
+  }
+
   // Shows a name the saved project already has on the open project (state,
   // top bar, link) without counting it as an unsaved change.
   function adoptName(name) {
@@ -201,6 +212,12 @@ const ProjectsView = (() => {
   /* ── Opening ────────────────────────────── */
   // Before replacing the open project: save it if it's linked, or ask.
   async function protectCurrent() {
+    // A shared project (collab.js) is kept on the server: send what's waiting first
+    if (typeof Collab !== 'undefined' && Collab.active()) {
+      let sent = false;
+      try { sent = await Collab.flush(); } catch (e) { sent = false; }
+      return sent || confirm('Some changes to the shared project couldn\'t be sent yet (they\'re in this browser only). Continue anyway and lose them?');
+    }
     const link = readLink();
     if (link) {
       if (link.dirty) { try { await saveNow(true); } catch (e) { return confirm('The current project couldn\'t be saved. Continue anyway and lose its latest changes?'); } }
@@ -219,7 +236,8 @@ const ProjectsView = (() => {
     });
   }
 
-  function loadIntoBrowser(data, link) {
+  // Replaces the open project; `shared` links it to a shared project (collab.js)
+  function loadIntoBrowser(data, link, shared) {
     const patch = {};
     DATA_KEYS.forEach(k => { patch[k] = data[k]; });
     if (!patch.project) patch.project = { name: 'Untitled Project', description: '' };
@@ -229,6 +247,7 @@ const ProjectsView = (() => {
     if (patch.networkAnalysis === undefined) patch.networkAnalysis = null;
     clearTimeout(timer);
     writeLink(null);                 // don't autosave the old link with the new data
+    if (typeof Collab !== 'undefined') Collab.setLink(shared || null);
     App.setState(patch);
     writeLink(link);
     // Reload so every page starts from the opened project
@@ -265,6 +284,7 @@ const ProjectsView = (() => {
         </div>
       </div>
       <div class="card" id="pj-current" style="margin-bottom:20px"></div>
+      <div id="pj-shared"></div>
       <div id="pj-legacy"></div>
       <div class="card" style="padding:0;overflow:hidden">
         <div style="padding:16px 20px 8px" class="card-title">Saved projects</div>
@@ -275,6 +295,7 @@ const ProjectsView = (() => {
     renderCurrent();
     refreshList();
     renderLegacy();
+    if (typeof Collab !== 'undefined') Collab.renderSharedList(document.getElementById('pj-shared'));
   }
 
   async function renderLegacy() {
@@ -301,6 +322,28 @@ const ProjectsView = (() => {
     const n = counts(s);
     const link = readLink();
     const stats = n.posts + ' posts · ' + n.aiCoded + ' AI-coded · ' + n.humanCoded + ' human-coded · ' + n.dimensions + ' codebook dimension' + (n.dimensions === 1 ? '' : 's');
+    // A shared project: saved on the server as it changes (collab.js); a private copy can still be kept here
+    if (typeof Collab !== 'undefined' && Collab.active()) {
+      box.innerHTML = `
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap">
+          <div>
+            <div style="font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--tx-muted)">Open now</div>
+            <div style="font:700 18px var(--f-display);margin:4px 0">${esc(s.project.name)}</div>
+            <div class="text-muted" style="font-size:13px">${esc(stats)}</div>
+            ${Collab.currentCardHTML()}
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-secondary" id="pj-copy">Save a private copy</button>
+            <button class="btn btn-secondary" id="pj-chat">Chat</button>
+            <button class="btn btn-primary" id="pj-share">${Collab.link().role === 'owner' ? 'Share…' : 'People…'}</button>
+          </div>
+        </div>`;
+      document.getElementById('pj-copy').onclick = () => nameDialog('Save a private copy', s.project.name + ' (copy)', name => saveCopy(name));
+      document.getElementById('pj-chat').onclick = () => Collab.openChat();
+      document.getElementById('pj-share').onclick = () => Collab.openShare();
+      Collab.wireCurrentCard();
+      return;
+    }
     let status;
     if (link) {
       status = saving ? '<span class="badge badge-blue">Saving…</span>'
@@ -319,11 +362,14 @@ const ProjectsView = (() => {
             <button class="btn btn-secondary" id="pj-saveas">Save as new copy</button>
             <button class="btn btn-primary" id="pj-savenow">Save now</button>`
           : `<button class="btn btn-primary" id="pj-saveas">Save this project</button>`}
+          ${typeof Collab !== 'undefined' && Collab.available() ? '<button class="btn btn-secondary" id="pj-share">Share…</button>' : ''}
         </div>
       </div>`;
     const sn = document.getElementById('pj-savenow');
     if (sn) sn.onclick = () => saveNow(false).catch(() => {});
     document.getElementById('pj-saveas').onclick = () => nameDialog(link ? 'Save as a new copy' : 'Save this project', link ? s.project.name + ' (copy)' : s.project.name, name => saveAsNew(name));
+    const sh = document.getElementById('pj-share');
+    if (sh) sh.onclick = () => Collab.openShare();
     const as = document.getElementById('pj-autosave');
     if (as) as.onchange = () => { const l = readLink(); if (l) { l.autosave = as.checked; writeLink(l); if (as.checked && l.dirty) saveNow(true).catch(() => {}); } };
   }
@@ -452,5 +498,5 @@ const ProjectsView = (() => {
     if (e.detail && e.detail.kinds.includes('projects') && App.getCurrentView && App.getCurrentView().id === 'projects') render();
   });
 
-  return { render, noteChange, saveNow, link: readLink };
+  return { render, noteChange, saveNow, link: readLink, protectCurrent, loadIntoBrowser, unlink: () => { clearTimeout(timer); writeLink(null); } };
 })();

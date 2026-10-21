@@ -43,7 +43,7 @@ app.use(statusSite.hostRouter);
 // and the scraper routes make requests to Reddit on this server's behalf, so
 // only MetaCode's own pages (same origin) may call them. The other routes
 // keep the permissive CORS they always had.
-const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?|account(\/.*)?|billing\/(checkout|portal|sync)|network\/analyze|lab(\/.*)?|desktop(\/.*)?)\/?$/i;
+const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?|account(\/.*)?|billing\/(checkout|portal|sync)|network\/analyze|lab(\/.*)?|desktop(\/.*)?|collab(\/.*)?)\/?$/i;
 const corsForAll = cors();
 app.use((req, res, next) => (AI_ROUTE.test(req.path) ? next() : corsForAll(req, res, next)));
 // …and state-changing requests to them must say they come from this site:
@@ -80,6 +80,10 @@ app.get('/s/:publicId', surveys.pageHandler);
 // Saved projects (Projects page) — also before the shared JSON parser (large projects)
 const projects = createProjects();
 app.use('/api/projects', projects.router);
+// Shared projects: members, roles, invitations, live updates and chat (collab/)
+const { createCollab } = require('./collab');
+const collab = createCollab({ accounts, publicUrl: () => accounts.config().publicUrl || null });
+app.use('/api/collab', collab.router);
 app.use(express.json({ limit: '10mb' }));
 app.get('/status', statusSite.page);   // the status page on the main site too
 // Pages, scripts and styles are revalidated on every load, so an updated
@@ -2370,6 +2374,7 @@ function start(port) {
       accounts.flush();
       scraper.shutdown();
       aiLab.shutdown();
+      collab.shutdown();
       statusMonitor.stop();
       scraper.onUpgrade.closeAll();
       emisPython.stop();
@@ -2435,4 +2440,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, start, scraper, accounts, aiLab, desktopApi };
+module.exports = { app, start, scraper, accounts, aiLab, desktopApi, collab };

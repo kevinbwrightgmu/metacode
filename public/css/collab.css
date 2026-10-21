@@ -1,0 +1,130 @@
+/* ══════════════════════════════════════════════
+   collab.css — shared projects (js/collab.js): the status in the top bar,
+   the Share dialog, conflicts, the chat panel and the invitation page
+   ══════════════════════════════════════════════ */
+
+/* Top bar */
+.cl-slot { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.cl-slot[hidden] { display: none; }
+.cl-btn {
+  display: inline-flex; align-items: center; gap: 6px; position: relative;
+  height: 32px; padding: 0 10px; border-radius: var(--r-sm);
+  border: 1px solid var(--border); background: var(--bg-surface);
+  font-size: 12.5px; font-weight: 500; color: var(--tx-second); cursor: pointer;
+  white-space: nowrap;
+}
+.cl-btn:hover { background: var(--bg-muted); color: var(--tx-primary); }
+.cl-btn svg { width: 15px; height: 15px; flex-shrink: 0; }
+.cl-btn:focus-visible, .cl-link:focus-visible, .cl-badge:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.cl-unread {
+  min-width: 17px; height: 17px; padding: 0 5px; border-radius: 9px;
+  background: var(--error); color: #fff; font-size: 10.5px; font-weight: 700;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.cl-status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--tx-second); white-space: nowrap; }
+.cl-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--tx-muted); flex-shrink: 0; }
+.cl-live .cl-dot { background: var(--success); }
+.cl-saving .cl-dot { background: var(--blue); }
+.cl-wait .cl-dot { background: var(--warning); }
+.cl-off .cl-dot { background: var(--error); }
+.cl-avatars { display: inline-flex; }
+.cl-avatars:empty { display: none; }
+.cl-avatars .cl-avatar + .cl-avatar { margin-left: -6px; }
+.cl-avatar {
+  width: 24px; height: 24px; border-radius: 50%; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: var(--violet-lt); color: var(--violet); border: 2px solid var(--bg-surface);
+  font-size: 10px; font-weight: 700; vertical-align: middle;
+}
+.cl-avatar.cl-more { background: #F1F5F9; color: var(--tx-second); }
+.cl-avatar.cl-on { box-shadow: 0 0 0 2px var(--success); }
+.cl-badge {
+  font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 10px;
+  background: #F1F5F9; color: var(--tx-second); border: 0; white-space: nowrap;
+}
+.cl-badge.cl-warn { background: var(--amber-lt); color: #92400E; cursor: pointer; }
+.cl-link { background: none; border: 0; padding: 0; color: var(--blue); font-size: 12px; cursor: pointer; text-decoration: underline; white-space: nowrap; }
+
+/* Share dialog */
+.cl-roles { margin: 10px 0 10px 18px; font-size: 13.5px; color: var(--tx-second); }
+.cl-roles li { margin: 3px 0; }
+.cl-invite { margin-bottom: 18px; }
+.cl-invite-row { display: flex; gap: 8px; margin-top: 8px; }
+.cl-invite-row select { flex: 1; }
+.cl-invite .form-hint { margin-top: 8px; }
+.cl-h { font-size: 11.5px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--tx-muted); margin: 14px 0 6px; }
+.cl-members td, .cl-invites td { vertical-align: middle; }
+.cl-members select { width: auto; padding: 4px 8px; }
+.cl-result { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.cl-result-no { color: var(--tx-second); }
+.cl-copy { display: flex; gap: 6px; margin-top: 6px; }
+.cl-copy input { flex: 1; font-family: var(--f-mono); font-size: 11.5px; }
+
+/* Conflicts */
+.cl-conflict { border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px 12px; margin-bottom: 10px; }
+.cl-conflict-title { font-weight: 600; font-size: 13.5px; margin-bottom: 8px; word-break: break-word; }
+.cl-conflict-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.cl-conflict-h { font-size: 11.5px; font-weight: 600; color: var(--tx-muted); text-transform: uppercase; letter-spacing: .05em; margin-bottom: 4px; }
+.cl-conflict pre { max-height: 160px; overflow: auto; background: var(--bg-muted); border-radius: var(--r-sm); padding: 6px 8px; font-size: 11px; margin-bottom: 6px; white-space: pre-wrap; word-break: break-word; }
+@media (max-width: 600px) { .cl-conflict-cols { grid-template-columns: 1fr; } }
+
+/* Projects page */
+.cl-current { margin-top: 8px; font-size: 13px; }
+
+/* Chat panel (same place as the assistant's) */
+.cl-chat {
+  position: fixed; top: 0; right: 0; bottom: 0; width: 360px; max-width: 100%;
+  display: flex; flex-direction: column; background: var(--bg-surface);
+  border-left: 1px solid var(--border); box-shadow: -12px 0 32px rgba(15,23,42,.10);
+  z-index: 890; transform: translateX(100%); visibility: hidden;
+  transition: transform .25s ease, visibility 0s linear .25s;
+}
+.cl-chat.is-open { transform: translateX(0); visibility: visible; transition: transform .25s ease, visibility 0s linear 0s; }
+.cl-chat-head { height: var(--topbar-h); flex-shrink: 0; display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 10px 0 16px; border-bottom: 1px solid var(--border); }
+.cl-chat-title { font-family: var(--f-display); font-size: 14.5px; font-weight: 600; }
+.cl-chat-sub { font-size: 11.5px; color: var(--tx-second); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 260px; }
+.cl-chat-log { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.cl-chat-empty { font-size: 13px; }
+.cl-msg { max-width: 88%; align-self: flex-start; }
+.cl-msg.cl-mine { align-self: flex-end; }
+.cl-msg-meta { font-size: 11px; color: var(--tx-muted); margin-bottom: 2px; }
+.cl-msg-text { background: var(--bg-muted); border: 1px solid var(--border); border-radius: 12px; padding: 7px 10px; font-size: 13.5px; white-space: pre-wrap; word-break: break-word; }
+.cl-mine .cl-msg-text { background: var(--blue-lt); border-color: var(--blue-mid); }
+.cl-pending .cl-msg-text { opacity: .6; }
+.cl-failed .cl-msg-text { border-color: var(--error); }
+.cl-chat-form { display: flex; gap: 8px; align-items: flex-end; padding: 10px 12px; border-top: 1px solid var(--border); }
+.cl-chat-form textarea { flex: 1; resize: none; border: 1px solid var(--border); border-radius: var(--r-sm); padding: 7px 9px; font: inherit; font-size: 13.5px; }
+.cl-chat-form textarea:focus { outline: none; border-color: var(--border-f); }
+
+/* Invitation page */
+.cl-invite-card { max-width: 560px; margin: 24px auto; }
+.cl-invite-card p { margin: 8px 0; }
+.cl-invite-what { font-size: 15px; margin: 6px 0 4px; }
+.cl-invite-msg { color: var(--tx-second); margin: 12px 0; }
+.cl-invite-actions { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+
+/* Toasts stay clear of the open chat; wide screens dock it beside the content */
+@media (min-width: 601px) { body.cl-chat-open .notif-stack { right: 384px; } }
+@media (min-width: 1440px) {
+  .main-content { transition: margin-right .25s ease; }
+  body.cl-chat-open .main-content { margin-right: 360px; }
+  .cl-chat { box-shadow: none; }
+}
+
+/* Narrow top bars: icons only */
+@media (max-width: 1100px) {
+  .cl-btn span:not(.cl-unread) { display: none; }
+  .cl-btn { padding: 0 8px; }
+  .cl-avatars { display: none; }
+}
+@media (max-width: 600px) {
+  .cl-slot { gap: 4px; flex-shrink: 0; }
+  .cl-btn { height: 28px; padding: 0 5px; }
+  .cl-status { font-size: 0; gap: 0; }
+  .cl-badge:not(.cl-warn), .cl-slot .cl-link { display: none; }
+  .cl-slot #cl-share-btn { display: none; }          /* on the Projects page instead */
+  body.cl-shared #status-label { display: none; }     /* room for the chat button: the AI status keeps its dot */
+  .cl-chat { width: 100%; border-left: none; }
+  body.cl-chat-open .notif-stack { top: calc(var(--topbar-h) + 12px); bottom: auto; }
+}
+@media (prefers-reduced-motion: reduce) { .cl-chat { transition: none; } }

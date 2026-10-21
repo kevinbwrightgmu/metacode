@@ -342,6 +342,11 @@ MetaCode works as described elsewhere in this README, with no sign-in and no lim
 | Social network analysis | — | — | ✓ | ✓ |
 | AI Coding Lab | — | — | — | ✓ (2,000 model calls / day, 50M tokens / month, 50 evaluation runs / day, 500 MB) |
 
+- **Shared projects:** share the open project with other accounts as editors or viewers (invitation links
+  for one email address each), see who has it open, get each other's changes as they happen, resolve
+  conflicting edits, and chat. The server checks every request against the project's members:
+  **[docs/collaboration.md](docs/collaboration.md)**.
+
 Plus daily limits on other AI requests and per-minute request limits. The server checks every sign-in
 with Supabase and every plan with Stripe — the browser is never trusted for either — and counts only work
 that succeeds. Setup (the SQL migration, Supabase Auth URLs, Stripe products, portal and webhook) and the
@@ -591,7 +596,9 @@ click **Add to project**.
 
 **With accounts on**, a signed-in person's work is also saved to their account (Supabase, readable only by
 them) — see [Accounts and Plans](#accounts-and-plans). The MetaCode server keeps only usage counters and
-the link between an account and its Stripe customer (`ACCOUNT_DATA_DIR`).
+the link between an account and its Stripe customer (`ACCOUNT_DATA_DIR`) — and, for a project you
+**share**, the shared copy, its members, invitations and chat (`COLLAB_DATA_DIR`), readable by its members
+only ([docs/collaboration.md](docs/collaboration.md)).
 
 To reset everything: Settings → Danger Zone → Reset All Data.
 
@@ -634,6 +641,7 @@ metacode/
 ├── model-match.js              "Closest model" ranking, used when the AI service rate-limits a model
 ├── owner.js                    Whose request it is: the signed-in account, else the browser (mc_owner cookie)
 ├── accounts/                   Accounts, plans and limits: Supabase sign-in checks, Stripe plans, usage counters, guards
+├── collab/                     Shared projects: roles, invitations, changes and conflicts, live events, chat — see docs/collaboration.md
 ├── supabase/migrations/        The Supabase table for accounts' data (Row Level Security)
 ├── projects/                   Import of projects older versions saved on the server (this computer only)
 ├── surveys/                    Survey Studio server side: API routes, publishing, responses, JSON-file store
@@ -664,6 +672,7 @@ metacode/
 │       ├── local-db.js          Your data in this browser (IndexedDB), browser identity, backup/restore
 │       ├── tour.js · app-tour.js  Guided tours and hands-on tutorials (spotlight + card); the coding app's tour
 │       ├── projects.js          Projects page: saved projects (in the browser), autosave
+│       ├── collab.js            Shared projects in the page: syncing, conflicts, Share dialog, chat, invitations
 │       ├── data.js              CSV import for posts/engagement/network (AI-assisted structure detection)
 │       ├── codebook.js          Coding scheme management
 │       ├── ai-coding.js         Batch AI coding
