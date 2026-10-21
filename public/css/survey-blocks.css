@@ -35,7 +35,8 @@
 /* Workspace */
 .bk-main { position: relative; min-width: 0; min-height: 0; }
 .bk-ws { position: absolute; inset: 0; overflow: auto; outline: none; cursor: default;
-  background-color: #F8FAFC; background-image: radial-gradient(#CBD5E1 1px, transparent 1px); background-size: 22px 22px; }
+  background-color: #F8FAFC; background-image: radial-gradient(#CBD5E1 1px, transparent 1px); background-size: 22px 22px;
+  background-attachment: local; /* the grid moves with the blocks when the workspace scrolls; its size follows the zoom (survey-blocks.js) */ }
 .bk-ws.is-panning { cursor: grabbing; }
 .bk-canvas { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
 .bk-sizer { pointer-events: none; }

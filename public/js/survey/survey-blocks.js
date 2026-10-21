@@ -606,6 +606,9 @@
       canvas.style.height = Math.max(h + 400, ws.clientHeight / zoom) + 'px';
       canvas.style.transform = 'scale(' + zoom + ')';
       canvas.parentElement.style.setProperty('--bk-zoom', zoom);
+      // the dotted grid zooms with the blocks (whole pixels, so the dots stay even)
+      const grid = Math.max(8, Math.round(22 * zoom)) + 'px';
+      ws.style.backgroundSize = grid + ' ' + grid;
       const sizer = ws.querySelector('.bk-sizer') || ws.appendChild(mk('div', 'bk-sizer'));
       sizer.style.width = (parseFloat(canvas.style.width) * zoom) + 'px';
       sizer.style.height = (parseFloat(canvas.style.height) * zoom) + 'px';
