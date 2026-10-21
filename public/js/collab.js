@@ -28,6 +28,7 @@
 const Collab = (() => {
   'use strict';
   const LINK_KEY = 'metacode_shared_link_v1';   // the shared project open in this browser (see linkFrom)
+  const INVITE_KEY = 'metacode_pending_invite_v1'; // an invitation opened before signing in (see renderInvite)
   const API = '/api/collab';
   const PUSH_MS = 1000;
   const DELETED = '-';                            // the "hash" of a deleted post
@@ -92,6 +93,21 @@ const Collab = (() => {
     m.set('network', { nodes: Array.isArray(n.nodes) ? n.nodes : [], edges: Array.isArray(n.edges) ? n.edges : [] });
     m.set('networkAnalysis', isObj(s.networkAnalysis) ? s.networkAnalysis : null);
     return m;
+  }
+  // Each post is shared on its own, under its id: a post without one, with
+  // one an earlier post already has (e.g. a CSV whose id column repeats) or
+  // with one that can't be a key gets a new id, so no post is left out.
+  // → how many posts got one
+  function giveIds(s) {
+    const seen = new Set();
+    let fixed = 0;
+    for (const p of s.posts || []) {
+      if (!isObj(p)) continue;
+      const ok = (typeof p.id === 'string' || typeof p.id === 'number') && p.id !== '' && !seen.has(String(p.id)) && POST_KEY.test('post:' + String(p.id));
+      if (!ok) { do { p.id = App.genId(); } while (seen.has(String(p.id))); fixed++; }
+      seen.add(String(p.id));
+    }
+    return fixed;
   }
   function entityOf(data, key) {
     if (key === 'meta') return data.project;
@@ -184,6 +200,8 @@ const Collab = (() => {
   }
   async function push() {
     if (!link || !ownsWorkspace()) return;
+    // Posts added since (an import, say) may need ids of their own too
+    if (canEdit() && giveIds(App.getState())) { applying = true; try { App.save(); } finally { applying = false; } }
     const list = changes();
     pending = list.length;
     if (!list.length || !canEdit()) { renderBar(); return; }
@@ -469,16 +487,15 @@ const Collab = (() => {
   /* ── Sharing a project ────────────────────── */
   async function share() {
     const s = App.getState();
-    // Every post needs an id to be shared on its own
-    let fixed = 0;
-    (s.posts || []).forEach(p => { if (isObj(p) && (p.id === undefined || p.id === null || p.id === '')) { p.id = App.genId(); fixed++; } });
+    const fixed = giveIds(s);
     if (fixed) App.save();
     const r = await call('POST', '/projects', { name: s.project.name, data: snapshot() });
     link = linkFrom(r);
     saveLink();
     if (typeof ProjectsView !== 'undefined') ProjectsView.unlink();   // changes go to the shared project now, not a saved copy
     adopt(r.data);
-    if (r.skipped) App.notify(r.skipped + ' post' + (r.skipped === 1 ? '' : 's') + ' couldn\'t be shared (missing, repeated or unusable ids) and stay in this browser only.', 'warning', 8000);
+    if (fixed) App.notify(fixed + ' post' + (fixed === 1 ? '' : 's') + ' had no id of its own (missing or repeated) and got a new one, so every post is shared.', 'info', 7000);
+    if (r.skipped) App.notify(r.skipped + ' entr' + (r.skipped === 1 ? 'y' : 'ies') + ' in the post list couldn\'t be read and were left out.', 'warning', 8000);
     connect();
     renderBar();
     return r;
@@ -509,6 +526,7 @@ const Collab = (() => {
   async function openShare() {
     const cfg = await getConfig();
     if (!cfg.enabled) { App.notify('Sharing needs accounts, which aren\'t turned on for this MetaCode server.', 'info', 5000); return; }
+    if (window.Account) await Account.ready;          // (clicked just after the page opened: is anyone signed in?)
     if (window.Account && !Account.signedIn()) { Account.openSignIn({ reason: 'Sign in to share projects with other people.' }); return; }
     if (!link) {
       const s = App.getState();
@@ -567,7 +585,12 @@ const Collab = (() => {
         try { await call('DELETE', '/projects/' + link.id + '/members/' + encodeURIComponent(tr.dataset.id)); openShare(); } catch (err) { App.notify(err.message, 'error'); }
       }
       if (b && b.dataset.act === 'revoke') {
-        try { await call('DELETE', '/projects/' + link.id + '/invites/' + encodeURIComponent(b.closest('tr').dataset.inv)); openShare(); } catch (err) { App.notify(err.message, 'error'); }
+        const inv = b.closest('tr').dataset.inv;
+        try {
+          await call('DELETE', '/projects/' + link.id + '/invites/' + encodeURIComponent(inv));
+          document.querySelectorAll('#cl-results [data-inv]').forEach(n => { if (n.dataset.inv === inv) n.remove(); });     // its link no longer works
+          openShare();
+        } catch (err) { App.notify(err.message, 'error'); }
       }
       const cp = e.target.closest('[data-copy]');
       if (cp) { try { await navigator.clipboard.writeText(cp.dataset.copy); cp.textContent = 'Copied'; } catch (err) { const i = cp.parentElement.querySelector('input'); if (i) { i.select(); } } }
@@ -601,10 +624,14 @@ const Collab = (() => {
     try {
       const r = await call('POST', '/projects/' + link.id + '/invites', { emails, role });
       await openShare();
-      document.getElementById('cl-results').innerHTML = r.results.map(x => x.link
-        ? '<div class="cl-result"><div><b>' + esc(x.email) + '</b> — ' + esc(roleName(x.role)) + (x.status === 'renewed' ? ' (a new link; the old one stops working)' : '') + '</div>' +
+      const box = document.getElementById('cl-results');
+      if (!box) return;
+      // The links of earlier invitations stay (newest first), except one a renewed invitation replaces
+      box.querySelectorAll('[data-email]').forEach(n => { if (r.results.some(x => x.email === n.dataset.email)) n.remove(); });
+      box.insertAdjacentHTML('afterbegin', r.results.map(x => x.link
+        ? '<div class="cl-result" data-email="' + esc(x.email) + '" data-inv="' + esc(x.inviteId) + '"><div><b>' + esc(x.email) + '</b> — ' + esc(roleName(x.role)) + (x.status === 'renewed' ? ' (a new link; the old one stops working)' : '') + '</div>' +
           '<div class="cl-copy"><input class="form-input" readonly value="' + esc(x.link) + '" aria-label="Invitation link for ' + esc(x.email) + '"><button class="btn btn-secondary btn-sm" data-copy="' + esc(x.link) + '">Copy link</button></div></div>'
-        : '<div class="cl-result cl-result-no"><b>' + esc(x.email) + '</b> — ' + esc(x.message) + '</div>').join('');
+        : '<div class="cl-result cl-result-no" data-email="' + esc(x.email) + '"><b>' + esc(x.email) + '</b> — ' + esc(x.message) + '</div>').join(''));
     } catch (e) { err.textContent = e.message; }
   }
 
@@ -761,10 +788,19 @@ const Collab = (() => {
   function wireCurrentCard() { const b = document.getElementById('cl-revert'); if (b) b.onclick = revertLocal; }
 
   /* ── The invitation page (app.html#invite/<token>) ── */
+  // Creating an account, confirming an email address or a sign-in link by
+  // email lands on the dashboard: the invitation opened before is remembered
+  // (for a day) and shown again once signed in.
+  function rememberInvite(token) { try { localStorage.setItem(INVITE_KEY, JSON.stringify({ token, at: Date.now() })); } catch (e) { /* storage blocked */ } }
+  function forgetInvite() { try { localStorage.removeItem(INVITE_KEY); } catch (e) { /* storage blocked */ } }
+  function pendingInvite() {
+    try { const p = JSON.parse(localStorage.getItem(INVITE_KEY) || 'null'); return p && typeof p.token === 'string' && Date.now() - p.at < 86400000 ? p.token : null; } catch (e) { return null; }
+  }
   async function renderInvite(container, token) {
     container.innerHTML = '<div class="loading-state">Checking the invitation…</div>';
     let inv;
     try { inv = await call('GET', '/invites/' + encodeURIComponent(token || '')); } catch (e) {
+      forgetInvite();
       container.innerHTML = '<div class="card cl-invite-card"><div class="card-title">Invitation</div><p>' + esc(e.message) + '</p><a class="btn btn-secondary" href="#projects">Go to Projects</a></div>';
       return;
     }
@@ -772,6 +808,7 @@ const Collab = (() => {
     const signedIn = window.Account && Account.signedIn();
     const who = signedIn ? Account.me().user.email : null;
     const ok = inv.status === 'pending';
+    if (ok && !signedIn) rememberInvite(token); else forgetInvite();
     container.innerHTML = '<div class="card cl-invite-card">' +
       '<div class="card-title">You\'re invited to a shared project</div>' +
       '<p class="cl-invite-what"><b>' + esc(inv.invitedBy || 'Someone') + '</b> invited you to <b>“' + esc(inv.project.name) + '”</b> as ' + (inv.role === 'editor' ? 'an <b>editor</b> (you can change the project)' : 'a <b>viewer</b> (you can read it)') + '.</p>' +
@@ -818,6 +855,9 @@ const Collab = (() => {
     // The page drew before the link was read (App.init runs first)
     if (link && App.getCurrentView().id === 'projects') ProjectsView.render();
     if (window.Account) Account.onChange(m => {
+      // Signed in after opening an invitation (e.g. from the link that confirmed a new account): back to it
+      const invite = m && m.signedIn ? pendingInvite() : null;
+      if (invite && App.getCurrentView().id !== 'invite') location.hash = '#invite/' + invite;
       config = null;
       getConfig().then(() => {
         if (link && m && m.signedIn && (conn === 'signin' || conn === 'offline')) reconnect();

@@ -382,30 +382,38 @@ function createCollab(deps) {
   router.get('/projects/:id/events', async (/** @type {any} */ req, /** @type {any} */ res) => {
     let user, p, m;
     try { user = await userOf(req); ({ p, m } = await access(req.params.id, user, 'viewer')); } catch (e) { return send(res, e); }
+    if (res.destroyed) return;                     // the browser went away while its sign-in was checked
     const conns = hub.get(p.id) || new Map();
     if ([...conns.values()].filter(c => c.user.id === user.id).length >= L.streamsPerUser) return send(res, fail(429, 'rate_limited', 'This project is open in too many of your tabs.'));
     res.writeHead(200, { 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-store', Connection: 'keep-alive', 'X-Accel-Buffering': 'no' });
     res.write('retry: 3000\n\n');
     const connId = ++connSeq;
-    conns.set(connId, { user: { id: user.id, email: user.email }, res, since: new Date().toISOString() });
-    hub.set(p.id, conns);
-    const chat = await store.chat(p.id);
-    write(res, 'hello', { projectId: p.id, revision: p.revision, name: p.name, role: m.role, you: { id: user.id, email: user.email }, chatLatest: chat.seq, users: presence(p.id) });
-    broadcast(p.id, 'presence', { users: presence(p.id) }, c => c.res !== res);
-    // Keep-alive, and a periodic check that the account still has access
-    const beat = setInterval(async () => {
-      const cur = await store.get(p.id).catch(() => null);
-      const still = cur && memberOf(cur, user.id);
-      if (!still) { kick(p.id, user.id, cur ? 'revoked' : 'deleted'); return; }
-      try { res.write(': ping\n\n'); } catch (e) { /* gone */ }
-    }, 20000);
+    /** @type {any} */
+    let beat = null;
+    let closed = false;
+    // Listening before anything is awaited: a stream closed meanwhile mustn't stay "open now" for good
     const done = () => {
+      if (closed) return;
+      closed = true;
       clearInterval(beat);
       const cs = hub.get(p.id);
       if (cs && cs.delete(connId)) { if (!cs.size) hub.delete(p.id); else broadcast(p.id, 'presence', { users: presence(p.id) }); }
     };
     res.on('close', done);
     res.on('error', done);
+    conns.set(connId, { user: { id: user.id, email: user.email }, res, since: new Date().toISOString() });
+    hub.set(p.id, conns);
+    const chat = await store.chat(p.id).catch(() => ({ seq: 0 }));
+    if (closed || res.destroyed) return done();
+    write(res, 'hello', { projectId: p.id, revision: p.revision, name: p.name, role: m.role, you: { id: user.id, email: user.email }, chatLatest: chat.seq, users: presence(p.id) });
+    broadcast(p.id, 'presence', { users: presence(p.id) }, c => c.res !== res);
+    // Keep-alive, and a periodic check that the account still has access
+    beat = setInterval(async () => {
+      const cur = await store.get(p.id).catch(() => null);
+      const still = cur && memberOf(cur, user.id);
+      if (!still) { kick(p.id, user.id, cur ? 'revoked' : 'deleted'); return; }
+      try { res.write(': ping\n\n'); } catch (e) { /* gone */ }
+    }, 20000);
   });
 
   // A body the JSON parser refused: say why, as JSON (not Express's HTML page)
