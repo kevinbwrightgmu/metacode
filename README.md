@@ -314,6 +314,12 @@ access rules, building installers and server settings:
 [docs/desktop/README.md](docs/desktop/README.md); releasing and signing:
 [docs/desktop/RELEASING.md](docs/desktop/RELEASING.md).
 
+## Secrets and secret scanning
+
+Credentials live only in the server's `.env` (names in `.env.example`) or the deployment's secret store, never
+in Git. TruffleHog scans every pull request and push to `main` (`.github/workflows/secret-scan.yml`); the
+latest whole-history audit, how to run one and what to do if a secret leaks: [docs/security.md](docs/security.md).
+
 ## Accounts and Plans
 
 Accounts are **off** unless the server's `.env` has `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`; then

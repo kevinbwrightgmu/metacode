@@ -207,7 +207,7 @@ kit's container, another host, or a VM:
    127.0.0.1 or a private interface, and firewall it), and give it a password.
 3. **In MetaCode's `.env`:**
    ```
-   SCRAPER_VPN_GATEWAY_PROXY_URL=http://user:password@127.0.0.1:8888
+   SCRAPER_VPN_GATEWAY_PROXY_URL=http://user:password@127.0.0.1:8888   # placeholder (trufflehog:ignore)
    SCRAPER_VPN_GATEWAY_HEALTH_URL=http://127.0.0.1:8000/v1/vpn/status
    SCRAPER_VPN_GATEWAY_IP_URL=http://127.0.0.1:8000/v1/publicip/ip
    SCRAPER_VPN_GATEWAY_HEALTH_API_KEY=…
