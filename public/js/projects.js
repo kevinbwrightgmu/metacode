@@ -39,9 +39,12 @@ const ProjectsView = (() => {
   const summary = r => ({ id: r.id, name: r.name, description: r.description || '', createdAt: r.createdAt, savedAt: r.savedAt, revision: r.revision || 1, counts: Object.assign({ posts: 0, aiCoded: 0, humanCoded: 0, dimensions: 0 }, counts(r.data || {})) });
   const newId = () => 'pr_' + Array.from(crypto.getRandomValues(new Uint8Array(12)), b => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[b % 62]).join('');
   function build(prev, body) {
-    const data = body.data !== undefined ? cleanData(body.data) : prev.data;
-    const name = str(body.name, 300) || prev.name || (data.project && data.project.name) || 'Untitled Project';
+    let data = body.data !== undefined ? cleanData(body.data) : prev.data;
+    const name = str(body.name, 300) || prev.name || (data && data.project && data.project.name) || 'Untitled Project';
     const description = body.description !== undefined ? str(body.description, 5000) : (prev.description || '');
+    // The saved project's name is the one its data opens with (a rename of a
+    // project that isn't open would otherwise come back as the old name)
+    if (data) data = Object.assign({}, data, { project: Object.assign({}, data.project, { name, description }) });
     return { name, description, data };
   }
   const notFound = () => new Error('That saved project doesn\'t exist (it may have been deleted).');
@@ -165,14 +168,34 @@ const ProjectsView = (() => {
     if (more && link.autosave) { clearTimeout(timer); timer = setTimeout(() => { saveNow(true).catch(() => {}); }, AUTOSAVE_MS); }
   }
 
+  // Saves the open project as a new saved project, which it then is linked to
+  // and named after. Nothing changes if the save fails.
   async function saveAsNew(name) {
+    clearTimeout(timer);
+    if (saving) await saving.catch(() => {});   // an autosave in flight would re-link the old copy afterwards
     const s = App.getState();
+    const project = Object.assign({ description: '' }, s.project, { name: name || (s.project && s.project.name) || 'Untitled Project' });
+    const data = Object.assign(snapshot(), { project });
     const seq = changeSeq;
-    const r = await api('', { method: 'POST', body: { name: name || (s.project && s.project.name) || 'Untitled Project', description: (s.project && s.project.description) || '', data: snapshot() } });
-    afterSave({ id: r.project.id, name: r.project.name, savedAt: r.project.savedAt, autosave: true }, seq);
+    const r = await api('', { method: 'POST', body: { name: project.name, description: project.description || '', data } });
+    const changedMeanwhile = changeSeq !== seq;
+    writeLink(null);                   // the old link (if any) mustn't pick up the new name
+    adoptName(r.project.name);
+    afterSave({ id: r.project.id, name: r.project.name, savedAt: r.project.savedAt, autosave: true }, changedMeanwhile ? NaN : changeSeq);
     App.notify('Saved as “' + r.project.name + '”', 'success');
     render();
     return r;
+  }
+
+  // Shows a name the saved project already has on the open project (state,
+  // top bar, link) without counting it as an unsaved change.
+  function adoptName(name) {
+    const link = readLink();
+    writeLink(null);
+    App.setState({ project: Object.assign({ description: '' }, App.getState().project, { name }) });
+    if (link) writeLink(Object.assign(link, { name }));
+    const top = document.getElementById('topbar-project');
+    if (top) top.textContent = name;
   }
 
   /* ── Opening ────────────────────────────── */
@@ -217,7 +240,9 @@ const ProjectsView = (() => {
     if (!(await protectCurrent())) return;
     try {
       const r = await api('/' + encodeURIComponent(id));
-      loadIntoBrowser(r.project.data, { id: r.project.id, name: r.project.name, savedAt: r.project.savedAt, autosave: true, dirty: false });
+      // the saved project's name wins over the one in its data (older saves could differ)
+      const data = Object.assign({}, r.project.data, { project: Object.assign({ description: '' }, r.project.data && r.project.data.project, { name: r.project.name }) });
+      loadIntoBrowser(data, { id: r.project.id, name: r.project.name, savedAt: r.project.savedAt, autosave: true, dirty: false });
     } catch (e) { App.notify('Couldn\'t open the project: ' + e.message, 'error'); }
   }
 
@@ -354,13 +379,10 @@ const ProjectsView = (() => {
 
   function renameProject(p) {
     nameDialog('Rename project', p.name, async name => {
+      if (saving) await saving.catch(() => {});   // an autosave in flight still carries the old name
       await api('/' + encodeURIComponent(p.id), { method: 'PUT', body: { name } });
       const link = readLink();
-      if (link && link.id === p.id) {
-        App.setState({ project: Object.assign({}, App.getState().project, { name }) });
-        const top = document.getElementById('topbar-project'); if (top) top.textContent = name;
-        writeLink(Object.assign(readLink() || link, { name }));
-      }
+      if (link && link.id === p.id) adoptName(name);
       render();
     });
   }
