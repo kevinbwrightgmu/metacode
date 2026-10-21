@@ -474,7 +474,9 @@ startup banner say when that happens.
   (`provider.emis.models`: id → name, `tool_call`, `reasoning`, `attachment`). To update it, edit the file or
   replace it with a newer OpenCode config from the AI service; changes are picked up without a restart. Only the model
   ids, names and capability flags are read from it — the AI service address and key always come from `.env`. If the
-  file is missing, MetaCode asks the AI service for its live list (`GET /v1/models`) instead. The model picked in Settings
+  file is missing, MetaCode asks the AI service for its live list (`GET /v1/models`) instead. When the file is used, the
+  service's live list is checked too, and models it doesn't offer right now are marked in Settings (and the AI Coding
+  Lab) rather than shown as plainly usable — inventory and details: [docs/ai-models.md](docs/ai-models.md). The model picked in Settings
   is used when it's listed; otherwise the default above is used (the server log says so). A request that needs
   something a model's flags say it lacks (tool calling, images) is refused with a clear message.
 - **Quota.** The AI service reports each key's remaining prompts and tokens with every answer and returns HTTP 429 once

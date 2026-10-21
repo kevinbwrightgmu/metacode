@@ -668,7 +668,9 @@ const App = (() => {
       const data = await res.json();
       const models = data.models || [];
       modelCache = models;
-      const opt = (m, cur) => '<option value="' + esc(m.id) + '"' + (m.id === cur ? ' selected' : '') + '>' + esc(m.name || m.id) + '</option>';
+      // models emis-models.json lists but the AI service doesn't (right now) are marked, not hidden
+      const opt = (m, cur) => '<option value="' + esc(m.id) + '"' + (m.id === cur ? ' selected' : '') + (m.available === false ? ' title="In ' + esc(data.source || 'the catalog') + ', but the AI service doesn\'t list it right now"' : '') + '>' +
+        esc(m.name || m.id) + (m.available === false ? ' — not offered by the AI service now' : '') + '</option>';
       if (!models.length) {
         modelSel.innerHTML = '<option value="">No models available</option>';
         if (hintEl) hintEl.textContent = data.note || 'No models returned — check the AI connection above.';
@@ -678,7 +680,12 @@ const App = (() => {
         if (current && !models.find(m => m.id === current)) {
           modelSel.insertAdjacentHTML('beforeend', '<option value="' + esc(current) + '" selected>' + esc(current) + ' (not in the list)</option>');
         }
-        if (hintEl) hintEl.textContent = models.length + ' model' + (models.length !== 1 ? 's' : '') + ' available' + (data.source ? ' (from ' + (data.source === 'emis' ? 'the live model list' : data.source) + ')' : '') + '.';
+        if (hintEl) {
+          const av = data.availability;
+          hintEl.textContent = models.length + ' model' + (models.length !== 1 ? 's' : '') + (data.source ? ' in ' + (data.source === 'emis' ? 'the live model list' : data.source) : '') +
+            (av && av.checked ? (av.notListed.length ? '; ' + av.listed + ' offered by the AI service now, ' + av.notListed.length + ' not (marked)' : '; all offered by the AI service now') + '.'
+              : av ? '. ' + av.note : '.');
+        }
       }
       if (feats) {
         const per = state.settings.models || {};

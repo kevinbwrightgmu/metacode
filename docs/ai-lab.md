@@ -190,6 +190,10 @@ Notes on providers and costs:
 - **Capabilities.** The Models page shows what each integration reports. A
   capability that isn't known is shown as "unknown", never assumed.
 - **Model checks.** Unknown model names are refused before any request is sent.
+  The Models page's **Offered now** column says whether the provider lists each
+  model right now (for the MetaCode AI service, the catalog `emis-models.json`
+  checked against the service's own list). The full inventory and how the list
+  is built: [ai-models.md](ai-models.md).
 - **Price list.** MetaCode never invents prices. To show cost **estimates**,
   keep a price list at `ai-lab-pricing.json` (or `AI_LAB_PRICING_FILE`):
 

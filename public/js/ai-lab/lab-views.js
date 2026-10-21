@@ -277,8 +277,10 @@
       m.providers.map(p => '<div class="card lab-section"><div class="card-title">' + esc(p.label) + '</div>' +
         '<p class="lab-second">Chat: ' + cap(p.capabilities.chat) + ' · streaming: ' + cap(p.capabilities.streaming) + ' · embeddings: ' + cap(p.capabilities.embeddings) + ' · fine-tuning: ' + cap(p.capabilities.fineTuning) + ' · usage reporting: ' + esc(p.capabilities.usageReporting) + '</p>' +
         (p.problem ? '<div class="lab-warn mt-3">' + esc(p.problem) + '</div>' : '') +
-        (p.models.length ? '<div class="table-wrap mt-3"><table class="table"><thead><tr><th>Model</th><th>Tool calling</th><th>Context window</th><th>Price (per 1M tokens)</th></tr></thead><tbody>' +
-          p.models.map(x => '<tr><td>' + esc(x.name) + (x.isDefault ? ' <span class="badge badge-blue">default</span>' : '') + '<div class="lab-mono lab-muted">' + esc(x.id) + '</div></td><td>' + cap(x.capabilities.toolCalling) + '</td><td>' + (x.contextWindow ? fmt(x.contextWindow) : 'unknown') + '</td>' +
+        (p.models.length ? '<div class="table-wrap mt-3"><table class="table"><thead><tr><th>Model</th><th>Offered now</th><th>Tool calling</th><th>Context window</th><th>Price (per 1M tokens)</th></tr></thead><tbody>' +
+          p.models.map(x => '<tr><td>' + esc(x.name) + (x.isDefault ? ' <span class="badge badge-blue">default</span>' : '') + '<div class="lab-mono lab-muted">' + esc(x.id) + '</div></td>' +
+            '<td>' + (x.available === true ? 'yes' : x.available === false ? '<span class="badge badge-amber" title="Listed in this server\'s catalog, but not in the provider\'s own model list right now">not listed by the provider</span>' : 'unknown') + '</td>' +
+            '<td>' + cap(x.capabilities.toolCalling) + '</td><td>' + (x.contextWindow ? fmt(x.contextWindow) : 'unknown') + '</td>' +
             '<td>' + (x.pricing ? esc(x.pricing.currency) + ' ' + x.pricing.input + ' in / ' + x.pricing.output + ' out <span class="lab-muted">(as of ' + esc(x.pricing.asOf || '?') + ')</span>' : '<span class="lab-muted">unknown</span>') + '</td></tr>').join('') + '</tbody></table></div>' : '') + '</div>').join('') +
       '<div class="lab-note">' + esc(m.notes.contextWindow || '') + ' Prices come from this server\'s price list' + (m.pricing.configured ? ' (as of ' + esc(m.pricing.asOf || '?') + ')' : ' — none is configured, so costs show as unknown') + '. Generated code is never run on this server (code execution: off).</div>';
     $('md-refresh').onclick = () => Lab.route();
