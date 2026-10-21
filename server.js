@@ -43,7 +43,7 @@ app.use(statusSite.hostRouter);
 // and the scraper routes make requests to Reddit on this server's behalf, so
 // only MetaCode's own pages (same origin) may call them. The other routes
 // keep the permissive CORS they always had.
-const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?|account(\/.*)?|billing\/(checkout|portal|sync)|network\/analyze|lab(\/.*)?|desktop(\/.*)?)\/?$/i;
+const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?|account(\/.*)?|billing\/(checkout|portal|sync)|network\/analyze|lab(\/.*)?|desktop(\/.*)?|collab(\/.*)?)\/?$/i;
 const corsForAll = cors();
 app.use((req, res, next) => (AI_ROUTE.test(req.path) ? next() : corsForAll(req, res, next)));
 // …and state-changing requests to them must say they come from this site:
@@ -80,6 +80,10 @@ app.get('/s/:publicId', surveys.pageHandler);
 // Saved projects (Projects page) — also before the shared JSON parser (large projects)
 const projects = createProjects();
 app.use('/api/projects', projects.router);
+// Shared projects: members, roles, invitations, live updates and chat (collab/)
+const { createCollab } = require('./collab');
+const collab = createCollab({ accounts, publicUrl: () => accounts.config().publicUrl || null });
+app.use('/api/collab', collab.router);
 app.use(express.json({ limit: '10mb' }));
 app.get('/status', statusSite.page);   // the status page on the main site too
 // Pages, scripts and styles are revalidated on every load, so an updated
@@ -926,7 +930,11 @@ async function fetchModelList() {
 function getModelList(forceRefresh) {
   const file = readModelsFile();
   if (file.ok) return Promise.resolve({ ok: true, ids: file.ids, info: file.info, source: 'file' });
+  return getLiveModelList(forceRefresh);
+}
 
+// EMIS's own list (GET /models), shared and cached as described above.
+function getLiveModelList(forceRefresh) {
   const now = Date.now();
   if (!forceRefresh) {
     if (modelList.ids && now - modelList.fetchedAt < MODEL_LIST_TTL_MS) return Promise.resolve({ ok: true, ids: modelList.ids, info: null, source: 'emis' });
@@ -949,6 +957,26 @@ function getModelList(forceRefresh) {
       });
   }
   return modelList.pending;
+}
+
+// Which of emis-models.json's models the AI service lists right now. The file
+// is the operator's catalog and stays authoritative (a model the service
+// leaves out of GET /models may still answer), but the list says which ones
+// the service doesn't offer, so pickers don't present them as plainly
+// usable. → { checked: true, listed: Set, at } or { checked: false, problem }.
+// With the live list as the source every model is listed by definition.
+// waitMs: how long a caller waits for a fetch (none: use the cached list and
+// refresh it in the background, so AI requests never wait for the check).
+async function serviceAvailability(forceRefresh, waitMs) {
+  const fresh = () => modelList.ids && Date.now() - modelList.fetchedAt < MODEL_LIST_TTL_MS;
+  const done = () => ({ checked: true, listed: new Set(modelList.ids), at: new Date(modelList.fetchedAt).toISOString() });
+  if (!forceRefresh && fresh()) return done();
+  const pending = getLiveModelList(forceRefresh).catch(() => null);
+  if (!waitMs) return { checked: false, problem: 'not checked yet' };
+  const live = await Promise.race([pending, new Promise(r => setTimeout(() => r('late'), waitMs))]);
+  if (live === 'late') return { checked: false, problem: 'the AI service didn\'t send its model list in time.' };
+  if (!live || !live.ok) return { checked: false, problem: (live && live.message) || 'the AI service\'s model list couldn\'t be loaded.' };
+  return done();
 }
 
 // Default model: EMIS_MODEL if set; otherwise the first model in
@@ -1898,6 +1926,8 @@ app.get('/api/models', async (req, res) => {
       return res.json({ models: [], note: list.message });
     }
     const choice = chooseDefaultModel(list.ids, list.source);
+    // the file's models, checked against the service's own list when it can be read
+    const avail = list.source === 'file' ? await serviceAvailability(true, 4000) : null;
     const others = list.ids.filter(id => id !== choice.model);
     if (list.source !== 'file') others.sort((a, b) => a.localeCompare(b));   // the file keeps its own order
     const ordered = (choice.model ? [choice.model] : []).concat(others);
@@ -1915,10 +1945,20 @@ app.get('/api/models', async (req, res) => {
         if (info.toolCall !== null) entry.toolCall = info.toolCall;
         if (info.reasoning !== null) entry.reasoning = info.reasoning;
         if (info.attachment !== null) entry.attachment = info.attachment;
+        if (info.context) entry.contextWindow = info.context;
+        if (info.output) entry.maxOutput = info.output;
       }
+      // true: the service lists it; false: it doesn't (right now); absent: not known
+      if (avail && avail.checked) entry.available = avail.listed.has(id);
+      else if (!avail) entry.available = true;
       return entry;
     });
     const body = { models, provider: 'emis', source: list.source === 'file' ? MODELS_FILE_NAME : 'emis' };
+    if (avail) {
+      body.availability = avail.checked
+        ? { checked: true, at: avail.at, listed: models.filter(m => m.available).length, notListed: models.filter(m => m.available === false).map(m => m.id) }
+        : { checked: false, note: 'Couldn\'t check which models the AI service offers right now (' + avail.problem.replace(/\.$/, '') + ').' };
+    }
     if (choice.error) body.note = choice.error.message;
     res.json(body);
   } catch (err) {
@@ -2113,12 +2153,14 @@ const labAi = {
     const list = await getModelList(false);
     if (!list.ok) return { ok: false, message: list.message };
     const choice = chooseDefaultModel(list.ids, list.source);
+    const avail = list.source === 'file' ? await serviceAvailability(false, 0) : null;
     return {
       ok: true, default: choice.model || null, source: list.source,
       models: list.ids.filter(id => !NOT_A_CHAT_MODEL.test(id) || (list.info && list.info.has(id))).map(id => {
         const info = list.info ? list.info.get(id) : null;
         return { id, name: info ? info.name : id, toolCall: info ? info.toolCall : null, reasoning: info ? info.reasoning : null,
-          contextWindow: info ? info.context || null : null, maxOutput: info ? info.output || null : null };
+          contextWindow: info ? info.context || null : null, maxOutput: info ? info.output || null : null,
+          available: !avail ? true : avail.checked ? avail.listed.has(id) : null };
       })
     };
   },
@@ -2332,6 +2374,7 @@ function start(port) {
       accounts.flush();
       scraper.shutdown();
       aiLab.shutdown();
+      collab.shutdown();
       statusMonitor.stop();
       scraper.onUpgrade.closeAll();
       emisPython.stop();
@@ -2397,4 +2440,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, start, scraper, accounts, aiLab, desktopApi };
+module.exports = { app, start, scraper, accounts, aiLab, desktopApi, collab };

@@ -1,5 +1,12 @@
 node_modules/
 .env
+.env.*
+!.env.example
+# key and certificate files (secrets live in .env or the deployment's secret store)
+*.pem
+*.key
+*.p12
+*.pfx
 reddit-credentials.json
 reddit-credentials.json.tmp
 redditapis-key.json
@@ -11,6 +18,7 @@ project-data/
 account-data/
 scraper-data/
 lab-data/
+collab-data/
 # VPN gateway kit: the generated secrets and gluetun's state
 deploy/vpn-gateway/vpn.env
 deploy/vpn-gateway/gluetun/*

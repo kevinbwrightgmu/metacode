@@ -615,6 +615,78 @@ test('Projects page: saved in this browser (not on the server), autosave, reopen
   await context.close();
 });
 
+test('Projects page: the name given when saving sticks (top bar, list, after autosave and reload); renames reach the data; a failed save changes nothing', { skip: noBrowser, timeout: 120000 }, async () => {
+  const { page, context, errors } = await openApp('#projects');
+  await page.waitForSelector('#pj-saveas');
+  const local = () => page.evaluate(() => LocalDB.all('projects'));
+  const shown = () => page.evaluate(() => ({ top: document.getElementById('topbar-project').textContent, state: App.getState().project.name,
+    card: (document.querySelector('#pj-current') || {}).textContent || '', link: ProjectsView.link() }));
+  assert.equal((await shown()).state, 'Untitled Project');
+  // Save a new project under a new name: one step, and the name shows at once
+  await page.click('#pj-saveas');
+  await page.fill('#pj-name', 'Heat pump study');
+  await page.click('#pj-ok');
+  await page.waitForFunction(() => ProjectsView.link() && ProjectsView.link().name === 'Heat pump study');
+  let s = await shown();
+  assert.equal(s.top, 'Heat pump study');
+  assert.equal(s.state, 'Heat pump study');
+  assert.match(s.card, /Heat pump study\s+Saved/);
+  assert.equal(s.link.dirty, false, 'taking the saved name isn\'t an unsaved change');
+  const first = (await local()).find(p => p.name === 'Heat pump study');
+  assert.equal(first.data.project.name, 'Heat pump study', 'the saved data opens with that name');
+  // A later change is autosaved under the same name (it used to become "Untitled Project" here)
+  await page.evaluate(() => App.setState({ posts: [{ id: 'a', text: 'one', aiCodes: {}, humanCodes: {} }] }));
+  await page.waitForFunction(id => LocalDB.get('projects', id).then(p => p.data.posts.length === 1), first.id, { timeout: 15000 });
+  let rec = (await local()).find(p => p.id === first.id);
+  assert.deepEqual([rec.name, rec.data.project.name], ['Heat pump study', 'Heat pump study']);
+  assert.equal((await local()).length, 1, 'no duplicate record');
+  await page.reload();
+  await page.waitForSelector('#pj-current');
+  assert.equal((await shown()).top, 'Heat pump study', 'after a reload');
+  // Save as a new copy: the copy is opened under its name, the original keeps its own
+  await page.click('#pj-saveas');
+  await page.fill('#pj-name', 'Heat pump study v2');
+  await page.click('#pj-ok');
+  await page.waitForFunction(() => ProjectsView.link().name === 'Heat pump study v2');
+  s = await shown();
+  assert.equal(s.top, 'Heat pump study v2');
+  assert.notEqual(s.link.id, first.id);
+  rec = (await local()).find(p => p.id === first.id);
+  assert.equal(rec.name, 'Heat pump study', 'the original isn\'t renamed');
+  // Renaming the project that isn't open renames its data too, so it opens under the new name
+  await page.click(`#pj-list tr[data-id="${first.id}"] [data-act="rename"]`);
+  await page.fill('#pj-name', 'Heat pumps 2025');
+  await page.click('#pj-ok');
+  await page.waitForFunction(id => LocalDB.get('projects', id).then(p => p.name === 'Heat pumps 2025'), first.id);
+  assert.equal((await local()).find(p => p.id === first.id).data.project.name, 'Heat pumps 2025');
+  assert.equal((await shown()).top, 'Heat pump study v2', 'the open project isn\'t affected');
+  // Renaming the open project shows at once and keeps the same saved project
+  const v2 = (await shown()).link.id;
+  await page.click(`#pj-list tr[data-id="${v2}"] [data-act="rename"]`);
+  await page.fill('#pj-name', 'Final study');
+  await page.click('#pj-ok');
+  await page.waitForFunction(() => document.getElementById('topbar-project').textContent === 'Final study');
+  assert.equal((await shown()).link.id, v2);
+  // A failed save: an error in the dialog, no success message, the name and link stay as they were
+  await page.evaluate(() => { window.__put = LocalDB.put; LocalDB.put = () => Promise.reject(new Error('Storage is full')); });
+  await page.click('#pj-saveas');
+  await page.fill('#pj-name', 'Never saved');
+  await page.click('#pj-ok');
+  await page.waitForFunction(() => /Storage is full/.test(document.getElementById('pj-err').textContent));
+  s = await shown();
+  assert.deepEqual([s.top, s.state, s.link.id], ['Final study', 'Final study', v2]);
+  assert.equal(await page.evaluate(() => /Never saved/.test(document.getElementById('notif-stack').textContent)), false, 'no success message for it');
+  await page.evaluate(() => { LocalDB.put = window.__put; App.closeModal(); });
+  assert.ok(!(await local()).some(p => p.name === 'Never saved'));
+  // Reopening the renamed project from the list
+  await page.click(`#pj-list tr[data-id="${first.id}"] [data-act="open"]`);
+  await page.waitForURL(/#dashboard/);
+  await page.waitForFunction(() => document.getElementById('topbar-project').textContent === 'Heat pumps 2025');
+  assert.equal(await page.evaluate(() => App.getState().project.name), 'Heat pumps 2025');
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
 test('Backup: everything kept in one browser can be restored in another, which then manages the same published surveys', { skip: noBrowser, timeout: 60000 }, async () => {
   const a = await openApp('#settings');
   await a.page.waitForSelector('#s-data-card');

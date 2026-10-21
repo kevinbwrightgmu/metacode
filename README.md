@@ -314,6 +314,12 @@ access rules, building installers and server settings:
 [docs/desktop/README.md](docs/desktop/README.md); releasing and signing:
 [docs/desktop/RELEASING.md](docs/desktop/RELEASING.md).
 
+## Secrets and secret scanning
+
+Credentials live only in the server's `.env` (names in `.env.example`) or the deployment's secret store, never
+in Git. TruffleHog scans every pull request and push to `main` (`.github/workflows/secret-scan.yml`); the
+latest whole-history audit, how to run one and what to do if a secret leaks: [docs/security.md](docs/security.md).
+
 ## Accounts and Plans
 
 Accounts are **off** unless the server's `.env` has `SUPABASE_URL` and `SUPABASE_PUBLISHABLE_KEY`; then
@@ -335,6 +341,11 @@ MetaCode works as described elsewhere in this README, with no sign-in and no lim
 | Reddit Scraper | — | 3 jobs / day, 100 items / job, 1,000 / month | 100 jobs / day, 5,000 / job, 100,000 / month, AI Scraper, custom code | 1,000 / day, 25,000 / job, 2,000,000 / month |
 | Social network analysis | — | — | ✓ | ✓ |
 | AI Coding Lab | — | — | — | ✓ (2,000 model calls / day, 50M tokens / month, 50 evaluation runs / day, 500 MB) |
+
+- **Shared projects:** share the open project with other accounts as editors or viewers (invitation links
+  for one email address each), see who has it open, get each other's changes as they happen, resolve
+  conflicting edits, and chat. The server checks every request against the project's members:
+  **[docs/collaboration.md](docs/collaboration.md)**.
 
 Plus daily limits on other AI requests and per-minute request limits. The server checks every sign-in
 with Supabase and every plan with Stripe — the browser is never trusted for either — and counts only work
@@ -468,7 +479,9 @@ startup banner say when that happens.
   (`provider.emis.models`: id → name, `tool_call`, `reasoning`, `attachment`). To update it, edit the file or
   replace it with a newer OpenCode config from the AI service; changes are picked up without a restart. Only the model
   ids, names and capability flags are read from it — the AI service address and key always come from `.env`. If the
-  file is missing, MetaCode asks the AI service for its live list (`GET /v1/models`) instead. The model picked in Settings
+  file is missing, MetaCode asks the AI service for its live list (`GET /v1/models`) instead. When the file is used, the
+  service's live list is checked too, and models it doesn't offer right now are marked in Settings (and the AI Coding
+  Lab) rather than shown as plainly usable — inventory and details: [docs/ai-models.md](docs/ai-models.md). The model picked in Settings
   is used when it's listed; otherwise the default above is used (the server log says so). A request that needs
   something a model's flags say it lacks (tool calling, images) is refused with a clear message.
 - **Quota.** The AI service reports each key's remaining prompts and tokens with every answer and returns HTTP 429 once
@@ -583,7 +596,9 @@ click **Add to project**.
 
 **With accounts on**, a signed-in person's work is also saved to their account (Supabase, readable only by
 them) — see [Accounts and Plans](#accounts-and-plans). The MetaCode server keeps only usage counters and
-the link between an account and its Stripe customer (`ACCOUNT_DATA_DIR`).
+the link between an account and its Stripe customer (`ACCOUNT_DATA_DIR`) — and, for a project you
+**share**, the shared copy, its members, invitations and chat (`COLLAB_DATA_DIR`), readable by its members
+only ([docs/collaboration.md](docs/collaboration.md)).
 
 To reset everything: Settings → Danger Zone → Reset All Data.
 
@@ -626,6 +641,7 @@ metacode/
 ├── model-match.js              "Closest model" ranking, used when the AI service rate-limits a model
 ├── owner.js                    Whose request it is: the signed-in account, else the browser (mc_owner cookie)
 ├── accounts/                   Accounts, plans and limits: Supabase sign-in checks, Stripe plans, usage counters, guards
+├── collab/                     Shared projects: roles, invitations, changes and conflicts, live events, chat — see docs/collaboration.md
 ├── supabase/migrations/        The Supabase table for accounts' data (Row Level Security)
 ├── projects/                   Import of projects older versions saved on the server (this computer only)
 ├── surveys/                    Survey Studio server side: API routes, publishing, responses, JSON-file store
@@ -656,6 +672,7 @@ metacode/
 │       ├── local-db.js          Your data in this browser (IndexedDB), browser identity, backup/restore
 │       ├── tour.js · app-tour.js  Guided tours and hands-on tutorials (spotlight + card); the coding app's tour
 │       ├── projects.js          Projects page: saved projects (in the browser), autosave
+│       ├── collab.js            Shared projects in the page: syncing, conflicts, Share dialog, chat, invitations
 │       ├── data.js              CSV import for posts/engagement/network (AI-assisted structure detection)
 │       ├── codebook.js          Coding scheme management
 │       ├── ai-coding.js         Batch AI coding

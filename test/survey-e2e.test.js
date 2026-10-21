@@ -803,3 +803,46 @@ test('the front page links to both apps and the coding app no longer embeds the 
   assert.deepEqual(errors.filter(e => !/is not defined|VANTA|THREE/.test(e)), []);
   await context.close();
 });
+
+test('Logic tab stays still: no resize churn or repainting while idle, across tab switches; the grid follows scroll and zoom; the tutorial pulse animates a ring only', { skip, timeout: 120000 }, async () => {
+  const { page, context, errors } = await openApp('/studio.html');
+  await page.evaluate(() => { window.__ro = 0; const RO = window.ResizeObserver; window.ResizeObserver = class extends RO { constructor(cb) { super((e, o) => { window.__ro++; cb(e, o); }); } }; });
+  await page.click('.ss-tpl[data-tpl="feedback"]');
+  await page.waitForSelector('.ss-mode[data-mode="logic"]');
+  // To and from the Logic tab a few times, then idle: the workspace settles and stays put
+  for (let i = 0; i < 3; i++) {
+    await page.click('.ss-mode[data-mode="logic"]');
+    await page.waitForSelector('.bk-ws .bk-script');
+    await page.click('.ss-mode[data-mode="design"]');
+  }
+  await page.click('.ss-mode[data-mode="logic"]');
+  await page.waitForTimeout(400);
+  const idle = await page.evaluate(() => new Promise(done => {
+    const ws = document.querySelector('.bk-ws'), shapes = () => Array.from(document.querySelectorAll('.bk-ws svg.bk-shape')).map(s => s.getAttribute('width') + 'x' + s.getAttribute('height')).join();
+    const seen = new Set(); const ro0 = window.__ro; let f = 0;
+    const tick = () => { seen.add([ws.clientWidth, ws.clientHeight, ws.scrollWidth, ws.scrollHeight, shapes()].join('|')); if (++f < 60) requestAnimationFrame(tick); else done({ layouts: seen.size, ro: window.__ro - ro0 }); };
+    requestAnimationFrame(tick);
+  }));
+  assert.deepEqual(idle, { layouts: 1, ro: 0 }, 'one layout over 60 frames, no resize callbacks');
+  const shots = new Set();
+  for (let i = 0; i < 4; i++) { shots.add((await page.screenshot()).toString('base64')); await page.waitForTimeout(100); }
+  assert.equal(shots.size, 1, 'nothing repaints while idle');
+  // The dotted grid moves with the blocks and zooms with them
+  const grid = () => page.evaluate(() => { const cs = getComputedStyle(document.querySelector('.bk-ws')); return [cs.backgroundAttachment, cs.backgroundSize]; });
+  assert.deepEqual(await grid(), ['local', '22px 22px']);
+  await page.click('.bk-zoom button[data-z="in"]');
+  assert.deepEqual(await grid(), ['local', '25px 25px'], '22 px × 1.15, in whole pixels');
+  await page.click('.bk-zoom button[data-z="reset"]');
+  assert.deepEqual(await grid(), ['local', '22px 22px']);
+  // The tutorial's hands-on steps pulse a ring (opacity), not the full-screen dimming shadow
+  await page.evaluate(() => Tour.start('studio-tutorial', { at: Tour.steps('studio-tutorial').findIndex(s => /made of blocks/i.test(s.title)) }));
+  await page.waitForSelector('html.tour-interactive .tour-spot:not(.is-hidden)');
+  const anims = await page.evaluate(() => document.getAnimations().filter(a => a.effect && a.effect.target && a.effect.target.classList && a.effect.target.classList.contains('tour-spot'))
+    .map(a => ({ name: a.animationName, pseudo: a.effect.pseudoElement || null, props: [...new Set(a.effect.getKeyframes().flatMap(k => Object.keys(k).filter(p => !['offset', 'computedOffset', 'easing', 'composite'].includes(p))))] })));
+  assert.deepEqual(anims, [{ name: 'tour-pulse', pseudo: '::after', props: ['opacity'] }]);
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  assert.equal(await page.evaluate(() => document.getAnimations().filter(a => a.animationName === 'tour-pulse').length), 0, 'no pulse with reduced motion');
+  await page.evaluate(() => Tour.stop());
+  assert.deepEqual(errors, []);
+  await context.close();
+});

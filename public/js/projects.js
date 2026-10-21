@@ -39,9 +39,12 @@ const ProjectsView = (() => {
   const summary = r => ({ id: r.id, name: r.name, description: r.description || '', createdAt: r.createdAt, savedAt: r.savedAt, revision: r.revision || 1, counts: Object.assign({ posts: 0, aiCoded: 0, humanCoded: 0, dimensions: 0 }, counts(r.data || {})) });
   const newId = () => 'pr_' + Array.from(crypto.getRandomValues(new Uint8Array(12)), b => 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789'[b % 62]).join('');
   function build(prev, body) {
-    const data = body.data !== undefined ? cleanData(body.data) : prev.data;
-    const name = str(body.name, 300) || prev.name || (data.project && data.project.name) || 'Untitled Project';
+    let data = body.data !== undefined ? cleanData(body.data) : prev.data;
+    const name = str(body.name, 300) || prev.name || (data && data.project && data.project.name) || 'Untitled Project';
     const description = body.description !== undefined ? str(body.description, 5000) : (prev.description || '');
+    // The saved project's name is the one its data opens with (a rename of a
+    // project that isn't open would otherwise come back as the old name)
+    if (data) data = Object.assign({}, data, { project: Object.assign({}, data.project, { name, description }) });
     return { name, description, data };
   }
   const notFound = () => new Error('That saved project doesn\'t exist (it may have been deleted).');
@@ -165,19 +168,56 @@ const ProjectsView = (() => {
     if (more && link.autosave) { clearTimeout(timer); timer = setTimeout(() => { saveNow(true).catch(() => {}); }, AUTOSAVE_MS); }
   }
 
+  // Saves the open project as a new saved project, which it then is linked to
+  // and named after. Nothing changes if the save fails.
   async function saveAsNew(name) {
+    clearTimeout(timer);
+    if (saving) await saving.catch(() => {});   // an autosave in flight would re-link the old copy afterwards
     const s = App.getState();
+    const project = Object.assign({ description: '' }, s.project, { name: name || (s.project && s.project.name) || 'Untitled Project' });
+    const data = Object.assign(snapshot(), { project });
     const seq = changeSeq;
-    const r = await api('', { method: 'POST', body: { name: name || (s.project && s.project.name) || 'Untitled Project', description: (s.project && s.project.description) || '', data: snapshot() } });
-    afterSave({ id: r.project.id, name: r.project.name, savedAt: r.project.savedAt, autosave: true }, seq);
+    const r = await api('', { method: 'POST', body: { name: project.name, description: project.description || '', data } });
+    const changedMeanwhile = changeSeq !== seq;
+    writeLink(null);                   // the old link (if any) mustn't pick up the new name
+    adoptName(r.project.name);
+    afterSave({ id: r.project.id, name: r.project.name, savedAt: r.project.savedAt, autosave: true }, changedMeanwhile ? NaN : changeSeq);
     App.notify('Saved as “' + r.project.name + '”', 'success');
     render();
     return r;
   }
 
+  // Saves the open project as a new saved project without linking to it (a
+  // private copy of a shared project; the shared one stays open)
+  async function saveCopy(name) {
+    const s = App.getState();
+    const project = { name: name || s.project.name, description: s.project.description || '' };
+    const r = await api('', { method: 'POST', body: { name: project.name, description: project.description, data: Object.assign(snapshot(), { project }) } });
+    App.notify('Saved a private copy “' + r.project.name + '”', 'success');
+    refreshListIfShown();
+    return r;
+  }
+
+  // Shows a name the saved project already has on the open project (state,
+  // top bar, link) without counting it as an unsaved change.
+  function adoptName(name) {
+    const link = readLink();
+    writeLink(null);
+    App.setState({ project: Object.assign({ description: '' }, App.getState().project, { name }) });
+    if (link) writeLink(Object.assign(link, { name }));
+    const top = document.getElementById('topbar-project');
+    if (top) top.textContent = name;
+  }
+
   /* ── Opening ────────────────────────────── */
   // Before replacing the open project: save it if it's linked, or ask.
   async function protectCurrent() {
+    // A shared project (collab.js) is kept on the server: send what's waiting first
+    if (typeof Collab !== 'undefined' && Collab.active()) {
+      let sent = false;
+      try { sent = await Collab.flush(); } catch (e) { sent = false; }
+      return sent || confirm('Some changes to the shared project couldn\'t be sent yet (they\'re in this browser only). Continue anyway and lose them?');
+    }
     const link = readLink();
     if (link) {
       if (link.dirty) { try { await saveNow(true); } catch (e) { return confirm('The current project couldn\'t be saved. Continue anyway and lose its latest changes?'); } }
@@ -196,7 +236,8 @@ const ProjectsView = (() => {
     });
   }
 
-  function loadIntoBrowser(data, link) {
+  // Replaces the open project; `shared` links it to a shared project (collab.js)
+  function loadIntoBrowser(data, link, shared) {
     const patch = {};
     DATA_KEYS.forEach(k => { patch[k] = data[k]; });
     if (!patch.project) patch.project = { name: 'Untitled Project', description: '' };
@@ -206,6 +247,7 @@ const ProjectsView = (() => {
     if (patch.networkAnalysis === undefined) patch.networkAnalysis = null;
     clearTimeout(timer);
     writeLink(null);                 // don't autosave the old link with the new data
+    if (typeof Collab !== 'undefined') Collab.setLink(shared || null);
     App.setState(patch);
     writeLink(link);
     // Reload so every page starts from the opened project
@@ -217,7 +259,9 @@ const ProjectsView = (() => {
     if (!(await protectCurrent())) return;
     try {
       const r = await api('/' + encodeURIComponent(id));
-      loadIntoBrowser(r.project.data, { id: r.project.id, name: r.project.name, savedAt: r.project.savedAt, autosave: true, dirty: false });
+      // the saved project's name wins over the one in its data (older saves could differ)
+      const data = Object.assign({}, r.project.data, { project: Object.assign({ description: '' }, r.project.data && r.project.data.project, { name: r.project.name }) });
+      loadIntoBrowser(data, { id: r.project.id, name: r.project.name, savedAt: r.project.savedAt, autosave: true, dirty: false });
     } catch (e) { App.notify('Couldn\'t open the project: ' + e.message, 'error'); }
   }
 
@@ -240,6 +284,7 @@ const ProjectsView = (() => {
         </div>
       </div>
       <div class="card" id="pj-current" style="margin-bottom:20px"></div>
+      <div id="pj-shared"></div>
       <div id="pj-legacy"></div>
       <div class="card" style="padding:0;overflow:hidden">
         <div style="padding:16px 20px 8px" class="card-title">Saved projects</div>
@@ -250,6 +295,7 @@ const ProjectsView = (() => {
     renderCurrent();
     refreshList();
     renderLegacy();
+    if (typeof Collab !== 'undefined') Collab.renderSharedList(document.getElementById('pj-shared'));
   }
 
   async function renderLegacy() {
@@ -276,6 +322,28 @@ const ProjectsView = (() => {
     const n = counts(s);
     const link = readLink();
     const stats = n.posts + ' posts · ' + n.aiCoded + ' AI-coded · ' + n.humanCoded + ' human-coded · ' + n.dimensions + ' codebook dimension' + (n.dimensions === 1 ? '' : 's');
+    // A shared project: saved on the server as it changes (collab.js); a private copy can still be kept here
+    if (typeof Collab !== 'undefined' && Collab.active()) {
+      box.innerHTML = `
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:16px;flex-wrap:wrap">
+          <div>
+            <div style="font-size:11.5px;font-weight:600;letter-spacing:.06em;text-transform:uppercase;color:var(--tx-muted)">Open now</div>
+            <div style="font:700 18px var(--f-display);margin:4px 0">${esc(s.project.name)}</div>
+            <div class="text-muted" style="font-size:13px">${esc(stats)}</div>
+            ${Collab.currentCardHTML()}
+          </div>
+          <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+            <button class="btn btn-secondary" id="pj-copy">Save a private copy</button>
+            <button class="btn btn-secondary" id="pj-chat">Chat</button>
+            <button class="btn btn-primary" id="pj-share">${Collab.link().role === 'owner' ? 'Share…' : 'People…'}</button>
+          </div>
+        </div>`;
+      document.getElementById('pj-copy').onclick = () => nameDialog('Save a private copy', s.project.name + ' (copy)', name => saveCopy(name));
+      document.getElementById('pj-chat').onclick = () => Collab.openChat();
+      document.getElementById('pj-share').onclick = () => Collab.openShare();
+      Collab.wireCurrentCard();
+      return;
+    }
     let status;
     if (link) {
       status = saving ? '<span class="badge badge-blue">Saving…</span>'
@@ -294,11 +362,14 @@ const ProjectsView = (() => {
             <button class="btn btn-secondary" id="pj-saveas">Save as new copy</button>
             <button class="btn btn-primary" id="pj-savenow">Save now</button>`
           : `<button class="btn btn-primary" id="pj-saveas">Save this project</button>`}
+          ${typeof Collab !== 'undefined' && Collab.available() ? '<button class="btn btn-secondary" id="pj-share">Share…</button>' : ''}
         </div>
       </div>`;
     const sn = document.getElementById('pj-savenow');
     if (sn) sn.onclick = () => saveNow(false).catch(() => {});
     document.getElementById('pj-saveas').onclick = () => nameDialog(link ? 'Save as a new copy' : 'Save this project', link ? s.project.name + ' (copy)' : s.project.name, name => saveAsNew(name));
+    const sh = document.getElementById('pj-share');
+    if (sh) sh.onclick = () => Collab.openShare();
     const as = document.getElementById('pj-autosave');
     if (as) as.onchange = () => { const l = readLink(); if (l) { l.autosave = as.checked; writeLink(l); if (as.checked && l.dirty) saveNow(true).catch(() => {}); } };
   }
@@ -354,13 +425,10 @@ const ProjectsView = (() => {
 
   function renameProject(p) {
     nameDialog('Rename project', p.name, async name => {
+      if (saving) await saving.catch(() => {});   // an autosave in flight still carries the old name
       await api('/' + encodeURIComponent(p.id), { method: 'PUT', body: { name } });
       const link = readLink();
-      if (link && link.id === p.id) {
-        App.setState({ project: Object.assign({}, App.getState().project, { name }) });
-        const top = document.getElementById('topbar-project'); if (top) top.textContent = name;
-        writeLink(Object.assign(readLink() || link, { name }));
-      }
+      if (link && link.id === p.id) adoptName(name);
       render();
     });
   }
@@ -430,5 +498,5 @@ const ProjectsView = (() => {
     if (e.detail && e.detail.kinds.includes('projects') && App.getCurrentView && App.getCurrentView().id === 'projects') render();
   });
 
-  return { render, noteChange, saveNow, link: readLink };
+  return { render, noteChange, saveNow, link: readLink, protectCurrent, loadIntoBrowser, unlink: () => { clearTimeout(timer); writeLink(null); } };
 })();

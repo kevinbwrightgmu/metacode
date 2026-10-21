@@ -113,7 +113,7 @@ test('providers: only administrator settings create routes; SOCKS and bad URLs a
   r = providersFromEnv({ SCRAPER_PROXY_URL: 'socks5://gw:1080', SCRAPER_NETWORK_PROVIDERS: 'proxy' }, deps);
   assert.match(r.providers[0].problems.join(' '), /SOCKS/);
   assert.equal(r.providers[0].capabilities.socks, false);
-  r = providersFromEnv({ SCRAPER_VPN_GATEWAY_PROXY_URL: 'http://user:s3cret-pass@gateway.internal:8888', SCRAPER_VPN_GATEWAY_HEALTH_URL: 'http://gateway.internal:8000/v1/vpn/status',
+  r = providersFromEnv({ SCRAPER_VPN_GATEWAY_PROXY_URL: 'http://user:s3cret-pass@gateway.internal:8888', SCRAPER_VPN_GATEWAY_HEALTH_URL: 'http://gateway.internal:8000/v1/vpn/status', // trufflehog:ignore (test fixture)
     SCRAPER_NETWORK_PROVIDERS: 'vpn-gateway,direct,nope', SCRAPER_NETWORK_FAILOVER: 'on' }, deps);
   assert.deepEqual(r.order, ['vpn-gateway', 'direct']);
   assert.equal(r.failover, true);
@@ -648,11 +648,11 @@ test('API: pause/resume/summary/history/settings are owner-scoped; the queue app
 
 test('API: administrators see providers, circuits, metrics and queue health — never credentials', async () => {
   const dir = tmpDir();
-  const app = await startScraperApp({ SCRAPER_DATA_DIR: dir, SCRAPER_PROXY_URL: 'http://ops:hunter2@proxy.internal:3128' }, { });
+  const app = await startScraperApp({ SCRAPER_DATA_DIR: dir, SCRAPER_PROXY_URL: 'http://ops:hunter2@proxy.internal:3128' }, { }); // trufflehog:ignore (test fixture)
   const { createScraper } = require('../scraper');
   const { loadScraperConfig } = require('../scraper/config');
   const express = require('express');
-  const config = loadScraperConfig(Object.assign(require('./helpers/harness').testEnv({ SCRAPER_DATA_DIR: tmpDir(), SCRAPER_PROXY_URL: 'http://ops:hunter2@proxy.internal:3128', SCRAPER_NETWORK_PROVIDERS: 'proxy,direct' })));
+  const config = loadScraperConfig(Object.assign(require('./helpers/harness').testEnv({ SCRAPER_DATA_DIR: tmpDir(), SCRAPER_PROXY_URL: 'http://ops:hunter2@proxy.internal:3128', SCRAPER_NETWORK_PROVIDERS: 'proxy,direct' }))); // trufflehog:ignore (test fixture)
   const scraper = createScraper({ config, logToConsole: false, adminGuard: (req, res, next) => (req.headers['x-test-admin'] === 'yes' ? next() : res.status(403).json({ error: { type: 'forbidden', message: 'no' } })) });
   const a = express(); a.use(express.json()); a.use('/api/scraper', scraper.router);
   const server = http.createServer(a);

@@ -31,6 +31,7 @@ const { redact } = require('../lib/log');
  * @property {number | null} contextWindow   null: unknown (a conservative default budget is used)
  * @property {number | null} maxOutput
  * @property {boolean} isDefault
+ * @property {boolean | null} available   true: the provider lists it now; false: it doesn't; null: not known
  */
 
 /**
@@ -95,7 +96,7 @@ class MetaCodeProvider {
       models: r.models.map(/** @param {any} m */ m => ({
         provider: this.id, id: m.id, name: m.name, isDefault: m.id === r.default,
         capabilities: { chat: true, streaming: true, toolCalling: m.toolCall, structuredOutput: null, embeddings: false, fineTuning: false },
-        contextWindow: m.contextWindow, maxOutput: m.maxOutput
+        contextWindow: m.contextWindow, maxOutput: m.maxOutput, available: m.available === undefined ? null : m.available
       }))
     };
   }
@@ -203,7 +204,8 @@ class OpenAICompatibleProvider {
       models: ids.map(id => ({
         provider: this.id, id, name: id, isDefault: false,
         capabilities: { chat: true, streaming: true, toolCalling: null, structuredOutput: null, embeddings: false, fineTuning: this.capabilities.fineTuning && this.cfg.fineTuneModels.includes(id) },
-        contextWindow: null, maxOutput: null
+        // listed by the provider's /models, or named by AI_LAB_OPENAI_MODELS (then not checked)
+        contextWindow: null, maxOutput: null, available: this.cfg.models.length ? null : true
       }))
     };
   }
