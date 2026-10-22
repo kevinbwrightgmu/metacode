@@ -5,7 +5,7 @@
 //
 //   { "asOf": "2026-10-01", "currency": "USD",
 //     "models": { "openai:gpt-4o-mini": { "inputPerMTok": 0.15, "outputPerMTok": 0.60 },
-//                 "metacode:gpt-5-5":    { "inputPerMTok": 1.25, "outputPerMTok": 10 } } }
+//                 "metacode:gpt-5.5":    { "inputPerMTok": 1.25, "outputPerMTok": 10 } } }
 //
 // A cost is then *estimated* as tokens × price (labelled with the list's
 // date). A model without a price has an *unknown* cost. No provider used here

@@ -122,7 +122,7 @@ function createPlatform(o) {
     async models() {
       const r = await server('/api/models', { timeoutMs: 20000 });
       if (!r.ok || !r.json) return { models: [], note: 'Couldn\'t load the model list.' };
-      return { models: Array.isArray(r.json.models) ? r.json.models.slice(0, 200).map((/** @type {any} */ m) => ({ id: String(m.id), name: String(m.name || m.id) })) : [], note: r.json.note || null };
+      return { models: Array.isArray(r.json.models) ? r.json.models.slice(0, 1000).map((/** @type {any} */ m) => ({ id: String(m.id), name: String(m.name || m.id) })) : [], note: r.json.note || null };
     },
 
     /** The account's saved projects (names and dates, not their data) */

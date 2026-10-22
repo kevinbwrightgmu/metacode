@@ -19,6 +19,7 @@ const undici = require('undici');
 const { LabError } = require('./errors');
 const { dispatcherFor } = require('../accounts/http');
 const { redact } = require('../lib/log');
+const { renamedModel } = require('../model-match');
 
 /** @typedef {import('../types/ai-lab').MessageUsage} MessageUsage */
 
@@ -321,7 +322,9 @@ function createRegistry(deps) {
     const p = get(providerId);
     const r = await p.models();
     if (!r.models.length) throw new LabError('provider_unavailable', p.label + ': ' + (r.problem || 'no models are available.'), { status: 503 });
-    const m = modelId ? r.models.find(x => x.id === modelId) : (r.models.find(x => x.isDefault) || r.models[0]);
+    // (a model saved under an older spelling of its id — claude-opus-5-5 → claude-opus-5.5 — is the same model)
+    const byId = /** @param {string | null} id */ id => (id ? r.models.find(x => x.id === id) : undefined);
+    const m = modelId ? byId(modelId) || byId(renamedModel(modelId, r.models.map(x => x.id))) : (r.models.find(x => x.isDefault) || r.models[0]);
     if (!m) throw new LabError('model_unavailable', 'The model "' + String(modelId).slice(0, 80) + '" isn\'t offered by ' + p.label + ' right now. Pick another under Models.', { status: 400 });
     return m;
   }

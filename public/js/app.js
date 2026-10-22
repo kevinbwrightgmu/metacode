@@ -39,6 +39,12 @@ const App = (() => {
     if (['openai/gpt-oss-20b', 'claude-sonnet-4-6'].includes(state.settings.model)) state.settings.model = '';
     if (typeof state.settings.model !== 'string') state.settings.model = '';
     if (!state.settings.models || typeof state.settings.models !== 'object') state.settings.models = {};
+    // The AI service respelled these ids (2026-10-22): a model picked under the old id keeps being picked
+    const RENAMED_MODELS = { 'claude-opus-5-5': 'claude-opus-5.5', 'claude-sonnet-5-5': 'claude-sonnet-5.5', 'claude-opus-4-6': 'claude-opus-4.6',
+      'gpt-6-1-sol': 'gpt-6.1-sol', 'gpt-5-6': 'gpt-5.6-sol', 'gpt-5-5': 'gpt-5.5', 'gemini-3-8-flash': 'gemini-3.8-flash', 'kimi-k2-6': 'kimi-k2.6',
+      'grok-4-7': 'grok-4.7', 'qwen-3-7-max': 'qwen-3.7-max', 'glm-5-3': 'glm-5.3', 'glm-5-3-flash': 'glm-5.3-flash' };
+    if (RENAMED_MODELS[state.settings.model]) state.settings.model = RENAMED_MODELS[state.settings.model];
+    Object.keys(state.settings.models).forEach(f => { if (RENAMED_MODELS[state.settings.models[f]]) state.settings.models[f] = RENAMED_MODELS[state.settings.models[f]]; });
     if (!Number.isFinite(Number(state.settings.delay))) state.settings.delay = 500;
     if (!Number.isFinite(Number(state.settings.parallel)) || Number(state.settings.parallel) < 1) state.settings.parallel = 4;
     if (typeof state.settings.switchModels !== 'boolean') state.settings.switchModels = true;
@@ -300,8 +306,8 @@ const App = (() => {
               <div class="s-feature-models" id="s-feature-models"></div>
             </div>
             <div class="form-group">
-              <label class="s-check-row" for="s-switch"><input type="checkbox" id="s-switch" ${settings.switchModels !== false ? 'checked' : ''}> If a model is rate-limited, use the closest similar model</label>
-              <div class="form-hint">When the AI service throttles the model you picked, requests go to the most similar available model — same family and line, nearest version and size (e.g. Claude Opus 4.8 → Opus 4.7) — until it can be used again, and a note says which one answered. Turn off to wait for your model instead (e.g. so every post is coded by the same model). A used-up AI budget can't be avoided this way: it applies to every model.</div>
+              <label class="s-check-row" for="s-switch"><input type="checkbox" id="s-switch" ${settings.switchModels !== false ? 'checked' : ''}> If a model is rate-limited or failing, use the closest similar model</label>
+              <div class="form-hint">When the AI service throttles the model you picked, or can't run it right now, requests go to the most similar available model — same family and line, nearest version and size (e.g. Claude Opus 5.5 → Claude Opus 5) — until it can be used again, and a note says which one answered. (AI Coding waits and tries your model again when the AI service can't run it, so every post is coded by the model you picked.) Turn off to wait for your model instead. A used-up AI budget can't be avoided this way: it applies to every model.</div>
               <div class="form-hint" id="s-limited"></div>
             </div>
             <div class="form-group">
@@ -631,7 +637,7 @@ const App = (() => {
       rows.push('<div class="text-muted">The .env file is switched off for this server (METACODE_ENV_FILE=none).</div>');
     } else {
       rows.push('<div style="color:var(--error)">✗ No <code>.env</code> file found (looked in ' + esc((env.searched || []).join(', ')) + ').</div>' +
-        '<div class="form-hint">Copy <code>.env.example</code> to a file named exactly <code>.env</code> next to <code>server.js</code>, put <code>EMIS_API_KEY=your-key</code> in it, save, then click <b>Reload .env</b>.</div>');
+        '<div class="form-hint">Copy <code>.env.example</code> to a file named exactly <code>.env</code> next to <code>server.js</code>, put your AI key in it as <code>EMIS_API_KEY=…</code>, save, then click <b>Reload .env</b>.</div>');
     }
     (env.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
     if (env.overridden && env.overridden.length) rows.push('<div style="color:#B45309">⚠ .env replaced older values set in this computer\'s environment for: ' + env.overridden.map(k => '<code>' + esc(k) + '</code>').join(' ') + '</div>');
@@ -717,16 +723,23 @@ const App = (() => {
       const data = await res.json();
       const items = data.keys || [];
       if (!items.length) {
-        listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">No AI keys loaded — add <code>EMIS_API_KEY=…</code> to .env and click Reload .env above.</div>';
+        listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">No AI keys loaded — add <code>EMIS_API_KEY=…</code> (your key) to .env and click Reload .env above.</div>';
         return;
       }
       listEl.innerHTML = items.map(k => {
+        // A used-up budget rests the key until its day, week or month rolls over
+        const back = new Date(Date.now() + (k.cooldownSecondsLeft || 0) * 1000);
         const statusBadge = k.status === 'available'
           ? '<span class="badge badge-green">Available</span>'
           : k.status === 'cooling_down'
-            ? '<span class="badge badge-amber">Resting ' + k.cooldownSecondsLeft + 's</span>'
+            ? '<span class="badge badge-amber" title="' + esc(back.toLocaleString()) + '">Resting ' + (k.cooldownSecondsLeft < 120 ? k.cooldownSecondsLeft + 's' : 'until ' + esc(k.cooldownSecondsLeft < 86400 ? back.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : back.toLocaleDateString())) + '</span>'
             : '<span class="badge badge-red">Rejected by the AI service</span>';
-        const quota = k.quota && k.quota.remainingPrompts !== null && k.quota.remainingPrompts !== undefined ? '<span style="color:var(--tx-muted)">' + k.quota.remainingPrompts + ' prompts left</span>' : '';
+        // The budget is prompts and/or tokens: show whichever the AI service reports
+        const q = k.quota || {};
+        const has = v => v !== null && v !== undefined;
+        const left = [has(q.remainingPrompts) ? Number(q.remainingPrompts).toLocaleString() + ' prompt' + (q.remainingPrompts === 1 ? '' : 's') : '',
+          has(q.remainingTokens) ? Number(q.remainingTokens).toLocaleString() + ' tokens' : ''].filter(Boolean).join(' · ');
+        const quota = left ? '<span style="color:var(--tx-muted)">' + left + ' left' + (q.window ? ' this ' + esc(q.window) : '') + '</span>' : '';
         return '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg-muted);border-radius:var(--r-sm);font-size:12.5px">' +
           '<span class="font-mono">' + esc(k.masked) + '</span><span class="badge badge-gray" style="font-size:10px">.env</span>' + quota +
           '<span style="margin-left:auto;color:var(--tx-muted)">' + k.requestCount + ' req</span>' + statusBadge + '</div>';

@@ -35,7 +35,9 @@ The front page (`index.html`) introduces the four research methods — Reddit da
 ### Prerequisites
 - **Node.js** v18 or higher → [nodejs.org](https://nodejs.org) (**v22 or higher** for the Reddit Scraper)
 - **Python** 3.9 or higher (only needed for the "Analyze CSV" NetworkX feature) → [python.org](https://python.org)
-- An **AI API key** for MetaCode's AI service (keys are issued manually by the service's operator).
+- An **AI API key** for MetaCode's AI service (it looks like `emis-…`). Keys are issued by hand: message
+  @kawaii_zxs on Discord (user ID 1079096114273320971) and say what you need it for. Each key comes with a budget — a
+  number of prompts and/or tokens it may spend per day, week or month.
 
 ### Setup (4 steps)
 
@@ -53,7 +55,7 @@ pip install -r requirements.txt
 ```bash
 cp .env.example .env
 # Edit .env and set your key:
-# EMIS_API_KEY=your-key
+# EMIS_API_KEY=emis-…
 ```
 The key is only read by MetaCode's server — it never reaches the browser. See [AI Provider](#ai-provider)
 for the other settings. **Settings → AI connection** shows which file was read and which settings it contained
@@ -414,8 +416,8 @@ For most research contexts, κ ≥ 0.61 is the acceptable threshold.
 ## AI Coding Tips
 
 - **Provider**: all AI features run through the AI service (see [AI Provider](#ai-provider))
-- **Quota**: The AI service gives each key a budget of prompts and tokens per day, week or month. Coding a large dataset uses one prompt per post (more if a post has to be retried), so check your quota before a big run
-- **Model selection**: Click "Fetch Models" in Settings to see exactly which models the AI service offers — the lineup can change over time
+- **Quota**: Each AI key has a budget — a number of prompts and/or tokens it may spend per day, week or month; when it runs out, the AI service answers 429 until the window rolls over. Coding a large dataset uses one prompt per post (more if a post has to be retried), so check your quota (Settings → AI keys) before a big run
+- **Model selection**: Click **↻ Refresh list** in Settings → AI models to see which models the AI service offers right now — the lineup can change over time (models in `emis-models.json` it doesn't list right now are marked)
 - **Codebook quality**: Clear, specific code descriptions dramatically improve AI coding accuracy
 - **Fine-tuning a code**: If the AI keeps misapplying one specific code, open it in the Codebook and add a note in "AI Fine-Tuning Notes" — e.g. "don't count sarcastic praise as Positive." This is read by the AI on every future coding run but never shown to human coders, so it won't bias manual coding or your reliability comparison
 - **Speed (copies at once)**: AI Coding splits the posts between several simultaneous requests to the same model — 4 by default. Change the number in the **at once** box next to **Run AI Coding** or in Settings → AI models (1 = one post at a time; up to `AI_MAX_PARALLEL`, 16 by default). Results appear as each post finishes. If the AI service rate-limits the key, MetaCode halves the number, pauses and retries by itself. Every post still uses one prompt of your quota, so more copies finish sooner but don't cost more
@@ -440,7 +442,7 @@ key in the server's `.env` — through the same local server, with key rotation.
 - the last few messages of the conversation.
 
 The conversation lives in memory only: it's cleared when you reload the page or click the clear button.
-Each question uses roughly 3,000 tokens of your AI token quota.
+Each question uses one prompt and roughly 3,000 tokens of the AI key's budget.
 
 ---
 
@@ -459,11 +461,11 @@ Configuration lives only in the server's `.env` file:
 |---|---|---|
 | `EMIS_API_KEY` | yes | Your AI key. Several keys can be listed, comma-separated — MetaCode rotates between them |
 | `EMIS_BASE_URL` | no | AI service address, default `https://emis.zxs-is-very.cool/v1` |
-| `EMIS_MODEL` | no | Default model. If empty: the first model in `emis-models.json` (without that file: `gpt-oss-120b` if the AI service lists it, otherwise the first model the AI service lists) |
+| `EMIS_MODEL` | no | Default model. If empty: Claude Opus 5.5 (`claude-opus-5.5`) when `emis-models.json` lists it, else the file's first model (without that file: `gpt-oss-120b` if the AI service lists it, otherwise the first model the AI service lists). An older spelling of an id (`claude-opus-5-5`) is read as the new one |
 | `EMIS_MODELS_FILE` | no | Model list file, default `emis-models.json` in the MetaCode folder |
-| `EMIS_TRANSPORT` | no | What sends AI requests: `auto` (default — Python, with the `openai` package when installed, else Node.js), `python` or `node` |
+| `EMIS_TRANSPORT` | no | What sends AI requests: `auto` (default — Python, with the `openai` package when installed, else Node.js), `python` or `node`. Any of them works: the AI service's browser check doesn't apply to API requests made with a key |
 | `EMIS_PROXY` | no | Proxy for AI requests (`HTTPS_PROXY` / `NO_PROXY` are used too) |
-| `EMIS_MODEL_SWITCH` | no | `off` stops MetaCode from answering with the closest similar model when the AI service rate-limits the chosen one (on by default) |
+| `EMIS_MODEL_SWITCH` | no | `off` stops MetaCode from answering with the closest similar model when the AI service rate-limits the chosen one or can't run it (on by default) |
 | `AI_MAX_PARALLEL` | no | The most copies of the model AI Coding may run at once (default 16, max 64); users choose up to this |
 | `AI_BATCH_PAUSE_SECONDS` | no | How long AI Coding first pauses when the AI service answers with a server error (default 5; doubles with each pause, up to 60) |
 | `EMIS_TIMEOUT_MS` | no | How long to wait for the AI service (default 120000 ms) |
@@ -475,34 +477,43 @@ then in the folder above; `.env.txt` (Windows often adds `.txt`) is accepted, an
 system environment (an old system variable is a common reason a new key seems not to load) — Settings and the
 startup banner say when that happens.
 
-- **Models.** The model list comes from `emis-models.json` — the AI service's models in OpenCode's config format
-  (`provider.emis.models`: id → name, `tool_call`, `reasoning`, `attachment`). To update it, edit the file or
-  replace it with a newer OpenCode config from the AI service; changes are picked up without a restart. Only the model
+- **Models.** The model list comes from `emis-models.json` — the AI service's OpenCode config
+  (`https://emis.zxs-is-very.cool/cli/opencode.json`; `provider.emis.models`: id → name, `tool_call`, `reasoning`,
+  `attachment`). The AI service generates that file live from its catalog and lists only models with tool calling, so
+  `GET /v1/models` can list more. To update it, download that file again and save it as `emis-models.json` (or edit
+  it); changes are picked up without a restart. The catalog sometimes respells ids (on 2026-10-22 `claude-opus-5-5`
+  became `claude-opus-5.5`, `gpt-6-1-sol` `gpt-6.1-sol` …): a model picked under an old spelling is still that model
+  (Settings, the AI Coding Lab, `EMIS_MODEL`). Only the model
   ids, names and capability flags are read from it — the AI service address and key always come from `.env`. If the
   file is missing, MetaCode asks the AI service for its live list (`GET /v1/models`) instead. When the file is used, the
   service's live list is checked too, and models it doesn't offer right now are marked in Settings (and the AI Coding
   Lab) rather than shown as plainly usable — inventory and details: [docs/ai-models.md](docs/ai-models.md). The model picked in Settings
   is used when it's listed; otherwise the default above is used (the server log says so). A request that needs
   something a model's flags say it lacks (tool calling, images) is refused with a clear message.
-- **Quota.** The AI service reports each key's remaining prompts and tokens with every answer and returns HTTP 429 once
-  the budget for the current day, week or month is used up. MetaCode then rests that key until the reset
+- **Quota.** Each key has a budget — a number of prompts and/or tokens it may spend per day, week or month. Every chat
+  answer carries the key's standing (`X-RateLimit-Window`, `X-RateLimit-Limit-Prompts` / `-Tokens`,
+  `X-RateLimit-Remaining-Prompts` / `-Tokens`, `X-RateLimit-Reset` in Unix seconds), and once the budget runs out the
+  key gets HTTP 429 until the window rolls over. MetaCode then rests that key until the reset
   time the AI service gave (another key is used if you listed several) and shows a message saying when the quota
   resets. Restarting the server clears this memory.
-- **Rate-limited models switch to the closest one.** A 429 while the key still has budget means the AI service is
-  throttling that one model. MetaCode then rests just that model (1 minute, doubling while it keeps
+- **Rate-limited models switch to the closest one.** The AI service documents 429 for a used-up budget; a 429 while
+  the quota headers still show budget left (and its message doesn't say the budget is spent) is treated as the AI
+  service throttling that one model. MetaCode then rests just that model (1 minute, doubling while it keeps
   happening, up to 15 — or what `Retry-After` says) and answers with the **closest similar model**: same
   family and line first (Claude Opus → Claude Opus, Qwen Max Thinking → Qwen Max Thinking), then the nearest
-  version and size, the same speed tier and capabilities (`model-match.js`). Requests for the resting model go
+  version and size, the same speed tier and capabilities (`model-match.js`); the same model under another spelling
+  of its id comes last, as it's most likely limited too. Requests for the resting model go
   straight to the substitute without calling the AI service, and the app says which model answered (AI Coding's summary
   counts the posts coded by a substitute). Up to four similar models are tried per request. If one key gets
   429s on three different models within 20 seconds without quota headers, it's the key being paused, so the
-  key rests instead. Turn switching off per browser in Settings → AI models (*If a model is rate-limited, use
-  the closest similar model*) or for the whole server with `EMIS_MODEL_SWITCH=off`. A used-up budget applies
+  key rests instead. Turn switching off per browser in Settings → AI models (*If a model is rate-limited or
+  failing, use the closest similar model*) or for the whole server with `EMIS_MODEL_SWITCH=off`. A used-up budget applies
   to every model, so switching doesn't help there.
 - **Server errors (HTTP 5xx) from the AI service.** Each request is retried twice first. A model that still
-  fails rests briefly (30 seconds, doubling while it keeps failing, up to 5 minutes): requests for the server's
-  default model go straight to the closest similar model meanwhile (a model you picked is still asked), and
-  failing models aren't used as substitutes. When three different models fail within a minute, the AI service
+  fails rests briefly (30 seconds, doubling while it keeps failing, up to 5 minutes), and requests for it are
+  answered by the closest similar model meanwhile — also a model you picked, while switching is on (Ask MetaCode,
+  Import Data, Analyze CSV, "Code this"; the app says which model answered). AI Coding runs keep the model you
+  picked: they pause and try it again (below). Failing models aren't used as substitutes. When three different models fail within a minute, the AI service
   itself is having problems: MetaCode stops trying other models and says so, and the status page shows the AI
   service as down until an answer comes through. During AI Coding, a server error pauses the run (5 s, then
   10, 20, 40, 60), halves how many posts are coded at once and tries those posts again — the status line says
@@ -514,14 +525,18 @@ startup banner say when that happens.
   Other websites open in your browser can't use MetaCode's AI endpoints (they're same-origin only).
 - **Settings page.** *AI connection* shows the `.env` file that was read (name, location, encoding), the names
   of the settings in it, warnings, whether AI is ready, and **Reload .env** / **Test connection**. *AI models*
-  has a default model plus one per feature — AI Coding, Ask MetaCode, Import Data (column detection) and
-  Analyze CSV (edge detection); "Same as default" follows the default. *AI Coding: copies of the model working
-  at once* sets how many posts are coded side by side; *If a model is rate-limited, use the closest similar
-  model* (on by default) and a list of the models the AI service is rate-limiting right now. *AI keys* lists each key masked, with
-  its status and remaining quota.
+  has a default model plus one per feature — AI Coding, Ask MetaCode, Import Data (column detection), Analyze CSV
+  (edge detection) and AI Scraper (beta); "Same as default" follows the default. *AI Coding: copies of the model working
+  at once* sets how many posts are coded side by side; *If a model is rate-limited or failing, use the closest similar
+  model* (on by default) and a list of the models the AI service is rate-limiting right now. *AI keys* lists each key
+  masked, with its status (resting until when) and the prompts and/or tokens it has left this day, week or month.
 - **Streaming.** `POST /api/ai` also accepts `"stream": true` (OpenAI request format) and then relays the AI service's
   server-sent events (`chat.completion.chunk` …, then `data: [DONE]`); a failure mid-stream arrives as a
-  final `data: {"error": {...}}` event. The current interface doesn't use streaming.
+  final `data: {"error": {...}}` event. The AI Coding Lab's conversations stream; the other features don't.
+- **Images, videos and the website check.** The AI service makes images and videos inside a chat completion when asked
+  (a model that can make one answers with it); MetaCode's features use the text of an answer, and a picture in it
+  shows as `[image omitted]`. Its website runs a one-time invisible check the first time you open it in a browser;
+  API requests made with a key, like MetaCode's, aren't affected by it.
 
 ---
 
@@ -617,7 +632,7 @@ metacode/
 ├── package.json
 ├── requirements.txt            Python dependency (networkx) for the NetworkX feature
 ├── .env.example                Copy to .env and add your AI key
-├── emis-models.json            The AI models offered in Settings (OpenCode config format)
+├── emis-models.json            The AI models offered in Settings (the AI service's /cli/opencode.json: its models with tool calling)
 ├── collector/                  AI Scraper (beta) app (React + Vite + TypeScript) — see collector/README.md
 │   ├── src/                    lib/ (AI jobs, records, settings), store/ (IndexedDB), export/, ui/
 │   ├── test/                   Vitest unit tests
@@ -709,7 +724,7 @@ If you use MetaCode in your research, please acknowledge:
 
 **"AI not set up" in the top bar / the key in `.env` doesn't load**
 → Open **Settings**: *AI connection* says which `.env` file was read and which setting names it found. Put
-`EMIS_API_KEY=your-key` in it (one setting per line), save, and click **Reload .env**. If it says no file was
+`EMIS_API_KEY=emis-…` (your key) in it (one setting per line), save, and click **Reload .env**. If it says no file was
 found, the file must be called `.env` (not `.env.example`) next to `server.js`.
 
 **HTTP 502 / "Couldn't reach the AI service" / "The AI service couldn't run the model … (HTTP 502)" / "The AI service is having server problems right now"**
@@ -727,19 +742,29 @@ the system proxy by itself. If a model you picked keeps failing, choose another 
 → The MetaCode server is still running the version from before the update. Restart it (stop it, then
 `npm start`).
 
-**HTTP 403 / "The AI service's website check answered instead of the API"**
-→ MetaCode sends AI requests from Python (with the official `openai` package when installed), as the AI service's
-documentation does. Install Python 3, run `pip install -r requirements.txt` (adds `openai`), and restart.
-**Settings → AI connection** shows what sends the requests ("requests sent by Python … (openai …)"). A 403
-that names a model means your key can't use that model: pick another in Settings → AI models.
+**HTTP 403 / "A web page answered (HTTP 403) instead of the AI service's API"**
+→ The AI service's website runs a one-time invisible check the first time you open it in a browser, but API requests
+made with a key — like MetaCode's — aren't affected by it. A web page here means the request didn't reach the API
+with your key: check that `EMIS_BASE_URL` is `https://emis.zxs-is-very.cool/v1` (or leave it out) and that
+`EMIS_API_KEY` holds your key (`emis-…`), then click **Reload .env**. If both are right, a proxy or firewall on your
+network may be answering instead (see `EMIS_PROXY` / `HTTPS_PROXY` above). A 403 that names a model means your key
+can't use that model: pick another in Settings → AI models.
 
 **"Your AI usage quota … is used up"**
-→ The key's AI budget for the current day/week/month is spent; the message says when it resets. Wait until
-then, or add another AI key to `EMIS_API_KEY` (comma-separated).
+→ The key's budget (prompts and/or tokens) for the current day, week or month is spent, and the AI service answers
+429 until the window rolls over; the message says when that is. Wait until then, or add another AI key to
+`EMIS_API_KEY` (comma-separated; keys are issued by hand — message @kawaii_zxs on Discord).
 
 **"The AI service doesn't offer the model …"**
 → In Settings → AI models, pick another model and click "Save model settings" (or set `EMIS_MODEL` in `.env`).
-If the model is listed in `emis-models.json` but the AI service no longer serves it, update that file.
+If the model is listed in `emis-models.json` but the AI service no longer serves it, download
+`https://emis.zxs-is-very.cool/cli/opencode.json` again and save it as `emis-models.json`.
+
+**Settings shows a model "(not in the list)"**
+→ The model list changed and no longer has that model under that id. Models whose id was only respelled (on
+2026-10-22 many ids got dots: `claude-opus-5-5` → `claude-opus-5.5`, `gpt-5-5` → `gpt-5.5`, `glm-5-3` → `glm-5.3`)
+are picked up by themselves; for any other, pick a model again in Settings → AI models and click "Save model
+settings" (and change `EMIS_MODEL` in `.env` if it names it).
 
 **"NetworkX not available" on the Analyze CSV page**
 → Run `pip install -r requirements.txt` (or `pip3 install -r requirements.txt`) in the project folder, then refresh the page

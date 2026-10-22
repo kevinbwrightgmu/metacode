@@ -49,7 +49,11 @@ above. Run the checks in [step 9](#9-check-that-it-works).
   (the [status page](../README.md#status-page)) if you want them.
 - **HTTPS.** The Reddit Scraper's in-app browser only works on `https://` (or `http://localhost`), because
   Scramjet needs a service worker and browsers only allow those on secure pages.
-- **Python 3**, for the AI Scraper (beta)'s agent, Analyze CSV and the AI requests (step 3).
+- **Python 3**, for the AI Scraper (beta)'s agent and Analyze CSV; MetaCode also sends its AI requests from Python when
+  it's there (Node.js otherwise) (step 3).
+- **An AI key** (`emis-…`) for MetaCode's AI service. Keys are issued by hand: message @kawaii_zxs on Discord (user ID
+  1079096114273320971) and say what you need it for. The key's budget (prompts and/or tokens per day, week or month)
+  is shared by everyone who uses the server.
 
 ## 2. Install Node.js 22, pm2 and git
 
@@ -101,7 +105,7 @@ nano .env
 Set at least:
 
 ```ini
-EMIS_API_KEY=your-key                 # the AI key
+EMIS_API_KEY=emis-…                   # the AI key (step 1)
 PORT=3000                             # nginx forwards to this port
 PUBLIC_URL=https://metac0.de          # your site's address (several: comma-separated)
 SCRAPER_USER_AGENT=nodejs:metacode-scraper:1.0 (by /u/your_reddit_name)
@@ -277,7 +281,8 @@ pages fail from it. Reddit's official API with keys works instead, for both the 
   included; others wait their turn. With many users bringing their own keys, raise it, e.g.
   `SCRAPER_MAX_CONCURRENT_JOBS=8`.
 - AI Scraper jobs also use MetaCode's AI key: each step is one AI request (a job makes at most its step limit
-  plus a few). The AI service's quota for that key is shared by everyone.
+  plus a few). The key's budget (prompts and/or tokens per day, week or month) is shared by everyone; when it runs
+  out, the AI service answers 429 until the window rolls over.
 
 ## 8. Firewall
 

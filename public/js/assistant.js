@@ -324,6 +324,14 @@ const Assistant = (() => {
     if (/no api key|isn.t set up|not_configured/i.test(msg)) {
       return { settings: true, text: 'MetaCode’s AI isn’t set up: add `EMIS_API_KEY=…` to the server’s `.env` file, then click **Reload .env** in **Settings**.' };
     }
+    // A used-up budget (prompts and/or tokens per day, week or month): the message says when it resets
+    if (/quota|used up|budget/i.test(msg) && (err && (err.status === 429 || err.type === 'quota_exceeded'))) {
+      return { settings: true, text: clean(msg, 300) + ' Until then, another AI key can be added to `EMIS_API_KEY` in the server’s `.env` file (comma-separated).' };
+    }
+    // One model is throttled: the message says when it can be used again
+    if (err && err.type === 'model_rate_limited') {
+      return { settings: true, text: clean(msg, 300) + ' With **If a model is rate-limited or failing, use the closest similar model** on (**Settings → AI models**), a similar model answers meanwhile.' };
+    }
     if (/rate.?limit|too many requests|\b429\b/i.test(msg)) {
       return { settings: true, text: providerLabel() + ' is rate-limiting requests right now. Wait a few seconds and try again — or add another AI key to `.env` (comma-separated).' };
     }

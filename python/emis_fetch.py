@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """MetaCode — EMIS worker (AI requests made from Python).
 
-EMIS documents its API for Python's OpenAI SDK, and some networks / gateway
-checks treat Node.js's HTTP client differently from Python's, so MetaCode's
-server sends its EMIS requests through this worker when Python is available
-(EMIS_TRANSPORT=auto, the default; =python to require it; =node to skip it).
+EMIS documents its API with curl and Python's OpenAI SDK (any OpenAI client
+works; its website's browser check doesn't apply to API requests made with a
+key). MetaCode's server sends its EMIS requests through this worker when
+Python is available (EMIS_TRANSPORT=auto, the default; =python to require it;
+=node to skip it), and through Node.js otherwise.
 
 It uses, in order of preference:
   1. the official `openai` package (pip install openai) — exactly the client
@@ -12,7 +13,7 @@ It uses, in order of preference:
   2. `httpx` (installed with openai);
   3. Python's standard library (urllib) — no pip install needed.
 Proxies: HTTPS_PROXY / HTTP_PROXY / NO_PROXY are honoured by all three, or
-EMIS_PROXY when given in the request.
+EMIS_PROXY when given in the request (then for every request, as from Node.js).
 
 Protocol (UTF-8 JSON, one object per line):
   stdout   {"ready": true, "python": "3.12.1", "client": "openai 1.54.0"}
@@ -24,6 +25,7 @@ The key is used only for the Authorization header of the request it came
 with; it is never printed or logged.
 """
 
+import base64
 import json
 import platform
 import socket
@@ -31,6 +33,7 @@ import ssl
 import sys
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
@@ -134,8 +137,11 @@ def via_urllib(req):
     timeout = max(1.0, req.get("timeoutMs", 120000) / 1000.0)
     data = json.dumps(req["body"]).encode("utf-8") if req.get("body") is not None else None
     handlers = []
-    if req.get("proxy"):
-        handlers.append(urllib.request.ProxyHandler({"http": req["proxy"], "https": req["proxy"]}))
+    proxy = req.get("proxy")
+    if proxy:
+        # EMIS_PROXY is set on the request itself (below): urllib's ProxyHandler
+        # would skip it for hosts NO_PROXY lists, and the environment's proxies don't apply
+        handlers.append(urllib.request.ProxyHandler({}))
     try:
         import certifi  # better CA bundle on macOS / old systems, when installed
         ctx = ssl.create_default_context(cafile=certifi.where())
@@ -149,6 +155,15 @@ def via_urllib(req):
     handlers.append(NoRedirect())
     opener = urllib.request.build_opener(*handlers)
     r = urllib.request.Request(req["url"], data=data, headers=headers_for(req), method=req.get("method", "GET"))
+    if proxy:
+        p = urllib.parse.urlsplit(proxy if "://" in proxy else "http://" + proxy)
+        host = p.hostname or ""
+        if ":" in host:
+            host = "[" + host + "]"
+        if p.username:
+            cred = urllib.parse.unquote(p.username) + ":" + urllib.parse.unquote(p.password or "")
+            r.add_header("Proxy-Authorization", "Basic " + base64.b64encode(cred.encode("utf-8")).decode("ascii"))
+        r.set_proxy(host + (":" + str(p.port) if p.port else ""), p.scheme or "http")
     try:
         with opener.open(r, timeout=timeout) as resp:
             body = resp.read().decode("utf-8", "replace")

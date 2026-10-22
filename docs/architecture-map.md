@@ -24,7 +24,7 @@ report ([implementation-report.md](implementation-report.md)).
 | Scraper | In-process job manager, Reddit HTTP client (destination allow-list, robots.txt, rate limiter, retries), transports: Python stdlib worker, epoxy-tls over Wisp, RedditAPIs.com client, browser relay | `scraper/**`, `python/reddit_fetch.py` | Data collection |
 | Queue / workers | No queue technology. Jobs live in server memory (`JobManager`), at most `SCRAPER_MAX_CONCURRENT_JOBS` run at once; lost on restart | `scraper/jobs/job-manager.js` | Background work |
 | Code sandbox | QuickJS (WASM) and Pyodide (WASM) in a child process started with Node's permission model, globals stripped, memory and time limits | `scraper/sandbox/*` | Custom scraper code |
-| AI | "EMIS", an OpenAI-compatible gateway: several keys with rotation, quota tracking, model fallback, streaming relay; model list from `emis-models.json` or `GET /models`; optional Python transport | `server.js` (`/api/ai`, `/api/ai/batch`, `/api/models`), `emis-python.js`, `emis-models.json` | AI coding, assistant, AI Scraper |
+| AI | "EMIS", an OpenAI-compatible gateway: several keys with rotation, quota tracking, model fallback, streaming relay; model list from `emis-models.json` (the service's `/cli/opencode.json`: its models with tool calling) or `GET /v1/models`; optional Python transport | `server.js` (`/api/ai`, `/api/ai/batch`, `/api/models`), `emis-python.js`, `emis-models.json` | AI coding, assistant, AI Scraper |
 | Storage services | Local disk only | — | — |
 | Logging / monitoring | `console.*` with `[area]` prefixes (pm2 logs), secret redaction helpers (`redact`, `sanitize`), status page with health checks | `status-page.js`, `server.js` | Operations |
 | Tests | `node --test` (unit, integration with mock servers, Playwright end-to-end with Chromium), Vitest for the collector | `test/**`, `collector/test/**` | Verification |
@@ -80,7 +80,7 @@ Decision: the AI Lab uses the same path — `contextOf()` → `needUser()` → `
 
 ## 4. AI integration audit
 
-- One provider: EMIS (OpenAI-compatible chat completions), several keys, quota headers, per-model rate-limit resting, similar-model fallback, streaming relay, empty-answer retry. No embeddings and no fine-tuning are offered by it (nothing in its model list or API suggests either).
+- One provider: EMIS (OpenAI-compatible; its documented endpoints are `GET /v1/models` and `POST /v1/chat/completions`, streaming or not), several keys, quota headers (a budget of prompts and/or tokens per day, week or month; 429 until it rolls over), per-model rate-limit resting, similar-model fallback, streaming relay, empty-answer retry. No embeddings and no fine-tuning are offered by it; images and videos are made inside a chat completion, and MetaCode uses only the text of answers.
 - Model metadata: id, name, `tool_call`, `reasoning`, `attachment` from `emis-models.json`. No context-window or pricing data.
 - The AI Scraper gets a narrow interface (`scraperAi.chat()`), which is the pattern the AI Lab follows.
 - Usage limits: AI requests and posts per plan (`accounts/usage.js`, synchronous reservations, so concurrent requests can't overshoot).

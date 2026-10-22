@@ -43,14 +43,16 @@ secrets**. It reported 7 `URI` findings, all URLs with a placeholder password:
 
 They are marked `trufflehog:ignore` in the current files. Older commits still
 contain them without the mark, so a whole-history scan lists them (that is
-why CI scans new commits only). Two historical values of `EMIS_API_KEY` in
-`.env.example` were placeholders too (`emis-...`, `your-key`).
+why CI scans new commits only). The values of `EMIS_API_KEY` in
+`.env.example`, then and now, are placeholders too (`emis-...`, `your-key`).
 
 ## If a real secret is found
 
 1. **Rotate it first** with the provider that issued it (Reddit:
    <https://www.reddit.com/prefs/apps>; Stripe, Supabase, Google Cloud, X,
-   LinkedIn: their dashboards; the AI service: its operator). Deleting it from
+   LinkedIn: their dashboards; the AI service: keys are issued by hand, so
+   message @kawaii_zxs on Discord, user ID 1079096114273320971, for a new one
+   and say the old one leaked). Deleting it from
    the file does not remove it from Git history, and anyone who cloned the
    repository already has it.
 2. Put the new value in the server's `.env` (or the deployment's secret

@@ -15,7 +15,7 @@ const { ScraperError, cancelledError } = require('./scraper/errors');
 const { createSurveys } = require('./surveys');
 const { createAccounts } = require('./accounts');
 const { createProjects } = require('./projects');
-const { rankSimilar } = require('./model-match');
+const { rankSimilar, renamedModel, sameModel } = require('./model-match');
 const { createStatusMonitor, statusRoutes } = require('./status-page');
 
 const app = express();
@@ -117,6 +117,11 @@ app.get('/collector/*', (req, res) => {
 
 const EMIS_DEFAULT_BASE_URL = 'https://emis.zxs-is-very.cool/v1';
 const EMIS_EXAMPLE_MODEL    = 'gpt-oss-120b';            // the model EMIS's documentation uses as its example
+// The default with emis-models.json and no EMIS_MODEL, when the file lists it.
+// The file is EMIS's /cli/opencode.json, in EMIS's order, so its first entry
+// (on 2026-10-22 a free-tier model) isn't a choice anyone made; this keeps the
+// default the earlier lists had first.
+const PREFERRED_DEFAULT_MODELS = ['claude-opus-5.5'];
 const MODEL_LIST_TTL_MS     = 5 * 60 * 1000;             // how long a fetched model list is reused
 const MODEL_LIST_TIMEOUT_MS = 20 * 1000;
 const MODEL_LIST_RETRY_MS   = 15 * 1000;             // after a failed fetch, wait this long before trying again
@@ -165,11 +170,15 @@ function loadEmisConfig(env) {
   String(env.EMIS_API_KEY || '').split(',').forEach((raw, i) => {
     const key = raw.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
     if (!key) return;
-    if (/\.\.\.|…/.test(key)) {
+    if (/\.\.\.|…/.test(key) || /^(your[-_]?(api[-_]?)?key|emis[-_]?key|changeme|<[^>]*>)$/i.test(key)) {
       config.warnings.push('EMIS_API_KEY entry ' + (i + 1) + ' is still the placeholder from .env.example, so it was ignored.');
     } else if (!/^[\x21-\x7E]+$/.test(key)) {
       config.warnings.push('EMIS_API_KEY entry ' + (i + 1) + ' contains characters that cannot be sent in an HTTP header, so it was ignored.');
     } else if (!config.keys.includes(key)) {
+      // The AI service's keys start with "emis-" (another OpenAI-compatible EMIS_BASE_URL may differ)
+      if (!/^emis-/i.test(key) && config.baseUrl === EMIS_DEFAULT_BASE_URL) {
+        config.warnings.push('EMIS_API_KEY entry ' + (i + 1) + ' doesn\'t start with "emis-" like the AI service\'s keys. It\'s used anyway; check it if AI requests are refused.');
+      }
       config.keys.push(key);
     }
   });
@@ -302,7 +311,7 @@ function recordQuota(key, quota, now) {
   const state = getKeyState(key);
   const previous = state.quota;
   state.quota = Object.assign({ updatedAt: now }, quota);
-  const usedUp = quota.remainingPrompts === 0 || quota.remainingTokens === 0;
+  const usedUp = budgetUsedUp(quota);
   const resetAt = plausibleResetTime(quota.resetAt, now);
   if (usedUp && resetAt) {
     if (!isResting(state, now)) {
@@ -370,8 +379,12 @@ function markKeyUsed(key) {
 // model -> { until, hits, lastAt, logged }
 const modelLimits = new Map();
 
+// A key's budget is prompts and/or tokens per day, week or month (EMIS's
+// documentation). One kind is spent when nothing of it is left — unless its
+// limit is 0 too: a key without that kind of budget may report 0 of 0.
 function budgetUsedUp(quota) {
-  return !!quota && (quota.remainingPrompts === 0 || quota.remainingTokens === 0);
+  const spent = (left, limit) => left === 0 && limit !== 0;
+  return !!quota && (spent(quota.remainingPrompts, quota.limitPrompts) || spent(quota.remainingTokens, quota.limitTokens));
 }
 function modelRestingUntil(model, now) {
   const st = modelLimits.get(model);
@@ -410,9 +423,11 @@ function onModelLimited(model, headers, now) {
   return modelLimitedFailure(model, st.until, now);
 }
 function switchingAllowed() { return !/^(off|no|false|0)$/i.test(String(process.env.EMIS_MODEL_SWITCH || '').trim()); }
+// EMIS answers 429 when the key's budget runs out; its message can say so before the headers do
+const BUDGET_MESSAGE = /\b(budget|quota)\b|used up|exhausted/i;
 // A 429 from EMIS for this key and model: rest the key (→ true: try the next key) or only the model (→ the failure).
-function classifyLimit(key, model, quota, headers, now) {
-  if (budgetUsedUp(quota) || (!quota && model && keyWidePause(key, model, now)) || !model) {
+function classifyLimit(key, model, quota, headers, now, detail) {
+  if (budgetUsedUp(quota) || BUDGET_MESSAGE.test(detail || '') || (!quota && model && keyWidePause(key, model, now)) || !model) {
     onQuotaExhausted(key, quota, headers, now);
     return true;
   }
@@ -468,7 +483,10 @@ async function closestModel(target, chatRequest, tried) {
   const now = Date.now();
   const candidates = list.ids.filter(id => !tried.has(id) && !NOT_A_CHAT_MODEL.test(id) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
     !capabilityProblem(chatRequest, list.info ? list.info.get(id) : null));
-  return rankSimilar(target, candidates, list.info)[0] || null;
+  // The same model under another spelling of its id (claude-opus-4-8 / claude-opus-4.8)
+  // is most likely limited or failing too: a similar model first, the other spelling last
+  const ranked = rankSimilar(target, candidates, list.info);
+  return ranked.find(id => !sameModel(target, id, list.info)) || ranked[0] || null;
 }
 
 const switchesLogged = new Map();
@@ -565,11 +583,12 @@ async function emisRequest(method, pathname, key, body, opts) {
   }
   return r;
 }
-// EMIS's documentation is written for Python's OpenAI SDK, and Node's own HTTP
-// client can be treated differently by the gateway's checks (HTTP 403 or a
-// web page instead of an answer). So requests go through a Python worker
-// (python/emis_fetch.py: the openai package if installed, else httpx/urllib)
-// when Python is available. EMIS_TRANSPORT: auto (default) | python | node.
+// EMIS's documentation shows curl and Python's OpenAI SDK. Requests go through
+// a Python worker (python/emis_fetch.py: the openai package if installed, else
+// httpx/urllib) when Python is available, and through Node.js otherwise or if
+// that fails; streaming always goes through Node.js. (EMIS's website runs a
+// browser check, which doesn't apply to API requests made with a key.)
+// EMIS_TRANSPORT: auto (default) | python | node.
 const { createEmisPython } = require('./emis-python');
 const emisPython = createEmisPython();
 function emisTransport() { const t = String(process.env.EMIS_TRANSPORT || 'auto').trim().toLowerCase(); return ['python', 'node'].includes(t) ? t : 'auto'; }
@@ -682,9 +701,9 @@ function describeFailure(r, ctx) {
   }
   if (status === 403) {
     if (/^\s*</.test(r.text || '')) {
-      return fail(403, 'blocked', 'The AI service\'s website check answered instead of the API (a web page with HTTP 403). MetaCode sends AI requests ' +
-        'through Python to avoid this — make sure Python 3 is installed (and ideally run "pip install openai"), then restart MetaCode. ' +
-        'Also check that EMIS_BASE_URL is ' + EMIS_DEFAULT_BASE_URL + '.', log);
+      return fail(403, 'blocked', 'A web page answered (HTTP 403) instead of the AI service\'s API. The AI service\'s website check doesn\'t apply to ' +
+        'API requests made with a key, so check that EMIS_BASE_URL is ' + EMIS_DEFAULT_BASE_URL + ' (the API address, ending in /v1) and that EMIS_API_KEY ' +
+        'holds your key, then click Reload .env in Settings. If both are right, a proxy or firewall on this network may be answering instead (see EMIS_PROXY / HTTPS_PROXY).', log);
     }
     return fail(403, 'permission_error', 'The AI service refused this request' + (detail ? ': "' + detail + '"' : ' for the configured key') +
       (ctx.model ? ' (model "' + ctx.model + '")' : '') + '. Check EMIS_API_KEY in the server\'s .env file, or pick another model in Settings → AI models.', log);
@@ -694,12 +713,12 @@ function describeFailure(r, ctx) {
     if (status !== 404 || /model/i.test(detail) || ctx.verified) {
       if (ctx.source === 'file') {
         return fail(404, 'model_not_found', 'The AI service doesn\'t offer the model "' + ctx.model + '", although it\'s listed in ' + MODELS_FILE_NAME + '. ' +
-          'Pick another model in Settings → Fetch Models, or update ' + MODELS_FILE_NAME + '.', log);
+          'Pick another model in Settings → AI models, or update ' + MODELS_FILE_NAME + '.', log);
       }
-      return fail(404, 'model_not_found', 'The AI service doesn\'t offer the model "' + ctx.model + '". Pick a model in Settings → Fetch Models, ' +
+      return fail(404, 'model_not_found', 'The AI service doesn\'t offer the model "' + ctx.model + '". Pick a model in Settings → AI models, ' +
         'or set EMIS_MODEL in the server\'s .env file.', log);
     }
-    return fail(404, 'not_found', 'The AI service answered "not found" for the model "' + ctx.model + '". Check the model (Settings → Fetch Models) ' +
+    return fail(404, 'not_found', 'The AI service answered "not found" for the model "' + ctx.model + '". Check the model (Settings → AI models) ' +
       'and that EMIS_BASE_URL in the server\'s .env file ends in /v1.', log);
   }
   if (status === 404) {
@@ -707,7 +726,7 @@ function describeFailure(r, ctx) {
   }
   if (status === 408) return fail(504, 'timeout', 'The AI service took too long to answer. Try again.', log);
   if (status === 413) return fail(413, 'request_too_large', 'The request was too large for the AI service. Try a shorter text or a smaller sample.', log);
-  if (status === 429) return fail(429, 'rate_limited', 'The AI service asked MetaCode to pause. Try again in a moment.', log);
+  if (status === 429) return fail(429, 'rate_limited', 'The AI service answered "too many requests" — the AI key\'s budget for the day, week or month may be used up (it lasts until the window rolls over). Try again later, or add another key to EMIS_API_KEY.', log);
   if (status >= 500) return Object.assign(fail(502, 'upstream_error', 'The AI service had a temporary server problem (HTTP ' + status + '). Try again in a moment.', log), { upstreamStatus: status });
   if (status >= 400) {
     return fail(400, 'invalid_request', 'The AI service couldn\'t process the request' + (detail ? ': ' + detail : ' (HTTP ' + status + ').'), log);
@@ -775,7 +794,7 @@ function sendFailure(res, f) {
 }
 
 // ── Model list ────────────────────────────────────────────────────────────────
-// Where MetaCode gets the models it offers (Settings → Fetch Models) and
+// Where MetaCode gets the models it offers (Settings → AI models) and
 // checks each request's model against:
 //  1. emis-models.json in this folder (or the file EMIS_MODELS_FILE names):
 //     EMIS's model list in OpenCode's config format, i.e. provider.emis.models =
@@ -911,11 +930,16 @@ async function fetchModelList() {
   for (const key of keys) {
     const r = await emisRequest('GET', '/models', key, null, { timeoutMs: Math.min(EMIS.timeoutMs, MODEL_LIST_TIMEOUT_MS) });
     if (r.failed) return describeFailure(r);
+    if (r.status === 403 && /^\s*</.test(r.text || '')) return describeFailure(r);      // a web page: not the key's fault
     if (r.status === 401 || r.status === 403) { markKeyRejected(key, r); failure = describeFailure(r); continue; }
     if (r.status === 429) { failure = describeFailure(r); continue; }
     if (!r.ok) return describeFailure(r);
     const ids = parseModelList(r.json);
-    if (!ids) return fail(502, 'malformed_response', 'The AI service sent its model list in a format MetaCode couldn\'t read.', 'HTTP ' + r.status + ' without a data array');
+    if (!ids) {
+      const what = describeReply(r);
+      return fail(502, 'malformed_response', 'The AI service sent its model list in a format MetaCode couldn\'t read (it sent ' + what + ').' +
+        (/web page/.test(what) ? ' Check that EMIS_BASE_URL is the API address ending in /v1 (default ' + EMIS_DEFAULT_BASE_URL + ').' : ''), 'HTTP ' + r.status + ': ' + what);
+    }
     getKeyState(key).invalid = false;
     return { ok: true, ids };
   }
@@ -979,19 +1003,25 @@ async function serviceAvailability(forceRefresh, waitMs) {
   return done();
 }
 
-// Default model: EMIS_MODEL if set; otherwise the first model in
-// emis-models.json. With EMIS's live list (no file): EMIS's documented example
-// model when it's listed, otherwise the first listed model that isn't
-// obviously an image, audio or embedding model.
+// Default model: EMIS_MODEL if set (also under an older spelling of its id);
+// otherwise Claude Opus 5.5 if emis-models.json lists it (PREFERRED_DEFAULT_MODELS),
+// else the file's first model. With EMIS's live list (no file): EMIS's
+// documented example model when it's listed, otherwise the first listed model
+// that isn't obviously an image, audio or embedding model.
 const NOT_A_CHAT_MODEL = /(image|video|dall-?e|sora|veo|imagen|flux|stable-?diffusion|sdxl|tts|whisper|transcri|speech|audio|embed|moderation|rerank|guard)/i;
 
 function chooseDefaultModel(ids, source) {
   if (EMIS.model) {
     if (ids.includes(EMIS.model)) return { model: EMIS.model };
+    const renamed = renamedModel(EMIS.model, ids);
+    if (renamed) { noteRename(EMIS.model, renamed, source, 'EMIS_MODEL'); return { model: renamed }; }
     return { error: fail(500, 'model_not_found', 'The model set in EMIS_MODEL ("' + EMIS.model + '") isn\'t in ' + listLabel(source) + '. ' +
       'Change EMIS_MODEL in the server\'s .env file, or remove it to let MetaCode choose.') };
   }
-  if (source === 'file') return ids.length ? { model: ids[0] } : { error: fail(500, 'no_models', MODELS_FILE_NAME + ' lists no models.') };
+  if (source === 'file') {
+    const preferred = PREFERRED_DEFAULT_MODELS.find(id => ids.includes(id));
+    return preferred ? { model: preferred } : ids.length ? { model: ids[0] } : { error: fail(500, 'no_models', MODELS_FILE_NAME + ' lists no models.') };
+  }
   if (ids.includes(EMIS_EXAMPLE_MODEL)) return { model: EMIS_EXAMPLE_MODEL };
   const model = ids.find(id => !NOT_A_CHAT_MODEL.test(id)) || ids[0];
   return model ? { model } : { error: fail(502, 'no_models', 'The AI service returned an empty model list.') };
@@ -1002,7 +1032,14 @@ function noteSubstitution(from, to, source) {
   if (substitutionsLogged.has(from)) return;
   substitutionsLogged.add(from);
   console.warn('[ai] "' + from + '" isn\'t in ' + listLabel(source) + ', so "' + to + '" is used instead. Choose a model in ' +
-    'Settings → Fetch Models, or set EMIS_MODEL in .env.');
+    'Settings → AI models, or set EMIS_MODEL in .env.');
+}
+// A model asked for under an older spelling of its id (claude-opus-5-5 → claude-opus-5.5)
+function noteRename(from, to, source, where) {
+  if (substitutionsLogged.has('rename:' + from)) return;
+  substitutionsLogged.add('rename:' + from);
+  console.warn('[ai] "' + from + '" is called "' + to + '" in ' + listLabel(source) + ' now; "' + to + '" is used.' +
+    (where === 'EMIS_MODEL' ? ' Update EMIS_MODEL in .env.' : ''));
 }
 
 // When the model list itself can't be loaded for these reasons, a chat
@@ -1023,6 +1060,9 @@ async function resolveModel(requested) {
   }
   const pick = model => ({ ok: true, model, verified: true, source: list.source, info: list.info ? list.info.get(model) || null : null });
   if (wanted && list.ids.includes(wanted)) return pick(wanted);
+  // The same model under the id the list spells it with now
+  const renamed = renamedModel(wanted, list.ids);
+  if (renamed) { noteRename(wanted, renamed, list.source); return Object.assign(pick(renamed), { renamedFrom: wanted }); }
   // Anything else gets the default — the same model Settings shows as selected
   // when the saved one isn't listed, so what's shown is what's used.
   const choice = chooseDefaultModel(list.ids, list.source);
@@ -1163,10 +1203,15 @@ function fromAnthropicRequest(body) {
 }
 
 // ── Response formats ──────────────────────────────────────────────────────────
+// (The AI service makes images and videos inside a chat completion when asked;
+// MetaCode's features use the text, so a picture is marked rather than dropped
+// without a trace — an answer that is only a picture isn't "empty".)
+const MEDIA_PART = /^(input_|output_)?(image|video|audio|file)(_url)?$/;
 function textContent(content) {
   if (typeof content === 'string') return content;
   if (Array.isArray(content)) {
-    return content.map(p => (typeof p === 'string' ? p : (p && typeof p.text === 'string' ? p.text : ''))).join('');
+    return content.map(p => (typeof p === 'string' ? p : !p ? '' : typeof p.text === 'string' ? p.text
+      : MEDIA_PART.test(String(p.type || '')) ? '[' + String(p.type).replace(/^(input|output)_/, '').replace(/_url$/, '') + ' omitted]' : '')).join('');
   }
   return '';
 }
@@ -1269,7 +1314,9 @@ function normalizeCompletion(json) {
       else if (raw.delta && typeof raw.delta === 'object') choice = Object.assign({}, raw, { message: Object.assign({ role: 'assistant' }, raw.delta) });
       else return null;
     }
-    choices.push(Object.assign({}, choice, { message: Object.assign({}, choice.message, { content: textContent(choice.message.content) }) }));
+    let content = textContent(choice.message.content);
+    if (!content && Array.isArray(choice.message.images) && choice.message.images.length) content = '[image omitted]';     // (OpenRouter-style images)
+    choices.push(Object.assign({}, choice, { message: Object.assign({}, choice.message, { content }) }));
   }
   return Object.assign({}, json, { choices });
 }
@@ -1315,7 +1362,7 @@ async function completeChat(chatRequest, ctx, signal, retriedLength) {
     const quota = readQuotaHeaders(r.headers);
     recordQuota(key, quota, now);
     if (r.status === 429) {
-      const limit = classifyLimit(key, chatRequest.model, quota, r.headers, now);
+      const limit = classifyLimit(key, chatRequest.model, quota, r.headers, now, providerMessage(r));
       if (limit === true) { limited = true; continue; }       // the key's budget: another key may have some
       return limit;                                           // this model only: answerChat picks the closest one
     }
@@ -1588,11 +1635,12 @@ async function streamWith(res, chatRequest, ctx, signal) {
       if (r.failed === 'aborted') return;
       if (r.failed) return sendFailure(res, describeFailure(r, ctx));
       if (r.status === 429) {
-        const limit = classifyLimit(key, chatRequest.model, quota, r.headers, now);
+        const limit = classifyLimit(key, chatRequest.model, quota, r.headers, now, providerMessage(r));
         if (limit === true) { limited = true; continue; }
         return { modelLimited: limit };
       }
-      if (r.status === 401 || r.status === 403) { markKeyRejected(key, r); rejection = describeFailure(r, ctx); continue; }
+      // (as for plain requests: a web page or a model this key can't use isn't the key's fault)
+      if (r.status === 401 || (r.status === 403 && !/^\s*</.test(r.text || '') && !/model/i.test(providerMessage(r)))) { markKeyRejected(key, r); rejection = describeFailure(r, ctx); continue; }
       return sendFailure(res, describeFailure(r, ctx));
     }
     if (!/^text\/event-stream/i.test(upstream.headers.get('content-type') || '')) {
@@ -1639,7 +1687,9 @@ async function streamChat(res, prep) {
 // ignored: EMIS is only called with the server's own key.
 // Checks and resolves one chat request (the body of POST /api/ai).
 // → { failure } or { format, chatRequest, ctx, explicit }
-// opts.switchModels: false = don't answer with a similar model when this one is rate-limited
+// opts.switchModels: false = don't answer with a similar model when this one is rate-limited (or failing)
+// opts.pickedFallback: false = a model picked in Settings that EMIS can't run right now isn't swapped
+//   (AI Coding batches pause and try the same model again instead, so every post is coded by it)
 async function prepareChat(body, formatName, opts) {
   const format = FORMATS[formatName];
   if (!format) return { failure: fail(400, 'invalid_request', 'Unknown provider: ' + redact(formatName, 40)) };
@@ -1662,8 +1712,9 @@ async function prepareChat(body, formatName, opts) {
   return {
     format, chatRequest,
     ctx: { model: resolved.model, verified: resolved.verified, source: resolved.source },
-    explicit: !!askedFor && askedFor === resolved.model,    // picked in Settings, not the server default
-    switchModels: switchingAllowed() && !(opts && opts.switchModels === false)
+    explicit: !!askedFor && (askedFor === resolved.model || askedFor === resolved.renamedFrom),    // picked in Settings, not the server default
+    switchModels: switchingAllowed() && !(opts && opts.switchModels === false),
+    pickedFallback: !(opts && opts.pickedFallback === false)
   };
 }
 
@@ -1675,10 +1726,14 @@ async function prepareChat(body, formatName, opts) {
 // When the model is rate-limited (now, or still resting from earlier), the
 // closest similar model answers instead — even one picked in Settings, unless
 // switching is turned off. When the server's default model fails in other
-// ways (EMIS can't run it right now), the closest models are tried too; a
-// model the user picked isn't swapped for those failures.
+// ways (EMIS can't run it right now), the closest models are tried too. A
+// model the user picked is swapped only when EMIS can't run it right now
+// (server errors, after retries) and switching is on — not when it doesn't
+// exist, the key may not use it or its answers can't be read (the user should
+// pick another), and not in AI Coding batches (opts.pickedFallback, prepareChat).
 async function answerChat(prep, signal) {
   const { chatRequest, ctx, explicit } = prep;
+  const swapPicked = explicit && prep.switchModels && prep.pickedFallback;
   const tried = new Set();
   let model = ctx.model, fallback = null, fallbackReason = null;
   let rateSwitches = 0, otherSwitches = 0, result;
@@ -1686,8 +1741,8 @@ async function answerChat(prep, signal) {
     tried.add(model);
     const now = Date.now();
     const resting = modelRestingUntil(model, now);
-    // The server's default model is failing at the moment: a similar model answers, without waiting on it
-    if (!resting && model === ctx.model && !explicit && modelDownUntil(model, now) && !serviceTrouble(now)) {
+    // The model is failing at the moment: a similar model answers, without waiting on it
+    if (!resting && model === ctx.model && (!explicit || swapPicked) && modelDownUntil(model, now) && !serviceTrouble(now)) {
       const alt = await closestModel(ctx.model, chatRequest, tried);
       if (alt) { otherSwitches++; noteSwitch(ctx.model, alt, 'failed'); model = alt; fallback = alt; fallbackReason = 'failed'; continue; }
     }
@@ -1700,8 +1755,8 @@ async function answerChat(prep, signal) {
     if (result.type === 'model_rate_limited' && prep.switchModels && rateSwitches < MAX_RATE_LIMIT_SWITCHES) why = 'rate_limited';
     // (once switching for a rate limit, a similar model that fails another way is skipped too;
     // when EMIS as a whole is failing, other models would fail too)
-    else if ((!explicit || fallbackReason === 'rate_limited') && MODEL_FALLBACK_TYPES.has(result.type) && otherSwitches < 2 &&
-      !(result.type === 'upstream_error' && serviceTrouble(Date.now()))) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
+    else if ((((!explicit || fallbackReason === 'rate_limited') && MODEL_FALLBACK_TYPES.has(result.type)) || (swapPicked && TEMPORARY_MODEL_FAILURES.has(result.type))) &&
+      otherSwitches < 2 && !(result.type === 'upstream_error' && serviceTrouble(Date.now()))) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
     if (!why) break;
     const alt = await closestModel(ctx.model, chatRequest, tried);     // closest to what was asked for
     if (!alt) break;
@@ -1826,7 +1881,7 @@ async function aiBatchRoute(req, res) {
     if (gaveUp) return send({ id: item.id, ok: false, status: 503, error: { message: gaveUp, type: 'service_unavailable' } });
     let out;
     try {
-      const prep = await prepareChat(item.body, 'openai', { switchModels });
+      const prep = await prepareChat(item.body, 'openai', { switchModels, pickedFallback: false });
       out = prep.failure ? { failure: prep.failure } : await answerChat(prep, client.signal);
     } catch (err) {
       console.error('[ai] Unexpected error in /api/ai/batch: ' + redact(err && err.message));
@@ -1910,6 +1965,8 @@ async function aiBatchRoute(req, res) {
 const BATCH_TRANSIENT = new Set(['upstream_error']);
 // Failures that a different model may not have (EMIS can't run one model right now).
 const MODEL_FALLBACK_TYPES = new Set(['upstream_error', 'malformed_response', 'model_not_found', 'not_found', 'permission_error']);
+// …of which this one passes (EMIS can't run the model right now): a model picked in Settings is swapped only for it
+const TEMPORARY_MODEL_FAILURES = new Set(['upstream_error']);
 
 // GET /api/models — the model list for the Settings dropdown (from
 // emis-models.json, or EMIS's live list), default model first: the frontend
@@ -2224,22 +2281,23 @@ async function aiStatusCheck() {
   if (allKeysResting(now)) {
     const f = quotaFailure(now);
     const when = f.resetAt ? describeWhen(Date.parse(f.resetAt), now).replace(/ \(.*\)$/, '') : 'soon';
-    return { status: 'degraded', note: f.type === 'quota_exceeded' ? 'The usage quota is used up; AI features resume ' + when + '.' : 'Paused briefly at the AI provider\'s request; back ' + when + '.' };
+    return { status: 'degraded', note: f.type === 'quota_exceeded' ? 'The usage quota is used up; AI features resume ' + when + '.' : 'Paused briefly at the AI service\'s request; back ' + when + '.' };
   }
   if (Date.now() - aiProbe.at > 60000) aiProbe = { at: Date.now(), result: await fetchModelList() };   // no prompts spent
   const r = aiProbe.result;
   if (!r.ok) {
-    if (r.status === 429) return { status: 'degraded', note: 'The AI provider is rate-limiting requests.' };
-    return { status: 'outage', note: r.type === 'timeout' || r.type === 'network' ? 'The AI provider can\'t be reached.' : 'The AI provider isn\'t accepting requests.' };
+    // (a 429 is how the AI service says a key's budget for the day, week or month is used up)
+    if (r.status === 429) return { status: 'degraded', note: 'The AI service answered "too many requests": the usage quota is probably used up until it resets.' };
+    return { status: 'outage', note: r.type === 'timeout' || r.type === 'network' ? 'The AI service can\'t be reached.' : 'The AI service isn\'t accepting requests.' };
   }
   now = Date.now();
-  if (serviceTrouble(now)) return { status: 'outage', note: 'The AI provider is answering with server errors for several models; AI requests are failing.' };
+  if (serviceTrouble(now)) return { status: 'outage', note: 'The AI service is answering with server errors for several models; AI requests are failing.' };
   const failing = Array.from(modelDown.keys()).filter(m => modelDownUntil(m, now)).length;
   const limited = restingModels(now).length;
   const parts = [];
-  if (failing) parts.push(failing + ' model' + (failing === 1 ? ' is' : 's are') + ' failing at the AI provider');
+  if (failing) parts.push(failing + ' model' + (failing === 1 ? ' is' : 's are') + ' failing at the AI service');
   if (limited) parts.push(limited + ' model' + (limited === 1 ? ' is' : 's are') + ' rate-limited');
-  if (parts.length) return { status: 'degraded', note: parts.join(' and ') + '; requests use the closest similar model.' };
+  if (parts.length) return { status: 'degraded', note: parts.join(' and ') + (switchingAllowed() ? '; requests for ' + (failing + limited === 1 ? 'it' : 'them') + ' use the closest similar model.' : '.') };
   return { status: 'operational', note: 'Responding normally.' };
 }
 let pyProbe = { at: 0, result: null };
@@ -2317,6 +2375,7 @@ app.post('/api/settings/reload', (req, res) => {
   keyState.clear();
   streamPref.clear();
   proxyAgent = null;
+  emisPython.stop();                       // started again with the new environment at the next request
   modelList.ids = null; modelList.fetchedAt = 0; modelList.failure = null; modelList.failedAt = 0;
   const env = envLoader.info;
   console.log('[settings] .env reloaded: ' + (env.found ? env.keys.length + ' value(s) from ' + env.file : 'no .env file found') + '; AI ' + (notConfigured() ? 'not ready' : 'ready (' + EMIS.keys.length + ' key(s))'));
@@ -2399,7 +2458,7 @@ function printBanner(PORT) {
   const keyCount = EMIS.keys.length;
   console.log('  AI         → ' + (EMIS.problem ? 'NOT READY — ' + EMIS.problem
     : keyCount ? keyCount + ' key' + (keyCount === 1 ? '' : 's') + ' set via .env ✓'
-    : 'Not set — add EMIS_API_KEY to .env to turn on AI features'));
+    : 'Not set — add EMIS_API_KEY=emis-… to .env to turn on AI features (keys are issued by hand: message @kawaii_zxs on Discord, user ID 1079096114273320971)'));
   if (EMIS.baseUrl) console.log('  AI API     → ' + EMIS.baseUrl + (emisTransport() === 'node' ? ' (via Node.js)' : ' (via Python when available; EMIS_TRANSPORT=' + emisTransport() + ')'));
   if (fileModels.ok) {
     const choice = chooseDefaultModel(fileModels.ids, 'file');
