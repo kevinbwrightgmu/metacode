@@ -599,11 +599,15 @@
       emptyEl.innerHTML = W.length ? '' : '<div class="bk-empty-card"><b>Build your survey\'s logic with blocks</b><span>Drag a yellow <i>when …</i> block from <b>Events</b> onto this space, then snap blocks underneath it — for example <i>if &lt;answer to … = yes&gt; then show …</i>.</span></div>';
       selected = null;   // the selection doesn't survive a re-render
     }
+    // The scrollable area follows the blocks only — never the workspace's own size: that is
+    // rounded to whole pixels (up, at 125 % display scaling or browser zoom), so content sized
+    // from it can overflow by a fraction of a pixel, which adds scrollbars, which shrink the
+    // workspace, which shrinks the content and removes them… every frame (the "shaking").
     function sizeCanvas() {
       let w = 0, h = 0;
       canvas.querySelectorAll(':scope > .bk-script').forEach(s => { w = Math.max(w, s.offsetLeft + s.offsetWidth); h = Math.max(h, s.offsetTop + s.offsetHeight); });
-      canvas.style.width = Math.max(w + 400, ws.clientWidth / zoom) + 'px';
-      canvas.style.height = Math.max(h + 400, ws.clientHeight / zoom) + 'px';
+      canvas.style.width = (w + 400) + 'px';
+      canvas.style.height = (h + 400) + 'px';
       canvas.style.transform = 'scale(' + zoom + ')';
       canvas.parentElement.style.setProperty('--bk-zoom', zoom);
       // the dotted grid zooms with the blocks (whole pixels, so the dots stay even)
@@ -1161,9 +1165,6 @@
       if (type !== 'change' || selfEdit || drag) return;
       if (info.logic || info.structure || info.pages) { render(); if (info.logic || info.pages) renderPalette(); }
     }));
-    const ro = new ResizeObserver(() => { if (!drag) sizeCanvas(); });
-    ro.observe(ws);
-    cleanup.push(() => ro.disconnect());
 
     function refresh() { render(); renderPalette(); }
     refresh();
