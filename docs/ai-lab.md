@@ -420,7 +420,8 @@ never create a real job.
   secrets redacted (`lib/log.js`) and never returned to the browser.
 
 **Body sizes.** Bodies are limited to 25 MB for imports and documents, and to
-2 MB otherwise.
+10 MB otherwise (a web server in front of MetaCode needs to allow at least as
+much: `client_max_body_size 30m` in nginx, docs/deploy-vps.md).
 
 ## 11. API
 

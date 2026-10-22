@@ -209,7 +209,7 @@ server {
     listen [::]:80;
     server_name metac0.de www.metac0.de status.metac0.de;
 
-    client_max_body_size 25m;            # imports and project uploads (MetaCode accepts up to 10 MB of JSON)
+    client_max_body_size 30m;            # above MetaCode's own limits (25 MB for shared projects and AI Lab imports, 26 MB for surveys); nginx's default is 1 MB
 
     location / {
         proxy_pass http://127.0.0.1:3000;
@@ -318,6 +318,19 @@ curl -i --http1.1 --max-time 3 https://metac0.de/wisp/ \
 | `426` *"…a reverse proxy is not forwarding WebSockets"* | nginx is missing the `Upgrade`/`Connection` lines, or Cloudflare's WebSockets switch is off |
 | `403` | The origin check refused it: add `proxy_set_header Host $host;` or set `PUBLIC_URL` (then `pm2 reload metacode`) |
 | `502` / `504` | MetaCode isn't running or isn't on that port: `pm2 status`, `pm2 logs metacode` |
+
+**"413 (Request Entity Too Large)" in the browser's console** is nginx refusing a request body (MetaCode's own
+limit reads *"Payload Too Large"*). Check the limit the site really uses — certbot and older setups may have a
+server block without it, and nginx's default is 1 MB:
+
+```bash
+sudo nginx -T 2>/dev/null | grep -n client_max_body_size      # expect 30m in the server block for 443
+```
+
+Put `client_max_body_size 30m;` in the `server { … }` block that has `listen 443 ssl` (or in `http { … }` for every
+site), then `sudo nginx -t && sudo systemctl reload nginx`. MetaCode sends long AI Coding runs, shared projects and
+their changes in pieces of at most about 512 KB, so those work even below that; surveys with large images, AI Lab
+imports and big Analyze CSV files need the full limit.
 
 Then open `https://metac0.de/app.html#scraper-beta`, ask the AI Scraper for a few posts, and watch its steps in
 the Monitor. If Reddit blocks the server, the job stops with "blocked by network security": add your own Reddit

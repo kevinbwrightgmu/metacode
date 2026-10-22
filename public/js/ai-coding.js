@@ -303,7 +303,7 @@ const AICoder = (() => {
   let abort = null;
   async function run() {
     const { posts } = App.getState();
-    const toCode = filterPosts(posts).filter(p => !Object.keys(p.aiCodes || {}).length);
+    let toCode = filterPosts(posts).filter(p => !Object.keys(p.aiCodes || {}).length);
 
     if (!toCode.length) { App.notify('All visible posts are already coded', 'info'); return; }
     if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add your AI key (EMIS_API_KEY) to the server\'s .env file (see Settings)', 'error'); return; }
@@ -312,7 +312,10 @@ const AICoder = (() => {
       if (!Account.signedIn()) { Account.openSignIn({ reason: 'Sign in to use AI coding — free accounts include ' + MetaPlans.get('free').limits.aiPostsPerWeek.toLocaleString() + ' posts a week.' }); return; }
       const left = Account.remaining('aiPosts');
       if (left === 0) { Account.openPlans({ reason: 'You\'ve used all of this week\'s AI coding posts on the ' + Account.plan().name + ' plan. They reset on Monday.', highlight: (MetaPlans.ORDER.map(MetaPlans.get).find(p => p.rank > MetaPlans.get(Account.plan().id).rank) || {}).id }); return; }
-      if (left < toCode.length && !confirm('Your ' + Account.plan().name + ' plan has ' + left.toLocaleString() + ' AI-coded posts left this week, and ' + toCode.length.toLocaleString() + ' posts are waiting. Code the first ' + left.toLocaleString() + ' now?')) return;
+      if (left < toCode.length) {
+        if (!confirm('Your ' + Account.plan().name + ' plan has ' + left.toLocaleString() + ' AI-coded posts left this week, and ' + toCode.length.toLocaleString() + ' posts are waiting. Code the first ' + left.toLocaleString() + ' now?')) return;
+        toCode = toCode.slice(0, left);          // (only those are sent)
+      }
     }
 
     running = true; stopFlag = false;
@@ -398,7 +401,7 @@ const AICoder = (() => {
     const subMsg = subs.length ? ' ' + subs.map(m => substitutes[m] + ' of them by “' + m + '”').join(', ') + ' — the closest model, used while the chosen one was rate-limited or unavailable.' : '';
     const doneMsg = (stopFlag
       ? 'Stopped after ' + coded + ' posts.'
-      : '✓ Done — ' + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError.replace(/\.$/, '') + ')' : '') : '') + '.' +
+      : (coded || !failed ? '✓ Done — ' : 'Nothing was coded — ') + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError.replace(/\.$/, '') + ')' : '') : '') + '.' +
         (failed && serverProblems ? ' Click Run AI Coding again later to code the rest — posts already coded are kept.' : '')) + subMsg;
     updateStatus(doneMsg, !!failed && !stopFlag);
     App.notify(

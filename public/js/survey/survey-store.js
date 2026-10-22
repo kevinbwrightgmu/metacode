@@ -37,7 +37,10 @@
       let data = null;
       try { data = await res.json(); } catch (e) { data = null; }
       if (!res.ok) {
-        const err = new Error((data && data.error && data.error.message) || ('The server answered ' + res.status + '.'));
+        // (a 413 without MetaCode's JSON: a web server in front of it refused the body)
+        const err = new Error((data && data.error && data.error.message) || (res.status === 413
+          ? 'The survey is larger than the web server in front of MetaCode accepts (HTTP 413) — large images are the usual cause. Whoever runs this server can raise that limit (nginx: client_max_body_size — see docs/deploy-vps.md).'
+          : 'The server answered ' + res.status + '.'));
         err.status = res.status; err.type = data && data.error && data.error.type; err.data = data;
         throw err;
       }
@@ -50,7 +53,7 @@
   const failure = (status, message, extra) => Object.assign(new Error(message), { status }, extra || {});
   const nowIso = () => new Date().toISOString();
   const clean = input => {
-    const size = JSON.stringify(input || {}).length;
+    const size = new Blob([JSON.stringify(input || {})]).size;        // UTF-8 bytes, as the server counts
     if (size > Core.LIMITS.docBytes) throw failure(413, 'The survey is too large to save (25 MB at most — large images are the usual cause).');
     return Core.normalizeDoc(input);
   };

@@ -575,7 +575,10 @@ function createSurveys(opts) {
   // a handler get the same safe JSON errors instead of Express's stack page.
   const errorHandler = (err, req, res, next) => sendError(res, err); // eslint-disable-line no-unused-vars
   router.use(errorHandler);
-  publicRouter.use(errorHandler);
+  // (a respondent's answers, not the survey: its own words when they're too large)
+  publicRouter.use((err, req, res, next) => (err && err.type === 'entity.too.large' && !res.headersSent // eslint-disable-line no-unused-vars
+    ? res.status(413).json({ error: { type: 'too_large', message: 'These answers are too long to send. Shorten the longest answers and try again.' } })
+    : sendError(res, err)));
 
   const pageHandler = (req, res, next) => {
     if (!/^[A-Za-z0-9]{4,40}$/.test(req.params.publicId)) return next();

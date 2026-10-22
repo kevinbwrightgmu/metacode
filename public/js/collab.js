@@ -32,7 +32,11 @@ const Collab = (() => {
   const API = '/api/collab';
   const PUSH_MS = 1000;
   const DELETED = '-';                            // the "hash" of a deleted post
-  const BATCH_BYTES = 4 * 1024 * 1024;
+  // Changes go to the server in batches of at most this many bytes (and 1,000 parts); a web server
+  // in front of MetaCode may accept little (nginx's default is 1 MB). Sharing a project sends this
+  // much at first and the rest the same way.
+  const BATCH_BYTES = 512 * 1024;
+  const bodyBytes = text => new Blob([text]).size;         // UTF-8 bytes, not characters
   const POST_KEY = /^post:[^\x00-\x1f\x7f]{1,200}$/;
   const DATA_VIEWS = ['codebook', 'ai-coding', 'human-coding', 'reliability', 'network', 'metrics', 'export', 'import'];   // show others' changes on request
   const LIVE_VIEWS = ['dashboard', 'projects'];                                                                           // redrawn at once
@@ -66,7 +70,9 @@ const Collab = (() => {
     try { j = await res.json(); } catch (e) { j = null; }
     if (!res.ok) {
       const err = (j && j.error) || {};
-      throw Object.assign(new Error(err.message || ('The server answered ' + res.status + '.')), { status: res.status, type: err.type || null, error: err });
+      // (a 413 without MetaCode's JSON: a web server in front of it refused the body)
+      const text = err.message || (res.status === 413 ? App.tooLargeMessage : 'The server answered ' + res.status + '.');
+      throw Object.assign(new Error(text), { status: res.status, type: err.type || (res.status === 413 ? 'too_large' : null), error: err });
     }
     return j;
   }
@@ -165,14 +171,13 @@ const Collab = (() => {
     const s = App.getState();
     return { project: { name: s.project.name, description: s.project.description || '' }, posts: s.posts, codebook: s.codebook, network: s.network, networkAnalysis: s.networkAnalysis };
   }
-  // Replaces the open project with the shared one's data (without reloading the page)
-  function adopt(data) {
+  // Links the open project to the shared one it was just shared as (its data stays as it is: what
+  // didn't go with the first request is sent as changes)
+  function adopt(project) {
     applying = true;
-    try {
-      App.setState({ project: Object.assign({ description: '' }, data.project, { sharedId: link.id }), posts: data.posts, codebook: data.codebook, network: data.network, networkAnalysis: data.networkAnalysis });
-    } finally { applying = false; }
+    try { App.setState({ project: Object.assign({}, App.getState().project, { name: project.name, description: project.description, sharedId: link.id }) }); } finally { applying = false; }
     const top = document.getElementById('topbar-project');
-    if (top) top.textContent = data.project.name;
+    if (top) top.textContent = project.name;
   }
 
   /* ── Sending changes ──────────────────────── */
@@ -207,12 +212,22 @@ const Collab = (() => {
     if (!list.length || !canEdit()) { renderBar(); return; }
     saving = true; renderBar();
     const conflictsBefore = link.conflicts.length;
+    const tooBig = [];
     try {
-      let batch = [], bytes = 0;
-      const send = async () => {
-        if (!batch.length) return;
+      const send = async batch => {
+        if (!batch.length || !link) return;
         const sent = new Map(batch.map(c => [c.key, c]));
-        const r = await call('POST', '/projects/' + link.id + '/changes', { changes: batch.map(c => ({ key: c.key, baseRev: c.baseRev, value: c.value })) });
+        let r;
+        try {
+          r = await call('POST', '/projects/' + link.id + '/changes', { changes: batch.map(c => ({ key: c.key, baseRev: c.baseRev, value: c.value })) });
+        } catch (e) {
+          if (e.status !== 413) throw e;
+          // More than the server (or a web server in front of it) accepts at once: halve it, down to single
+          // parts; a part too large on its own stays in this browser until it changes again (not sent over and over)
+          if (batch.length > 1) { const h = Math.ceil(batch.length / 2); await send(batch.slice(0, h)); await send(batch.slice(h)); return; }
+          tooBig.push(batch[0]); link.hashes[batch[0].key] = batch[0].hash; saveLink();
+          return;
+        }
         if (!link) return;
         r.applied.forEach(k => { link.revs[k] = r.revision; link.hashes[k] = sent.get(k).hash; });
         // nothing else happened in between: no need to fetch our own change back
@@ -224,17 +239,19 @@ const Collab = (() => {
         });
         if (r.invalid.length) { invalidKeys += r.invalid.length; r.invalid.forEach(k => { const c = sent.get(k); if (c) link.hashes[k] = c.hash; }); }
         saveLink();
-        batch = []; bytes = 0;
       };
+      let batch = [], bytes = 0;
       for (const c of list) {
-        const size = JSON.stringify(c.value).length + 64;
-        if (batch.length && (bytes + size > BATCH_BYTES || batch.length >= 1000)) await send();
+        const size = bodyBytes(JSON.stringify(c.value === undefined ? null : c.value)) + 64;
+        if (batch.length && (bytes + size > BATCH_BYTES || batch.length >= 1000)) { await send(batch); batch = []; bytes = 0; }
         batch.push(c); bytes += size;
       }
-      await send();
+      await send(batch);
       pushFails = 0;
       pending = 0;
       if (invalidKeys) { App.notify(invalidKeys + ' change' + (invalidKeys === 1 ? '' : 's') + ' couldn\'t be shared (the server didn\'t accept the data) and stay in this browser only.', 'warning', 7000); invalidKeys = 0; }
+      if (tooBig.length) App.notify((tooBig.length === 1 ? label(tooBig[0].key, tooBig[0].value) + ' is' : tooBig.length + ' parts of the project are') +
+        ' too large to send to the shared project at once (HTTP 413), so ' + (tooBig.length === 1 ? 'it stays' : 'they stay') + ' in this browser only.', 'warning', 9000);
     } catch (e) {
       if (!link) return;
       if (e.status === 404) { lostAccess('revoked'); return; }
@@ -489,15 +506,27 @@ const Collab = (() => {
     const s = App.getState();
     const fixed = giveIds(s);
     if (fixed) App.save();
-    const r = await call('POST', '/projects', { name: s.project.name, data: snapshot() });
+    // The first request has the project with as many posts as fit in a batch (a web server in front of
+    // MetaCode may accept little); the rest is sent like any change, in batches, right after
+    const data = snapshot();
+    const first = Object.assign({}, data, { posts: [] });
+    let bytes = bodyBytes(JSON.stringify(first));
+    if (bytes > BATCH_BYTES) { first.network = { nodes: [], edges: [] }; first.networkAnalysis = null; bytes = bodyBytes(JSON.stringify(first)); }   // (a large network goes on its own)
+    for (const p of data.posts || []) {
+      const b = bodyBytes(JSON.stringify(p)) + 1;
+      if (bytes + b > BATCH_BYTES) break;
+      first.posts.push(p); bytes += b;
+    }
+    const r = await call('POST', '/projects', { name: s.project.name, data: first });
     link = linkFrom(r);
     saveLink();
     if (typeof ProjectsView !== 'undefined') ProjectsView.unlink();   // changes go to the shared project now, not a saved copy
-    adopt(r.data);
+    adopt(r.data.project);
     if (fixed) App.notify(fixed + ' post' + (fixed === 1 ? '' : 's') + ' had no id of its own (missing or repeated) and got a new one, so every post is shared.', 'info', 7000);
     if (r.skipped) App.notify(r.skipped + ' entr' + (r.skipped === 1 ? 'y' : 'ies') + ' in the post list couldn\'t be read and were left out.', 'warning', 8000);
     connect();
     renderBar();
+    await schedulePush();                 // what didn't fit in the first request
     return r;
   }
   // Opens a shared project in this browser

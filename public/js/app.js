@@ -785,7 +785,7 @@ const App = (() => {
     let data = null;
     try { data = await res.json(); } catch (e) { data = null; }
     if (!res.ok) {
-      const msg = (data && data.error && data.error.message) ? data.error.message : ('API error ' + res.status);
+      const msg = (data && data.error && data.error.message) ? data.error.message : res.status === 413 ? TOO_LARGE : ('API error ' + res.status);
       const err = new Error(msg);
       err.status = res.status;
       err.type = data && data.error && data.error.type;
@@ -810,19 +810,68 @@ const App = (() => {
   //   opts:  { feature, parallel, delay, signal, onResult({ id, ok, text, error, status, model, requested, fallbackReason }) }
   //   (model: the model that answered — a similar one when the requested model was rate-limited)
   // Resolves to { parallel } (how many ran at the end; the server lowers it when rate-limited).
+  // A web server in front of MetaCode (nginx's client_max_body_size) refused a
+  // request body as too large: its answer is a web page, not MetaCode's JSON.
+  const TOO_LARGE = 'The request is larger than the web server in front of MetaCode accepts (HTTP 413). Whoever runs this server can raise that limit (nginx: client_max_body_size — see docs/deploy-vps.md).';
+  // Bytes a request body takes on the wire (UTF-8), not characters
+  const bodyBytes = text => new Blob([text]).size;
+
+  // A long AI Coding run goes to the server in batches of at most this many
+  // requests / bytes, one after another: a web server in front of MetaCode may
+  // accept little (nginx's default is 1 MB), and the server takes 2,000 at most.
+  const BATCH_REQUESTS = 200, BATCH_BYTES = 512 * 1024;
   async function callClaudeBatch(items, opts) {
     opts = opts || {};
     const model = modelFor(opts.feature);
+    // A system prompt every item shares (AI Coding's codebook) is sent once per batch, not once per post
+    const shared = items.length && items.every(it => it.system === items[0].system) ? items[0].system || null : null;
     const requests = items.map(it => {
-      const body = { messages: it.system ? [{ role: 'system', content: it.system }].concat(it.messages) : it.messages.slice(), max_tokens: it.max_tokens || 1000, temperature: 0.1 };
+      const own = shared ? null : it.system;
+      const body = { messages: own ? [{ role: 'system', content: own }].concat(it.messages) : it.messages.slice(), max_tokens: it.max_tokens || 1000, temperature: 0.1 };
       if (model) body.model = model;
-      return { id: it.id, body };
+      return { id: it.id, body, bytes: bodyBytes(JSON.stringify({ id: it.id, body })) + 1 };
     });
+    const base = bodyBytes(JSON.stringify({ requests: [], parallel: 16, delayMs: 5000, switchModels: true, system: shared || undefined }));
+    const chunks = [];
+    let cur = [], size = base;
+    for (const r of requests) {
+      if (cur.length && (cur.length >= BATCH_REQUESTS || size + r.bytes > BATCH_BYTES)) { chunks.push(cur); cur = []; size = base; }
+      cur.push(r); size += r.bytes;
+    }
+    if (cur.length) chunks.push(cur);
+    let parallel = clampParallel(opts.parallel || getParallel());
+    let stopped = null;          // { status, error, type }: the server gave up on this run (or the plan's posts ran out)
+    const failAll = (list, f) => list.forEach(r => opts.onResult && opts.onResult({ id: r.id, ok: false, status: f.status, error: f.error, type: f.type }));
+    while (chunks.length) {
+      const chunk = chunks.shift();
+      if (stopped) { failAll(chunk, stopped); continue; }
+      let out;
+      for (let tries = 0; ; tries++) {
+        try { out = await sendBatch(chunk, parallel, shared, model, opts, f => { if (!stopped && (f.type === 'service_unavailable' || f.type === 'limit_reached')) stopped = f; }); break; }
+        catch (e) {
+          // (a plan runs one batch at a time: the server may still be closing the previous one)
+          if (e.status === 429 && e.type === 'account_rate_limited' && tries < 5 && !(opts.signal && opts.signal.aborted)) { await new Promise(r => setTimeout(r, 1000 * (tries + 1))); continue; }
+          throw e;
+        }
+      }
+      if (out.tooLarge) {
+        // Even this batch was too large for the web server in front: halve it, down to single requests
+        if (chunk.length > 1) { chunks.unshift(chunk.slice(0, Math.ceil(chunk.length / 2)), chunk.slice(Math.ceil(chunk.length / 2))); continue; }
+        failAll(chunk, { status: 413, error: TOO_LARGE, type: 'too_large' });
+        continue;
+      }
+      if (out.parallel) parallel = Math.min(parallel, out.parallel);
+    }
+    return { parallel };
+  }
+  // One batch: POST /api/ai/batch, answers streamed back as NDJSON → { parallel } or { tooLarge }
+  async function sendBatch(chunk, parallel, system, model, opts, onFailure) {
     const res = await fetch('/api/ai/batch', { method: 'POST', signal: opts.signal, headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requests, parallel: clampParallel(opts.parallel || getParallel()), delayMs: opts.delay || 0, switchModels: state.settings.switchModels !== false }) });
+      body: JSON.stringify({ requests: chunk.map(r => ({ id: r.id, body: r.body })), parallel, delayMs: opts.delay || 0, switchModels: state.settings.switchModels !== false, system: system || undefined }) });
     if (!res.ok) {
       let data = null;
       try { data = await res.json(); } catch (e) { data = null; }
+      if (res.status === 413) return { tooLarge: true };
       const err = new Error((data && data.error && data.error.message) || ('API error ' + res.status));
       err.status = res.status;
       err.type = data && data.error && data.error.type;
@@ -845,7 +894,9 @@ const App = (() => {
         opts.onResult && opts.onResult({ id: msg.id, ok: true, text: String((c && c.message && c.message.content) || '').trim(),
           model: msg.fallback || null, requested: msg.requested || null, fallbackReason: msg.fallbackReason || null });
       } else {
-        opts.onResult && opts.onResult({ id: msg.id, ok: false, status: msg.status, error: (msg.error && msg.error.message) || 'AI request failed', type: msg.error && msg.error.type });
+        const f = { status: msg.status, error: (msg.error && msg.error.message) || 'AI request failed', type: msg.error && msg.error.type };
+        onFailure(f);
+        opts.onResult && opts.onResult(Object.assign({ id: msg.id, ok: false }, f));
       }
     };
     for (;;) {
@@ -1007,7 +1058,7 @@ const App = (() => {
     init, navigate: (v) => navigate(v), setViewCleanup, fetchModels, fetchKeyStatus, reloadEnv, modelFor, AI_FEATURES,
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
     getState, setState, save, reloadState,
-    callClaude, callClaudeBatch, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
+    callClaude, callClaudeBatch, tooLargeMessage: TOO_LARGE, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,
     saveProject, saveSettings, downloadBackup, restoreBackup, testApi, clearCodes, resetAll,

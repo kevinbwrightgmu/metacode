@@ -84,7 +84,10 @@ app.use('/api/projects', projects.router);
 const { createCollab } = require('./collab');
 const collab = createCollab({ accounts, publicUrl: () => accounts.config().publicUrl || null });
 app.use('/api/collab', collab.router);
-app.use(express.json({ limit: '10mb' }));
+// The shared JSON parser — not for the AI Coding Lab, which reads its own bodies
+// (25 MB for imports and documents, 10 MB otherwise: ai-lab/index.js)
+const jsonBody = express.json({ limit: '10mb' });
+app.use((req, res, next) => (/^\/api\/lab(\/|$)/.test(req.path) ? next() : jsonBody(req, res, next)));
 app.get('/status', statusSite.page);   // the status page on the main site too
 // Pages, scripts and styles are revalidated on every load, so an updated
 // MetaCode is never run with yesterday's cached JavaScript.
@@ -1824,8 +1827,12 @@ app.post('/api/ai', accounts.aiSingle, async (req, res) => {
 
 // POST /api/ai/batch — many chat requests answered by several copies of the
 // same model in parallel (AI Coding). Body:
-//   { requests: [{ id, body }], parallel: 1…AI_MAX_PARALLEL, delayMs: 0…5000, switchModels?: false }
-// (each body is what POST /api/ai takes, OpenAI format). The answer is NDJSON,
+//   { requests: [{ id, body }], parallel: 1…AI_MAX_PARALLEL, delayMs: 0…5000, switchModels?: false, system?: text }
+// (each body is what POST /api/ai takes, OpenAI format; `system`, when given,
+// is put before each request's messages as its system message, so a codebook
+// prompt shared by every post is sent once — the browser also sends a long
+// run as several batches, which keeps each request small enough for a web
+// server's body limit in front of MetaCode). The answer is NDJSON,
 // one line per request as soon as it finishes, in any order:
 //   { id, ok: true, data, fallback?, fallbackReason?, requested? }  or  { id, ok: false, status, error: { message, type } }
 // (fallback: the similar model that answered because the requested one was rate-limited or failing)
@@ -1857,6 +1864,9 @@ async function aiBatchRoute(req, res) {
   if (list.some(r => !r || typeof r !== 'object' || !r.body || typeof r.body !== 'object' || r.body.stream)) {
     return sendFailure(res, fail(400, 'invalid_request', 'Each request needs an "id" and a non-streaming "body".'));
   }
+  const system = req.body.system;
+  if (system !== undefined && system !== null && typeof system !== 'string') return sendFailure(res, fail(400, 'invalid_request', '"system" must be text.'));
+  const withSystem = body => (system && Array.isArray(body.messages) ? Object.assign({}, body, { messages: [{ role: 'system', content: system }].concat(body.messages) }) : body);
   const notReady = notConfigured();
   if (notReady) return sendFailure(res, notReady);
   const max = aiMaxParallel();
@@ -1873,7 +1883,7 @@ async function aiBatchRoute(req, res) {
   // The plan's posts left this week (accounts/): the rest of the batch isn't sent
   const allowance = Number.isFinite(req.aiAllowance) ? req.aiAllowance : list.length;
   list.slice(allowance).forEach(r => send({ id: r.id === undefined ? null : r.id, ok: false, status: 429, error: { message: req.aiLimitMessage || 'Your plan\'s AI coding limit is used up.', type: 'limit_reached' } }));
-  const queue = list.slice(0, allowance).map(r => ({ id: r.id === undefined ? null : r.id, body: r.body, tries: 0, serverTries: 0 }));
+  const queue = list.slice(0, allowance).map(r => ({ id: r.id === undefined ? null : r.id, body: withSystem(r.body), tries: 0, serverTries: 0 }));
   let active = 0, pausedUntil = 0, successes = 0;
   let ceiling = parallel;          // how many may run at once (lowered for good only by rate limits)
   let serverStreak = 0, okStreak = 0, gaveUp = null;
@@ -2111,6 +2121,9 @@ function runPython(scriptPath, stdinPayload) {
       }
 
       proc.on('error', () => finish(cmd, null));
+      // A script that ends before reading all of its input (NetworkX missing) closes the pipe:
+      // that must not take the whole server down (EPIPE); its output says what went wrong
+      proc.stdin.on('error', () => {});
       proc.stdout.on('data', d => { stdout += d.toString(); });
       proc.stderr.on('data', d => { stderr += d.toString(); });
       proc.on('close', () => finish(cmd, { stdout: stdout, stderr: stderr }));
@@ -2128,9 +2141,10 @@ app.get('/api/network/status', async (req, res) => {
   res.json(status);
 });
 
+// Body: { edges: [{ source, target, weight }] } or, smaller, { edgeRows: [[source, target, weight]] }; labels; directed
 app.post('/api/network/analyze', accounts.feature('network', { meter: 'networkRuns' }), async (req, res) => {
   const body  = req.body || {};
-  const edges = body.edges;
+  const edges = Array.isArray(body.edgeRows) ? body.edgeRows.filter(Array.isArray).map(r => ({ source: r[0], target: r[1], weight: r[2] })) : body.edges;
   if (!Array.isArray(edges) || edges.length === 0) {
     return res.status(400).json({ error: { message: 'No edges provided for analysis.' } });
   }

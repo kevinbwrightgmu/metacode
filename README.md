@@ -750,6 +750,11 @@ with your key: check that `EMIS_BASE_URL` is `https://emis.zxs-is-very.cool/v1` 
 network may be answering instead (see `EMIS_PROXY` / `HTTPS_PROXY` above). A 403 that names a model means your key
 can't use that model: pick another in Settings → AI models.
 
+**"413 (Request Entity Too Large)" in the browser's console / "The request is larger than the web server in front of MetaCode accepts"**
+→ The web server in front of MetaCode (nginx) refused the request body; its default limit is 1 MB. Set
+`client_max_body_size 30m;` in the `server` block for port 443 and reload nginx — see
+[docs/deploy-vps.md](docs/deploy-vps.md#9-check-that-it-works). (MetaCode's own limit reads "Payload Too Large".)
+
 **"Your AI usage quota … is used up"**
 → The key's budget (prompts and/or tokens) for the current day, week or month is spent, and the AI service answers
 429 until the window rolls over; the message says when that is. Wait until then, or add another AI key to

@@ -152,14 +152,28 @@ const CloudSync = (() => {
   }
 
   /* ── Talking to Supabase ───────────────────── */
+  // 'kind/id' → the version (change time, or the open project's hash) the account storage refused as
+  // too large (HTTP 413): kept in this browser, and not sent again until it changes
+  const refused = new Map();
+  const refusedNoted = new Set();          // said once per item (the open project changes often during AI Coding)
+  const nameOf = (data, id) => (data && (data.name || data.title || (data.project && data.project.name))) || id;
   async function push() {
     const sb = client();
     const items = Object.values(st.pending);
     let batch = [], bytes = 0;
-    const flush = async () => {
-      if (!batch.length) return;
-      const rows = batch.map(b => b.row);
-      const { data: saved, error } = await sb.from(TABLE).upsert(rows, { onConflict: 'user_id,kind,id' }).select('kind,id,updated_at');
+    const send = async list => {
+      if (!list.length) return;
+      const rows = list.map(b => b.row);
+      const { data: saved, error, status } = await sb.from(TABLE).upsert(rows, { onConflict: 'user_id,kind,id' }).select('kind,id,updated_at');
+      if (error && status === 413) {
+        // More than the account storage accepts in one request: halve it, down to one item;
+        // one that's too large on its own doesn't hold up the others
+        if (list.length > 1) { const h = Math.ceil(list.length / 2); await send(list.slice(0, h)); await send(list.slice(h)); return; }
+        const b = list[0], k = b.item.kind + '/' + b.item.id;
+        refused.set(k, b.version);
+        if (!refusedNoted.has(k)) { refusedNoted.add(k); notify('“' + nameOf(b.row.data, b.item.id) + '” is too large to save to your account (the account storage refused it). It\'s kept in this browser.', 'warning', 8000); }
+        return;
+      }
       if (error) throw new Error(error.message || 'Saving to your account failed');
       // The server's timestamp of each row this browser just wrote: when a later
       // pull reads them back, they're recognised as ours, not another device's.
@@ -167,15 +181,15 @@ const CloudSync = (() => {
       st.seen = st.seen || {};
       st.done = st.done || {};
       (saved || []).forEach(r => { if (r && r.updated_at) st.seen[r.kind + '/' + r.id] = newer(r.updated_at, st.seen[r.kind + '/' + r.id]); });
-      batch.forEach(b => {
+      list.forEach(b => {
         const k = b.item.kind + '/' + b.item.id;
         st.done[k] = Math.max(st.done[k] || 0, b.item.t || 0);
         if (st.pending[k] && (st.pending[k].t || 0) <= (b.item.t || 0)) delete st.pending[k];
         if (b.wsHash) setWsHash(b.wsHash);
       });
       save();
-      batch = []; bytes = 0;
     };
+    const flush = async () => { const list = batch; batch = []; bytes = 0; await send(list); };
     for (const item of items) {
       let data = null, deleted = item.op === 'del', wsHashNow = null;
       if (!deleted) {
@@ -186,15 +200,17 @@ const CloudSync = (() => {
         if (!data) deleted = true;
       }
       const row = { user_id: user, kind: item.kind, id: item.id, data: deleted ? null : data, deleted };
-      const size = deleted ? 100 : JSON.stringify(data).length;
+      const version = item.kind === 'workspace' ? wsHashNow : item.t;
+      if (!deleted && refused.get(item.kind + '/' + item.id) === version) continue;     // refused as too large, unchanged since
+      const size = deleted ? 100 : new Blob([JSON.stringify(data)]).size;              // UTF-8 bytes
       if (size > MAX_BYTES) {
         delete st.pending[item.kind + '/' + item.id];
         save();
-        notify('“' + ((data && (data.name || data.title || (data.project && data.project.name))) || item.id) + '” is too large to save to your account (over 24 MB). It\'s kept in this browser.', 'warning', 8000);
+        notify('“' + nameOf(data, item.id) + '” is too large to save to your account (over 24 MB). It\'s kept in this browser.', 'warning', 8000);
         continue;
       }
       if (bytes + size > BATCH_BYTES) await flush();
-      batch.push({ item, row, wsHash: wsHashNow });
+      batch.push({ item, row, wsHash: wsHashNow, version });
       bytes += size;
     }
     await flush();
