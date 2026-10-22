@@ -108,3 +108,32 @@ test('with scripts in it, on a wide window, after zooming the blocks in and out:
   assert.deepEqual(errors, []);
   await context.close();
 });
+
+test('…and at a real 125 % display scale (the device scale factor, as on Windows at 125 %), window size by window size', { skip, timeout: 120000 }, async () => {
+  // Playwright's deviceScaleFactor keeps CSS sizes whole; a scaled browser window doesn't
+  const scaled = await require('playwright-core').chromium.launch({ executablePath: chromiumPath, ignoreDefaultArgs: ['--hide-scrollbars'], args: ['--force-device-scale-factor=1.25', '--window-size=1280,900'] });
+  try {
+    const context = await scaled.newContext({ viewport: null });
+    await context.addInitScript(() => { try { localStorage.setItem('metacode_tour_studio', 'done'); localStorage.setItem('metacode_tour_app', 'done'); } catch (e) { /* ignore */ } });
+    const page = await context.newPage();
+    await page.route(/^https?:\/\/(?!localhost)/, r => r.abort());
+    await page.goto(baseUrl + '/studio.html');
+    await page.click('.ss-tpl[data-tpl="blank"]');
+    await page.click('.ss-mode[data-mode="logic"]');
+    await page.waitForSelector('.bk-ws .bk-empty-card');
+    assert.equal(await page.evaluate(() => devicePixelRatio), 1.25);
+    const cdp = await context.newCDPSession(page);
+    const { windowId } = await cdp.send('Browser.getWindowForTarget');
+    const moving = [];
+    for (let dw = 0; dw < 3; dw++) {
+      for (let dh = 0; dh < 5; dh++) {
+        await cdp.send('Browser.setWindowBounds', { windowId, bounds: { width: 1500 + dw, height: 860 + dh } });
+        await page.waitForTimeout(150);
+        const r = await watch(page);
+        if (r.layouts !== 1 || r.roErrors) moving.push((1500 + dw) + 'x' + (860 + dh) + ': ' + r.layouts + ' layouts, ' + r.roErrors + ' ResizeObserver loop errors');
+      }
+    }
+    assert.deepEqual(moving, []);
+    await context.close();
+  } finally { await scaled.close(); }
+});
