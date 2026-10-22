@@ -72,7 +72,7 @@
   function cleanUrl() {
     const u = new URL(location.href);
     let changed = false;
-    ['code', 'error', 'error_code', 'error_description', 'type'].forEach(k => { if (u.searchParams.has(k)) { u.searchParams.delete(k); changed = true; } });
+    ['code', 'error', 'error_code', 'error_description', 'type', 'sb_flow_id'].forEach(k => { if (u.searchParams.has(k)) { u.searchParams.delete(k); changed = true; } });
     if (changed) history.replaceState(null, '', u.pathname + (u.search && u.search !== '?' ? u.search : '') + u.hash);
   }
 
@@ -82,13 +82,19 @@
       config = r.ok ? await r.json() : { enabled: false };
     } catch (e) { config = { enabled: false }; }
     if (!config.enabled) { readyResolve(); emit(); return; }
-    const linkError = new URL(location.href).searchParams.get('error_description');
+    // Back from a link in an email (confirm, sign-in link, password reset): ?code=… — or ?error=… when
+    // Supabase refused the link itself (expired, already used)
+    const q = new URL(location.href).searchParams;
+    const link = q.has('code') ? { kind: 'code' } : (q.has('error') || q.has('error_code') || q.has('error_description'))
+      ? { kind: 'error', code: q.get('error_code') || q.get('error') || '', text: q.get('error_description') || '' } : null;
     try {
       if (!root.supabase || !root.supabase.createClient) await loadScript('/vendor/supabase.js');
       client = root.supabase.createClient(config.supabaseUrl, config.publishableKey, {
         auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'pkce' }
       });
       client.auth.onAuthStateChange((event, s) => onSession(event, s));
+      const started = await client.auth.initialize();       // a link's code is exchanged for a session here
+      if (link && started && started.error) link.error = started.error;
       const { data } = await client.auth.getSession();
       session = (data && data.session) || null;
       setCookie(session);
@@ -96,9 +102,32 @@
       console.warn('[account] Sign-in isn\'t available: ' + (e && e.message));
     }
     cleanUrl();
-    if (linkError) setTimeout(() => notify('That sign-in link didn\'t work: ' + linkError, 'error', 7000), 300);
     readyResolve();
     await refresh();
+    // The link didn't sign anyone in: say why and what to do, instead of just showing "Sign in"
+    if (link && !session && client) setTimeout(() => explainLink(link), 300);
+  }
+
+  // A link from a MetaCode email that couldn't sign you in. Links only work in the browser that asked
+  // for them (PKCE), once, and for a limited time.
+  function explainLink(link) {
+    const code = authCode(link.error) || link.code;
+    // No error at all: supabase-js ignores a link's code when this browser didn't ask for the link
+    const elsewhere = link.kind === 'code' && (!link.error || code === 'pkce_code_verifier_not_found');
+    console.warn('[account] The email link couldn\'t sign you in: ' + (elsewhere ? 'it was opened in a different browser than the one that asked for it' : (code || (link.error && link.error.message) || link.text)));
+    let why;
+    if (link.kind === 'code') {
+      why = (elsewhere
+        ? 'That email link was opened in a different browser or app than the one you used on MetaCode, so it couldn\'t sign you in here.'
+        : /expired/.test(code) ? 'That email link has expired.'
+        : 'That email link was already used or isn\'t valid any more.') +
+        ' If it was the link to confirm your account, your email is confirmed now: sign in below with your email and password.' +
+        ' To reset a password, use “Forgot password?” again and open the new link in this browser.';
+    } else {
+      why = (/expired|otp/i.test(code + ' ' + link.text) ? 'That email link has expired or was already used.' : 'That email link didn\'t work' + (link.text ? ' (' + link.text.slice(0, 160) + ').' : '.')) +
+        ' Sign in below, or ask for a new link.';
+    }
+    openSignIn({ reason: why });
   }
 
   function onSession(event, s) {
@@ -217,13 +246,63 @@
   }
   function closeDialog() { if (openDialog) openDialog.close(); }
 
+  // Supabase Auth's error code (e.g. invalid_credentials), from the error or its message
+  function authCode(e) {
+    if (!e) return '';
+    const c = String(e.code || (e.details && e.details.code) || '');
+    if (c) return c;
+    const m = String(e.message || e.msg || '');
+    if (/invalid login credentials/i.test(m)) return 'invalid_credentials';
+    if (/email not confirmed/i.test(m)) return 'email_not_confirmed';
+    if (/already registered|already exists/i.test(m)) return 'user_already_exists';
+    if (/signups not allowed for otp/i.test(m)) return 'otp_disabled';
+    if (/captcha/i.test(m)) return 'captcha_failed';
+    if (/not authorized/i.test(m) && /email/i.test(m)) return 'email_address_not_authorized';
+    return '';
+  }
+  // Every refusal says what to do next (the browser console only shows "400")
   function authError(e) {
     const m = String((e && (e.message || e.msg)) || 'Something went wrong.');
-    if (/invalid login credentials/i.test(m)) return 'That email and password don\'t match an account.';
-    if (/email not confirmed/i.test(m)) return 'Confirm your email first — open the link we sent you, then sign in.';
-    if (/already registered|already exists/i.test(m)) return 'There\'s already an account with that email. Sign in instead.';
+    const code = authCode(e);
+    if (code) console.warn('[account] Supabase Auth refused the request: ' + code);
+    switch (code) {
+      case 'invalid_credentials': return 'That email and password don\'t match an account. Check them, or use “Forgot password?” below. No account yet? Use “Create account”.';
+      case 'email_not_confirmed': return 'Confirm your email first: open the link in the email from MetaCode, then sign in.';
+      case 'user_already_exists': case 'email_exists': return 'There\'s already an account with that email. Sign in instead.';
+      case 'otp_disabled': return 'There\'s no MetaCode account for that email yet. Create one first (“Create account”).';
+      case 'weak_password': return 'Choose a stronger password. ' + m;
+      case 'same_password': return 'That\'s your current password: choose a different one.';
+      case 'email_address_invalid': return 'That email address can\'t be used. Check it, or use another one.';
+      case 'email_address_not_authorized': return 'MetaCode can\'t send email to that address yet: its sign-in service (Supabase) only emails the site\'s own team until the operator sets up an email sender (custom SMTP). Ask the site\'s operator.';
+      case 'signup_disabled': return 'New accounts can\'t be created on this MetaCode server right now.';
+      case 'email_provider_disabled': return 'Signing in with email is turned off for this MetaCode server (Supabase: Authentication → Providers → Email).';
+      case 'captcha_failed': return 'This MetaCode server\'s sign-in asks for a CAPTCHA, which these pages don\'t show. Its operator needs to turn off bot protection in Supabase (Authentication → Attack Protection).';
+      case 'over_email_send_rate_limit': return 'Too many emails were sent just now. Wait a few minutes, then try again.';
+      case 'over_request_rate_limit': return 'Too many attempts. Wait a minute, then try again.';
+      case 'flow_state_not_found': case 'flow_state_expired': case 'bad_code_verifier': case 'otp_expired': case 'pkce_code_verifier_not_found':
+        return 'That email link can\'t be used any more. Ask for a new one and open it in this browser.';
+    }
+    if (e && e.status === 429) return 'Too many attempts. Wait a minute, then try again.';
     if (/fetch|network/i.test(m)) return 'MetaCode couldn\'t reach the sign-in service. Check your connection and try again.';
     return m;
+  }
+  // Under a "confirm your email first" message: send the confirmation email again
+  function offerResend(err, address) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'acct-secondary acct-resend';
+    b.textContent = 'Send the confirmation email again';
+    b.onclick = async () => {
+      b.disabled = true;
+      const { error } = await client.auth.resend({ type: 'signup', email: address, options: { emailRedirectTo: redirectTo() } });
+      if (error) { err.textContent = authError(error); b.disabled = false; return; }
+      err.textContent = '';
+      const ok = document.createElement('p');
+      ok.className = 'acct-ok acct-resend';
+      ok.textContent = 'Sent to ' + address + '. Open the link in the newest email from MetaCode in this browser. (Check your spam folder too.)';
+      b.replaceWith(ok);
+    };
+    err.after(b);
   }
   const redirectTo = () => location.origin + '/app.html';
 
@@ -270,6 +349,7 @@
       form.onsubmit = async e => {
         e.preventDefault();
         err.textContent = '';
+        form.querySelectorAll('.acct-resend').forEach(n => n.remove());
         const pw = form.querySelector('[name=password]');
         if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email())) { err.textContent = 'Enter a valid email address.'; return; }
         if (pw && mode === 'signup' && pw.value.length < 8) { err.textContent = 'Use at least 8 characters for your password.'; return; }
@@ -287,7 +367,8 @@
             const { data, error } = await client.auth.signUp({ email: email(), password: pw.value, options: { emailRedirectTo: redirectTo() } });
             if (error) throw error;
             if (!data.session) {
-              body.innerHTML = '<p class="acct-ok">Almost there — we sent a confirmation link to <b>' + esc(email()) + '</b>. Open it in this browser to finish creating your account.</p>';
+              body.innerHTML = '<p class="acct-ok">Almost there — we sent a confirmation link to <b>' + esc(email()) + '</b>. Open it in this browser to finish creating your account. ' +
+                '(Opened somewhere else, it still confirms your email: then come back here and sign in with your password.)</p>';
               return;
             }
           } else {
@@ -300,6 +381,7 @@
           if (opts.then) setTimeout(opts.then, 300);
         } catch (x) {
           err.textContent = authError(x);
+          if (mode === 'signin' && authCode(x) === 'email_not_confirmed') offerResend(err, email());
           busy(false, mode === 'signup' ? 'Create account' : mode === 'reset' ? 'Email me a reset link' : 'Sign in');
         }
       };

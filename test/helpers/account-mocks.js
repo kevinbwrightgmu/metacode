@@ -1,6 +1,7 @@
 // Local stand-ins for the services accounts/ talks to, so tests never reach the
 // real Supabase project or Stripe:
-//   • mockSupabase(): Auth (password sign-in, sign-up, refresh, user, logout) and
+//   • mockSupabase(): Auth (password sign-in, sign-up, refresh, user, logout, the
+//     PKCE email-link exchange, resend, sign-in links) and
 //     a small PostgREST for the metacode_data table, with per-user row isolation
 //     (what Row Level Security does in the real database).
 //   • mockStripe(): customers, subscriptions, products, checkout and portal
@@ -26,6 +27,9 @@ function mockSupabase(opts) {
   const refresh = new Map();     // refresh token → user id
   const rows = [];               // metacode_data rows
   const calls = [];
+  const mails = [];              // emails Supabase would send: { type, email }
+  const flows = new Map();       // email → code challenge of its latest PKCE flow (sign-up, link, reset, resend)
+  const codes = new Map();       // auth code (from a clicked email link) → { email, challenge }
   let clock = Date.now();
   const nextStamp = () => { clock = Math.max(clock + 1, Date.now()); return new Date(clock).toISOString(); };
 
@@ -43,6 +47,16 @@ function mockSupabase(opts) {
   }
   const publicUser = u => ({ id: u.id, aud: 'authenticated', role: 'authenticated', email: u.email, email_confirmed_at: u.confirmed ? new Date().toISOString() : null, app_metadata: { provider: 'email' }, user_metadata: {}, created_at: new Date().toISOString() });
   const userById = id => Array.from(users.values()).find(u => u.id === id) || null;
+  // Someone clicks the latest link Supabase emailed to `email`: Supabase confirms the address and
+  // sends the browser back with ?code=… (exchanged for a session with the verifier the browser kept)
+  function clickEmailLink(email) {
+    const u = users.get(String(email).toLowerCase());
+    if (u) u.confirmed = true;
+    const code = crypto.randomUUID();
+    codes.set(code, { email: String(email).toLowerCase(), challenge: flows.get(String(email).toLowerCase()) || null });
+    return code;
+  }
+  const flowFrom = (email, data) => { if (data.code_challenge) flows.set(String(email || '').toLowerCase(), data.code_challenge); };
   const bearerUser = req => { const m = String(req.headers.authorization || '').match(/^Bearer (.+)$/); return m && tokens.has(m[1]) ? userById(tokens.get(m[1])) : null; };
 
   // PostgREST filters used by cloud-sync.js: col=eq.v, col=gt.v, col=in.(a,b)
@@ -88,7 +102,8 @@ function mockSupabase(opts) {
     const url = new URL(req.url, 'http://x');
     const body = await readBody(req);
     calls.push({ method: req.method, path: url.pathname, apikey: req.headers.apikey || null });
-    const json = (status, obj, headers) => { res.writeHead(status, Object.assign({ 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': '*', 'Access-Control-Expose-Headers': '*' }, headers || {})); res.end(obj === undefined ? '' : JSON.stringify(obj)); };
+    // Supabase Auth's errors carry a code; supabase-js reads it on API version 2024-01-01 responses
+    const json = (status, obj, headers) => { res.writeHead(status, Object.assign({ 'Content-Type': 'application/json', 'X-Supabase-Api-Version': '2024-01-01', 'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Headers': '*', 'Access-Control-Allow-Methods': '*', 'Access-Control-Expose-Headers': '*' }, headers || {})); res.end(obj === undefined ? '' : JSON.stringify(obj)); };
     if (req.method === 'OPTIONS') return json(204);
     if (opts.apikey && req.headers.apikey !== opts.apikey) return json(401, { message: 'Invalid API key' });
     const p = url.pathname;
@@ -99,7 +114,16 @@ function mockSupabase(opts) {
       const u = users.get(String(data.email || '').toLowerCase());
       if (!u || u.password !== data.password) return json(400, { error: 'invalid_grant', error_description: 'Invalid login credentials', code: 'invalid_credentials', msg: 'Invalid login credentials' });
       if (!u.confirmed) return json(400, { error: 'invalid_grant', code: 'email_not_confirmed', msg: 'Email not confirmed' });
+      if (opts.captcha && !(data.gotrue_meta_security && data.gotrue_meta_security.captcha_token)) return json(400, { code: 'captcha_failed', msg: 'captcha protection: request disallowed (no captcha response)' });
       return json(200, issue(u));
+    }
+    if (p === '/auth/v1/token' && url.searchParams.get('grant_type') === 'pkce') {
+      const c = codes.get(data.auth_code);
+      if (!c) return json(400, { code: 'flow_state_not_found', msg: 'invalid flow state, no valid flow state found' });
+      codes.delete(data.auth_code);
+      const hashed = crypto.createHash('sha256').update(String(data.code_verifier || '')).digest('base64url');
+      if (!c.challenge || hashed !== c.challenge) return json(400, { code: 'bad_code_verifier', msg: 'code challenge does not match previously saved code verifier' });
+      return json(200, issue(users.get(c.email)));
     }
     if (p === '/auth/v1/token' && url.searchParams.get('grant_type') === 'refresh_token') {
       const id = refresh.get(data.refresh_token);
@@ -109,8 +133,10 @@ function mockSupabase(opts) {
     }
     if (p === '/auth/v1/signup') {
       if (users.has(String(data.email || '').toLowerCase())) return json(422, { code: 'user_already_exists', msg: 'User already registered' });
+      if (opts.emailTeam && !opts.emailTeam.includes(String(data.email || '').toLowerCase())) return json(400, { code: 'email_address_not_authorized', msg: 'Email address "' + data.email + '" cannot be used as it is not authorized' });
       const u = addUser(String(data.email), String(data.password), { unconfirmed: !!opts.confirmEmail });
-      if (opts.confirmEmail) return json(200, publicUser(u));
+      flowFrom(u.email, data);
+      if (opts.confirmEmail) { mails.push({ type: 'signup', email: u.email }); return json(200, publicUser(u)); }
       return json(200, issue(u));
     }
     if (p === '/auth/v1/user' && req.method === 'GET') {
@@ -128,7 +154,19 @@ function mockSupabase(opts) {
       if (m) tokens.delete(m[1]);
       return json(204);
     }
-    if (p === '/auth/v1/recover' || p === '/auth/v1/otp') return json(200, {});
+    if (p === '/auth/v1/otp') {
+      if (data.create_user === false && !users.has(String(data.email || '').toLowerCase())) return json(422, { code: 'otp_disabled', msg: 'Signups not allowed for otp' });
+      flowFrom(data.email, data);
+      mails.push({ type: 'magiclink', email: String(data.email || '').toLowerCase() });
+      return json(200, {});
+    }
+    if (p === '/auth/v1/recover') { flowFrom(data.email, data); mails.push({ type: 'recovery', email: String(data.email || '').toLowerCase() }); return json(200, {}); }
+    if (p === '/auth/v1/resend') {
+      if (opts.emailLimit && mails.length >= opts.emailLimit) return json(429, { code: 'over_email_send_rate_limit', msg: 'email rate limit exceeded' });
+      flowFrom(data.email, data);
+      mails.push({ type: data.type, email: String(data.email || '').toLowerCase() });
+      return json(200, {});
+    }
     if (p === '/auth/v1/settings') return json(200, { external: { email: true }, disable_signup: false });
 
     if (p === '/rest/v1/metacode_data') {
@@ -166,7 +204,7 @@ function mockSupabase(opts) {
   });
 
   return {
-    server, users, rows, calls, addUser, issue, jwtFor,
+    server, users, rows, calls, mails, addUser, issue, jwtFor, clickEmailLink,
     async start() { this.url = await listen(server); return this.url; },
     close: () => close(server)
   };
