@@ -32,7 +32,7 @@ test.before(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-collab-e2e-'));
   sb = mockSupabase({ apikey: KEY });
   await sb.start();
-  for (const n of ['owner', 'alice', 'bob']) sb.addUser(n + '@example.org', 'password-' + n);
+  for (const n of ['owner', 'alice', 'bob', 'dana', 'erin']) sb.addUser(n + '@example.org', 'password-' + n);
   Object.assign(process.env, testEnv({
     SUPABASE_URL: sb.url, SUPABASE_PUBLISHABLE_KEY: KEY, STRIPE_SECRET_KEY: '',
     ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects'),
@@ -189,4 +189,72 @@ test('two people on one project: share, invite, accept, live edits, a conflict, 
   // Nothing went wrong in any page
   assert.deepEqual([...O.errors, ...A.errors, ...B.errors], []);
   for (const p of [O, A, B]) await p.ctx.close();
+});
+
+test('every post is shared (repeated ids get new ones), earlier invitation links stay in the dialog, and an invitation opened before signing in comes back', { skip, timeout: 120000 }, async () => {
+  const until = async (fn, what) => { for (let i = 0; i < 100; i++) { if (await fn()) return; await new Promise(r => setTimeout(r, 100)); } throw new Error('timed out: ' + what); };
+  const texts = list => list.map(p => p.text).sort();
+  const D = await person();
+  await D.page.goto(baseUrl + '/app.html#dashboard');
+  await signIn(D.page, 'dana@example.org');
+  // A comments export whose id column repeats
+  await D.page.evaluate(() => {
+    App.setState({ project: { name: 'Comments', description: '' }, codebook: [],
+      posts: [{ id: 't3_a', text: 'first comment' }, { id: 't3_a', text: 'second comment' }, { id: 't3_a', text: 'third comment' }, { id: 't3_b', text: 'another' }] });
+  });
+  await D.page.click('#cl-share-btn');
+  await D.page.click('#cl-go');
+  await D.page.waitForSelector('#cl-emails');
+  const id = await D.page.evaluate(() => Collab.link().id);
+  const local = await D.page.evaluate(() => App.getState().posts.map(p => ({ id: p.id, text: p.text })));
+  assert.deepEqual(texts(local), ['another', 'first comment', 'second comment', 'third comment'], 'no post left the open project');
+  assert.equal(new Set(local.map(p => p.id)).size, 4, 'each post has its own id');
+  assert.equal(local.find(p => p.text === 'first comment').id, 't3_a', 'the first keeps its id');
+  assert.deepEqual(texts((await mod.collab.store.get(id)).data.posts), texts(local), 'and every one is shared');
+  // Posts added later with a repeated id are shared too
+  await D.page.evaluate(() => App.setState({ posts: App.getState().posts.concat([{ id: 'x1', text: 'late one' }, { id: 'x1', text: 'late two' }]) }));
+  await until(async () => (await mod.collab.store.get(id)).data.posts.length === 6, 'six posts on the server');
+  assert.equal(await D.page.evaluate(() => new Set(App.getState().posts.map(p => p.id)).size), 6);
+
+  /* Invitation links: each stays until it's replaced or revoked */
+  const rows = () => D.page.$$eval('#cl-results .cl-result', l => l.map(r => ({ email: r.dataset.email, link: r.querySelector('input') ? r.querySelector('input').value : null, text: r.textContent })));
+  async function invite(email, role) {
+    const old = ((await rows()).find(r => r.email === email) || {}).link || null;
+    await D.page.fill('#cl-emails', email);
+    await D.page.selectOption('#cl-role', role);
+    await D.page.click('#cl-invite-go');
+    await D.page.waitForFunction(([e, o]) => [...document.querySelectorAll('#cl-results .cl-result')].some(r => r.dataset.email === e && r.querySelector('input') && r.querySelector('input').value !== o), [email, old]);
+    return rows();
+  }
+  await invite('erin@example.org', 'editor');
+  let r = await invite('frank@example.org', 'viewer');
+  assert.deepEqual(r.map(x => x.email), ['frank@example.org', 'erin@example.org'], 'the first link is still there (newest first)');
+  const erinOld = r[1].link;
+  r = await invite('erin@example.org', 'editor');
+  assert.deepEqual(r.map(x => x.email), ['erin@example.org', 'frank@example.org'], 'a renewed invitation replaces its old link');
+  assert.notEqual(r[0].link, erinOld);
+  assert.match(r[0].text, /a new link; the old one stops working/);
+  const erinLink = r[0].link;
+  await D.page.click('.cl-invites tr:has-text("frank@example.org") [data-act="revoke"]');
+  await D.page.waitForFunction(() => !document.querySelector('.cl-invites') || !/frank/.test(document.querySelector('.cl-invites').textContent));
+  assert.deepEqual((await rows()).map(x => x.email), ['erin@example.org'], 'a revoked invitation\'s link goes');
+  await D.page.click('#modal-foot .btn-primary');
+
+  /* erin opens her link signed out; the link that confirms a new account (or an emailed
+     sign-in link) opens the app, not the invitation: once signed in she's back on it */
+  const E = await person();
+  await E.page.goto(erinLink);
+  await E.page.waitForSelector('#cl-inv-signin');
+  await E.page.goto(baseUrl + '/app.html#dashboard');
+  await E.page.reload();
+  await signIn(E.page, 'erin@example.org');
+  await E.page.waitForSelector('#cl-inv-accept', { timeout: 10000 });
+  assert.match(E.page.url(), /#invite\//);
+  await E.page.click('#cl-inv-accept');
+  await E.page.waitForSelector('#cl-slot .cl-live', { timeout: 15000 });
+  assert.deepEqual(texts(await E.page.evaluate(() => App.getState().posts)), texts((await mod.collab.store.get(id)).data.posts));
+  assert.equal(await E.page.evaluate(() => localStorage.getItem('metacode_pending_invite_v1')), null, 'forgotten once used');
+
+  assert.deepEqual([...D.errors, ...E.errors], []);
+  for (const p of [D, E]) await p.ctx.close();
 });

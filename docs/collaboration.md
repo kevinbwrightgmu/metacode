@@ -24,7 +24,9 @@ open (every 20 seconds) and ends it on removal.
 ## Using it
 
 - **Share** (top bar, or *Share…* on the Projects page) puts a copy of the open project on the server and makes
-  you its owner. From then on the open project in your browser is linked to the shared one.
+  you its owner. From then on the open project in your browser is linked to the shared one. Each post is shared
+  under its id, so a post without one, or with an id an earlier post already has (a CSV whose id column repeats,
+  say), gets a new id first — when you share and whenever such posts are added later. No post is left out.
 - **Invite people** by email, as editors or viewers. MetaCode doesn't send email: you get a link for each person
   and send it yourself. A link
   - works for 14 days and once;
@@ -32,7 +34,13 @@ open (every 20 seconds) and ends it on removal.
     unconfirmed address could belong to anyone);
   - can be revoked. Inviting the same address again replaces its link (the old one stops working).
 
-  People without an account open the link, create an account with that address, confirm it, and accept.
+  The Share dialog keeps the links of everyone you invite while it's open (newest first), until an invitation is
+  renewed or revoked. Only a hash of each link is stored, so copy them before closing it; to get a lost link
+  again, invite the address again.
+
+  People without an account open the link, create an account with that address, confirm it, and accept. The link
+  that confirms a new account (or an emailed sign-in link) opens MetaCode's dashboard, not the invitation: the
+  browser remembers an invitation opened before signing in (for a day) and shows it again once you're signed in.
 - **Shared projects** on the Projects page lists the shared projects you belong to, with your role; *Open*
   replaces the open project in your browser with the shared one (saving or sending the current one first).
 - **The top bar** shows the connection (*Live*, *Sending…*, *Reconnecting…*, *Offline*), who else has the
@@ -119,7 +127,7 @@ All routes need a signed-in account except `GET /config` and `GET /invites/:toke
 |---|---|---|
 | `GET /config` | anyone | `{ enabled, signedIn, roles, inviteDays, limits }` |
 | `GET /projects` | signed in | the shared projects you belong to, with your role |
-| `POST /projects` | signed in | `{ name, data }` → you own the shared copy; `skipped` counts posts that couldn't be shared (no usable or a repeated id) |
+| `POST /projects` | signed in | `{ name, data }` → you own the shared copy; `skipped` counts posts that couldn't be shared (no usable or a repeated id; the page gives such posts new ids before sending) |
 | `GET /projects/:id[?since=rev]` | viewer+ | the project, or the parts changed after `rev` (deleted posts come back as `null`) and the post order |
 | `POST /projects/:id/changes` | editor+ | `{ changes: [{ key, baseRev, value }] }` → `{ revision, applied, conflicts: [{ key, rev, value }], invalid }` |
 | `PATCH /projects/:id` | editor+ | `{ name }` |
@@ -140,10 +148,13 @@ All routes need a signed-in account except `GET /config` and `GET /invites/:toke
 - `test/collab.test.js` — the server with a stand-in Supabase: roles on every route, non-members, invitations
   (renewal, masking, expiry, single use, revocation, unconfirmed and wrong accounts, accounts created after the
   invitation), concurrent changes and conflicts, `?since` deltas, live events, chat (idempotency, history,
-  limits), removal and deletion ending live connections, limits, accounts off, requests from other websites.
+  limits), removal and deletion ending live connections, a live connection closed while it's being set up (it
+  doesn't stay "open now"), limits, accounts off, requests from other websites.
 - `test/collab-e2e.test.js` — three real browsers (owner, editor, viewer): share, invite, sign in from the link
   and accept, live edits, presence, a conflict on one post resolved in the dialog, chat (unread count, text
-  never rendered as HTML), a viewer's edits not sent, removal.
+  never rendered as HTML), a viewer's edits not sent, removal; posts with repeated ids all shared, earlier
+  invitation links kept in the dialog until renewed or revoked, and an invitation opened before signing in shown
+  again after signing in from the dashboard.
 
 The tests use a local stand-in for Supabase; they prove MetaCode's pages and server, not a live Supabase
 project's configuration.

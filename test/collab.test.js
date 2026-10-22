@@ -455,6 +455,29 @@ test('limits: chat messages per minute, members per project, open streams per ac
   for (const s of streams) await s.close();
 });
 
+test('a stream the browser closes while it\'s being set up doesn\'t stay "open now"', async () => {
+  const id = await shareWith([], null, 'Ghosts');
+  // The slow steps: checking the sign-in (Supabase, Stripe) and reading the chat
+  for (const [what, obj, fn] of [['sign-in check', mod.accounts, 'contextOf'], ['chat read', mod.collab.store, 'chat']]) {
+    const orig = obj[fn];
+    let reached = () => {};
+    const slow = new Promise(r => { reached = r; });
+    obj[fn] = async function (...a) { reached(); await new Promise(r => setTimeout(r, 300)); return orig.apply(this, a); };
+    try {
+      const s = stream(T.owner, id);
+      await slow;
+      await s.close();                       // e.g. the page was reloaded
+      await new Promise(r => setTimeout(r, 500));
+    } finally { obj[fn] = orig; }
+    assert.deepEqual(mod.collab.online(id), [], what);
+  }
+  // …and a stream that stays open is still counted
+  const s = stream(T.owner, id);
+  await s.waitFor('hello');
+  assert.deepEqual(mod.collab.online(id).map(u => u.email), ['owner@example.org']);
+  await s.close();
+});
+
 test('bodies the server can\'t read get a JSON answer saying why', async () => {
   const bad = await fetch(base + '/api/collab/projects', { method: 'POST', headers: { Authorization: 'Bearer ' + T.owner, 'Content-Type': 'application/json' }, body: '{"name": "x", data: ' });
   assert.equal(bad.status, 400);
