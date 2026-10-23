@@ -294,10 +294,15 @@ const CSVAnalyzer = (() => {
     resultsEl.innerHTML = '<div class="loading-state">Running NetworkX analysis on ' + edges.length + ' edges…</div>';
 
     // Sent compactly: [source, target, weight] rows, a repeated pair once with the weights
-    // added up (as the analysis does anyway), so a large CSV stays a small request
-    const pairs = new Map();
-    edges.forEach(e => { const k = JSON.stringify([e.source, e.target]); pairs.set(k, (pairs.get(k) || 0) + e.weight); });
-    const edgeRows = Array.from(pairs, ([k, w]) => JSON.parse(k).concat(w));
+    // added up (as the analysis does anyway), so a large CSV stays a small request. A row from
+    // a node to itself goes as it is: the analysis leaves those out and counts each one (skipped edges)
+    const pairs = new Map(), selfRows = [];
+    edges.forEach(e => {
+      if (e.source === e.target) { selfRows.push([e.source, e.target, e.weight]); return; }
+      const k = JSON.stringify([e.source, e.target]);
+      pairs.set(k, (pairs.get(k) || 0) + e.weight);
+    });
+    const edgeRows = Array.from(pairs, ([k, w]) => JSON.parse(k).concat(w)).concat(selfRows);
 
     try {
       const res = await fetch('/api/network/analyze', {

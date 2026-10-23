@@ -36,7 +36,8 @@ const CloudSync = (() => {
   //     done:    { 'kind/id': t of the newest change sent } }
   let st = null;
   let busy = false, again = false, timer = null, pullTimer = null, backoff = 0;
-  let status = { state: 'off', lastSync: null, error: null, pending: 0 };
+  let status = { state: 'off', lastSync: null, error: null, pending: 0, tooLarge: 0 };
+  const tooLarge = new Set();      // 'kind/id' of waiting changes the account storage refused as too large (as of the last push)
   let seq = 0;
   const stamp = () => Date.now() * 1000 + (++seq % 1000);     // orders changes, across tabs too
 
@@ -85,7 +86,9 @@ const CloudSync = (() => {
   // One tab at a time talks to the account (where the browser supports it)
   const withLock = fn => (navigator.locks && navigator.locks.request ? navigator.locks.request('metacode-sync', fn) : fn());
   function setStatus(state, extra) {
-    status = Object.assign({}, status, { state, pending: st ? Object.keys(st.pending || {}).length : 0 }, extra || {});
+    const keys = st ? Object.keys(st.pending || {}) : [];
+    const big = keys.filter(k => tooLarge.has(k)).length;
+    status = Object.assign({}, status, { state, pending: keys.length - big, tooLarge: big }, extra || {});
     try { document.dispatchEvent(new CustomEvent('metacode:sync-status', { detail: status })); } catch (e) { /* old browser */ }
   }
   // FNV-1a — enough to tell whether the open project changed since it was last synced
@@ -135,7 +138,9 @@ const CloudSync = (() => {
   function checkWorkspace() {
     if (!user || !st) return;
     const s = wsString();
-    if (s && wsHashOf(s) !== st.wsHash) queue('workspace', 'current', 'put');
+    if (!s) return;
+    const h = wsHashOf(s);
+    if (h !== st.wsHash && refused.get('workspace/current') !== h) queue('workspace', 'current', 'put');   // (not one refused as too large)
   }
   let wsTimer = null;
   // app.js and studio-shell.js call this after saving the open project
@@ -160,6 +165,7 @@ const CloudSync = (() => {
   async function push() {
     const sb = client();
     const items = Object.values(st.pending);
+    tooLarge.clear();
     let batch = [], bytes = 0;
     const send = async list => {
       if (!list.length) return;
@@ -170,7 +176,7 @@ const CloudSync = (() => {
         // one that's too large on its own doesn't hold up the others
         if (list.length > 1) { const h = Math.ceil(list.length / 2); await send(list.slice(0, h)); await send(list.slice(h)); return; }
         const b = list[0], k = b.item.kind + '/' + b.item.id;
-        refused.set(k, b.version);
+        refused.set(k, b.version); tooLarge.add(k);
         if (!refusedNoted.has(k)) { refusedNoted.add(k); notify('“' + nameOf(b.row.data, b.item.id) + '” is too large to save to your account (the account storage refused it). It\'s kept in this browser.', 'warning', 8000); }
         return;
       }
@@ -201,7 +207,7 @@ const CloudSync = (() => {
       }
       const row = { user_id: user, kind: item.kind, id: item.id, data: deleted ? null : data, deleted };
       const version = item.kind === 'workspace' ? wsHashNow : item.t;
-      if (!deleted && refused.get(item.kind + '/' + item.id) === version) continue;     // refused as too large, unchanged since
+      if (!deleted && refused.get(item.kind + '/' + item.id) === version) { tooLarge.add(item.kind + '/' + item.id); continue; }    // refused as too large, unchanged since
       const size = deleted ? 100 : new Blob([JSON.stringify(data)]).size;              // UTF-8 bytes
       if (size > MAX_BYTES) {
         delete st.pending[item.kind + '/' + item.id];
@@ -464,9 +470,11 @@ const CloudSync = (() => {
     checkWorkspace();
     await syncNow();
     refresh();
-    const waiting = Object.keys((st && st.pending) || {}).length;
+    const keys = Object.keys((st && st.pending) || {});
+    const waiting = keys.length, big = keys.filter(k => tooLarge.has(k)).length;
+    const why = big === waiting ? 'too large for your account storage' : (big ? big + ' of them too large for your account storage, the others: ' : '') + (status.error || 'offline');
     const choice = await ask('Sign out',
-      (waiting ? '<p class="acct-warn">' + waiting + ' change(s) couldn\'t be saved to your account yet (' + escHtml(status.error || 'offline') + '). If you remove them from this browser now, they\'ll be lost.</p>' : '<p>Everything is saved to your account.</p>') +
+      (waiting ? '<p class="acct-warn">' + waiting + ' change(s) couldn\'t be saved to your account yet (' + escHtml(why) + '). If you remove them from this browser now, they\'ll be lost.</p>' : '<p>Everything is saved to your account.</p>') +
       '<p>Remove your projects and surveys from this browser? (Recommended on a shared computer — they stay in your account.)</p>',
       [{ label: waiting ? 'Keep them here and sign out' : 'Remove from this browser and sign out', value: waiting ? 'keep' : 'clear' },
         { label: waiting ? 'Remove anyway and sign out' : 'Keep them here and sign out', value: waiting ? 'clear' : 'keep' },

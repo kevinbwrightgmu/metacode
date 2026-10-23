@@ -332,7 +332,7 @@ const AICoder = (() => {
 
     for (let round = 0; round < 3 && pending.length && !stopFlag && !gaveUp; round++) {
       const byId = new Map(pending.map(p => [p.id, p]));
-      const retry = [];
+      const retry = [], settled = new Set();      // settled: coded, or failed for good, in this round
       // Posts that failed because of the AI service: give it a little time first
       if (round && serverFailed && !(await countdown(round === 1 ? 15 : 30, pending.length))) break;
       serverFailed = 0;
@@ -355,7 +355,7 @@ const AICoder = (() => {
             if (codings) {
               const updated = App.getState().posts.map(p => p.id === post.id ? Object.assign({}, p, { aiCodes: codings }) : p);
               App.setState({ posts: updated });
-              coded++; done++;
+              coded++; done++; settled.add(post.id);
               if (r.model) substitutes[r.model] = (substitutes[r.model] || 0) + 1;
               scheduleRefresh();
             } else {
@@ -367,7 +367,7 @@ const AICoder = (() => {
               // An unreadable answer, or a passing EMIS problem, is worth another try
               // (not once the server has given up on the AI service for this run)
               if (round < 2 && (r.ok || (serverSide && r.type !== 'service_unavailable'))) { retry.push(post); console.warn('[AICoder] post', post.id, '— will try again:', problem); }
-              else { failed++; done++; console.error('[AICoder] post', post.id, problem); }
+              else { failed++; done++; settled.add(post.id); console.error('[AICoder] post', post.id, problem); }
             }
             updateProgress(done, toCode.length);
             updateStatus('Coded ' + coded + ' of ' + toCode.length + ' · ' + parallel + ' at once' + (failed ? ' · ' + failed + ' failed' : '') + (lastError ? ' — last problem: ' + lastError : ''), !!lastError && !r.ok);
@@ -382,6 +382,7 @@ const AICoder = (() => {
         lastError = err.message;
         console.error('[AICoder] batch', err);
         updateStatus('Error: ' + err.message, true);
+        pending = pending.filter(p => !settled.has(p.id));      // (counted below once each: not the posts already counted)
         break;
       }
       pending = retry;

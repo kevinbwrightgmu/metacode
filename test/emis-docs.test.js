@@ -29,7 +29,7 @@ test.before(async () => {
       if (req.url === '/v1/models') {
         if (modelsMode === 'webpage403') { res.writeHead(403, { 'Content-Type': 'text/html' }); return res.end('<!doctype html><title>Just a moment...</title>'); }
         if (modelsMode === 'webpage200') { res.writeHead(200, { 'Content-Type': 'text/html' }); return res.end('<!doctype html><title>emis</title>'); }
-        return res.end(JSON.stringify({ data: ['prompts-only', 'budget-said', 'picture', 'picture-only', 'other-1'].map(id => ({ id })) }));
+        return res.end(JSON.stringify({ data: ['prompts-only', 'budget-said', 'picture', 'picture-only', 'other-1', 'gemini-3.8-flash', 'gemini-3.7-flash', 'slow'].map(id => ({ id })) }));
       }
       const j = JSON.parse(body || '{}');
       calls.push(j.model);
@@ -45,6 +45,13 @@ test.before(async () => {
         res.writeHead(429, { 'Content-Type': 'application/json', 'X-RateLimit-Window': 'day', 'X-RateLimit-Limit-Tokens': '5000', 'X-RateLimit-Remaining-Tokens': '400', 'X-RateLimit-Reset': reset() });
         return res.end('{"error":{"message":"Token budget exceeded for this window"}}');
       }
+      // One model limited by its provider, in the provider's words, while the key has plenty of budget left
+      if (j.model === 'gemini-3.8-flash') {
+        res.writeHead(429, { 'Content-Type': 'application/json', 'X-RateLimit-Window': 'week', 'X-RateLimit-Limit-Prompts': '1000', 'X-RateLimit-Remaining-Prompts': '950',
+          'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + 5 * 86400) });
+        return res.end('{"error":{"message":"Resource has been exhausted (e.g. check quota)."}}');
+      }
+      if (j.model === 'slow') return setTimeout(() => res.end(answer('ok, slowly')), 1500);
       if (j.model === 'picture') return res.end(answer([{ type: 'text', text: 'Here is your cat: ' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }]));
       if (j.model === 'picture-only') return res.end(answer([{ type: 'image_url', image_url: { url: 'https://example.org/cat.png' } }]));
       return res.end(answer('ok from ' + j.model));
@@ -98,6 +105,18 @@ test('a 429 that says the budget is spent rests the key until the reset (no hopp
   await reload('EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=' + KEY + '\n');       // (forgets the rest)
 });
 
+test('a 429 for one model whose provider says "exhausted … quota" while the key has budget left rests that model, not the key', async () => {
+  calls.length = 0;
+  const r = await ask('gemini-3.8-flash');
+  assert.equal(r.status, 200, JSON.stringify(r.json));
+  assert.deepEqual(calls, ['gemini-3.8-flash', 'gemini-3.7-flash'], 'the closest similar model answered');
+  assert.equal((await keyStatus()).status, 'available');
+  calls.length = 0;
+  assert.equal((await ask('other-1')).status, 200, 'other models aren\'t held up');
+  assert.deepEqual(calls, ['other-1']);
+  await reload('EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=' + KEY + '\n');       // (forgets the resting model)
+});
+
 test('the .env.example placeholder isn\'t taken for a key; a key that doesn\'t look like the AI service\'s is used, with a warning', async () => {
   let st = await reload('EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=your-key\n');
   assert.equal(st.ai.ready, false, 'not "AI ready" with a key that would be refused');
@@ -130,4 +149,19 @@ test('a picture in an answer is marked, not dropped without a trace; an answer t
   r = await ask('picture-only');
   assert.equal(r.status, 200);
   assert.equal(r.json.choices[0].message.content, '[image omitted]');
+});
+
+const python = ['python3', 'python'].some(cmd => { try { return require('child_process').spawnSync(cmd, ['--version']).status === 0; } catch (e) { return false; } });
+test('Reload .env while a request is with the Python worker: it is answered, not sent to the AI service a second time', { skip: !python && 'no Python', timeout: 30000 }, async () => {
+  const env = 'EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=' + KEY + '\nEMIS_TRANSPORT=python\n';
+  await reload(env);
+  calls.length = 0;
+  const pending = ask('slow');
+  await new Promise(r => setTimeout(r, 600));
+  const st = await reload(env);
+  assert.match(st.ai.transport, /^Python /, 'the new worker is already running');
+  const r = await pending;
+  assert.equal(r.status, 200);
+  assert.deepEqual(calls, ['slow'], 'one call');
+  await reload('EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=' + KEY + '\nEMIS_TRANSPORT=node\n');
 });

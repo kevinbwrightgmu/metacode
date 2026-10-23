@@ -465,7 +465,7 @@ Configuration lives only in the server's `.env` file:
 | `EMIS_MODELS_FILE` | no | Model list file, default `emis-models.json` in the MetaCode folder |
 | `EMIS_TRANSPORT` | no | What sends AI requests: `auto` (default — Python, with the `openai` package when installed, else Node.js), `python` or `node`. Any of them works: the AI service's browser check doesn't apply to API requests made with a key |
 | `EMIS_PROXY` | no | Proxy for AI requests (`HTTPS_PROXY` / `NO_PROXY` are used too) |
-| `EMIS_MODEL_SWITCH` | no | `off` stops MetaCode from answering with the closest similar model when the AI service rate-limits the chosen one or can't run it (on by default) |
+| `EMIS_MODEL_SWITCH` | no | `off` stops MetaCode from answering with the closest similar model when the AI service rate-limits a model, or can't run a model picked in Settings (on by default). The server's own default model still falls back to a similar model when the AI service can't run it |
 | `AI_MAX_PARALLEL` | no | The most copies of the model AI Coding may run at once (default 16, max 64); users choose up to this |
 | `AI_BATCH_PAUSE_SECONDS` | no | How long AI Coding first pauses when the AI service answers with a server error (default 5; doubles with each pause, up to 60) |
 | `EMIS_TIMEOUT_MS` | no | How long to wait for the AI service (default 120000 ms) |

@@ -15,7 +15,7 @@ const { ScraperError, cancelledError } = require('./scraper/errors');
 const { createSurveys } = require('./surveys');
 const { createAccounts } = require('./accounts');
 const { createProjects } = require('./projects');
-const { rankSimilar, renamedModel, sameModel } = require('./model-match');
+const { rankSimilar, renamedModel, sameModel, canonicalId } = require('./model-match');
 const { createStatusMonitor, statusRoutes } = require('./status-page');
 
 const app = express();
@@ -427,7 +427,11 @@ function onModelLimited(model, headers, now) {
 }
 function switchingAllowed() { return !/^(off|no|false|0)$/i.test(String(process.env.EMIS_MODEL_SWITCH || '').trim()); }
 // EMIS answers 429 when the key's budget runs out; its message can say so before the headers do
-const BUDGET_MESSAGE = /\b(budget|quota)\b|used up|exhausted/i;
+// ("Token budget exceeded for this window"). Only wording about the budget counts: a model's own
+// limit passed on from its provider often says "quota" or "exhausted" ("Resource has been
+// exhausted (e.g. check quota)") while the key has plenty left, and resting the key for that
+// would stop every model until the window resets (days, for a weekly one).
+const BUDGET_MESSAGE = /\bbudget\b[^.]{0,40}\b(exceeded|used up|exhausted|spent|reached|run out|depleted)\b|\b(exceeded|used up|exhausted|spent|out of)\b[^.]{0,40}\bbudget\b/i;
 // A 429 from EMIS for this key and model: rest the key (→ true: try the next key) or only the model (→ the failure).
 function classifyLimit(key, model, quota, headers, now, detail) {
   if (budgetUsedUp(quota) || BUDGET_MESSAGE.test(detail || '') || (!quota && model && keyWidePause(key, model, now)) || !model) {
@@ -464,9 +468,16 @@ function onModelServerError(model, status, now) {
   st.lastAt = now;
   st.until = now + Math.min(MODEL_DOWN_MAX_MS, MODEL_DOWN_MS * 2 ** Math.min(st.hits - 1, 6));
   modelDown.set(model, st);
-  serverErrors = serverErrors.filter(e => now - e.at < SERVICE_TROUBLE_WINDOW_MS && e.model !== model);
+  // (two spellings of one model's id, claude-opus-4-8 / claude-opus-4.8, are one model failing, not two)
+  serverErrors = serverErrors.filter(e => now - e.at < SERVICE_TROUBLE_WINDOW_MS && canonicalId(e.model) !== canonicalId(model));
   serverErrors.push({ model, at: now, status: status || 502 });
   if (st.hits === 1) console.warn('[ai] The AI service answered with a server error (HTTP ' + (status || 502) + ') for the model "' + model + '" after retries; it rests until ' + new Date(st.until).toLocaleTimeString() + '.');
+}
+// How a model that is resting after server errors failed (for when it's skipped rather than tried again)
+function modelDownFailure(model) {
+  const e = serverErrors.find(x => x.model === model);
+  const status = e ? e.status : 502;
+  return Object.assign(fail(502, 'upstream_error', 'The AI service had a temporary server problem (HTTP ' + status + '). Try again in a moment.'), { upstreamStatus: status });
 }
 function onModelAnswered(model) {
   modelDown.delete(model);
@@ -486,10 +497,11 @@ async function closestModel(target, chatRequest, tried) {
   const now = Date.now();
   const candidates = list.ids.filter(id => !tried.has(id) && !NOT_A_CHAT_MODEL.test(id) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
     !capabilityProblem(chatRequest, list.info ? list.info.get(id) : null));
-  // The same model under another spelling of its id (claude-opus-4-8 / claude-opus-4.8)
-  // is most likely limited or failing too: a similar model first, the other spelling last
+  // The same model under another spelling of its id (claude-opus-4-8 / claude-opus-4.8) as one
+  // already tried is most likely limited or failing too: a different model first, other spellings last
   const ranked = rankSimilar(target, candidates, list.info);
-  return ranked.find(id => !sameModel(target, id, list.info)) || ranked[0] || null;
+  const triedAlready = id => [target, ...tried].some(t => sameModel(t, id, list.info));
+  return ranked.find(id => !triedAlready(id)) || ranked[0] || null;
 }
 
 const switchesLogged = new Map();
@@ -1690,7 +1702,8 @@ async function streamChat(res, prep) {
 // ignored: EMIS is only called with the server's own key.
 // Checks and resolves one chat request (the body of POST /api/ai).
 // → { failure } or { format, chatRequest, ctx, explicit }
-// opts.switchModels: false = don't answer with a similar model when this one is rate-limited (or failing)
+// opts.switchModels: false = don't answer with a similar model when this one is rate-limited, or when a
+//   model picked in Settings is failing (the server's default model still falls back when EMIS can't run it)
 // opts.pickedFallback: false = a model picked in Settings that EMIS can't run right now isn't swapped
 //   (AI Coding batches pause and try the same model again instead, so every post is coded by it)
 async function prepareChat(body, formatName, opts) {
@@ -1740,6 +1753,7 @@ async function answerChat(prep, signal) {
   const tried = new Set();
   let model = ctx.model, fallback = null, fallbackReason = null;
   let rateSwitches = 0, otherSwitches = 0, result;
+  let own = null;               // how the model asked for failed (or was failing, when it was skipped)
   for (;;) {
     tried.add(model);
     const now = Date.now();
@@ -1747,18 +1761,19 @@ async function answerChat(prep, signal) {
     // The model is failing at the moment: a similar model answers, without waiting on it
     if (!resting && model === ctx.model && (!explicit || swapPicked) && modelDownUntil(model, now) && !serviceTrouble(now)) {
       const alt = await closestModel(ctx.model, chatRequest, tried);
-      if (alt) { otherSwitches++; noteSwitch(ctx.model, alt, 'failed'); model = alt; fallback = alt; fallbackReason = 'failed'; continue; }
+      if (alt) { own = modelDownFailure(ctx.model); otherSwitches++; noteSwitch(ctx.model, alt, 'failed'); model = alt; fallback = alt; fallbackReason = 'failed'; continue; }
     }
     result = resting ? modelLimitedFailure(model, resting, now)
       : await completeChat(Object.assign({}, chatRequest, { model }), Object.assign({}, ctx, { model, verified: ctx.verified || model !== ctx.model }), signal);
     if (result.aborted) return { aborted: true };
     if (result.ok) { onModelAnswered(model); break; }
     if (result.type === 'upstream_error') onModelServerError(model, result.upstreamStatus, Date.now());
+    if (model === ctx.model) own = result;
     let why = null;
     if (result.type === 'model_rate_limited' && prep.switchModels && rateSwitches < MAX_RATE_LIMIT_SWITCHES) why = 'rate_limited';
-    // (once switching for a rate limit, a similar model that fails another way is skipped too;
-    // when EMIS as a whole is failing, other models would fail too)
-    else if ((((!explicit || fallbackReason === 'rate_limited') && MODEL_FALLBACK_TYPES.has(result.type)) || (swapPicked && TEMPORARY_MODEL_FAILURES.has(result.type))) &&
+    // (once switching, a similar model that fails in its own way — not offered, not allowed for the
+    // key, unreadable answers — is skipped too; when EMIS as a whole is failing, other models would fail too)
+    else if ((((!explicit || fallbackReason) && MODEL_FALLBACK_TYPES.has(result.type)) || (swapPicked && TEMPORARY_MODEL_FAILURES.has(result.type))) &&
       otherSwitches < 2 && !(result.type === 'upstream_error' && serviceTrouble(Date.now()))) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
     if (!why) break;
     const alt = await closestModel(ctx.model, chatRequest, tried);     // closest to what was asked for
@@ -1767,8 +1782,13 @@ async function answerChat(prep, signal) {
     noteSwitch(ctx.model, alt, why);
     model = alt; fallback = alt; fallbackReason = why;
   }
+  // The search ended on a similar model's own problem (not offered, not allowed for the key, rate-limited…):
+  // what to report is what happened to the model asked for. Not when the key or the AI service as a
+  // whole is the problem (a paused key, a used-up budget, EMIS failing for every model): that applies to any model
+  if (!result.ok && model !== ctx.model && own && (result.type === 'model_rate_limited' || MODEL_FALLBACK_TYPES.has(result.type)) &&
+    !(result.type === 'upstream_error' && serviceTrouble(Date.now()))) result = own;
   if (!result.ok && result.type === 'model_rate_limited') {
-    const others = Array.from(tried).filter(m => m !== ctx.model);
+    const others = Array.from(tried).filter(m => m !== ctx.model && modelRestingUntil(m, Date.now()));
     const soonest = Math.min(...Array.from(tried).map(m => modelRestingUntil(m, Date.now()) || Infinity));
     let message = 'The AI service is rate-limiting the model "' + ctx.model + '"' + (others.length ? ' and the most similar models (' + others.map(m => '"' + m + '"').join(', ') + ')' : '') + ' right now.';
     if (Number.isFinite(soonest)) message += ' The first one can be used again ' + describeWhen(soonest, Date.now()) + '.';
@@ -1779,7 +1799,7 @@ async function answerChat(prep, signal) {
     // Say which models failed, and whether it's EMIS as a whole
     const trouble = serviceTrouble(Date.now());
     const code = 'HTTP ' + (result.upstreamStatus || 502);
-    const others = Array.from(tried).filter(m => m !== ctx.model);
+    const others = Array.from(tried).filter(m => m !== ctx.model && modelDownUntil(m, Date.now()));
     result = Object.assign({}, result, trouble ? {
       message: 'The AI service is having server problems right now: ' + trouble.models.length + ' different models answered with server errors (' + code + ') in the last minute. ' +
         'This is on the AI service\'s side, not MetaCode\'s — try again in a few minutes.',
@@ -2383,14 +2403,17 @@ function settingsStatus() {
 app.get('/api/settings/status', (req, res) => { res.set('Cache-Control', 'no-store'); res.json(settingsStatus()); });
 // Re-reads .env without restarting: the AI (EMIS) settings apply at once;
 // scraper/port settings still need a restart.
-app.post('/api/settings/reload', (req, res) => {
+app.post('/api/settings/reload', async (req, res) => {
   envLoader.load();
   EMIS = loadEmisConfig(process.env);
   keyState.clear();
   streamPref.clear();
   proxyAgent = null;
-  emisPython.stop();                       // started again with the new environment at the next request
+  // The Python worker starts again with the new environment (EMIS_PYTHON, proxies…); requests it
+  // was already working on are answered first, not sent again
   modelList.ids = null; modelList.fetchedAt = 0; modelList.failure = null; modelList.failedAt = 0;
+  emisPython.stop({ finishRequests: true });
+  if (emisTransport() !== 'node') await emisPython.warm();
   const env = envLoader.info;
   console.log('[settings] .env reloaded: ' + (env.found ? env.keys.length + ' value(s) from ' + env.file : 'no .env file found') + '; AI ' + (notConfigured() ? 'not ready' : 'ready (' + EMIS.keys.length + ' key(s))'));
   res.json(settingsStatus());

@@ -329,8 +329,11 @@ sudo nginx -T 2>/dev/null | grep -n client_max_body_size      # expect 30m in th
 
 Put `client_max_body_size 30m;` in the `server { … }` block that has `listen 443 ssl` (or in `http { … }` for every
 site), then `sudo nginx -t && sudo systemctl reload nginx`. MetaCode sends long AI Coding runs, shared projects and
-their changes in pieces of at most about 512 KB, so those work even below that; surveys with large images, AI Lab
-imports and big Analyze CSV files need the full limit.
+their changes in pieces of about 512 KB, so those mostly work even below that. A single part of a shared project is
+never split, though: a post, the codebook, a Network Graph or a network analysis larger than the limit (at nginx's
+1 MB default, a network of more than roughly 10–15k edges) stays in the sending browser, and collaborators don't get
+it. Surveys with large images, AI Lab imports, big Analyze CSV files and shared projects with large networks need
+the full limit.
 
 Then open `https://metac0.de/app.html#scraper-beta`, ask the AI Scraper for a few posts, and watch its steps in
 the Monitor. If Reddit blocks the server, the job stops with "blocked by network security": add your own Reddit

@@ -307,7 +307,7 @@ const App = (() => {
             </div>
             <div class="form-group">
               <label class="s-check-row" for="s-switch"><input type="checkbox" id="s-switch" ${settings.switchModels !== false ? 'checked' : ''}> If a model is rate-limited or failing, use the closest similar model</label>
-              <div class="form-hint">When the AI service throttles the model you picked, or can't run it right now, requests go to the most similar available model — same family and line, nearest version and size (e.g. Claude Opus 5.5 → Claude Opus 5) — until it can be used again, and a note says which one answered. (AI Coding waits and tries your model again when the AI service can't run it, so every post is coded by the model you picked.) Turn off to wait for your model instead. A used-up AI budget can't be avoided this way: it applies to every model.</div>
+              <div class="form-hint">When the AI service throttles the model you picked, or can't run it right now, requests go to the most similar available model — same family and line, nearest version and size (e.g. Claude Opus 5.5 → Claude Opus 5) — until it can be used again, and a note says which one answered. (AI Coding waits and tries your model again when the AI service can't run it, so every post is coded by the model you picked.) Turn off to wait for your model instead (with “Server default”, the server still uses a similar model when the AI service can't run its default). A used-up AI budget can't be avoided this way: it applies to every model.</div>
               <div class="form-hint" id="s-limited"></div>
             </div>
             <div class="form-group">
@@ -732,13 +732,13 @@ const App = (() => {
         const statusBadge = k.status === 'available'
           ? '<span class="badge badge-green">Available</span>'
           : k.status === 'cooling_down'
-            ? '<span class="badge badge-amber" title="' + esc(back.toLocaleString()) + '">Resting ' + (k.cooldownSecondsLeft < 120 ? k.cooldownSecondsLeft + 's' : 'until ' + esc(k.cooldownSecondsLeft < 86400 ? back.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : back.toLocaleDateString())) + '</span>'
+            ? '<span class="badge badge-amber" title="' + esc(back.toLocaleString()) + '">Resting ' + (k.cooldownSecondsLeft < 120 ? k.cooldownSecondsLeft + 's' : 'until ' + esc(k.cooldownSecondsLeft >= 86400 ? back.toLocaleDateString() : back.toDateString() === new Date().toDateString() ? back.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : back.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }))) + '</span>'
             : '<span class="badge badge-red">Rejected by the AI service</span>';
-        // The budget is prompts and/or tokens: show whichever the AI service reports
+        // The budget is prompts and/or tokens: show whichever the AI service reports (0 of 0: the key has no budget of that kind)
         const q = k.quota || {};
-        const has = v => v !== null && v !== undefined;
-        const left = [has(q.remainingPrompts) ? Number(q.remainingPrompts).toLocaleString() + ' prompt' + (q.remainingPrompts === 1 ? '' : 's') : '',
-          has(q.remainingTokens) ? Number(q.remainingTokens).toLocaleString() + ' tokens' : ''].filter(Boolean).join(' · ');
+        const has = (v, limit) => v !== null && v !== undefined && !(v === 0 && limit === 0);
+        const left = [has(q.remainingPrompts, q.limitPrompts) ? Number(q.remainingPrompts).toLocaleString() + ' prompt' + (q.remainingPrompts === 1 ? '' : 's') : '',
+          has(q.remainingTokens, q.limitTokens) ? Number(q.remainingTokens).toLocaleString() + ' tokens' : ''].filter(Boolean).join(' · ');
         const quota = left ? '<span style="color:var(--tx-muted)">' + left + ' left' + (q.window ? ' this ' + esc(q.window) : '') + '</span>' : '';
         return '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg-muted);border-radius:var(--r-sm);font-size:12.5px">' +
           '<span class="font-mono">' + esc(k.masked) + '</span><span class="badge badge-gray" style="font-size:10px">.env</span>' + quota +
@@ -841,19 +841,33 @@ const App = (() => {
     if (cur.length) chunks.push(cur);
     let parallel = clampParallel(opts.parallel || getParallel());
     let stopped = null;          // { status, error, type }: the server gave up on this run (or the plan's posts ran out)
-    const failAll = (list, f) => list.forEach(r => opts.onResult && opts.onResult({ id: r.id, ok: false, status: f.status, error: f.error, type: f.type }));
+    // Every item gets one result, whichever way its batch ends
+    const answered = new Set();
+    const report = r => { if (answered.has(r.id)) return; answered.add(r.id); if (opts.onResult) opts.onResult(r); };
+    const sendOpts = Object.assign({}, opts, { onResult: report });
+    const failAll = (list, f) => list.forEach(r => report({ id: r.id, ok: false, status: f.status, error: f.error, type: f.type }));
     while (chunks.length) {
       const chunk = chunks.shift();
       if (stopped) { failAll(chunk, stopped); continue; }
       let out;
       for (let tries = 0; ; tries++) {
-        try { out = await sendBatch(chunk, parallel, shared, model, opts, f => { if (!stopped && (f.type === 'service_unavailable' || f.type === 'limit_reached')) stopped = f; }); break; }
+        try { out = await sendBatch(chunk, parallel, shared, model, sendOpts, f => { if (!stopped && (f.type === 'service_unavailable' || f.type === 'limit_reached')) stopped = f; }); break; }
         catch (e) {
+          const aborted = e.name === 'AbortError' || (opts.signal && opts.signal.aborted);
           // (a plan runs one batch at a time: the server may still be closing the previous one)
-          if (e.status === 429 && e.type === 'account_rate_limited' && tries < 5 && !(opts.signal && opts.signal.aborted)) { await new Promise(r => setTimeout(r, 1000 * (tries + 1))); continue; }
-          throw e;
+          if (e.status === 429 && e.type === 'account_rate_limited' && tries < 5 && !aborted) { await new Promise(r => setTimeout(r, 1000 * (tries + 1))); continue; }
+          if (aborted || (!answered.size && !(e.status === 429 && e.type === 'limit_reached'))) throw e;
+          // Partway through a run (the connection dropped, a web server in front answered 502…) or the plan's
+          // posts ran out: what's left fails item by item, like a failure inside a batch
+          const f = { status: e.status || 0, error: e.message, type: e.type || (e.status ? 'api_error' : 'network') };
+          if (f.type === 'service_unavailable' || f.type === 'limit_reached') stopped = f;
+          failAll(chunk, f);
+          chunks.splice(0).forEach(c => failAll(c, f));
+          out = null;
+          break;
         }
       }
+      if (!out) continue;
       if (out.tooLarge) {
         // Even this batch was too large for the web server in front: halve it, down to single requests
         if (chunk.length > 1) { chunks.unshift(chunk.slice(0, Math.ceil(chunk.length / 2)), chunk.slice(Math.ceil(chunk.length / 2))); continue; }

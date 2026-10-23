@@ -419,7 +419,7 @@ function createCollab(deps) {
   // A body the JSON parser refused: say why, as JSON (not Express's HTML page)
   router.use((/** @type {any} */ err, /** @type {any} */ req, /** @type {any} */ res, /** @type {(e?: any) => void} */ next) => {
     if (!err || res.headersSent) return next(err);
-    if (err.type === 'entity.too.large') return send(res, fail(413, 'too_large', 'That\'s more than 25 MB, the most a shared project can send at once. Share a smaller copy (fewer posts).'));
+    if (err.type === 'entity.too.large') return send(res, fail(413, 'too_large', 'That\'s more than 25 MB, the most one request to a shared project may carry. A single post, codebook or network this large can\'t be shared; it stays in this browser.'));
     if (err.type === 'entity.parse.failed') return send(res, fail(400, 'invalid_request', 'The request wasn\'t valid JSON.'));
     return send(res, err);
   });

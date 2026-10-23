@@ -114,6 +114,24 @@ test('AI Coding: a run far over 1 MB is sent in batches the web server accepts, 
   await until(() => page.evaluate(() => /✓ Done — 700 posts coded/.test(document.getElementById('status-msg').textContent)), 'the run says it\'s done');
 });
 
+test('AI Coding: when a later batch of a run fails (a web server in front answers 502), each post is counted once and tried again', { skip: noBrowser, timeout: 180000 }, async () => {
+  const N = 400;
+  let batches = 0;
+  await page.route('**/api/ai/batch', route => (++batches === 2 ? route.fulfill({ status: 502, contentType: 'text/html', body: '<html><body><h1>502 Bad Gateway</h1></body></html>' }) : route.continue()));
+  try {
+    await page.evaluate(([n, cb]) => {
+      App.setState({ project: { name: 'Run with a hiccup', description: '' }, codebook: cb, posts: Array.from({ length: n }, (_, i) => ({ id: 'h' + i, text: 'Post ' + i, humanCodes: {}, aiCodes: {} })) });
+      App.navigate('ai-coding');
+    }, [N, codebook]);
+    await page.waitForSelector('#run-btn');
+    await page.click('#run-btn');
+    await until(() => page.evaluate(() => /Done|Nothing was coded|Stopped/.test(document.getElementById('status-msg').textContent)), 'the run ends', 150000);
+    assert.equal(await page.evaluate(() => document.getElementById('status-msg').textContent), '✓ Done — 400 posts coded.');
+    assert.equal(await page.evaluate(() => document.getElementById('progress-label').textContent), '400 / 400');
+    assert.equal(batches, 3, 'the batch that failed was sent again');
+  } finally { await page.unroute('**/api/ai/batch'); }
+});
+
 test('sharing a project far over 1 MB: the first part fits, the rest follows as changes; nothing is refused', { skip: noBrowser, timeout: 180000 }, async () => {
   const N = 2500;
   await page.evaluate(([n, sample]) => {
@@ -145,12 +163,43 @@ test('the account sync: an item the account storage refuses as too large stays i
   for (let i = 0; i < 3; i++) { await page.evaluate(() => CloudSync.syncNow()); await new Promise(r => setTimeout(r, 500)); }
   assert.equal(sbFront.refused.length, before, 'the same version isn\'t sent again');
   assert.equal(await page.evaluate(() => [...document.querySelectorAll('.notif-stack > *')].filter(n => /too large to save to your account/.test(n.textContent)).length), 1, 'said once');
+  const quiet = sbFront.passed.length + sbFront.refused.length;
+  await new Promise(r => setTimeout(r, 8000));
+  assert.equal(sbFront.passed.length + sbFront.refused.length, quiet, 'left alone, the browser doesn\'t keep syncing it every few seconds');
+  assert.deepEqual(await page.evaluate(() => [CloudSync.status().pending, CloudSync.status().tooLarge]), [0, 1], 'counted as too large, not as waiting');
 });
 
 test('the web server in front of MetaCode refused nothing all along (the console\'s only 413s are the account storage\'s)', { skip: noBrowser }, async () => {
   assert.deepEqual(front.refused, []);
   assert.equal(consoleErrors.filter(e => /413/.test(e)).length, sbFront.refused.length, 'one console line per refusal by the account storage');
   assert.deepEqual(consoleErrors.filter(e => /pageerror/.test(e)), []);
+});
+
+test('a shared part too large for the web server stays in this browser, and someone else\'s change to it is a conflict, not an overwrite', { skip: noBrowser, timeout: 120000 }, async () => {
+  // (the "Big share" project shared above is still open and linked)
+  const id = await page.evaluate(() => Collab.link().id);
+  const BIG = Math.round(1.65 * MB);
+  await page.evaluate(n => { const s = App.getState(); s.posts.find(p => p.id === 's0').text = 'x'.repeat(n); s.posts.find(p => p.id === 's1').text = 'small edit'; App.save(); }, BIG);
+  await until(() => front.refused.some(r => /\/changes$/.test(r.path)), 'the large part refused');
+  await until(() => page.evaluate(() => [...document.querySelectorAll('.notif-stack > *')].some(n => /too large to send to the shared project/.test(n.textContent))), 'the browser says so');
+  await until(async () => (await mod.collab.store.get(id)).data.posts.find(p => p.id === 's1').text === 'small edit', 'the small change was shared anyway');
+  assert.equal((await mod.collab.store.get(id)).data.posts.find(p => p.id === 's0').text.length, text(0).length, 'the server still has the old version');
+  const refused = front.refused.length;
+  await page.evaluate(() => Collab.flush());
+  await new Promise(r => setTimeout(r, 2500));
+  assert.equal(front.refused.length, refused, 'the same version isn\'t sent over and over');
+  // Someone else (here: the same account, through the API) codes s0 from the server's version
+  const token = sb.issue(sb.users.get('owner@example.org')).access_token;
+  const g = await (await fetch(direct + '/api/collab/projects/' + id, { headers: { Authorization: 'Bearer ' + token } })).json();
+  const theirs = Object.assign({}, g.data.posts.find(p => p.id === 's0'), { humanCodes: { d1: 'pos' } });
+  const r = await fetch(direct + '/api/collab/projects/' + id + '/changes', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token }, body: JSON.stringify({ changes: [{ key: 'post:s0', baseRev: g.revs['post:s0'], value: theirs }] }) });
+  assert.equal(r.status, 200);
+  await until(() => page.evaluate(() => Collab.status().conflicts === 1), 'a conflict to resolve');
+  assert.equal(await page.evaluate(() => App.getState().posts.find(p => p.id === 's0').text.length), BIG, 'the large local version is still here');
+  assert.ok(await page.evaluate(() => !!document.getElementById('cl-conflicts')), 'the conflict dialog is open');
+  await page.click('#cl-all-theirs');
+  await until(() => page.evaluate(() => Collab.status().conflicts === 0), 'resolved');
+  assert.deepEqual(await page.evaluate(() => App.getState().posts.find(p => p.id === 's0').humanCodes), { d1: 'pos' });
 });
 
 test('Analyze CSV\'s compact edge list is read; a script that ends before reading its input can\'t crash the server', { timeout: 120000 }, async () => {

@@ -42,7 +42,10 @@ sent to the AI service as chat completions).
 4. **Failures.** A used-up budget (429; prompts and/or tokens per day, week or
    month) rests the key until the window rolls over; a 429 while the budget
    lasts, or a model the service can't run right now, switches to the closest
-   similar model (`model-match.js`, on by default, switchable in Settings); a missing key, a wrong address or a rejected key
+   similar model (`model-match.js`, on by default; switching off in Settings or
+   with `EMIS_MODEL_SWITCH=off` covers rate limits and models picked in
+   Settings, while the server's default model still falls back when the service
+   can't run it); a missing key, a wrong address or a rejected key
    give a clear message naming the setting to fix; unknown capabilities are
    shown as unknown, never assumed. Context windows are unknown unless the
    catalog states them (the Lab then uses a conservative budget).

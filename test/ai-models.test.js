@@ -36,6 +36,10 @@ test.before(async () => {
           res.writeHead(429, { 'Content-Type': 'application/json', 'X-RateLimit-Window': 'day', 'X-RateLimit-Limit-Prompts': '100', 'X-RateLimit-Remaining-Prompts': '50', 'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + 3600) });
           return res.end('{"error":{"message":"model busy"}}');
         }
+        // The service can't run these right now (a server error each time)…
+        if (/^acme-(opus-5\.5|opus-4\.8|opus-4[.-]7)$/.test(j.model)) { res.statusCode = 502; return res.end('{"error":{"message":"upstream failed"}}'); }
+        // …and doesn't offer this one any more, although the catalog lists it
+        if (j.model === 'acme-opus-5.4') { res.statusCode = 404; return res.end('{"error":{"message":"The model acme-opus-5.4 does not exist"}}'); }
         return res.end(JSON.stringify({ id: 'x', model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok from ' + j.model }, finish_reason: 'stop' }] }));
       }
       res.statusCode = 404; res.end('{}');
@@ -179,5 +183,39 @@ test('a rate-limited model is answered by a similar model, not by its other spel
     assert.equal(r.status, 200);
     assert.equal(r.headers.get('x-metacode-model-fallback'), 'alias-2.0');
     assert.equal(r.headers.get('x-metacode-model-fallback-reason'), 'rate_limited');
+  });
+});
+
+test('a picked model that is failing: a similar model that isn\'t offered is skipped, not the end of the search', { timeout: 60000 }, async () => {
+  await withCatalog({ 'acme-opus-5.5': { name: 'Acme Opus 5.5' }, 'acme-opus-5.4': { name: 'Acme Opus 5.4' }, 'acme-opus-5.3': { name: 'Acme Opus 5.3' }, 'acme-sonnet-5': { name: 'Acme Sonnet 5' } }, async () => {
+    for (const round of ['first', 'while it rests']) {
+      svc.chats.length = 0;
+      const r = await ask('acme-opus-5.5');
+      assert.equal(r.status, 200, round + ': ' + JSON.stringify(await r.clone().json()));
+      assert.equal(r.headers.get('x-metacode-model-fallback'), 'acme-opus-5.3', round);
+      assert.equal(svc.chats[svc.chats.length - 1], 'acme-opus-5.3', round);
+    }
+  });
+});
+
+test('…and when no similar model can answer, the error is about the model that was picked, not a substitute', { timeout: 60000 }, async () => {
+  await withCatalog({ 'acme-opus-5.5': { name: 'Acme Opus 5.5' }, 'acme-opus-5.4': { name: 'Acme Opus 5.4' } }, async () => {
+    const r = await ask('acme-opus-5.5');
+    const e = (await r.json()).error;
+    assert.equal(r.status, 502);
+    assert.equal(e.type, 'upstream_error');
+    assert.match(e.message, /couldn't run the model "acme-opus-5\.5"/);
+    assert.doesNotMatch(e.message, /doesn't offer|acme-opus-5\.4/, 'the model that isn\'t offered isn\'t blamed (or listed as failing)');
+    assert.match(e.message, /"acme-opus-5\.5" you picked/);
+  });
+});
+
+test('a substitute\'s other spelling isn\'t tried next (likely the same model, failing too): a different model answers', { timeout: 60000 }, async () => {
+  await withCatalog({ 'acme-opus-4.8': { name: 'Acme Opus 4.8' }, 'acme-opus-4.7': { name: 'Acme Opus 4.7' }, 'acme-opus-4-7': { name: 'Acme Opus 4.7' }, 'acme-opus-4.6': { name: 'Acme Opus 4.6' } }, async () => {
+    svc.chats.length = 0;
+    const r = await ask('acme-opus-4.8');
+    assert.equal(r.status, 200, JSON.stringify(await r.clone().json()));
+    assert.equal(r.headers.get('x-metacode-model-fallback'), 'acme-opus-4.6');
+    assert.ok(!svc.chats.includes('acme-opus-4-7'), 'tried: ' + svc.chats.join(', '));
   });
 });

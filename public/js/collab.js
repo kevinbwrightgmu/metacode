@@ -41,7 +41,7 @@ const Collab = (() => {
   const DATA_VIEWS = ['codebook', 'ai-coding', 'human-coding', 'reliability', 'network', 'metrics', 'export', 'import'];   // show others' changes on request
   const LIVE_VIEWS = ['dashboard', 'projects'];                                                                           // redrawn at once
 
-  let link = null;           // { id, name, role, owner, revision, revs, hashes, conflicts, chatSeen }
+  let link = null;           // { id, name, role, owner, revision, revs, hashes, conflicts, chatSeen, localOnly }
   let me = null;             // { id, email } of the signed-in account (from the event stream)
   let es = null, esFails = 0, esTimer = null;
   let conn = 'off';          // off | connecting | live | reconnecting | offline | signin
@@ -164,6 +164,10 @@ const Collab = (() => {
   // The open project is the shared one (another device's workspace, a restored backup or a newly opened project isn't)
   const ownsWorkspace = () => { const s = App.getState(); return !!(link && s.project && s.project.sharedId === link.id); };
   const canEdit = () => !!link && (link.role === 'owner' || link.role === 'editor');
+  // Parts too large for the server (or a web server in front of it) to take in one request: key → the
+  // hash of the version that was refused. They aren't sent again until they change, and the server's
+  // copy stays what link.hashes says it is, so someone else's change to one is a conflict, not an overwrite
+  const localOnly = () => link.localOnly || (link.localOnly = {});
   const active = () => !!link;
 
   // The open project's data as the server expects it
@@ -196,7 +200,7 @@ const Collab = (() => {
     for (const [k, v] of ents) {
       if (blocked.has(k)) continue;
       const h = hashOf(v);
-      if (h !== link.hashes[k]) out.push({ key: k, baseRev: link.revs[k] || 0, value: v, hash: h });
+      if (h !== link.hashes[k] && h !== localOnly()[k]) out.push({ key: k, baseRev: link.revs[k] || 0, value: v, hash: h });
     }
     for (const k of Object.keys(link.hashes)) {
       if (k.startsWith('post:') && !ents.has(k) && link.hashes[k] !== DELETED && !blocked.has(k)) out.push({ key: k, baseRev: link.revs[k] || 0, value: null, hash: DELETED });
@@ -207,6 +211,7 @@ const Collab = (() => {
     if (!link || !ownsWorkspace()) return;
     // Posts added since (an import, say) may need ids of their own too
     if (canEdit() && giveIds(App.getState())) { applying = true; try { App.save(); } finally { applying = false; } }
+    if (Object.keys(localOnly()).length) { const ents = entities(App.getState()); Object.keys(link.localOnly).forEach(k => { if (!ents.has(k)) delete link.localOnly[k]; }); }
     const list = changes();
     pending = list.length;
     if (!list.length || !canEdit()) { renderBar(); return; }
@@ -225,16 +230,16 @@ const Collab = (() => {
           // More than the server (or a web server in front of it) accepts at once: halve it, down to single
           // parts; a part too large on its own stays in this browser until it changes again (not sent over and over)
           if (batch.length > 1) { const h = Math.ceil(batch.length / 2); await send(batch.slice(0, h)); await send(batch.slice(h)); return; }
-          tooBig.push(batch[0]); link.hashes[batch[0].key] = batch[0].hash; saveLink();
+          tooBig.push(batch[0]); localOnly()[batch[0].key] = batch[0].hash; saveLink();
           return;
         }
         if (!link) return;
-        r.applied.forEach(k => { link.revs[k] = r.revision; link.hashes[k] = sent.get(k).hash; });
+        r.applied.forEach(k => { link.revs[k] = r.revision; link.hashes[k] = sent.get(k).hash; delete localOnly()[k]; });
         // nothing else happened in between: no need to fetch our own change back
         if (r.applied.length && r.revision === link.revision + 1) link.revision = r.revision;
         r.conflicts.forEach(c => {
           const theirs = hashOf(c.value);
-          if (theirs === sent.get(c.key).hash) { link.revs[c.key] = c.rev; link.hashes[c.key] = theirs; }      // the same change, already there
+          if (theirs === sent.get(c.key).hash) { link.revs[c.key] = c.rev; link.hashes[c.key] = theirs; delete localOnly()[c.key]; }      // the same change, already there
           else addConflict(c);
         });
         if (r.invalid.length) { invalidKeys += r.invalid.length; r.invalid.forEach(k => { const c = sent.get(k); if (c) link.hashes[k] = c.hash; }); }
@@ -250,8 +255,6 @@ const Collab = (() => {
       pushFails = 0;
       pending = 0;
       if (invalidKeys) { App.notify(invalidKeys + ' change' + (invalidKeys === 1 ? '' : 's') + ' couldn\'t be shared (the server didn\'t accept the data) and stay in this browser only.', 'warning', 7000); invalidKeys = 0; }
-      if (tooBig.length) App.notify((tooBig.length === 1 ? label(tooBig[0].key, tooBig[0].value) + ' is' : tooBig.length + ' parts of the project are') +
-        ' too large to send to the shared project at once (HTTP 413), so ' + (tooBig.length === 1 ? 'it stays' : 'they stay') + ' in this browser only.', 'warning', 9000);
     } catch (e) {
       if (!link) return;
       if (e.status === 404) { lostAccess('revoked'); return; }
@@ -262,6 +265,9 @@ const Collab = (() => {
       if (!e.offline && pushFails === 1 && e.status !== 429) App.notify('Couldn\'t send changes to the shared project: ' + e.message + ' They\'re kept in this browser.', 'warning', 6000);
     } finally {
       saving = false; renderBar();
+      // (also when a later batch failed: these aren't sent again until they change)
+      if (tooBig.length) App.notify((tooBig.length === 1 ? label(tooBig[0].key, tooBig[0].value) + ' is' : tooBig.length + ' parts of the project are') +
+        ' too large to send to the shared project at once (HTTP 413), so ' + (tooBig.length === 1 ? 'it stays' : 'they stay') + ' in this browser only.', 'warning', 9000);
       if (link && link.conflicts.length > conflictsBefore) { App.notify('Someone else changed the same part of the project. Choose which version to keep.', 'warning', 7000); openConflicts(); }
       else if (link && link.conflicts.length) renderConflictsIfOpen();
     }
@@ -302,11 +308,11 @@ const Collab = (() => {
       const theirs = hashOf(c.value);
       const mine = local.has(c.key) ? hashOf(local.get(c.key)) : DELETED;
       const known = link.hashes[c.key];
-      if (mine === theirs) { link.revs[c.key] = c.rev; link.hashes[c.key] = theirs; continue; }
+      if (mine === theirs) { link.revs[c.key] = c.rev; link.hashes[c.key] = theirs; delete localOnly()[c.key]; continue; }
       const changedHere = known === undefined ? mine !== DELETED : mine !== known;
       if (changedHere && canEdit()) { addConflict(c); conflicted++; continue; }
       setLocal(s, c.key, c.value);
-      link.revs[c.key] = c.rev; link.hashes[c.key] = theirs;
+      link.revs[c.key] = c.rev; link.hashes[c.key] = theirs; delete localOnly()[c.key];
       applied++;
     }
     if (order && applied) {
@@ -360,6 +366,7 @@ const Collab = (() => {
       if (!c) continue;
       if (pick === 'theirs') { setLocal(s, key, c.theirs); changed = true; }
       link.revs[key] = c.rev; link.hashes[key] = c.theirsHash;        // mine is then a change made from their version
+      delete localOnly()[key];                                         // (and is sent again, even if it was too large before)
       link.conflicts = link.conflicts.filter(x => x !== c);
     }
     saveLink();
@@ -493,7 +500,9 @@ const Collab = (() => {
   function statusTitle() {
     if (!link) return '';
     if (!canEdit()) return 'Shared project — you\'re a viewer. ' + (pending ? pending + ' change' + (pending === 1 ? '' : 's') + ' made here aren\'t shared.' : '');
-    if (conn === 'live') return pending ? pending + ' change' + (pending === 1 ? '' : 's') + ' waiting to be sent' : 'Every change is shared';
+    const big = Object.keys(link.localOnly || {}).length;
+    const kept = big ? ' (' + big + ' part' + (big === 1 ? ' is' : 's are') + ' too large to send and stay' + (big === 1 ? 's' : '') + ' in this browser only)' : '';
+    if (conn === 'live') return (pending ? pending + ' change' + (pending === 1 ? '' : 's') + ' waiting to be sent' : big ? 'Every other change is shared' : 'Every change is shared') + kept;
     return 'Changes are kept in this browser and sent when the server can be reached' + (pending ? ' (' + pending + ' waiting)' : '') + '.';
   }
   function icon(n) {
