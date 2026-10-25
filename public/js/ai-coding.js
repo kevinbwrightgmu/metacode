@@ -303,7 +303,7 @@ const AICoder = (() => {
   let abort = null;
   async function run() {
     const { posts } = App.getState();
-    const toCode = filterPosts(posts).filter(p => !Object.keys(p.aiCodes || {}).length);
+    let toCode = filterPosts(posts).filter(p => !Object.keys(p.aiCodes || {}).length);
 
     if (!toCode.length) { App.notify('All visible posts are already coded', 'info'); return; }
     if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add your AI key (EMIS_API_KEY) to the server\'s .env file (see Settings)', 'error'); return; }
@@ -312,7 +312,10 @@ const AICoder = (() => {
       if (!Account.signedIn()) { Account.openSignIn({ reason: 'Sign in to use AI coding — free accounts include ' + MetaPlans.get('free').limits.aiPostsPerWeek.toLocaleString() + ' posts a week.' }); return; }
       const left = Account.remaining('aiPosts');
       if (left === 0) { Account.openPlans({ reason: 'You\'ve used all of this week\'s AI coding posts on the ' + Account.plan().name + ' plan. They reset on Monday.', highlight: (MetaPlans.ORDER.map(MetaPlans.get).find(p => p.rank > MetaPlans.get(Account.plan().id).rank) || {}).id }); return; }
-      if (left < toCode.length && !confirm('Your ' + Account.plan().name + ' plan has ' + left.toLocaleString() + ' AI-coded posts left this week, and ' + toCode.length.toLocaleString() + ' posts are waiting. Code the first ' + left.toLocaleString() + ' now?')) return;
+      if (left < toCode.length) {
+        if (!confirm('Your ' + Account.plan().name + ' plan has ' + left.toLocaleString() + ' AI-coded posts left this week, and ' + toCode.length.toLocaleString() + ' posts are waiting. Code the first ' + left.toLocaleString() + ' now?')) return;
+        toCode = toCode.slice(0, left);          // (only those are sent)
+      }
     }
 
     running = true; stopFlag = false;
@@ -329,7 +332,7 @@ const AICoder = (() => {
 
     for (let round = 0; round < 3 && pending.length && !stopFlag && !gaveUp; round++) {
       const byId = new Map(pending.map(p => [p.id, p]));
-      const retry = [];
+      const retry = [], settled = new Set();      // settled: coded, or failed for good, in this round
       // Posts that failed because of the AI service: give it a little time first
       if (round && serverFailed && !(await countdown(round === 1 ? 15 : 30, pending.length))) break;
       serverFailed = 0;
@@ -352,7 +355,7 @@ const AICoder = (() => {
             if (codings) {
               const updated = App.getState().posts.map(p => p.id === post.id ? Object.assign({}, p, { aiCodes: codings }) : p);
               App.setState({ posts: updated });
-              coded++; done++;
+              coded++; done++; settled.add(post.id);
               if (r.model) substitutes[r.model] = (substitutes[r.model] || 0) + 1;
               scheduleRefresh();
             } else {
@@ -364,7 +367,7 @@ const AICoder = (() => {
               // An unreadable answer, or a passing EMIS problem, is worth another try
               // (not once the server has given up on the AI service for this run)
               if (round < 2 && (r.ok || (serverSide && r.type !== 'service_unavailable'))) { retry.push(post); console.warn('[AICoder] post', post.id, '— will try again:', problem); }
-              else { failed++; done++; console.error('[AICoder] post', post.id, problem); }
+              else { failed++; done++; settled.add(post.id); console.error('[AICoder] post', post.id, problem); }
             }
             updateProgress(done, toCode.length);
             updateStatus('Coded ' + coded + ' of ' + toCode.length + ' · ' + parallel + ' at once' + (failed ? ' · ' + failed + ' failed' : '') + (lastError ? ' — last problem: ' + lastError : ''), !!lastError && !r.ok);
@@ -379,6 +382,7 @@ const AICoder = (() => {
         lastError = err.message;
         console.error('[AICoder] batch', err);
         updateStatus('Error: ' + err.message, true);
+        pending = pending.filter(p => !settled.has(p.id));      // (counted below once each: not the posts already counted)
         break;
       }
       pending = retry;
@@ -398,7 +402,7 @@ const AICoder = (() => {
     const subMsg = subs.length ? ' ' + subs.map(m => substitutes[m] + ' of them by “' + m + '”').join(', ') + ' — the closest model, used while the chosen one was rate-limited or unavailable.' : '';
     const doneMsg = (stopFlag
       ? 'Stopped after ' + coded + ' posts.'
-      : '✓ Done — ' + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError.replace(/\.$/, '') + ')' : '') : '') + '.' +
+      : (coded || !failed ? '✓ Done — ' : 'Nothing was coded — ') + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError.replace(/\.$/, '') + ')' : '') : '') + '.' +
         (failed && serverProblems ? ' Click Run AI Coding again later to code the rest — posts already coded are kept.' : '')) + subMsg;
     updateStatus(doneMsg, !!failed && !stopFlag);
     App.notify(

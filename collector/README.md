@@ -25,8 +25,8 @@ The MetaCode server needs:
 - **Node.js 22.12 or newer** (building the app with Vite 7).
 - **Python 3.8+**. The agent is `python/ai_scraper.py`, standard library only. `SCRAPER_PYTHON` picks the
   command if it isn't `python3`.
-- **MetaCode's AI key** (`EMIS_API_KEY` in `.env`). The agent uses MetaCode's AI service like the other AI
-  features.
+- **MetaCode's AI key** (`EMIS_API_KEY=emis-…` in `.env`; keys are issued by hand — message @kawaii_zxs on Discord,
+  user ID 1079096114273320971). The agent uses MetaCode's AI service like the other AI features.
 
 ```bash
 # in the MetaCode folder
@@ -123,7 +123,8 @@ refuses the server, the job stops and says so.
 - **Steps** (5–60, default 25): tool calls the AI may make. Replies the agent couldn't read don't count, but
   three in a row end the job.
 - **AI requests**: one per step, at most the step limit plus 6, all on MetaCode's AI key. On a shared server
-  everyone uses the same AI quota.
+  everyone shares that key's budget (prompts and/or tokens per day, week or month; when it's used up, jobs stop
+  until it rolls over).
 - **Posts to keep** (1–300) and **comments per post** (0–100): the job ends when the limit is reached.
 - **Run time** (1–30 minutes): then the AI is asked to wrap up, and stopped a minute later.
 - **Reddit requests**: paced like any MetaCode scraper job (at least `SCRAPER_MIN_DELAY_MS` apart, per set of

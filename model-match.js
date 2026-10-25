@@ -6,12 +6,19 @@
 //   1. the same family      claude / gpt / gemini / qwen / deepseek / llama …
 //   2. the same line        opus vs sonnet, max vs plus, flash, coder, oss …
 //   3. thinking or not      qwen-3.7-max-thinking → another "thinking" model
-//   4. the nearest version  claude-opus-4-8 → 4-7 before 4-6; ties go to the newer
+//   4. the nearest version  claude-opus-4.8 → 4.7 before 4.6; ties go to the newer
 //   5. the nearest size     70b → 72b before 7b; and the same speed tier (flash, mini…)
 //   6. the same capabilities (reasoning, images/files) from emis-models.json
 //   7. how alike the names are, as a tie-breaker
 //
 // rankSimilar(model, candidates, info) → candidates, best first (pure; no I/O).
+//
+// The AI service's catalog also respells ids now and then: on 2026-10-22
+// claude-opus-5-5 became claude-opus-5.5, gpt-6-1-sol gpt-6.1-sol… The
+// same model can even be listed under both spellings. canonicalId() reads
+// "-" or "_" between two digits as "." (and ignores case); renamedModel()
+// finds a model saved under an old spelling in the current list, and
+// sameModel() tells two spellings of one model apart from a similar model.
 
 // Vendor prefixes that come before the family name (meta-llama, nvidia-nemotron…)
 const VENDOR_PREFIX = new Set(['meta', 'nvidia', 'inclusionai', 'xiaomi', 'stepfun', 'poolside', 'dots', 'liquid', 'mistralai', 'google', 'anthropic', 'openai', 'microsoft', 'ibm', 'amazon', 'cohere', 'moonshot', 'moonshotai', 'zhipu', 'zai', 'alibaba', 'bytedance']);
@@ -92,4 +99,24 @@ function rankSimilar(model, candidates, info) {
     .map(x => x.id);
 }
 
-module.exports = { rankSimilar, parse, score };
+// Renames that changed more than the punctuation
+const RENAMED = { 'gpt-5-6': 'gpt-5.6-sol' };
+const canonicalId = id => String(id || '').toLowerCase().replace(/(\d)[-_](?=\d)/g, '$1.');
+
+// The id `ids` lists for a model saved under another spelling, or null
+function renamedModel(wanted, ids) {
+  if (!wanted) return null;
+  if (RENAMED[wanted] && ids.includes(RENAMED[wanted])) return RENAMED[wanted];
+  const c = canonicalId(wanted);
+  return ids.find(id => id !== wanted && canonicalId(id) === c) || null;
+}
+
+// Two ids of one model: the same id but for punctuation, or the same display name
+function sameModel(a, b, info) {
+  if (canonicalId(a) === canonicalId(b) || RENAMED[a] === b || RENAMED[b] === a) return true;
+  const name = id => { const i = info && typeof info.get === 'function' ? info.get(id) : null; return i && i.name ? String(i.name).trim().toLowerCase() : null; };
+  const na = name(a);
+  return !!na && na === name(b);
+}
+
+module.exports = { rankSimilar, parse, score, canonicalId, renamedModel, sameModel };

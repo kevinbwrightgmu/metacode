@@ -39,6 +39,12 @@ const App = (() => {
     if (['openai/gpt-oss-20b', 'claude-sonnet-4-6'].includes(state.settings.model)) state.settings.model = '';
     if (typeof state.settings.model !== 'string') state.settings.model = '';
     if (!state.settings.models || typeof state.settings.models !== 'object') state.settings.models = {};
+    // The AI service respelled these ids (2026-10-22): a model picked under the old id keeps being picked
+    const RENAMED_MODELS = { 'claude-opus-5-5': 'claude-opus-5.5', 'claude-sonnet-5-5': 'claude-sonnet-5.5', 'claude-opus-4-6': 'claude-opus-4.6',
+      'gpt-6-1-sol': 'gpt-6.1-sol', 'gpt-5-6': 'gpt-5.6-sol', 'gpt-5-5': 'gpt-5.5', 'gemini-3-8-flash': 'gemini-3.8-flash', 'kimi-k2-6': 'kimi-k2.6',
+      'grok-4-7': 'grok-4.7', 'qwen-3-7-max': 'qwen-3.7-max', 'glm-5-3': 'glm-5.3', 'glm-5-3-flash': 'glm-5.3-flash' };
+    if (RENAMED_MODELS[state.settings.model]) state.settings.model = RENAMED_MODELS[state.settings.model];
+    Object.keys(state.settings.models).forEach(f => { if (RENAMED_MODELS[state.settings.models[f]]) state.settings.models[f] = RENAMED_MODELS[state.settings.models[f]]; });
     if (!Number.isFinite(Number(state.settings.delay))) state.settings.delay = 500;
     if (!Number.isFinite(Number(state.settings.parallel)) || Number(state.settings.parallel) < 1) state.settings.parallel = 4;
     if (typeof state.settings.switchModels !== 'boolean') state.settings.switchModels = true;
@@ -300,8 +306,8 @@ const App = (() => {
               <div class="s-feature-models" id="s-feature-models"></div>
             </div>
             <div class="form-group">
-              <label class="s-check-row" for="s-switch"><input type="checkbox" id="s-switch" ${settings.switchModels !== false ? 'checked' : ''}> If a model is rate-limited, use the closest similar model</label>
-              <div class="form-hint">When the AI service throttles the model you picked, requests go to the most similar available model — same family and line, nearest version and size (e.g. Claude Opus 4.8 → Opus 4.7) — until it can be used again, and a note says which one answered. Turn off to wait for your model instead (e.g. so every post is coded by the same model). A used-up AI budget can't be avoided this way: it applies to every model.</div>
+              <label class="s-check-row" for="s-switch"><input type="checkbox" id="s-switch" ${settings.switchModels !== false ? 'checked' : ''}> If a model is rate-limited or failing, use the closest similar model</label>
+              <div class="form-hint">When the AI service throttles the model you picked, or can't run it right now, requests go to the most similar available model — same family and line, nearest version and size (e.g. Claude Opus 5.5 → Claude Opus 5) — until it can be used again, and a note says which one answered. (AI Coding waits and tries your model again when the AI service can't run it, so every post is coded by the model you picked.) Turn off to wait for your model instead (with “Server default”, the server still uses a similar model when the AI service can't run its default). A used-up AI budget can't be avoided this way: it applies to every model.</div>
               <div class="form-hint" id="s-limited"></div>
             </div>
             <div class="form-group">
@@ -631,7 +637,7 @@ const App = (() => {
       rows.push('<div class="text-muted">The .env file is switched off for this server (METACODE_ENV_FILE=none).</div>');
     } else {
       rows.push('<div style="color:var(--error)">✗ No <code>.env</code> file found (looked in ' + esc((env.searched || []).join(', ')) + ').</div>' +
-        '<div class="form-hint">Copy <code>.env.example</code> to a file named exactly <code>.env</code> next to <code>server.js</code>, put <code>EMIS_API_KEY=your-key</code> in it, save, then click <b>Reload .env</b>.</div>');
+        '<div class="form-hint">Copy <code>.env.example</code> to a file named exactly <code>.env</code> next to <code>server.js</code>, put your AI key in it as <code>EMIS_API_KEY=…</code>, save, then click <b>Reload .env</b>.</div>');
     }
     (env.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
     if (env.overridden && env.overridden.length) rows.push('<div style="color:#B45309">⚠ .env replaced older values set in this computer\'s environment for: ' + env.overridden.map(k => '<code>' + esc(k) + '</code>').join(' ') + '</div>');
@@ -717,16 +723,23 @@ const App = (() => {
       const data = await res.json();
       const items = data.keys || [];
       if (!items.length) {
-        listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">No AI keys loaded — add <code>EMIS_API_KEY=…</code> to .env and click Reload .env above.</div>';
+        listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">No AI keys loaded — add <code>EMIS_API_KEY=…</code> (your key) to .env and click Reload .env above.</div>';
         return;
       }
       listEl.innerHTML = items.map(k => {
+        // A used-up budget rests the key until its day, week or month rolls over
+        const back = new Date(Date.now() + (k.cooldownSecondsLeft || 0) * 1000);
         const statusBadge = k.status === 'available'
           ? '<span class="badge badge-green">Available</span>'
           : k.status === 'cooling_down'
-            ? '<span class="badge badge-amber">Resting ' + k.cooldownSecondsLeft + 's</span>'
+            ? '<span class="badge badge-amber" title="' + esc(back.toLocaleString()) + '">Resting ' + (k.cooldownSecondsLeft < 120 ? k.cooldownSecondsLeft + 's' : 'until ' + esc(k.cooldownSecondsLeft >= 86400 ? back.toLocaleDateString() : back.toDateString() === new Date().toDateString() ? back.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : back.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }))) + '</span>'
             : '<span class="badge badge-red">Rejected by the AI service</span>';
-        const quota = k.quota && k.quota.remainingPrompts !== null && k.quota.remainingPrompts !== undefined ? '<span style="color:var(--tx-muted)">' + k.quota.remainingPrompts + ' prompts left</span>' : '';
+        // The budget is prompts and/or tokens: show whichever the AI service reports (0 of 0: the key has no budget of that kind)
+        const q = k.quota || {};
+        const has = (v, limit) => v !== null && v !== undefined && !(v === 0 && limit === 0);
+        const left = [has(q.remainingPrompts, q.limitPrompts) ? Number(q.remainingPrompts).toLocaleString() + ' prompt' + (q.remainingPrompts === 1 ? '' : 's') : '',
+          has(q.remainingTokens, q.limitTokens) ? Number(q.remainingTokens).toLocaleString() + ' tokens' : ''].filter(Boolean).join(' · ');
+        const quota = left ? '<span style="color:var(--tx-muted)">' + left + ' left' + (q.window ? ' this ' + esc(q.window) : '') + '</span>' : '';
         return '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg-muted);border-radius:var(--r-sm);font-size:12.5px">' +
           '<span class="font-mono">' + esc(k.masked) + '</span><span class="badge badge-gray" style="font-size:10px">.env</span>' + quota +
           '<span style="margin-left:auto;color:var(--tx-muted)">' + k.requestCount + ' req</span>' + statusBadge + '</div>';
@@ -772,7 +785,7 @@ const App = (() => {
     let data = null;
     try { data = await res.json(); } catch (e) { data = null; }
     if (!res.ok) {
-      const msg = (data && data.error && data.error.message) ? data.error.message : ('API error ' + res.status);
+      const msg = (data && data.error && data.error.message) ? data.error.message : res.status === 413 ? TOO_LARGE : ('API error ' + res.status);
       const err = new Error(msg);
       err.status = res.status;
       err.type = data && data.error && data.error.type;
@@ -797,19 +810,82 @@ const App = (() => {
   //   opts:  { feature, parallel, delay, signal, onResult({ id, ok, text, error, status, model, requested, fallbackReason }) }
   //   (model: the model that answered — a similar one when the requested model was rate-limited)
   // Resolves to { parallel } (how many ran at the end; the server lowers it when rate-limited).
+  // A web server in front of MetaCode (nginx's client_max_body_size) refused a
+  // request body as too large: its answer is a web page, not MetaCode's JSON.
+  const TOO_LARGE = 'The request is larger than the web server in front of MetaCode accepts (HTTP 413). Whoever runs this server can raise that limit (nginx: client_max_body_size — see docs/deploy-vps.md).';
+  // Bytes a request body takes on the wire (UTF-8), not characters
+  const bodyBytes = text => new Blob([text]).size;
+
+  // A long AI Coding run goes to the server in batches of at most this many
+  // requests / bytes, one after another: a web server in front of MetaCode may
+  // accept little (nginx's default is 1 MB), and the server takes 2,000 at most.
+  const BATCH_REQUESTS = 200, BATCH_BYTES = 512 * 1024;
   async function callClaudeBatch(items, opts) {
     opts = opts || {};
     const model = modelFor(opts.feature);
+    // A system prompt every item shares (AI Coding's codebook) is sent once per batch, not once per post
+    const shared = items.length && items.every(it => it.system === items[0].system) ? items[0].system || null : null;
     const requests = items.map(it => {
-      const body = { messages: it.system ? [{ role: 'system', content: it.system }].concat(it.messages) : it.messages.slice(), max_tokens: it.max_tokens || 1000, temperature: 0.1 };
+      const own = shared ? null : it.system;
+      const body = { messages: own ? [{ role: 'system', content: own }].concat(it.messages) : it.messages.slice(), max_tokens: it.max_tokens || 1000, temperature: 0.1 };
       if (model) body.model = model;
-      return { id: it.id, body };
+      return { id: it.id, body, bytes: bodyBytes(JSON.stringify({ id: it.id, body })) + 1 };
     });
+    const base = bodyBytes(JSON.stringify({ requests: [], parallel: 16, delayMs: 5000, switchModels: true, system: shared || undefined }));
+    const chunks = [];
+    let cur = [], size = base;
+    for (const r of requests) {
+      if (cur.length && (cur.length >= BATCH_REQUESTS || size + r.bytes > BATCH_BYTES)) { chunks.push(cur); cur = []; size = base; }
+      cur.push(r); size += r.bytes;
+    }
+    if (cur.length) chunks.push(cur);
+    let parallel = clampParallel(opts.parallel || getParallel());
+    let stopped = null;          // { status, error, type }: the server gave up on this run (or the plan's posts ran out)
+    // Every item gets one result, whichever way its batch ends
+    const answered = new Set();
+    const report = r => { if (answered.has(r.id)) return; answered.add(r.id); if (opts.onResult) opts.onResult(r); };
+    const sendOpts = Object.assign({}, opts, { onResult: report });
+    const failAll = (list, f) => list.forEach(r => report({ id: r.id, ok: false, status: f.status, error: f.error, type: f.type }));
+    while (chunks.length) {
+      const chunk = chunks.shift();
+      if (stopped) { failAll(chunk, stopped); continue; }
+      let out;
+      for (let tries = 0; ; tries++) {
+        try { out = await sendBatch(chunk, parallel, shared, model, sendOpts, f => { if (!stopped && (f.type === 'service_unavailable' || f.type === 'limit_reached')) stopped = f; }); break; }
+        catch (e) {
+          const aborted = e.name === 'AbortError' || (opts.signal && opts.signal.aborted);
+          // (a plan runs one batch at a time: the server may still be closing the previous one)
+          if (e.status === 429 && e.type === 'account_rate_limited' && tries < 5 && !aborted) { await new Promise(r => setTimeout(r, 1000 * (tries + 1))); continue; }
+          if (aborted || (!answered.size && !(e.status === 429 && e.type === 'limit_reached'))) throw e;
+          // Partway through a run (the connection dropped, a web server in front answered 502…) or the plan's
+          // posts ran out: what's left fails item by item, like a failure inside a batch
+          const f = { status: e.status || 0, error: e.message, type: e.type || (e.status ? 'api_error' : 'network') };
+          if (f.type === 'service_unavailable' || f.type === 'limit_reached') stopped = f;
+          failAll(chunk, f);
+          chunks.splice(0).forEach(c => failAll(c, f));
+          out = null;
+          break;
+        }
+      }
+      if (!out) continue;
+      if (out.tooLarge) {
+        // Even this batch was too large for the web server in front: halve it, down to single requests
+        if (chunk.length > 1) { chunks.unshift(chunk.slice(0, Math.ceil(chunk.length / 2)), chunk.slice(Math.ceil(chunk.length / 2))); continue; }
+        failAll(chunk, { status: 413, error: TOO_LARGE, type: 'too_large' });
+        continue;
+      }
+      if (out.parallel) parallel = Math.min(parallel, out.parallel);
+    }
+    return { parallel };
+  }
+  // One batch: POST /api/ai/batch, answers streamed back as NDJSON → { parallel } or { tooLarge }
+  async function sendBatch(chunk, parallel, system, model, opts, onFailure) {
     const res = await fetch('/api/ai/batch', { method: 'POST', signal: opts.signal, headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requests, parallel: clampParallel(opts.parallel || getParallel()), delayMs: opts.delay || 0, switchModels: state.settings.switchModels !== false }) });
+      body: JSON.stringify({ requests: chunk.map(r => ({ id: r.id, body: r.body })), parallel, delayMs: opts.delay || 0, switchModels: state.settings.switchModels !== false, system: system || undefined }) });
     if (!res.ok) {
       let data = null;
       try { data = await res.json(); } catch (e) { data = null; }
+      if (res.status === 413) return { tooLarge: true };
       const err = new Error((data && data.error && data.error.message) || ('API error ' + res.status));
       err.status = res.status;
       err.type = data && data.error && data.error.type;
@@ -832,7 +908,9 @@ const App = (() => {
         opts.onResult && opts.onResult({ id: msg.id, ok: true, text: String((c && c.message && c.message.content) || '').trim(),
           model: msg.fallback || null, requested: msg.requested || null, fallbackReason: msg.fallbackReason || null });
       } else {
-        opts.onResult && opts.onResult({ id: msg.id, ok: false, status: msg.status, error: (msg.error && msg.error.message) || 'AI request failed', type: msg.error && msg.error.type });
+        const f = { status: msg.status, error: (msg.error && msg.error.message) || 'AI request failed', type: msg.error && msg.error.type };
+        onFailure(f);
+        opts.onResult && opts.onResult(Object.assign({ id: msg.id, ok: false }, f));
       }
     };
     for (;;) {
@@ -994,7 +1072,7 @@ const App = (() => {
     init, navigate: (v) => navigate(v), setViewCleanup, fetchModels, fetchKeyStatus, reloadEnv, modelFor, AI_FEATURES,
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
     getState, setState, save, reloadState,
-    callClaude, callClaudeBatch, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
+    callClaude, callClaudeBatch, tooLargeMessage: TOO_LARGE, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,
     saveProject, saveSettings, downloadBackup, restoreBackup, testApi, clearCodes, resetAll,

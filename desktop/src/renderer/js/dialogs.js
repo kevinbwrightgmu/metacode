@@ -325,6 +325,8 @@ export async function settingsDialog(app) {
   if (app.state.status === 'active') {
     sheets.aiModels().then((/** @type {any} */ r) => {
       for (const m of r.models) model.append(h('option', { value: m.id, selected: m.id === s.aiModel }, m.name));
+      // A saved model the list doesn't have (any more) stays selected rather than being reset on Save
+      if (s.aiModel && !r.models.some((/** @type {any} */ m) => m.id === s.aiModel)) model.append(h('option', { value: s.aiModel, selected: true }, s.aiModel + ' (not in the list)'));
       if (r.note) modelNote.textContent = r.note;
     }).catch((/** @type {any} */ e) => { modelNote.textContent = errText(e); });
   } else modelNote.textContent = 'The model list needs a connection to MetaCode.';

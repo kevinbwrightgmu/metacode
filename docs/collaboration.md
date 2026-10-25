@@ -95,7 +95,7 @@ version back.
 | Chat messages per account and project | 30 per minute |
 | Live connections per account and project (tabs) | 8 |
 | Change requests per account | 240 per minute |
-| Size of one request | 25 MB (bigger projects: share a smaller copy) |
+| Size of one request | 25 MB. Sharing and changes are sent in pieces of about 512 KB (at most 1,000 parts each), so a project of any size can be shared; only one part — a post, the codebook, a network or a network analysis — can't be split. A part too large for the server (or a web server in front of it) stays in the sending browser, which says so; someone else's change to it is then a conflict to resolve |
 
 ## Server
 

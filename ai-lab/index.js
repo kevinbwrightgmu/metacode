@@ -134,7 +134,7 @@ function createAiLab(opts) {
     res.set('Retry-After', String(r.retryAfter));
     res.status(429).json({ error: { type: 'account_rate_limited', message: 'Too many AI Coding Lab requests — try again in ' + r.retryAfter + ' s.' } });
   });
-  const small = express.json({ limit: '2mb' });
+  const small = express.json({ limit: '10mb' });
   const large = express.json({ limit: '25mb' });
   router.use((/** @type {any} */ req, /** @type {any} */ res, /** @type {() => void} */ next) => (/\/(import|documents)$/.test(req.path) ? large : small)(req, res, next));
 

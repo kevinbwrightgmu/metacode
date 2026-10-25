@@ -668,7 +668,8 @@
       : s.state === 'error' ? 'Couldn\'t reach your account storage: ' + esc(s.error || 'unknown error') + '. Your work is safe in this browser and will be saved when it can.'
       : s.state === 'offline' ? 'Offline — changes are kept in this browser and saved when you\'re back online.'
       : s.state === 'idle' ? 'Saved to your account' + (when ? ' (last synced ' + esc(when) + ')' : '') + '.' : 'Saved in this browser.';
-    return '<p class="acct-sync acct-sync-' + esc(s.state) + '">' + text + (s.pending ? ' <span class="text-muted">' + s.pending + ' change' + (s.pending === 1 ? '' : 's') + ' waiting.</span>' : '') + '</p>' +
+    return '<p class="acct-sync acct-sync-' + esc(s.state) + '">' + text + (s.pending ? ' <span class="text-muted">' + s.pending + ' change' + (s.pending === 1 ? '' : 's') + ' waiting.</span>' : '') +
+      (s.tooLarge ? ' <span class="text-muted">' + s.tooLarge + ' item' + (s.tooLarge === 1 ? ' is' : 's are') + ' too large for your account storage and kept in this browser only.</span>' : '') + '</p>' +
       '<div class="acct-row"><button type="button" class="acct-secondary" data-a="syncnow">Sync now</button></div>';
   }
   function wireSync(container) {

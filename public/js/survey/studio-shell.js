@@ -12,7 +12,7 @@
   const STORAGE_KEY = 'strata_v1';   // the MetaCode project (same key as app.js)
   const DEFAULT_STATE = {
     project: { name: 'Untitled Project', description: '' }, posts: [], codebook: [], network: { nodes: [], edges: [] },
-    networkAnalysis: null, settings: { provider: 'groq', apiKeys: [], model: 'openai/gpt-oss-20b', delay: 500 }
+    networkAnalysis: null, settings: { model: '', models: {}, delay: 500 }
   };
 
   function readState() {

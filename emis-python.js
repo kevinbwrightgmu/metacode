@@ -23,47 +23,57 @@ function candidates() {
 const asciiJson = v => JSON.stringify(v).replace(/[\u007f-\uffff]/g, ch => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'));
 
 function createEmisPython() {
-  let child = null, ready = null, info = null, nextId = 1, failedAt = 0, failure = null;
-  const pending = new Map();
+  // worker: { proc, pending: Map(id → { resolve, timer }) } — each worker answers only its own requests
+  let worker = null, ready = null, info = null, nextId = 1, failedAt = 0, failure = null, generation = 0;
 
   function start() {
     if (ready) return ready;
-    ready = (async () => {
+    const gen = generation;
+    const attempt = (async () => {
       let last = null;
       for (const c of candidates()) {
-        try { return await spawnOne(c); } catch (e) { last = e; }
+        if (gen !== generation) throw new Error('stopped');
+        try { return await spawnOne(c, gen); } catch (e) { last = e; }
       }
       throw last || new Error('Python wasn\'t found');
     })();
-    ready.catch(e => { failure = e.message; failedAt = Date.now(); ready = null; });
-    return ready;
+    ready = attempt;
+    attempt.catch(e => { if (gen !== generation) return; failure = e.message; failedAt = Date.now(); ready = null; });
+    return attempt;
   }
 
-  function spawnOne(c) {
+  function spawnOne(c, gen) {
     return new Promise((resolve, reject) => {
       let p;
       try {
         p = spawn(c.cmd, c.args.concat(['-u', WORKER]), { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: Object.assign({}, process.env, { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' }) });
       } catch (e) { reject(e); return; }
+      const w = { proc: p, pending: new Map() };
       let started = false, stderr = '';
       const timer = setTimeout(() => { if (!started) { try { p.kill(); } catch (e) { /* gone */ } reject(new Error(c.cmd + ' didn\'t start')); } }, 15000);
       p.on('error', e => { clearTimeout(timer); if (!started) reject(e); });
+      p.stdin.on('error', () => {});             // (a worker that's gone: its requests fail on exit)
       p.stderr.on('data', d => { stderr = (stderr + d).slice(-2000); });
       p.on('exit', code => {
         clearTimeout(timer);
         if (!started) { reject(new Error(c.cmd + ' exited (' + code + '): ' + stderr.trim().slice(-300))); return; }
-        if (child === p) { child = null; ready = null; }
-        pending.forEach(entry => entry.resolve({ failed: 'network', code: 'ECONNRESET', message: 'The Python worker stopped.' }));
-        pending.clear();
+        if (worker === w) { worker = null; ready = null; }
+        w.pending.forEach(entry => { clearTimeout(entry.timer); entry.resolve({ failed: 'network', code: 'ECONNRESET', message: 'The Python worker stopped.' }); });
+        w.pending.clear();
       });
       const rl = readline.createInterface({ input: p.stdout });
       rl.on('line', line => {
         let msg;
         try { msg = JSON.parse(line); } catch (e) { return; }
-        if (msg.ready) { started = true; clearTimeout(timer); child = p; info = { python: msg.python, client: msg.client, cmd: c.cmd }; resolve(info); return; }
-        const entry = pending.get(msg.id);
+        if (msg.ready) {
+          started = true; clearTimeout(timer);
+          // stop() was called while it started (Reload .env): it was started with the old environment
+          if (gen !== generation) { try { p.kill(); } catch (e) { /* gone */ } reject(new Error('stopped')); return; }
+          worker = w; info = { python: msg.python, client: msg.client, cmd: c.cmd }; resolve(info); return;
+        }
+        const entry = w.pending.get(msg.id);
         if (!entry) return;
-        pending.delete(msg.id);
+        w.pending.delete(msg.id);
         clearTimeout(entry.timer);
         if (msg.error) {
           entry.resolve({ failed: msg.error.kind === 'timeout' ? 'timeout' : msg.error.kind === 'client' ? 'client' : 'network', code: msg.error.code, message: msg.error.message });
@@ -76,23 +86,46 @@ function createEmisPython() {
 
   // → response shape, or null when Python can't be used (caller falls back to Node).
   async function request(opts) {
-    if (!child && failure && Date.now() - failedAt < 60000) return null;   // don't retry a missing Python on every call
-    try { await start(); } catch (e) { return null; }
-    if (!child) return null;
+    if (!worker && failure && Date.now() - failedAt < 60000) return null;   // don't retry a missing Python on every call
+    try { await start(); } catch (e) {
+      if (e.message !== 'stopped') return null;
+      try { await start(); } catch (e2) { return null; }     // (Reload .env while it was starting: the new one)
+    }
+    const w = worker;
+    if (!w) return null;
     const id = nextId++;
     return new Promise(resolve => {
-      const timer = setTimeout(() => { pending.delete(id); resolve({ failed: 'timeout', code: 'ETIMEDOUT' }); }, (opts.timeoutMs || 120000) + 5000);
-      pending.set(id, { resolve, timer });
-      if (opts.signal) opts.signal.addEventListener('abort', () => { if (pending.delete(id)) { clearTimeout(timer); resolve({ failed: 'aborted' }); } }, { once: true });
-      child.stdin.write(asciiJson({ id, method: opts.method, url: opts.url, key: opts.key, body: opts.body === undefined ? null : opts.body, timeoutMs: opts.timeoutMs, proxy: opts.proxy || '' }) + '\n');
+      const timer = setTimeout(() => { w.pending.delete(id); resolve({ failed: 'timeout', code: 'ETIMEDOUT' }); }, (opts.timeoutMs || 120000) + 5000);
+      w.pending.set(id, { resolve, timer });
+      if (opts.signal) opts.signal.addEventListener('abort', () => { if (w.pending.delete(id)) { clearTimeout(timer); resolve({ failed: 'aborted' }); } }, { once: true });
+      w.proc.stdin.write(asciiJson({ id, method: opts.method, url: opts.url, key: opts.key, body: opts.body === undefined ? null : opts.body, timeoutMs: opts.timeoutMs, proxy: opts.proxy || '' }) + '\n');
     });
+  }
+
+  // The next request starts a new worker (with the environment as it is then). opts.finishRequests: the
+  // old worker answers what it was already sent before it exits (Reload .env: those requests have
+  // reached the AI service, and sending them again would spend the key's budget twice).
+  function stop(opts) {
+    generation++;
+    ready = null; info = null; failure = null; failedAt = 0;
+    const w = worker;
+    worker = null;
+    if (!w) return;
+    if (opts && opts.finishRequests && w.pending.size) {
+      const kill = setTimeout(() => { try { w.proc.kill(); } catch (e) { /* gone */ } }, 130000);
+      kill.unref();
+      w.proc.once('exit', () => clearTimeout(kill));
+      try { w.proc.stdin.end(); } catch (e) { /* gone */ }       // its read loop ends; Python exits once they're answered
+      return;
+    }
+    try { w.proc.kill(); } catch (e) { /* gone */ }
   }
 
   return {
     request,
     status: () => (info ? Object.assign({ ok: true }, info) : { ok: false, problem: failure }),
     warm: () => start().catch(() => null),
-    stop() { if (child) { try { child.kill(); } catch (e) { /* gone */ } child = null; ready = null; } }
+    stop
   };
 }
 

@@ -7,7 +7,7 @@ const CSVAnalyzer = (() => {
 
   let lastParsed     = null;  // { headers, rows, sample }
   let lastMapping     = null; // detected/edited column mapping
-  let lastEdgesBuilt  = null; // [{source,target,weight}] actually sent to Python
+  let lastEdgesBuilt  = null; // [{source,target,weight}] built from the CSV (sent with repeated pairs combined)
   let lastLabelsMap   = null; // {nodeId: label} sent alongside edges
   let lastAnalysis    = null; // result JSON from /api/network/analyze
 
@@ -293,15 +293,27 @@ const CSVAnalyzer = (() => {
     const resultsEl = document.getElementById('csvan-results');
     resultsEl.innerHTML = '<div class="loading-state">Running NetworkX analysis on ' + edges.length + ' edges…</div>';
 
+    // Sent compactly: [source, target, weight] rows, a repeated pair once with the weights
+    // added up (as the analysis does anyway), so a large CSV stays a small request. A row from
+    // a node to itself goes as it is: the analysis leaves those out and counts each one (skipped edges)
+    const pairs = new Map(), selfRows = [];
+    edges.forEach(e => {
+      if (e.source === e.target) { selfRows.push([e.source, e.target, e.weight]); return; }
+      const k = JSON.stringify([e.source, e.target]);
+      pairs.set(k, (pairs.get(k) || 0) + e.weight);
+    });
+    const edgeRows = Array.from(pairs, ([k, w]) => JSON.parse(k).concat(w)).concat(selfRows);
+
     try {
       const res = await fetch('/api/network/analyze', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ edges, labels, directed: !!directed })
+        body: JSON.stringify({ edgeRows, labels, directed: !!directed })
       });
-      const data = await res.json();
-      if (!res.ok || data.error) {
-        throw new Error((data.error && data.error.message) || 'Analysis failed');
+      let data = null;
+      try { data = await res.json(); } catch (e) { data = null; }      // (a web server's own error page isn't JSON)
+      if (!res.ok || !data || data.error) {
+        throw new Error((data && data.error && data.error.message) || (res.status === 413 ? App.tooLargeMessage : 'Analysis failed (HTTP ' + res.status + ').'));
       }
       lastAnalysis = data;
       renderResults(data);

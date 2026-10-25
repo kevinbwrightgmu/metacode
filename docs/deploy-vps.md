@@ -49,7 +49,11 @@ above. Run the checks in [step 9](#9-check-that-it-works).
   (the [status page](../README.md#status-page)) if you want them.
 - **HTTPS.** The Reddit Scraper's in-app browser only works on `https://` (or `http://localhost`), because
   Scramjet needs a service worker and browsers only allow those on secure pages.
-- **Python 3**, for the AI Scraper (beta)'s agent, Analyze CSV and the AI requests (step 3).
+- **Python 3**, for the AI Scraper (beta)'s agent and Analyze CSV; MetaCode also sends its AI requests from Python when
+  it's there (Node.js otherwise) (step 3).
+- **An AI key** (`emis-…`) for MetaCode's AI service. Keys are issued by hand: message @kawaii_zxs on Discord (user ID
+  1079096114273320971) and say what you need it for. The key's budget (prompts and/or tokens per day, week or month)
+  is shared by everyone who uses the server.
 
 ## 2. Install Node.js 22, pm2 and git
 
@@ -101,7 +105,7 @@ nano .env
 Set at least:
 
 ```ini
-EMIS_API_KEY=your-key                 # the AI key
+EMIS_API_KEY=emis-…                   # the AI key (step 1)
 PORT=3000                             # nginx forwards to this port
 PUBLIC_URL=https://metac0.de          # your site's address (several: comma-separated)
 SCRAPER_USER_AGENT=nodejs:metacode-scraper:1.0 (by /u/your_reddit_name)
@@ -205,7 +209,7 @@ server {
     listen [::]:80;
     server_name metac0.de www.metac0.de status.metac0.de;
 
-    client_max_body_size 25m;            # imports and project uploads (MetaCode accepts up to 10 MB of JSON)
+    client_max_body_size 30m;            # above MetaCode's own limits (25 MB for shared projects and AI Lab imports, 26 MB for surveys); nginx's default is 1 MB
 
     location / {
         proxy_pass http://127.0.0.1:3000;
@@ -277,7 +281,8 @@ pages fail from it. Reddit's official API with keys works instead, for both the 
   included; others wait their turn. With many users bringing their own keys, raise it, e.g.
   `SCRAPER_MAX_CONCURRENT_JOBS=8`.
 - AI Scraper jobs also use MetaCode's AI key: each step is one AI request (a job makes at most its step limit
-  plus a few). The AI service's quota for that key is shared by everyone.
+  plus a few). The key's budget (prompts and/or tokens per day, week or month) is shared by everyone; when it runs
+  out, the AI service answers 429 until the window rolls over.
 
 ## 8. Firewall
 
@@ -313,6 +318,22 @@ curl -i --http1.1 --max-time 3 https://metac0.de/wisp/ \
 | `426` *"…a reverse proxy is not forwarding WebSockets"* | nginx is missing the `Upgrade`/`Connection` lines, or Cloudflare's WebSockets switch is off |
 | `403` | The origin check refused it: add `proxy_set_header Host $host;` or set `PUBLIC_URL` (then `pm2 reload metacode`) |
 | `502` / `504` | MetaCode isn't running or isn't on that port: `pm2 status`, `pm2 logs metacode` |
+
+**"413 (Request Entity Too Large)" in the browser's console** is nginx refusing a request body (MetaCode's own
+limit reads *"Payload Too Large"*). Check the limit the site really uses — certbot and older setups may have a
+server block without it, and nginx's default is 1 MB:
+
+```bash
+sudo nginx -T 2>/dev/null | grep -n client_max_body_size      # expect 30m in the server block for 443
+```
+
+Put `client_max_body_size 30m;` in the `server { … }` block that has `listen 443 ssl` (or in `http { … }` for every
+site), then `sudo nginx -t && sudo systemctl reload nginx`. MetaCode sends long AI Coding runs, shared projects and
+their changes in pieces of about 512 KB, so those mostly work even below that. A single part of a shared project is
+never split, though: a post, the codebook, a Network Graph or a network analysis larger than the limit (at nginx's
+1 MB default, a network of more than roughly 10–15k edges) stays in the sending browser, and collaborators don't get
+it. Surveys with large images, AI Lab imports, big Analyze CSV files and shared projects with large networks need
+the full limit.
 
 Then open `https://metac0.de/app.html#scraper-beta`, ask the AI Scraper for a few posts, and watch its steps in
 the Monitor. If Reddit blocks the server, the job stops with "blocked by network security": add your own Reddit

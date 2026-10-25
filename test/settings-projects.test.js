@@ -214,7 +214,7 @@ test('each request uses the model it asks for', async () => {
   assert.ok(['model-a', 'model-b', 'model-c'].every(m => models.includes(m)));
 });
 
-test('a temporary EMIS failure is retried; a failing default model falls back; a picked one says so', async () => {
+test('a temporary EMIS failure is retried; a failing model falls back (a picked one too, unless switching is off)', async () => {
   const ask = model => json('POST', '/api/ai', Object.assign({ messages: [{ role: 'user', content: 'hi' }] }, model ? { model } : {}), { 'x-provider': 'openai' });
   emisFaults.flaky = 1;
   let r = await ask('model-b');
@@ -236,9 +236,19 @@ test('a temporary EMIS failure is retried; a failing default model falls back; a
   assert.equal(next.headers.get('x-metacode-model-fallback'), body.model);
   assert.ok(!seenModels.includes(def), 'the failing model wasn\'t asked again');
 
-  r = await ask(def);
-  assert.equal(r.status, 502, 'a model the user picked is not swapped');
-  assert.match(r.json.error.message, /Settings → AI models/);
+  // A model the user picked that EMIS can't run right now is answered by the closest model too, and says so
+  const picked = await fetch(base + '/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-provider': 'openai' }, body: JSON.stringify({ model: def, messages: [{ role: 'user', content: 'hi' }] }) });
+  assert.equal(picked.status, 200, 'a picked model that fails is swapped');
+  assert.equal(picked.headers.get('x-metacode-model-fallback'), body.model);
+  assert.equal(picked.headers.get('x-metacode-model-fallback-reason'), 'failed');
+  assert.equal(picked.headers.get('x-metacode-model-requested'), def);
+  // …unless switching is turned off (Settings → AI models): then it says what failed
+  const off = await fetch(base + '/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-provider': 'openai', 'X-MetaCode-Model-Switch': 'off' }, body: JSON.stringify({ model: def, messages: [{ role: 'user', content: 'hi' }] }) });
+  assert.equal(off.status, 502, 'switching off: not swapped');
+  assert.match((await off.json()).error.message, /Settings → AI models/);
+  // A picked model the key may not use isn't swapped (another model would hide that)
+  r = await ask('forbidden-model');
+  assert.equal(r.status, 403);
   emisFaults.broken = new Set();
 });
 
@@ -461,7 +471,7 @@ test('the status page shows the AI service as degraded while models are rate-lim
   const j = (await json('GET', '/api/status')).json;
   const ai = j.components.find(c => c.id === 'ai');
   assert.equal(ai.status, 'degraded');
-  assert.match(ai.note, /rate-limited; requests use the closest similar model/);
+  assert.match(ai.note, /rate-limited; requests for (it|them) use the closest similar model\./);
   assert.deepEqual(hits, before, 'no chat requests were made');
   assert.ok(!/emis/i.test(JSON.stringify(j)));
 });
@@ -782,7 +792,7 @@ test('a batch stops sending when the AI service keeps failing, instead of trying
 test('server errors from several models are reported as the AI service having problems, also on the status page; an answer clears it', { timeout: 30000 }, async () => {
   const bodies = [];
   for (const model of ['flop-pro-3-0', 'flop-pro-2-9', 'flop-pro-2-8']) {
-    const r = await ask(model);
+    const r = await ask(model, { 'X-MetaCode-Model-Switch': 'off' });      // (with switching on, a similar model would be tried first)
     assert.equal(r.status, 502, model);
     bodies.push((await r.json()).error);
   }
@@ -801,7 +811,7 @@ test('server errors from several models are reported as the AI service having pr
   assert.equal((await ask('model-b')).status, 200);
   for (let end = Date.now() + 8000; Date.now() < end; await new Promise(r => setTimeout(r, 500))) if ((ai = await aiStatus()).status !== 'outage') break;
   assert.equal(ai.status, 'degraded');
-  assert.match(ai.note, /\d+ models are failing at the AI provider/);
+  assert.match(ai.note, /\d+ models are failing at the AI service( and \d+ models? (is|are) rate-limited)?; requests for them use the closest similar model\./);
 });
 
 test('AI Coding page: server errors pause the run (the status line says so) and every post is still coded', { skip: noBrowser, timeout: 90000 }, async () => {
