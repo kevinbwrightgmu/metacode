@@ -37,7 +37,7 @@
         scrapeJobsPerDay: 0, scrapeItemsPerJob: 0, scrapeItemsPerMonth: 0, scrapeJobsAtOnce: 0,
         publishedSurveys: 0, surveyResponsesPerMonth: 0,
         networkRunsPerDay: 0,
-        labRequestsPerDay: 0, labTokensPerMonth: 0, labGenerationsAtOnce: 0, labEvalRunsPerDay: 0, labEvalRunsAtOnce: 0, labStorageMb: 0, labFineTunesPerMonth: 0
+        labRequestsPerDay: 0, labTokensPerMonth: 0, labGenerationsAtOnce: 0, labEvalRunsPerDay: 0, labEvalRunsAtOnce: 0, labStorageMb: 0, labFineTunesPerMonth: 0, labExecutionsPerDay: 0
       }
     },
     pro: {
@@ -49,7 +49,7 @@
         scrapeJobsPerDay: 3, scrapeItemsPerJob: 100, scrapeItemsPerMonth: 1000, scrapeJobsAtOnce: 1,
         publishedSurveys: 3, surveyResponsesPerMonth: 300,
         networkRunsPerDay: 0,
-        labRequestsPerDay: 0, labTokensPerMonth: 0, labGenerationsAtOnce: 0, labEvalRunsPerDay: 0, labEvalRunsAtOnce: 0, labStorageMb: 0, labFineTunesPerMonth: 0
+        labRequestsPerDay: 0, labTokensPerMonth: 0, labGenerationsAtOnce: 0, labEvalRunsPerDay: 0, labEvalRunsAtOnce: 0, labStorageMb: 0, labFineTunesPerMonth: 0, labExecutionsPerDay: 0
       }
     },
     max: {
@@ -61,7 +61,7 @@
         scrapeJobsPerDay: 100, scrapeItemsPerJob: 5000, scrapeItemsPerMonth: 100000, scrapeJobsAtOnce: 3,
         publishedSurveys: 25, surveyResponsesPerMonth: 5000,
         networkRunsPerDay: 100,
-        labRequestsPerDay: 0, labTokensPerMonth: 0, labGenerationsAtOnce: 0, labEvalRunsPerDay: 0, labEvalRunsAtOnce: 0, labStorageMb: 0, labFineTunesPerMonth: 0
+        labRequestsPerDay: 0, labTokensPerMonth: 0, labGenerationsAtOnce: 0, labEvalRunsPerDay: 0, labEvalRunsAtOnce: 0, labStorageMb: 0, labFineTunesPerMonth: 0, labExecutionsPerDay: 0
       }
     },
     ultra: {
@@ -74,7 +74,7 @@
         publishedSurveys: 250, surveyResponsesPerMonth: 100000,
         networkRunsPerDay: 1000,
         // AI Coding Lab fair-use ceilings (model calls include evaluation tasks and AI grading)
-        labRequestsPerDay: 2000, labTokensPerMonth: 50000000, labGenerationsAtOnce: 3, labEvalRunsPerDay: 50, labEvalRunsAtOnce: 2, labStorageMb: 500, labFineTunesPerMonth: 5
+        labRequestsPerDay: 2000, labTokensPerMonth: 50000000, labGenerationsAtOnce: 3, labEvalRunsPerDay: 50, labEvalRunsAtOnce: 2, labStorageMb: 500, labFineTunesPerMonth: 5, labExecutionsPerDay: 500
       }
     }
   };
@@ -103,7 +103,8 @@
     labRequests:     { limit: 'labRequestsPerDay', period: 'day', label: 'AI Coding Lab model calls', unit: 'calls', feature: 'aiLab' },
     labTokens:       { limit: 'labTokensPerMonth', period: 'month', label: 'AI Coding Lab tokens (reported by the provider, or estimated)', unit: 'tokens', feature: 'aiLab' },
     labEvalRuns:     { limit: 'labEvalRunsPerDay', period: 'day', label: 'Evaluation runs', unit: 'runs', feature: 'aiLab' },
-    labFineTunes:    { limit: 'labFineTunesPerMonth', period: 'month', label: 'Fine-tuning jobs', unit: 'jobs', feature: 'aiLab' }
+    labFineTunes:    { limit: 'labFineTunesPerMonth', period: 'month', label: 'Fine-tuning jobs', unit: 'jobs', feature: 'aiLab' },
+    labExecutions:   { limit: 'labExecutionsPerDay', period: 'day', label: 'Code experiment runs', unit: 'runs', feature: 'aiLab' }
   };
 
   // "this week", "today"… and how a period is said in a sentence

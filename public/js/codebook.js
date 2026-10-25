@@ -4,7 +4,16 @@
 
 const Codebook = (() => {
 
-  function render() {
+  // Ids inside inline handlers: a plain id (letters, digits, _ and -) is written into the
+  // handler (escaped as well); any other id goes through a data attribute, never into JavaScript.
+  const SAFE_ID = /^[a-z0-9_-]+$/i;
+  function act(fn, ...ids) {
+    if (ids.every(id => typeof id === 'string' && SAFE_ID.test(id))) return `onclick="Codebook.${fn}(${ids.map(id => `'${App.esc(id)}'`).join(',')})"`;
+    return `onclick="Codebook.${fn}(${ids.map((_, i) => `this.dataset.cbArg${i}`).join(',')})" ${ids.map((id, i) => `data-cb-arg${i}="${App.esc(String(id))}"`).join(' ')}`;
+  }
+
+  // param: the route after "#codebook/" — "lab/<submissionId>" is a coding rule sent from the AI Coding Lab (lab-handoff.js)
+  function render(param) {
     const container = document.getElementById('view-container');
     const { codebook } = App.getState();
 
@@ -26,6 +35,8 @@ const Codebook = (() => {
         </div>
       `}
     `;
+    const m = /^lab\/(.+)$/.exec(String(param || ''));
+    if (m && typeof LabHandoff !== 'undefined') LabHandoff.open(m[1], { via: 'hash' });
   }
 
   function emptyState() {
@@ -44,26 +55,141 @@ const Codebook = (() => {
   }
 
   function dimensionCard(dim) {
+    const improve = typeof CodingRule !== 'undefined' ? CodingRule.improveUrl(dim.id) : null;
     return `
-      <div class="dim-card" id="dim-${dim.id}">
+      <div class="dim-card" id="dim-${App.esc(dim.id)}">
         <div class="dim-head">
           <div style="flex:1">
             <div class="dim-name">${App.esc(dim.name)}</div>
             <div class="dim-desc">${App.esc(dim.description || 'No description')}</div>
           </div>
           <div class="dim-actions">
-            <button class="btn btn-ghost btn-sm" onclick="Codebook.addCode('${dim.id}')">+ Code</button>
-            <button class="btn btn-ghost btn-sm" onclick="Codebook.editDimension('${dim.id}')">Edit</button>
-            <button class="btn btn-ghost btn-sm" style="color:var(--error)" onclick="Codebook.deleteDimension('${dim.id}')">Delete</button>
+            ${improve ? `<a class="btn btn-ghost btn-sm cr-improve" href="${App.esc(improve)}" title="Write and test a coding rule for this variable in the AI Coding Lab (Ultra)">Improve in AI Coding Lab</a>` : ''}
+            <button class="btn btn-ghost btn-sm" ${act('addCode', dim.id)}>+ Code</button>
+            <button class="btn btn-ghost btn-sm" ${act('editDimension', dim.id)}>Edit</button>
+            <button class="btn btn-ghost btn-sm" style="color:var(--error)" ${act('deleteDimension', dim.id)}>Delete</button>
           </div>
         </div>
-        <div class="dim-codes" id="codes-${dim.id}">
+        <div class="dim-codes" id="codes-${App.esc(dim.id)}">
           ${dim.codes.length === 0
             ? `<span style="font-size:12.5px;color:var(--tx-muted)">No codes yet — click "+ Code" to add one</span>`
             : dim.codes.map(c => codeChip(dim.id, c)).join('')
           }
         </div>
+        ${rulePanel(dim)}
       </div>`;
+  }
+
+  /* ── Coding rule (from the AI Coding Lab; coding-rule.js) ── */
+  // The measured results of a rule; compact = the panel's short list
+  function ruleMetricsHTML(rule, compact) {
+    if (typeof CodingRule === 'undefined') return '';
+    let items = CodingRule.metricItems(rule);
+    if (compact) {
+      items = items.filter(m => ['accuracy', 'macroF1', 'coverage', 'baselineAgreement'].includes(m.key));
+      // Without reference labels, one line says so instead of two
+      if (!items[0].measured && !items[1].measured) items = [{ key: 'reference', label: 'Accuracy', text: 'not measured — no reference labels', measured: false, n: null }].concat(items.slice(2));
+    }
+    return `<ul class="cr-metrics${compact ? ' cr-metrics-compact' : ''}">${items.map(m => m.measured
+      ? `<li class="cr-metric" data-metric="${App.esc(m.key)}"><span class="cr-metric-v">${App.esc(m.text)}</span> <span class="cr-metric-l">${App.esc(m.label)}</span>${m.n !== null ? ` <span class="cr-n">n = ${App.esc(String(m.n))}</span>` : ''}</li>`
+      : `<li class="cr-metric cr-muted" data-metric="${App.esc(m.key)}"><span class="cr-metric-l">${App.esc(m.label)}</span> <span class="cr-metric-v">${App.esc(m.text)}</span></li>`).join('')}</ul>`;
+  }
+
+  function rulePanel(dim) {
+    const rule = dim.codingRule;
+    if (!rule || typeof rule !== 'object' || typeof CodingRule === 'undefined') return '';
+    const exp = rule.experiment && typeof rule.experiment === 'object' ? rule.experiment : {};
+    const url = CodingRule.experimentUrl(rule);
+    const sent = CodingRule.formatDate(rule.sentAt);
+    const history = Array.isArray(dim.codingRuleHistory) ? dim.codingRuleHistory.filter(h => h && typeof h === 'object') : [];
+    return `
+      <div class="cr-panel" data-dim="${App.esc(dim.id)}">
+        <div class="cr-head">${App.esc(CodingRule.headline(rule))}</div>
+        ${ruleMetricsHTML(rule, true)}
+        <div class="cr-foot">
+          <span class="cr-sent">${sent ? 'Sent ' + App.esc(sent) : 'Sent'}${typeof exp.name === 'string' && exp.name ? ' from “' + App.esc(exp.name) + '”' : ''}</span>
+          <span class="cr-buttons">
+            <button class="btn btn-ghost btn-sm cr-view" ${act('viewRule', dim.id)}>View code</button>
+            ${url ? `<a class="btn btn-ghost btn-sm cr-open" href="${App.esc(url)}">Open experiment</a>` : ''}
+            <button class="btn btn-ghost btn-sm cr-remove" style="color:var(--error)" ${act('removeRule', dim.id)}>Remove rule</button>
+          </span>
+        </div>
+        ${history.length ? `<details class="cr-history"><summary>History (${history.length} earlier version${history.length === 1 ? '' : 's'})</summary>
+          <ol>${history.map(h => `<li>${App.esc(CodingRule.historyLine(h))}</li>`).join('')}</ol></details>` : ''}
+      </div>`;
+  }
+
+  function viewRule(dimId) {
+    const dim = App.getState().codebook.find(d => d.id === dimId);
+    const rule = dim && dim.codingRule;
+    if (!rule || typeof rule !== 'object' || typeof CodingRule === 'undefined') return;
+    const str = v => (typeof v === 'string' ? v : '');
+    const exp = rule.experiment && typeof rule.experiment === 'object' ? rule.experiment : {};
+    const sbx = rule.sandbox && typeof rule.sandbox === 'object' ? rule.sandbox : {};
+    const sec = rule.security && typeof rule.security === 'object' ? rule.security : {};
+    const ev = rule.evaluation && typeof rule.evaluation === 'object' ? rule.evaluation : {};
+    const prompts = rule.prompts && typeof rule.prompts === 'object' ? rule.prompts : {};
+    const url = CodingRule.experimentUrl(rule);
+    const code = str(rule.code);
+    const history = Array.isArray(dim.codingRuleHistory) ? dim.codingRuleHistory.filter(h => h && typeof h === 'object') : [];
+    const row = (k, v) => v ? `<dt>${App.esc(k)}</dt><dd>${App.esc(v)}</dd>` : '';
+    const short = h => (typeof h === 'string' ? h.replace(/^sha256:/, '').slice(0, 12) : '');
+    App.openModal('Coding rule — ' + (dim.name || dim.id), `
+      <div class="cr-view-modal" id="cr-view">
+        <p class="cr-lead">${App.esc(CodingRule.headline(rule))}</p>
+        <p class="cr-note">MetaCode keeps this rule with the variable for reference. It never runs the code, and AI Coding doesn't use it.</p>
+        <dl class="cr-facts">
+          ${row('Experiment', str(exp.name))}
+          ${row('Version', Number.isInteger(rule.version) ? 'v' + rule.version : '')}
+          ${row('Language', CodingRule.languageLabel(rule.language))}
+          ${row('Code hash', short(rule.codeHash))}
+          ${row('Sandbox', [str(sbx.name), Number.isInteger(sbx.version) ? 'data v' + sbx.version : '', short(sbx.sha256)].filter(Boolean).join(' · '))}
+          ${row('Run', [Number.isInteger(ev.records) ? ev.records + ' records' : '', ev.split === 'test' ? 'held-out split' : ev.split ? str(ev.split) + ' split' : '', CodingRule.formatDate(ev.finishedAt)].filter(Boolean).join(' · '))}
+          ${row('Security', sec.policy === 'passed' ? 'Policy checks passed · AI review: ' + str(sec.review).replace('_', ' ') : '')}
+          ${row('AI recommendation', str(ev.recommendation))}
+          ${row('Selected', CodingRule.formatDate(rule.selectedAt))}
+          ${row('Sent', CodingRule.formatDate(rule.sentAt))}
+          ${row('Saved here', CodingRule.formatDate(rule.appliedAt))}
+        </dl>
+        <div class="cr-label">Measured in the sandbox</div>
+        ${ruleMetricsHTML(rule, false)}
+        ${str(rule.rationale) ? `<div class="cr-label">Why this version</div><div class="cr-text">${App.esc(rule.rationale)}</div>` : ''}
+        ${str(prompts.original) || str(prompts.final) ? `<details class="cr-prompts"><summary>Prompts</summary>
+          ${str(prompts.original) ? `<div class="cr-label">First prompt</div><div class="cr-text">${App.esc(prompts.original)}</div>` : ''}
+          ${str(prompts.final) ? `<div class="cr-label">Last prompt</div><div class="cr-text">${App.esc(prompts.final)}</div>` : ''}</details>` : ''}
+        <div class="cr-label">Code <span>${App.esc(CodingRule.formatBytes(CodingRule.utf8Bytes(code)))}</span></div>
+        <pre class="cr-code" id="cr-view-code" tabindex="0">${App.esc(code)}</pre>
+        ${history.length ? `<div class="cr-label">History</div><ol class="cr-history-list">${history.map(h => `<li>${App.esc(CodingRule.historyLine(h))}
+          ${typeof h.code === 'string' && h.code ? `<details><summary>Code</summary><pre class="cr-code" tabindex="0">${App.esc(h.code)}</pre></details>` : '<span class="form-hint"> · code not kept</span>'}</li>`).join('')}</ol>` : ''}
+      </div>
+    `, `
+      ${url ? `<a class="btn btn-secondary" href="${App.esc(url)}">Open experiment</a>` : ''}
+      <button class="btn btn-primary" onclick="App.closeModal()">Close</button>
+    `);
+  }
+
+  function removeRule(dimId) {
+    const dim = App.getState().codebook.find(d => d.id === dimId);
+    if (!dim || !dim.codingRule) return;
+    const n = Array.isArray(dim.codingRuleHistory) ? dim.codingRuleHistory.length : 0;
+    const v = Number.isInteger(dim.codingRule.version) ? 'v' + dim.codingRule.version : 'the coding rule';
+    App.openModal('Remove the coding rule?', `
+      <div class="cr-view-modal" id="cr-remove">
+        <p class="cr-lead">This removes ${App.esc(v)}${n ? ` and its history (${n} earlier version${n === 1 ? '' : 's'})` : ''} from “${App.esc(dim.name || dim.id)}”. The codes, coding results and AI Coding don't change.</p>
+        <p class="form-hint">The experiment stays in the AI Coding Lab, so you can send it to the Codebook again.</p>
+      </div>
+    `, `
+      <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
+      <button class="btn btn-danger" id="cr-remove-confirm" ${act('confirmRemoveRule', dimId)}>Remove rule</button>
+    `);
+  }
+
+  function confirmRemoveRule(dimId) {
+    const r = CodingRule.removeCodingRule(App.getState().codebook, dimId);
+    if (r.changed) App.setState({ codebook: r.codebook });
+    App.closeModal();
+    if (r.changed) App.notify('Coding rule removed', 'warning');
+    render();
   }
 
   function codeChip(dimId, code) {
@@ -78,9 +204,9 @@ const Codebook = (() => {
       <div class="dim-code" title="${App.esc(tooltip)}" style="cursor:default">
         <span class="code-id">${App.esc(code.id)}</span>
         ${App.esc(code.label)}${aiDot}
-        <button onclick="Codebook.editCode('${dimId}','${code.id}')"
+        <button ${act('editCode', dimId, code.id)}
           style="background:none;border:none;cursor:pointer;margin-left:4px;color:var(--tx-muted);font-size:11px" title="Edit">✎</button>
-        <button onclick="Codebook.deleteCode('${dimId}','${code.id}')"
+        <button ${act('deleteCode', dimId, code.id)}
           style="background:none;border:none;cursor:pointer;color:var(--tx-muted);font-size:11px" title="Remove">✕</button>
       </div>`;
   }
@@ -144,7 +270,7 @@ const Codebook = (() => {
       </div>
     `, `
       <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="Codebook.saveDimension('${dimId}')">Save Changes</button>
+      <button class="btn btn-primary" ${act('saveDimension', dimId)}>Save Changes</button>
     `);
   }
 
@@ -172,7 +298,7 @@ const Codebook = (() => {
     if (!dim) return;
     App.openModal(`Add Code to "${dim.name}"`, codeFormHTML(), `
       <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="Codebook.saveCode('${dimId}')">Add Code</button>
+      <button class="btn btn-primary" ${act('saveCode', dimId)}>Add Code</button>
     `);
     setTimeout(() => document.getElementById('code-id')?.focus(), 100);
   }
@@ -183,7 +309,7 @@ const Codebook = (() => {
     if (!code) return;
     App.openModal(`Edit Code in "${dim.name}"`, codeFormHTML(code), `
       <button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button>
-      <button class="btn btn-primary" onclick="Codebook.saveCode('${dimId}','${codeId}')">Save Changes</button>
+      <button class="btn btn-primary" ${act('saveCode', dimId, codeId)}>Save Changes</button>
     `);
   }
 
@@ -238,7 +364,8 @@ const Codebook = (() => {
 
     if (editId) {
       const idx = codes.findIndex(c=>c.id===editId);
-      if (idx !== -1) codes[idx] = { id:editId, label, description:desc||'', aiNotes:aiNotes||'' };
+      // Other fields of the code (added by other features) are kept
+      if (idx !== -1) codes[idx] = { ...codes[idx], id:editId, label, description:desc||'', aiNotes:aiNotes||'' };
       App.notify('Code updated', 'success');
     } else {
       if (codes.some(c=>c.id===codeId)) { App.notify('Code ID already exists in this dimension', 'error'); return; }
@@ -359,5 +486,6 @@ const Codebook = (() => {
   }
 
   return { render, addDimension, saveDimension, editDimension, deleteDimension,
-           addCode, saveCode, editCode, deleteCode, importModal, importCSV, loadExample };
+           addCode, saveCode, editCode, deleteCode, importModal, importCSV, loadExample,
+           viewRule, removeRule, confirmRemoveRule, ruleMetricsHTML };
 })();

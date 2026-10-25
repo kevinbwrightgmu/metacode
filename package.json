@@ -16,12 +16,18 @@
     "collector:test": "npm --prefix collector test"
   },
   "dependencies": {
+    "@codemirror/lang-javascript": "6.2.5",
+    "@codemirror/lang-python": "6.2.1",
+    "@codemirror/merge": "6.12.2",
     "@mercuryworkshop/epoxy-tls": "2.1.19-1",
     "@mercuryworkshop/epoxy-transport": "3.0.1",
     "@mercuryworkshop/scramjet": "2.0.67-alpha.2",
     "@mercuryworkshop/scramjet-controller": "0.0.14",
     "@mercuryworkshop/wisp-js": "0.5.0",
     "@supabase/supabase-js": "2.117.3",
+    "acorn": "8.19.0",
+    "acorn-walk": "8.3.5",
+    "codemirror": "6.0.2",
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",

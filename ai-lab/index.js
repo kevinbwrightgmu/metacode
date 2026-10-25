@@ -23,6 +23,8 @@ const E = require('./evals');
 const O = require('./optimize');
 const { buildMessages, TASK_TYPES } = require('./context');
 const { createFineTuning } = require('./finetune');
+const { createCodeSandbox, LANGUAGES: CODE_LANGUAGES } = require('./code-sandbox');
+const { createExperiments } = require('./experiments');
 const { logger, redact, userRef } = require('../lib/log');
 
 /** @typedef {import('../types/ai-lab').LabPrincipal} LabPrincipal */
@@ -63,10 +65,26 @@ function createAiLab(opts) {
   /** @param {string} event @param {Record<string, any>} f */
   const metric = (event, f) => {
     if (event === 'eval.run') { ops.evalRuns[f.status] = (ops.evalRuns[f.status] || 0) + 1; ops.evalMs.push(f.ms); if (ops.evalMs.length > 500) ops.evalMs.shift(); }
-    if (event === 'eval.task') { const k = f.provider + ':' + f.model; ops.requests[k] = (ops.requests[k] || 0) + 1; if (!f.ok) ops.errors[f.type] = (ops.errors[f.type] || 0) + 1; else { ops.latencies.push(f.ms); if (ops.latencies.length > 1000) ops.latencies.shift(); } }
+    if (event === 'eval.task' || event === 'experiment.ai') { const k = f.provider + ':' + f.model; ops.requests[k] = (ops.requests[k] || 0) + 1; if (!f.ok) ops.errors[f.type] = (ops.errors[f.type] || 0) + 1; else { ops.latencies.push(f.ms); if (ops.latencies.length > 1000) ops.latencies.shift(); } }
   };
   const runner = E.createRunner({ store, registry, usage, pricing, getConfig, metric });
   const fineTuning = createFineTuning({ store, registry, usage, getConfig });
+  // Code experiments: coding rules run only in the isolated sandbox (code-sandbox.js), only when the user clicks Run
+  const codeSandbox = createCodeSandbox({ getConfig });
+  const experiments = createExperiments({ store, registry, usage, getConfig, sandbox: codeSandbox, metric });
+
+  /** What /models says about running code: the setting, how runs are isolated here, which languages work. */
+  async function executionInfo() {
+    const ex = getConfig().execution;
+    /** @type {Record<string, string>} */
+    const unavailable = {};
+    const languages = CODE_LANGUAGES.filter(l => { const s = codeSandbox.supported(l); if (!s.ok) unavailable[l] = s.reason; return s.ok; });
+    let isolation = null;
+    if (ex.mode === 'sandbox') { try { isolation = await codeSandbox.isolation('javascript'); } catch (e) { isolation = null; } }
+    return { mode: ex.mode, isolationSetting: ex.isolation, isolation, languages, unavailable,
+      limits: { timeoutMs: ex.timeoutMs, memoryMb: ex.memoryMb, pythonMemoryMb: ex.pythonMemoryMb, maxOutputKb: ex.maxOutputKb, maxRunning: ex.maxRunning },
+      note: 'Only code experiments run, only in the sandbox, only when you click Run. Workbench and evaluation answers are never run.' };
+  }
 
   /** @param {any} req @returns {UserStore} */
   const us = req => store.forUser(req.lab.key);
@@ -112,7 +130,7 @@ function createAiLab(opts) {
     try {
       const r = await policy.decide(req);
       const acc = opts.accounts && opts.accounts.enabled();
-      if ('principal' in r) return res.json({ allowed: true, plan: r.principal.plan, anonymousMode: r.principal.anonymousMode, accountsEnabled: !!acc, codeExecution: 'off' });
+      if ('principal' in r) return res.json({ allowed: true, plan: r.principal.plan, anonymousMode: r.principal.anonymousMode, accountsEnabled: !!acc, codeExecution: getConfig().codeExecution });
       res.json({ allowed: false, reason: { type: r.denied.type, message: r.denied.message }, requiredPlan: 'ultra', accountsEnabled: !!acc, signedIn: r.denied.type !== 'sign_in_required' && r.denied.status !== 401 });
     } catch (err) { sendError(res, err); }
   });
@@ -123,7 +141,7 @@ function createAiLab(opts) {
     const q = /** @param {number} p */ p => (lat.length ? lat[Math.min(lat.length - 1, Math.floor(p * lat.length))] : null);
     return { since: ops.since, modelCalls: ops.requests, providerErrors: ops.errors, latency: { p50Ms: q(0.5), p95Ms: q(0.95), samples: lat.length },
       evaluationRuns: ops.evalRuns, evaluationMedianMs: ops.evalMs.length ? ops.evalMs.slice().sort((a, b) => a - b)[Math.floor(ops.evalMs.length / 2)] : null,
-      ingestion: ops.ingestion, usageLimitEvents: ops.limitEvents, tokens: ops.tokens, runner: runner.stats(), fineTuning: fineTuning.stats() };
+      ingestion: ops.ingestion, usageLimitEvents: ops.limitEvents, tokens: ops.tokens, runner: runner.stats(), fineTuning: fineTuning.stats(), experiments: experiments.stats() };
   }));
 
   router.use(policy.require);
@@ -145,7 +163,7 @@ function createAiLab(opts) {
     const pi = pricing.info();
     return {
       providers: catalog.map(p => Object.assign({}, p, { models: p.models.map(m => Object.assign({}, m, { pricing: pricing.priceOf(p.provider, m.id) })) })),
-      pricing: pi, codeExecution: 'off', warnings: getConfig().warnings,
+      pricing: pi, codeExecution: getConfig().codeExecution, execution: await executionInfo(), warnings: getConfig().warnings,
       notes: { contextWindow: 'Unknown context windows use a budget of ' + getConfig().defaultContextTokens + ' tokens (AI_LAB_DEFAULT_CONTEXT_TOKENS).', taskTypes: TASK_TYPES }
     };
   }));
@@ -174,7 +192,7 @@ function createAiLab(opts) {
     const profiles = byDate(u.list('profiles').filter(p => !p.archived));
     const convs = byDate(u.list('conversations'));
     const runs = u.list('runs').sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
-    const docs = u.list('documents'), datasets = u.list('datasets'), suites = u.list('suites');
+    const docs = u.list('documents'), datasets = u.list('datasets'), suites = u.list('suites'), exps = u.list('experiments').filter(e => !e.archived);
     /** @type {{ key: string, text: string }[]} */
     const next = [];
     if (!projects.length) next.push({ key: 'project', text: 'Create a project for your codebase.' });
@@ -188,7 +206,7 @@ function createAiLab(opts) {
     const candidates = profiles.flatMap(p => p.versions.filter(/** @param {any} v */ v => v.status === 'candidate').map(/** @param {any} v */ v => ({ profileId: p.id, name: p.name, version: v.version })));
     candidates.forEach(c => next.push({ key: 'candidate', text: 'Profile "' + c.name + '" has a candidate version ' + c.version + ' waiting: run the suite with it, compare, then accept or reject it.' }));
     return {
-      counts: { projects: projects.length, profiles: profiles.length, conversations: convs.length, documents: docs.length, datasets: datasets.length, suites: suites.length, runs: runs.length },
+      counts: { projects: projects.length, profiles: profiles.length, conversations: convs.length, documents: docs.length, datasets: datasets.length, suites: suites.length, runs: runs.length, experiments: exps.length },
       recentProjects: projects.slice(0, 5).map(p => ({ id: p.id, name: p.name, updatedAt: p.updatedAt })),
       recentConversations: convs.slice(0, 5).map(c => ({ id: c.id, title: c.title, projectId: c.projectId, messages: c.messages.length, updatedAt: c.updatedAt })),
       profiles: profiles.slice(0, 5).map(p => ({ id: p.id, name: p.name, currentVersion: p.currentVersion, updatedAt: p.updatedAt })),
@@ -206,12 +224,13 @@ function createAiLab(opts) {
     const u = us(req);
     /** @type {Record<string, unknown>} */
     const out = { format: 'metacode-ai-lab-export', exportedAt: now() };
-    ['projects', 'profiles', 'conversations', 'documents', 'datasets', 'suites', 'runs', 'finetunes'].forEach(k => { out[k] = u.list(k); });
+    ['projects', 'profiles', 'conversations', 'documents', 'datasets', 'suites', 'runs', 'finetunes', 'sandboxes', 'experiments', 'xruns'].forEach(k => { out[k] = u.list(k); });
     res.set('Content-Disposition', 'attachment; filename="metacode-ai-lab-export.json"');
     res.json(out);
   }));
   router.delete('/data', route(req => {
     if (!req.body || req.body.confirm !== 'DELETE') throw invalid('Send { "confirm": "DELETE" } to delete all of your AI Coding Lab data.');
+    experiments.cancelUser(req.lab.key);
     us(req).list('runs').forEach(r => runner.cancel(r.id));
     us(req).removeAll();
     log.info('data.deleted', { user: userRef(req.lab.userId) });
@@ -982,6 +1001,9 @@ function createAiLab(opts) {
   /* ── Fine-tuning (finetune.js) ─────────────────── */
   fineTuning.routes(router, { us, owned, route, str });
 
+  /* ── Code experiments (experiments.js) ─────────── */
+  experiments.routes(router, { us, owned, route, str, checkStorage });
+
   router.use((/** @type {any} */ req, /** @type {any} */ res) => res.status(404).json({ error: { type: 'not_found', message: 'Unknown AI Coding Lab endpoint.' } }));
 
   /** The page. Its data comes only from the API above; the HTML itself holds nothing private. */
@@ -991,9 +1013,9 @@ function createAiLab(opts) {
   }
 
   return {
-    router, page, store, registry, runner, fineTuning,
-    start() { runner.recover(); fineTuning.start(); },
-    shutdown() { runner.shutdown(); fineTuning.shutdown(); }
+    router, page, store, registry, runner, fineTuning, experiments, codeSandbox,
+    start() { runner.recover(); fineTuning.start(); experiments.start(); },
+    shutdown() { runner.shutdown(); fineTuning.shutdown(); experiments.shutdown(); }
   };
 }
 

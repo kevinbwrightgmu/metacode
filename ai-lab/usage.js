@@ -9,6 +9,8 @@
 //   labTokens    tokens per month — what the provider reported, or MetaCode's
 //                estimate (characters / 4) when it reported nothing
 //   labEvalRuns  evaluation runs per day      labFineTunes  per month
+//   labExecutions  code experiment runs per day (one unit when a run starts
+//                the sandbox; not refunded when the code fails)
 //
 // Before a call: one request and the estimated tokens are reserved; after it,
 // the reservation is settled to what was used (failed calls give everything
@@ -44,7 +46,7 @@ function createLabUsage(deps) {
   }
 
   /**
-   * Takes one unit of a simple meter (evaluation runs, fine-tuning jobs).
+   * Takes one unit of a simple meter (evaluation runs, fine-tuning jobs, code runs).
    * @param {LabPrincipal} p
    * @param {string} meter
    */
@@ -103,7 +105,7 @@ function createLabUsage(deps) {
   function summary(p) {
     /** @type {Record<string, { used: number, limit: number, period: string, resetsAt: string, label: string, unit: string }>} */
     const out = {};
-    ['labRequests', 'labTokens', 'labEvalRuns', 'labFineTunes'].forEach(meter => {
+    ['labRequests', 'labTokens', 'labEvalRuns', 'labFineTunes', 'labExecutions'].forEach(meter => {
       const m = Plans.METERS[meter];
       out[meter] = { used: usage.used(p.userId, meter), limit: p.limits[m.limit], period: m.period, resetsAt: nextReset(m.period, Date.now()), label: m.label, unit: m.unit };
     });

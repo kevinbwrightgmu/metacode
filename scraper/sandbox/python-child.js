@@ -19,6 +19,11 @@
 //   • WebAssembly memory can't grow past the configured limit.
 // What's left is one bridge (_metacode_host) whose calls are relayed to the
 // parent over IPC; the parent performs (and polices) every Reddit request.
+//
+// The AI Coding Lab (ai-lab/code-sandbox.js) starts the same process for
+// coding rules, without the format library (no fourth argument: the bridge
+// then has only call and send) and with start.subject ("Your coding rule")
+// for the fallback messages.
 
 'use strict';
 
@@ -27,7 +32,7 @@ const fsConstants = require('node:fs').constants;
 
 const PYODIDE_ENTRY = process.argv[2];
 const PYODIDE_DIR = process.argv[3];
-const FORMAT_PATH = process.argv[4];
+const FORMAT_PATH = process.argv[4];   // optional (the scraper's record formatters)
 
 const LIMITS = {
   maxMessageBytes: 1024 * 1024,        // one emit()/log() batch
@@ -130,6 +135,7 @@ function makeFormat() {
 }
 
 async function run(start) {
+  const subject = typeof start.subject === 'string' && start.subject ? start.subject.slice(0, 60) : 'Your scraper';
   capWasmMemory(start.limits.memoryBytes);
 
   let stdoutBuf = '';
@@ -163,7 +169,7 @@ async function run(start) {
     throw err;
   }
 
-  const host = Object.freeze({
+  const bridge = {
     call(name, argsJson) {
       if (pending.size >= LIMITS.maxPendingCalls) {
         return Promise.resolve(JSON.stringify({ ok: false, error: { type: 'custom_code_error', message: 'Too many concurrent requests from the sandbox (max ' + LIMITS.maxPendingCalls + ')' } }));
@@ -190,9 +196,10 @@ async function run(start) {
         send({ type: 'progress', patch: value });
       }
       return '';
-    },
-    format: makeFormat()
-  });
+    }
+  };
+  if (FORMAT_PATH) bridge.format = makeFormat();
+  const host = Object.freeze(bridge);
 
   // The SDK module gets the bridge; then the registry entry is dropped.
   py.registerJsModule('_metacode_host', host);
@@ -232,6 +239,15 @@ async function run(start) {
   let result = null;
   try { result = JSON.parse(resultJson); } catch (e) { result = null; }
   if (!result || typeof result !== 'object') return finish({ type: 'error', error: { type: 'sandbox_error', message: 'The Python sandbox returned no result.' } });
-  if (result.ok) return finish({ type: 'done', result: { emitted: result.emitted, meta: result.meta || null } });
-  return finish({ type: 'error', error: { type: result.error && result.error.type || 'custom_code_error', message: String(result.error && result.error.message || 'Your scraper failed.') } });
+  if (result.ok) return finish({ type: 'done', result: { emitted: result.emitted, meta: result.meta || null }, stats: { rssBytes: process.memoryUsage.rss(), engineMemoryBytes: wasmMemoryBytes(py) } });
+  return finish({ type: 'error', error: { type: result.error && result.error.type || 'custom_code_error', message: String(result.error && result.error.message || subject + ' failed.') } });
+}
+
+// Size of Pyodide's WebAssembly memory (it never shrinks, so this is the
+// peak), or null when it can't be read.
+function wasmMemoryBytes(py) {
+  try {
+    const heap = py && py._module && py._module.HEAPU8;
+    return heap && heap.buffer ? heap.buffer.byteLength : null;
+  } catch (e) { return null; }
 }

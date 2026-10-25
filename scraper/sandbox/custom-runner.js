@@ -13,9 +13,7 @@ const path = require('path');
 const fs = require('fs');
 const { ScraperError, isScraperError, cancelledError, sanitize } = require('../errors');
 const { sleep } = require('../network/rate-limiter');
-
-const CHILD = path.join(__dirname, 'sandbox-child.js');
-const PY_CHILD = path.join(__dirname, 'python-child.js');
+const { CHILD, PY_CHILD, sandboxReadablePaths, pythonEnginePaths, permissionModelAvailable, moduleHooksAvailable } = require('./sandbox-paths');
 const PY_BOOT_ALLOWANCE_MS = 60000;   // time Pyodide may take to start before a Python scraper's own limit begins
 const PRELUDE_SOURCE = fs.readFileSync(path.join(__dirname, 'guest-prelude.js'), 'utf8');
 const PY_PRELUDE_SOURCE = fs.readFileSync(path.join(__dirname, 'python-prelude.py'), 'utf8');
@@ -27,33 +25,10 @@ const MAX_SLEEP_MS = 60000;
 const PASS_HEADERS = ['content-type', 'content-length', 'etag', 'last-modified', 'retry-after', 'location',
   'x-ratelimit-remaining', 'x-ratelimit-used', 'x-ratelimit-reset'];
 
-// Directory of an installed package (walks up from its entry point).
-function packageRoot(name) {
-  let dir = path.dirname(require.resolve(name));
-  for (let i = 0; i < 6; i++) {
-    try {
-      const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
-      if (pkg.name === name) return dir;
-    } catch (e) { /* keep walking */ }
-    dir = path.dirname(dir);
-  }
-  throw new Error('Package root not found for ' + name);
-}
-
-let readablePaths = null;
-function sandboxReadablePaths() {
-  if (!readablePaths) {
-    const qjs = packageRoot('quickjs-emscripten');
-    const core = packageRoot('quickjs-emscripten-core');
-    const jitl = path.dirname(packageRoot('@jitl/quickjs-wasmfile-release-sync'));
-    readablePaths = { entry: require.resolve('quickjs-emscripten'), dirs: [CHILD, qjs, core, jitl] };
-  }
-  return readablePaths;
-}
-
+// Engine files and the platform checks live in sandbox-paths.js (shared with
+// the AI Coding Lab's runner); the wording here is the scraper's.
 function sandboxSupported(language) {
-  const flags = process.allowedNodeEnvironmentFlags;
-  if (!flags || !flags.has('--permission')) {
+  if (!permissionModelAvailable()) {
     return { ok: false, reason: 'The custom-code sandbox needs Node.js 22 or newer (Node\'s --permission model).' };
   }
   if (language === 'python') return pythonSupported();
@@ -66,8 +41,8 @@ function sandboxSupported(language) {
 let pyPaths = null;
 function pythonReadablePaths() {
   if (!pyPaths) {
-    const dir = packageRoot('pyodide');
-    pyPaths = { entry: path.join(dir, 'pyodide.js'), dir: dir + path.sep, dirs: [PY_CHILD, FORMAT_PATH, dir] };
+    const engine = pythonEnginePaths();
+    pyPaths = { entry: engine.entry, dir: engine.dir, dirs: [PY_CHILD, FORMAT_PATH, engine.root] };
   }
   return pyPaths;
 }
@@ -75,7 +50,7 @@ function pythonReadablePaths() {
 // Python runs in Pyodide (CPython compiled to WebAssembly) inside the same
 // kind of locked-down process; its network lock-down needs module hooks.
 function pythonSupported() {
-  if (typeof require('node:module').registerHooks !== 'function') {
+  if (!moduleHooksAvailable()) {
     return { ok: false, reason: 'Python scrapers need Node.js 22.15 or newer on the MetaCode server. Update Node.js, or switch the language to JavaScript.' };
   }
   try { pythonReadablePaths(); } catch (e) {

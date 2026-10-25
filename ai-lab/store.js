@@ -6,9 +6,16 @@
 //   projects/<id>.json  profiles/<id>.json  conversations/<id>.json
 //   documents/<id>.json datasets/<id>.json   suites/<id>.json
 //   runs/<id>.json      finetunes/<id>.json
+//   sandboxes/<id>.json experiments/<id>.json xruns/<id>.json   (code experiments)
 //   datasets/<id>/v<n>.json        a dataset version (immutable)
 //   runs/<id>/results.ndjson       an evaluation run's task results
+//   sandboxes/<id>/v<n>.json       a sandbox data version: records + labels (immutable)
+//   xruns/<id>/results.json        a code run's validated results ({ results })
 //   audit.ndjson                   configuration changes (no content)
+//
+// Some ids only name objects stored inside another one: messages (msg_) and
+// examples (exm_), an experiment's thread messages (thm_) and its Codebook
+// submissions (cbs_).
 //
 // Isolation is structural: a request only ever opens the folder of the user
 // the server authenticated (policy.js), so another user's ids simply don't
@@ -20,8 +27,9 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 
-const KINDS = ['projects', 'profiles', 'conversations', 'documents', 'datasets', 'suites', 'runs', 'finetunes'];
-const PREFIX = { projects: 'prj', profiles: 'prf', conversations: 'cnv', documents: 'doc', datasets: 'dst', suites: 'ste', runs: 'run', finetunes: 'ftj', messages: 'msg', examples: 'exm' };
+const KINDS = ['projects', 'profiles', 'conversations', 'documents', 'datasets', 'suites', 'runs', 'finetunes', 'sandboxes', 'experiments', 'xruns'];
+const PREFIX = { projects: 'prj', profiles: 'prf', conversations: 'cnv', documents: 'doc', datasets: 'dst', suites: 'ste', runs: 'run', finetunes: 'ftj',
+  sandboxes: 'sbx', experiments: 'exp', xruns: 'xrn', messages: 'msg', examples: 'exm', thread: 'thm', submissions: 'cbs' };
 const ID_RE = /^[a-z]{3}_[A-Za-z0-9_-]{16}$/;
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,60}$/;
 

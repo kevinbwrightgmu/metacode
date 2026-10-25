@@ -71,6 +71,51 @@ app.get('/vendor/supabase.js', (req, res) => {
   res.set('Cache-Control', 'public, max-age=86400');
   res.sendFile(require.resolve('@supabase/supabase-js/dist/umd/supabase.js'));
 });
+// CodeMirror 6 for the AI Coding Lab's code editor (public/js/ai-lab/lab-editor.mjs).
+// The packages are ES modules only; the import map in ai-lab.html points each
+// bare specifier here. Only this fixed list of files is served, each from its
+// installed package's folder (never a path from the request).
+const CODEMIRROR_FILES = new Map([
+  ['codemirror.js', ['codemirror', 'dist/index.js']],
+  ['state.js', ['@codemirror/state', 'dist/index.js']],
+  ['view.js', ['@codemirror/view', 'dist/index.js']],
+  ['language.js', ['@codemirror/language', 'dist/index.js']],
+  ['commands.js', ['@codemirror/commands', 'dist/index.js']],
+  ['search.js', ['@codemirror/search', 'dist/index.js']],
+  ['autocomplete.js', ['@codemirror/autocomplete', 'dist/index.js']],
+  ['lint.js', ['@codemirror/lint', 'dist/index.js']],
+  ['lang-javascript.js', ['@codemirror/lang-javascript', 'dist/index.js']],
+  ['lang-python.js', ['@codemirror/lang-python', 'dist/index.js']],
+  ['merge.js', ['@codemirror/merge', 'dist/index.js']],
+  ['streamparser.js', ['@codemirror/streamparser', 'dist/index.js']],
+  ['lezer-common.js', ['@lezer/common', 'dist/index.js']],
+  ['lezer-highlight.js', ['@lezer/highlight', 'dist/index.js']],
+  ['lezer-lr.js', ['@lezer/lr', 'dist/index.js']],
+  ['lezer-javascript.js', ['@lezer/javascript', 'dist/index.js']],
+  ['lezer-python.js', ['@lezer/python', 'dist/index.js']],
+  ['style-mod.js', ['style-mod', 'src/style-mod.js']],
+  ['w3c-keyname.js', ['w3c-keyname', 'index.js']],
+  ['crelt.js', ['crelt', 'index.js']],
+  ['find-cluster-break.js', ['@marijn/find-cluster-break', 'src/index.js']]
+]);
+const codemirrorPaths = new Map();   // file → absolute path (null: package not installed)
+function codemirrorPath(file) {
+  if (!codemirrorPaths.has(file)) {
+    const [pkg, rel] = CODEMIRROR_FILES.get(file);
+    // The package folder from node_modules' search paths (their "exports" maps don't expose package.json)
+    const dir = (require.resolve.paths(pkg) || []).map(d => path.join(d, pkg)).find(d => {
+      try { return JSON.parse(fs.readFileSync(path.join(d, 'package.json'), 'utf8')).name === pkg; } catch (e) { return false; }
+    });
+    codemirrorPaths.set(file, dir ? path.join(dir, rel) : null);
+  }
+  return codemirrorPaths.get(file);
+}
+app.get('/vendor/cm/:file', (req, res) => {
+  const file = CODEMIRROR_FILES.has(req.params.file) ? codemirrorPath(req.params.file) : null;
+  if (!file) return res.status(404).type('text/plain').send('Not found');
+  res.set({ 'Content-Type': 'text/javascript; charset=utf-8', 'Cache-Control': 'public, max-age=86400', 'X-Content-Type-Options': 'nosniff' });
+  res.sendFile(file, err => { if (err && !res.headersSent) { res.removeHeader('Cache-Control'); res.status(404).type('text/plain').send('Not found'); } });
+});
 // Survey Studio (surveys/): mounted before the shared JSON parser because
 // survey documents (with embedded images) may be larger than its limit.
 const surveys = createSurveys({ policy: accounts.surveysPolicy });

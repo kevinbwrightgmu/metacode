@@ -53,7 +53,7 @@
   }
 
   const CHECK_HELP = 'Checks applied to every task, in addition to each example\'s own. JSON array, e.g. [{"type":"code_block"}, {"type":"not_contains","values":["eval("]}, {"type":"ai_rubric","criteria":"Handles errors explicitly"}]. ' +
-    'syntax only parses code; unit_tests is always skipped (generated code is never run); ai_rubric is graded by a model and labelled AI-graded.';
+    'syntax only parses code; unit_tests is always skipped (evaluation answers are never run; only Code Experiments run code, in their sandbox); ai_rubric is graded by a model and labelled AI-graded.';
 
   // Grading models are named by id; they run through the run's provider
   function judgeOptions(selected) {
