@@ -663,6 +663,10 @@ and 22.15 or newer for Python (the Node permission model and module hooks), and
 `npm install` (QuickJS, Pyodide, CodeMirror and Acorn come from npm). The
 network namespace needs `unshare` and unprivileged user namespaces; `prlimit`
 is optional. The Models page and each run's terminal show what is available.
+A server updated without `npm install` still starts: until it is run, the
+packages it lacks are reported there ("… isn't installed. Run "npm install" and
+restart MetaCode.") and JavaScript/TypeScript rules are blocked, never run
+unchecked (policy rule `checker_unavailable`).
 
 **Setting warnings.** An `AI_LAB_*` value the Lab can't use is ignored with a
 warning in the server log (`[ai-lab] config.warning detail="…"`), once when the

@@ -401,6 +401,9 @@ receives. Use `proxy_set_header Host $http_host;` (which keeps the port) instead
 MetaCode isn't running: `pm2 status`, then `pm2 logs metacode --lines 50` for the reason (a missing
 `npm install`, a port in use, a Node.js that's too old).
 
+**`Error: Cannot find module '…'` in `pm2 logs metacode`**
+The code was updated (`git pull`) but its packages weren't: `cd ~/metacode && npm install && pm2 reload metacode`.
+
 **Changed `.env` but nothing changed**
 AI settings can be reloaded from **Settings → AI connection → Reload .env**. Everything else (`PORT`,
 `PUBLIC_URL`, scraper settings) needs `pm2 reload metacode`.
