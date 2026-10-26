@@ -72,7 +72,7 @@ test('a check that throws or hangs counts as an outage instead of breaking the p
 let server, port, dataDir;
 test.before(async () => {
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-status-'));
-  Object.assign(process.env, testEnv({ SURVEY_DATA_DIR: dataDir, EMIS_API_KEY: '' }));
+  Object.assign(process.env, testEnv({ SURVEY_DATA_DIR: dataDir }));
   const { start } = require('../server');
   server = await start(0);
   port = server.address().port;
@@ -104,7 +104,7 @@ test('GET /api/status: every component, public, nothing secret', async () => {
   assert.deepEqual(j.components.map(c => c.id), ['app', 'ai', 'surveys', 'analysis', 'scraper']);
   assert.ok(['operational', 'degraded', 'outage'].includes(j.status));
   const ai = j.components.find(c => c.id === 'ai');
-  assert.equal(ai.status, 'off', 'no AI key in this test');
+  assert.equal(ai.status, 'off', 'AI is switched off in this test');
   assert.match(ai.note, /isn't set up/);
   assert.equal(j.components.find(c => c.id === 'surveys').status, 'operational');
   assert.equal(j.components.find(c => c.id === 'app').status, 'operational');

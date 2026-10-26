@@ -26,7 +26,7 @@ test.before(async () => {
   Object.assign(process.env, testEnv({
     SUPABASE_URL: sb.url, SUPABASE_PUBLISHABLE_KEY: KEY, STRIPE_SECRET_KEY: '',
     ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects'),
-    COLLAB_DATA_DIR: path.join(tmp, 'collab'), EMIS_MODELS_FILE: path.join(tmp, 'none.json'), PUBLIC_URL: '', DESKTOP_RELEASES_REPO: 'off'
+    COLLAB_DATA_DIR: path.join(tmp, 'collab'), PUBLIC_URL: '', DESKTOP_RELEASES_REPO: 'off'
   }));
   mod = require('../server');
   server = await mod.start(0);

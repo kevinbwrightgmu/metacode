@@ -3,10 +3,11 @@
 // One interface over the AI services the Lab can use. What each can do is
 // reported from the actual integration, never assumed:
 //
-//   metacode  MetaCode's own AI service (EMIS, server.js → labAi): chat and
-//             streaming; tool calling per model (emis-models.json); no
-//             embeddings, no fine-tuning. Token usage is taken from its answer
-//             when it reports it, otherwise estimated (and labelled so).
+//   metacode  MetaCode's own AI service (its OpenCode service, through
+//             server.js → labAi): chat and streaming; tool calling per model
+//             (from the service's model list); no embeddings, no fine-tuning.
+//             Token usage is taken from its answer when it reports it,
+//             otherwise estimated (and labelled so).
 //   openai    An OpenAI-compatible API the operator configured
 //             (AI_LAB_OPENAI_API_KEY): chat and streaming; fine-tuning only
 //             when AI_LAB_FINE_TUNING=on (it's paid — see finetune.js).
@@ -75,7 +76,7 @@ function failureToError(f) {
   return new LabError(f.type || 'provider_error', 'MetaCode\'s AI service: ' + (f.message || 'the request failed.'), { status, retryAfterSeconds: f.retryAfterSeconds || null });
 }
 
-/** MetaCode's own AI service (EMIS), through server.js's labAi interface. */
+/** MetaCode's own AI service (its OpenCode service), through server.js's labAi interface. */
 class MetaCodeProvider {
   /** @param {any} ai */
   constructor(ai) {
@@ -92,10 +93,14 @@ class MetaCodeProvider {
     if (!this.ai) return { models: [], problem: this.problem() };
     const r = await this.ai.models();
     if (!r.ok) return { models: [], problem: r.message };
+    // Two providers offering a model under the same name: "Claude Opus 5.5 · OpenCode Zen"
+    /** @type {Record<string, number>} */
+    const names = {};
+    r.models.forEach(/** @param {any} m */ m => { names[m.name] = (names[m.name] || 0) + 1; });
     return {
       problem: null,
       models: r.models.map(/** @param {any} m */ m => ({
-        provider: this.id, id: m.id, name: m.name, isDefault: m.id === r.default,
+        provider: this.id, id: m.id, name: names[m.name] > 1 && m.providerName ? m.name + ' · ' + m.providerName : m.name, isDefault: m.id === r.default,
         capabilities: { chat: true, streaming: true, toolCalling: m.toolCall, structuredOutput: null, embeddings: false, fineTuning: false },
         contextWindow: m.contextWindow, maxOutput: m.maxOutput, available: m.available === undefined ? null : m.available
       }))

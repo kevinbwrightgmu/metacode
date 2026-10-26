@@ -1,6 +1,6 @@
 // ── Reddit scraper configuration ──────────────────────────────────────────────
 // Everything comes from the server's environment (.env), validated the same
-// way loadEmisConfig() in server.js validates the EMIS settings: a bad value
+// way loadAiConfig() in server.js validates the AI settings: a bad value
 // is ignored with a warning (printed at startup), never a crash. Secrets
 // (REDDIT_CLIENT_SECRET) are only ever used by the server process; they are
 // never sent to the browser, never logged and never passed to the custom-code

@@ -1,5 +1,7 @@
 # Implementation report: scraper reliability and the Ultra AI Coding Lab
 
+> Historical report. Since October 2026, MetaCode's AI goes through its own OpenCode service (OpenCode Zen and the AI gateway EMIS): see [opencode-service.md](opencode-service.md).
+
 This covers two pieces of work on branch `claude/reddit-scraper-integration-duqgpd`:
 - commit `b55672f` — scraper reliability;
 - commit `35f2b0c` — AI Coding Lab.

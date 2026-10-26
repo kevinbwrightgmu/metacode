@@ -3,9 +3,10 @@
 
 EMIS documents its API with curl and Python's OpenAI SDK (any OpenAI client
 works; its website's browser check doesn't apply to API requests made with a
-key). MetaCode's server sends its EMIS requests through this worker when
-Python is available (EMIS_TRANSPORT=auto, the default; =python to require it;
-=node to skip it), and through Node.js otherwise.
+key). MetaCode's OpenCode service (opencode/, its EMIS provider) sends its
+non-streamed EMIS requests through this worker when Python is available
+(EMIS_TRANSPORT=auto, the default; =python to require it; =node to skip it),
+and through Node.js otherwise (streamed answers always go through Node.js).
 
 It uses, in order of preference:
   1. the official `openai` package (pip install openai) — exactly the client
@@ -18,7 +19,8 @@ EMIS_PROXY when given in the request (then for every request, as from Node.js).
 Protocol (UTF-8 JSON, one object per line):
   stdout   {"ready": true, "python": "3.12.1", "client": "openai 1.54.0"}
   stdin    {"id": 1, "method": "POST", "url": "https://…/v1/chat/completions",
-            "key": "emis-…", "body": {…} | null, "timeoutMs": 120000, "proxy": ""}
+            "key": "emis-…", "body": {…} | null, "headers": {…extra headers from the
+            provider's config…}, "timeoutMs": 120000, "proxy": ""}
   stdout   {"id": 1, "status": 200, "headers": {...}, "body": "text"}
        or  {"id": 1, "error": {"kind": "timeout|dns|tls|connection|invalid", "code": "...", "message": "..."}}
 The key is used only for the Authorization header of the request it came
@@ -86,6 +88,15 @@ def base_and_path(url):
     return url[: i + 3], url[i + 3:]
 
 
+# The provider's own extra headers (its config's options.headers); never the ones this worker sets
+RESERVED = ("authorization", "content-type", "content-length", "host", "accept")
+
+
+def extra_headers(req):
+    given = req.get("headers") if isinstance(req.get("headers"), dict) else {}
+    return {str(k): str(v) for k, v in given.items() if str(k).lower() not in RESERVED}
+
+
 def via_openai(req):
     base, path = base_and_path(req["url"])
     if not base or path not in ("/chat/completions", "/models"):
@@ -93,7 +104,8 @@ def via_openai(req):
     timeout = max(1.0, req.get("timeoutMs", 120000) / 1000.0)
     proxy = req.get("proxy") or None
     http_client = httpx.Client(proxy=proxy, timeout=timeout) if proxy else None
-    client = openai.OpenAI(base_url=base, api_key=req["key"], timeout=timeout, max_retries=0, http_client=http_client)
+    client = openai.OpenAI(base_url=base, api_key=req["key"], timeout=timeout, max_retries=0, http_client=http_client,
+                           default_headers=extra_headers(req) or None)
     try:
         if path == "/models":
             raw = client.models.with_raw_response.list()
@@ -118,7 +130,9 @@ def via_openai(req):
 
 def headers_for(req):
     streaming = isinstance(req.get("body"), dict) and bool(req["body"].get("stream"))
-    h = {"Authorization": "Bearer " + req["key"], "Accept": "text/event-stream" if streaming else "application/json", "User-Agent": USER_AGENT}
+    h = {"User-Agent": USER_AGENT}
+    h.update(extra_headers(req))
+    h.update({"Authorization": "Bearer " + req["key"], "Accept": "text/event-stream" if streaming else "application/json"})
     if req.get("body") is not None:
         h["Content-Type"] = "application/json"
     return h

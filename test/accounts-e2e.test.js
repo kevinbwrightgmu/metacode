@@ -40,8 +40,7 @@ test.before(async () => {
   Object.assign(process.env, testEnv({
     SUPABASE_URL: sb.url, SUPABASE_PUBLISHABLE_KEY: KEY,
     STRIPE_SECRET_KEY: 'sk_test_e2e123', STRIPE_API_BASE: stripe.url, STRIPE_WEBHOOK_SECRET: 'whsec_e2e',
-    ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects'),
-    EMIS_API_KEY: ''
+    ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects')
   }));
   const { start } = require('../server');
   server = await start(0);

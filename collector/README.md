@@ -25,8 +25,10 @@ The MetaCode server needs:
 - **Node.js 22.12 or newer** (building the app with Vite 7).
 - **Python 3.8+**. The agent is `python/ai_scraper.py`, standard library only. `SCRAPER_PYTHON` picks the
   command if it isn't `python3`.
-- **MetaCode's AI key** (`EMIS_API_KEY=emis-…` in `.env`; keys are issued by hand — message @kawaii_zxs on Discord,
-  user ID 1079096114273320971). The agent uses MetaCode's AI service like the other AI features.
+- **MetaCode's AI service** running and ready (Settings → AI connection says so). `npm start` starts it by itself;
+  on a server pm2 runs it ([../docs/opencode-service.md](../docs/opencode-service.md)). Without keys it offers OpenCode
+  Zen's free models; AI keys (`OPENCODE_API_KEY`, or the AI gateway's `EMIS_API_KEY`) go in `.env`. The agent uses
+  MetaCode's AI like the other AI features.
 
 ```bash
 # in the MetaCode folder
@@ -73,8 +75,8 @@ npm start                      # MetaCode at http://localhost:3000
    The agent checks each call, shows the model a compact result (id, subreddit, score, comments, age, title,
    the start of the text), remembers what it already tried, and says when a call was wrong so the model can
    fix it.
-3. **The server makes every request.** AI requests go through MetaCode's AI service (same key, model choice,
-   fallbacks and quota messages as other AI features). Reddit requests go through the job's Reddit client
+3. **The server makes every request.** AI requests go through MetaCode's AI service (same providers, model
+   choice, fallbacks and quota messages as other AI features). Reddit requests go through the job's Reddit client
    (destination checks, rate limits, retries). `keep` adds the records Reddit returned to the server, so the
    AI can't make posts up.
 4. **This app follows the job** with server-sent events (or polling): the steps appear in the Monitor as they
@@ -122,9 +124,9 @@ refuses the server, the job stops and says so.
 
 - **Steps** (5–60, default 25): tool calls the AI may make. Replies the agent couldn't read don't count, but
   three in a row end the job.
-- **AI requests**: one per step, at most the step limit plus 6, all on MetaCode's AI key. On a shared server
-  everyone shares that key's budget (prompts and/or tokens per day, week or month; when it's used up, jobs stop
-  until it rolls over).
+- **AI requests**: one per step, at most the step limit plus 6, all through MetaCode's AI. On a shared server
+  everyone shares its budget — the AI gateway key's prompts and/or tokens per day, week or month, or OpenCode Zen's
+  free limit or account; when it's used up, jobs stop until it resets.
 - **Posts to keep** (1–300) and **comments per post** (0–100): the job ends when the limit is reached.
 - **Run time** (1–30 minutes): then the AI is asked to wrap up, and stopped a minute later.
 - **Reddit requests**: paced like any MetaCode scraper job (at least `SCRAPER_MIN_DELAY_MS` apart, per set of
@@ -168,8 +170,9 @@ goal; that depends on the model you choose. Try a small job first and read the s
 Install Python 3 (`sudo apt install python3`), or set `SCRAPER_PYTHON` to its command, then restart MetaCode.
 
 **"MetaCode's AI isn't set up yet" / an AI quota or rate-limit message**
-The AI service is MetaCode's: set `EMIS_API_KEY` in `.env` (Settings → AI connection shows the state). A used-up
-quota ends the job, and the posts kept so far stay.
+The AI service is MetaCode's: Settings → AI connection shows its state (and whether it runs at all; see
+[../docs/opencode-service.md](../docs/opencode-service.md#9-troubleshooting)). A used-up quota ends the job, and the
+posts kept so far stay.
 
 **The job stops with "You've been blocked by network security" / "Reddit refused this request…"**
 Reddit is blocking the server's address. Add your own Reddit API keys (Reddit Scraper → Reddit API access) and

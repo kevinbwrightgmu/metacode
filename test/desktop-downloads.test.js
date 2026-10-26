@@ -259,7 +259,7 @@ test('the real server: /download is the download page, its API answers, and the 
   Object.assign(process.env, testEnv({
     SUPABASE_URL: '', SUPABASE_PUBLISHABLE_KEY: '', DESKTOP_WITHOUT_ACCOUNTS: 'true',
     ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects'),
-    EMIS_MODELS_FILE: path.join(tmp, 'none.json'), PUBLIC_URL: '', DESKTOP_RELEASES_API: gh.url
+    PUBLIC_URL: '', DESKTOP_RELEASES_API: gh.url
   }));
   delete process.env.DESKTOP_DOWNLOAD_URL;
   const mod = require('../server');

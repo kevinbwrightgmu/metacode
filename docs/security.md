@@ -8,8 +8,19 @@ desktop app lives in GitHub Actions secrets ([desktop/RELEASING.md](desktop/RELE
 
 `.gitignore` keeps `.env`, `.env.*` (except `.env.example`), key and
 certificate files (`*.pem`, `*.key`, `*.p12`, `*.pfx`), the files MetaCode
-writes keys to (`reddit-credentials.json`, `redditapis-key.json`) and the data
-folders out of Git.
+writes keys to (`reddit-credentials.json`, `redditapis-key.json`), the AI
+service's token folder (`opencode-data/`) and the data folders out of Git.
+
+## AI keys stay in the AI service
+
+The AI provider keys (`OPENCODE_API_KEY` for OpenCode Zen, `EMIS_API_KEY` for
+the AI gateway) are read from `.env` by MetaCode's OpenCode service, which runs
+beside MetaCode on `127.0.0.1` ([opencode-service.md](opencode-service.md#8-security)).
+They are never sent to the browser, logged, returned by an endpoint or put in
+an error message; Settings shows keys masked (`…6789`). MetaCode reaches the
+service with an access token (`OPENCODE_SERVICE_TOKEN`, or the file
+`opencode-data/token`, readable only by its owner); the service's port (4097)
+isn't opened in the firewall.
 
 ## Code that runs on the server never sees secrets
 
@@ -56,17 +67,21 @@ secrets**. It reported 7 `URI` findings, all URLs with a placeholder password:
 They are marked `trufflehog:ignore` in the current files. Older commits still
 contain them without the mark, so a whole-history scan lists them (that is
 why CI scans new commits only). The values of `EMIS_API_KEY` in
-`.env.example`, then and now, are placeholders too (`emis-...`, `your-key`).
+`.env.example`, then and now, are placeholders too (`emis-...`, `your-key`);
+`OPENCODE_API_KEY` and `OPENCODE_SERVICE_TOKEN` are empty there.
 
 ## If a real secret is found
 
 1. **Rotate it first** with the provider that issued it (Reddit:
    <https://www.reddit.com/prefs/apps>; Stripe, Supabase, Google Cloud, X,
-   LinkedIn: their dashboards; the AI service: keys are issued by hand, so
-   message @kawaii_zxs on Discord, user ID 1079096114273320971, for a new one
-   and say the old one leaked). Deleting it from
-   the file does not remove it from Git history, and anyone who cloned the
-   repository already has it.
+   LinkedIn: their dashboards; OpenCode Zen: create a new API key and delete
+   the old one in its console, <https://opencode.ai/auth>; the AI gateway
+   (EMIS): keys are issued by hand, so message @kawaii_zxs on Discord, user ID
+   1079096114273320971, for a new one and say the old one leaked; MetaCode's
+   AI service token: change `OPENCODE_SERVICE_TOKEN`, or delete
+   `opencode-data/token`, and restart MetaCode and the service). Deleting it
+   from the file does not remove it from Git history, and anyone who cloned
+   the repository already has it.
 2. Put the new value in the server's `.env` (or the deployment's secret
    store) and restart; never in a tracked file.
 3. Remove the old value from the tracked file.

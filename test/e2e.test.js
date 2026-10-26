@@ -37,7 +37,7 @@ test.before(async () => {
   const apiBase = await apiMock.listen();
   rapiMock = createMockRedditApis();                       // stands in for api.redditapis.com
   const rapiBase = await rapiMock.listen();
-  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: redditBase, REDDIT_OAUTH_BASE_URL: apiBase, REDDITAPIS_BASE_URL: rapiBase, SCRAPER_DEFAULT_DELAY_MS: '100', EMIS_API_KEY: '' }));
+  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: redditBase, REDDIT_OAUTH_BASE_URL: apiBase, REDDITAPIS_BASE_URL: rapiBase, SCRAPER_DEFAULT_DELAY_MS: '100' }));
   const { start } = require('../server');
   server = await start(0);
   baseUrl = 'http://localhost:' + server.address().port;

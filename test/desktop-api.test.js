@@ -18,9 +18,9 @@ const { testEnv } = require('./helpers/harness');
 
 const KEY = 'sb_publishable_test_0123456789abcdef';
 const PROD = { pro: 'prod_VQeJh2lPqfmae9', max: 'prod_VQeK26tKchu1VI', ultra: 'prod_VQeKXAJtQQLKqm' };
-let sb, stripe, stripeOpts, emis, server, base, tmp, mod;
+let sb, stripe, stripeOpts, aiService, server, base, tmp, mod;
 const U = {}, T = {}, SUB = {};
-const emisCalls = [];
+const aiCalls = [];
 
 test.before(async () => {
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-desktop-'));
@@ -33,19 +33,20 @@ test.before(async () => {
   } };
   stripe = mockStripe(stripeOpts);
   await stripe.start();
-  emis = http.createServer((req, res) => {
+  aiService = http.createServer((req, res) => {
     let body = '';
     req.on('data', c => { body += c; });
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'good-model' }] }));
+      if (req.url !== '/v1/chat/completions') { res.statusCode = 404; return res.end('{}'); }
       const j = JSON.parse(body || '{}');
-      emisCalls.push(j);
+      aiCalls.push(j);
       const last = j.messages[j.messages.length - 1].content;
       res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: /Code this/.test(last) ? '{"codings":{"tone":{"code":"pos","confidence":0.9,"reasoning":"x"}}}' : '=SUM(A1:A10)' }, finish_reason: 'stop' }] }));
     });
   });
-  await new Promise(r => emis.listen(0, '127.0.0.1', r));
+  await new Promise(r => aiService.listen(0, '127.0.0.1', r));
   for (const p of ['free', 'pro', 'max', 'ultra', 'pastdue', 'canceled', 'downgraded', 'stripedown']) {
     U[p] = sb.addUser(p + '@example.org', 'pw-' + p);
     T[p] = sb.issue(U[p]).access_token;
@@ -61,8 +62,8 @@ test.before(async () => {
     SUPABASE_URL: sb.url, SUPABASE_PUBLISHABLE_KEY: KEY,
     STRIPE_SECRET_KEY: 'sk_test_mock123', STRIPE_API_BASE: stripe.url, STRIPE_WEBHOOK_SECRET: 'whsec_test_secret',
     ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects'),
-    EMIS_BASE_URL: 'http://127.0.0.1:' + emis.address().port + '/v1', EMIS_API_KEY: 'emis-test-key-123456', EMIS_TRANSPORT: 'node',
-    EMIS_MODEL: 'good-model', EMIS_MODELS_FILE: path.join(tmp, 'none.json'), PUBLIC_URL: '', DESKTOP_OFFLINE_HOURS: '48'
+    OPENCODE_SERVICE_URL: 'http://127.0.0.1:' + aiService.address().port + '/v1', OPENCODE_SERVICE_TOKEN: 'test-service-token-0123456789',
+    OPENCODE_MODEL: 'good-model', PUBLIC_URL: '', DESKTOP_OFFLINE_HOURS: '48'
   }));
   delete process.env.DESKTOP_LEASE_PRIVATE_KEY;
   mod = require('../server');
@@ -72,7 +73,7 @@ test.before(async () => {
 test.after(async () => {
   if (server) { server.closeAllConnections(); await new Promise(r => server.close(r)); }
   for (const s of [sb, stripe]) if (s) await s.close();
-  if (emis) { emis.closeAllConnections(); await new Promise(r => emis.close(r)); }
+  if (aiService) { aiService.closeAllConnections(); await new Promise(r => aiService.close(r)); }
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -107,7 +108,7 @@ test('config: public settings only — the Supabase project, the lease public ke
   assert.equal(r.json.offlineHours, 48);
   assert.deepEqual(r.json.plansWithDesktop, ['pro', 'max', 'ultra']);
   assert.equal(r.json.upgradeUrl, base + '/app.html#account', 'the website\'s own plans page');
-  assert.ok(!/sk_test|whsec|PRIVATE KEY|emis-test-key/.test(r.text), 'no secret ever reaches the app');
+  assert.ok(!/sk_test|whsec|PRIVATE KEY|test-service-token/.test(r.text), 'no secret ever reaches the app');
   assert.equal(r.headers.get('cache-control'), 'no-store');
   // The key is generated once and kept (owner-only) in the account data folder
   const file = path.join(tmp, 'accounts', 'desktop-lease-key.pem');

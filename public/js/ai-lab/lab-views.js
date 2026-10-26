@@ -26,7 +26,7 @@
         stat(o.counts.documents, 'Knowledge documents', '#knowledge') + stat(o.counts.datasets, 'Datasets', '#training') + stat(o.counts.runs, 'Evaluation runs', '#evaluations') +
       '</div>' +
       '<div class="lab-grid-2 lab-section">' +
-        '<div class="card"><div class="card-title">Recent evaluation runs</div>' + (o.recentRuns.length ? '<ul class="lab-list">' + o.recentRuns.map(r => '<li><a href="#run/' + esc(r.id) + '">' + esc(r.model) + (r.profileVersion ? ' · profile v' + r.profileVersion : '') + '</a><span>' + badge(r.status) + ' ' + (r.passRate !== null ? pct(r.passRate) + ' passed' : '') + '</span></li>').join('') + '</ul>' : '<p class="lab-muted">No runs yet.</p>') + '</div>' +
+        '<div class="card"><div class="card-title">Recent evaluation runs</div>' + (o.recentRuns.length ? '<ul class="lab-list">' + o.recentRuns.map(r => '<li><a href="#run/' + esc(r.id) + '">' + esc(Lab.modelName(r.provider, r.model)) + (r.profileVersion ? ' · profile v' + r.profileVersion : '') + '</a><span>' + badge(r.status) + ' ' + (r.passRate !== null ? pct(r.passRate) + ' passed' : '') + '</span></li>').join('') + '</ul>' : '<p class="lab-muted">No runs yet.</p>') + '</div>' +
         '<div class="card"><div class="card-title">Recent conversations</div>' + (o.recentConversations.length ? '<ul class="lab-list">' + o.recentConversations.map(c => '<li><a href="#workbench/' + esc(c.id) + '">' + esc(c.title) + '</a><span class="lab-muted">' + when(c.updatedAt) + '</span></li>').join('') + '</ul>' : '<p class="lab-muted">No conversations yet.</p>') + '</div>' +
         '<div class="card"><div class="card-title">Background jobs</div>' + (o.activeJobs.length ? '<ul class="lab-list">' + o.activeJobs.map(j => '<li><a href="#' + (j.id.startsWith('ftj_') ? 'training' : 'run/' + esc(j.id)) + '">' + esc(j.id) + '</a><span>' + badge(j.status) + (j.progress ? ' ' + fmt(j.progress.done) + ' / ' + fmt(j.progress.total) : '') + '</span></li>').join('') + '</ul>' : '<p class="lab-muted">Nothing running.</p>') + '</div>' +
         '<div class="card"><div class="card-title">Usage (fair-use allowance)</div>' + Object.keys(o.usage).map(k => meter(k, o.usage[k])).join('') + '<a href="#usage" class="lab-muted">Details →</a></div>' +
@@ -102,7 +102,7 @@
       '<div class="lab-grid-2 lab-section"><div class="card"><div class="card-title">Stack and instructions</div><dl class="lab-kv">' +
         '<dt>Languages</dt><dd>' + esc(p.languages.join(', ') || '—') + '</dd><dt>Frameworks</dt><dd>' + esc(p.frameworks.join(', ') || '—') + '</dd>' +
         '<dt>Repository</dt><dd>' + (p.repository.url ? esc(p.repository.url) + (p.repository.branch ? ' (' + esc(p.repository.branch) + ')' : '') : '—') + '</dd>' +
-        '<dt>Default model</dt><dd>' + (p.defaultModel ? esc(p.defaultModel.provider + ' · ' + p.defaultModel.model) : 'Server default') + '</dd></dl>' +
+        '<dt>Default model</dt><dd>' + (p.defaultModel ? esc(Lab.modelLabel(p.defaultModel.provider, p.defaultModel.model)) : 'Server default') + '</dd></dl>' +
         (p.instructions ? '<div class="lab-pre mt-3">' + esc(p.instructions) + '</div>' : '<p class="lab-muted mt-3">No project instructions.</p>') + '</div>' +
       '<div class="card" id="pj-docs"></div></div>';
     $('pj-edit').onclick = () => Lab.background(projectForm(p));
@@ -278,7 +278,7 @@
         '<p class="lab-second">Chat: ' + cap(p.capabilities.chat) + ' · streaming: ' + cap(p.capabilities.streaming) + ' · embeddings: ' + cap(p.capabilities.embeddings) + ' · fine-tuning: ' + cap(p.capabilities.fineTuning) + ' · usage reporting: ' + esc(p.capabilities.usageReporting) + '</p>' +
         (p.problem ? '<div class="lab-warn mt-3">' + esc(p.problem) + '</div>' : '') +
         (p.models.length ? '<div class="table-wrap mt-3"><table class="table"><thead><tr><th>Model</th><th>Offered now</th><th>Tool calling</th><th>Context window</th><th>Price (per 1M tokens)</th></tr></thead><tbody>' +
-          p.models.map(x => '<tr><td>' + esc(x.name) + (x.isDefault ? ' <span class="badge badge-blue">default</span>' : '') + '<div class="lab-mono lab-muted">' + esc(x.id) + '</div></td>' +
+          p.models.map(x => '<tr><td>' + esc(Lab.modelName(p.provider, x.id)) + (x.isDefault ? ' <span class="badge badge-blue">default</span>' : '') + '<div class="lab-mono lab-muted">' + esc(Lab.modelId(p.provider, x.id)) + '</div></td>' +
             '<td>' + (x.available === true ? 'yes' : x.available === false ? '<span class="badge badge-amber" title="Listed in this server\'s catalog, but not in the provider\'s own model list right now">not listed by the provider</span>' : 'unknown') + '</td>' +
             '<td>' + cap(x.capabilities.toolCalling) + '</td><td>' + (x.contextWindow ? fmt(x.contextWindow) : 'unknown') + '</td>' +
             '<td>' + (x.pricing ? esc(x.pricing.currency) + ' ' + x.pricing.input + ' in / ' + x.pricing.output + ' out <span class="lab-muted">(as of ' + esc(x.pricing.asOf || '?') + ')</span>' : '<span class="lab-muted">unknown</span>') + '</td></tr>').join('') + '</tbody></table></div>' : '') + '</div>').join('') +

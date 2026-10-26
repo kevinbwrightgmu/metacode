@@ -44,7 +44,7 @@ test.before(async () => {
   legacy.id = 'sv_oldshared01';
   fs.mkdirSync(path.join(dataDir, 'surveys'), { recursive: true });
   fs.writeFileSync(path.join(dataDir, 'surveys', legacy.id + '.json'), JSON.stringify({ id: legacy.id, revision: 2, createdAt: '2025-01-01T00:00:00.000Z', updatedAt: '2025-01-01T00:00:00.000Z', doc: legacy, publish: null }));
-  Object.assign(process.env, testEnv({ SURVEY_DATA_DIR: dataDir, EMIS_API_KEY: '' }));
+  Object.assign(process.env, testEnv({ SURVEY_DATA_DIR: dataDir }));
   const { start } = require('../server');
   server = await start(0);
   baseUrl = 'http://localhost:' + server.address().port;

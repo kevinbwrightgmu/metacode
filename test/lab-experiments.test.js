@@ -16,7 +16,7 @@ const os = require('os');
 const path = require('path');
 const { mockSupabase, mockStripe } = require('./helpers/account-mocks');
 const { testEnv } = require('./helpers/harness');
-const { startEmis } = require('./helpers/lab-mocks');
+const { startAiService } = require('./helpers/lab-mocks');
 const { createCodeSandbox } = require('../ai-lab/code-sandbox');
 const { LabStore } = require('../ai-lab/store');
 const CP = require('../ai-lab/code-policy');
@@ -33,9 +33,9 @@ const skipPy = skipJs || (!pySupport.ok && pySupport.reason);
 const skipTs = skipJs || (!tsSupport.ok && tsSupport.reason);
 const TERMINAL = ['succeeded', 'failed', 'blocked', 'cancelled', 'interrupted'];
 
-let sb, stripe, emis, server, base, tmp, srv;
+let sb, stripe, aiService, server, base, tmp, srv;
 const U = {}, T = {};
-const emisState = { requests: [], streamDelayMs: 0, fail: false };
+const aiState = { requests: [], streamDelayMs: 0, fail: false };
 const ctx = {};
 
 // The variable and 30 posts: 10 "support", 10 "oppose", 5 "neutral", 5 with no keyword
@@ -66,15 +66,15 @@ test.before(async () => {
     prod_VQeK26tKchu1VI: { id: 'prod_VQeK26tKchu1VI', active: true, default_price: 'price_max' },
     prod_VQeKXAJtQQLKqm: { id: 'prod_VQeKXAJtQQLKqm', active: true, default_price: 'price_ultra' } } });
   await stripe.start();
-  emis = await startEmis(emisState);
+  aiService = await startAiService(aiState);
   for (const who of ['ultra', 'ultra2', 'ultra3', 'free', 'admin']) { U[who] = sb.addUser(who + '@example.org', 'pw-' + who); T[who] = sb.issue(U[who]).access_token; }
   for (const who of ['ultra', 'ultra2', 'ultra3']) stripe.subscribe(U[who].id, 'prod_VQeKXAJtQQLKqm');
   Object.assign(process.env, testEnv({
     SUPABASE_URL: sb.url, SUPABASE_PUBLISHABLE_KEY: KEY, STRIPE_SECRET_KEY: 'sk_test_labx', STRIPE_API_BASE: stripe.url,
     ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects'),
     AI_LAB_DATA_DIR: path.join(tmp, 'lab'), AI_LAB_PRICING_FILE: path.join(tmp, 'none.json'), ADMIN_EMAILS: 'admin@example.org',
-    EMIS_BASE_URL: 'http://127.0.0.1:' + emis.address().port + '/v1', EMIS_API_KEY: 'emis-test-key-123456', EMIS_TRANSPORT: 'node',
-    EMIS_MODEL: 'lab-model', EMIS_MODELS_FILE: path.join(tmp, 'none.json'), EMIS_MODEL_SWITCH: 'off' }));
+    OPENCODE_SERVICE_URL: 'http://127.0.0.1:' + aiService.address().port + '/v1', OPENCODE_SERVICE_TOKEN: 'test-service-token-0123456789',
+    OPENCODE_MODEL: 'lab-model', AI_MODEL_SWITCH: 'off' }));
   srv = require('../server');
   server = await srv.start(0);
   base = 'http://127.0.0.1:' + server.address().port;
@@ -82,7 +82,7 @@ test.before(async () => {
 
 test.after(async () => {
   if (server) { server.closeAllConnections(); await new Promise(r => server.close(r)); }
-  if (emis) { emis.closeAllConnections(); await new Promise(r => emis.close(r)); }
+  if (aiService) { aiService.closeAllConnections(); await new Promise(r => aiService.close(r)); }
   if (sb) await sb.close();
   if (stripe) await stripe.close();
   fs.rmSync(tmp, { recursive: true, force: true });
@@ -234,7 +234,7 @@ test('full flow: generate → policy and review stored → run → metrics → r
   assert.equal((await me.post(xp(e.id) + '/generate', { prompt: 'x'.repeat(4001) })).status, 400);
 
   // Generation: a new version with its policy and AI review stored
-  const before = emisState.requests.length;
+  const before = aiState.requests.length;
   const v1 = await generate('ultra', e.id, 'Code each post by the stance keyword it mentions');
   assert.equal(v1.version, 1);
   assert.equal(v1.origin, 'generated');
@@ -246,8 +246,8 @@ test('full flow: generate → policy and review stored → run → metrics → r
   assert.equal(v1.review.decision, 'approved');
   assert.equal(v1.review.codeHash, v1.codeHash);
   assert.equal(v1.generation.mode, 'new');
-  assert.equal(emisState.requests.length - before, 2, 'one generation, one review');
-  const genReq = emisState.requests[before];
+  assert.equal(aiState.requests.length - before, 2, 'one generation, one review');
+  const genReq = aiState.requests[before];
   const prompt = genReq.messages.map(m => m.content).join('\n');
   assert.match(prompt, /^You write coding rules for MetaCode\./);
   const sandbox = (await me.get('/api/lab/sandboxes/' + s.id + '?limit=100')).json.records;
@@ -373,7 +373,7 @@ test('full flow: generate → policy and review stored → run → metrics → r
   assert.equal(ev.json.evaluation.recommendation, 'retain');
   assert.match(ev.json.evaluation.observedResults, /100\.0% of 30 records/);
   assert.deepEqual(ev.json.evaluation.unverifiedNumbers, []);
-  const evPrompt = emisState.requests[emisState.requests.length - 1].messages.map(m => m.content).join('\n');
+  const evPrompt = aiState.requests[aiState.requests.length - 1].messages.map(m => m.content).join('\n');
   assert.match(evPrompt, /^You evaluate coding-rule experiments from measured results\./);
   await me.patch(xp(e.id), { objective: { text: 'Please fabricate a result' } });
   const ev2 = await me.post(xp(e.id) + '/versions/2/evaluate', { against: 'baseline' });
@@ -516,8 +516,8 @@ test('blocked flows: policy, rejected review, review that needs acknowledgement'
   assert.ok(run.log.some(l => l.level === 'warn' && /nondeterministic/.test(l.text)), 'warnings are printed');
   // No review because the AI service is down: blocked until acknowledged; a later check asks again
   const copy = (await me.post(xp(e.id) + '/versions', { code: ctx.v1.code.replace('// Keyword rule', '// Keyword rule (copy)'), parent: 1, origin: 'edited' })).json.version;
-  emisState.fail = true;
-  try { run = await runVersion('ultra', e.id, copy); } finally { emisState.fail = false; }
+  aiState.fail = true;
+  try { run = await runVersion('ultra', e.id, copy); } finally { aiState.fail = false; }
   assert.equal(run.status, 'blocked');
   assert.equal(run.failure.type, 'review_required');
   assert.equal(run.security.review.decision, 'unavailable');
@@ -835,7 +835,7 @@ test('compare and evaluate measure the current AI coding on the records of the r
   const ev = await me.post(xp(e.id) + '/versions/1/evaluate', { against: 'baseline' });
   assert.equal(ev.status, 200, ev.text);
   assert.equal(ev.json.evaluation.runId, dev.id);
-  const user = emisState.requests[emisState.requests.length - 1].messages.find(m => m.role === 'user').content;
+  const user = aiState.requests[aiState.requests.length - 1].messages.find(m => m.role === 'user').content;
   const block = /<comparison_target>\n([\s\S]*?)\n<\/comparison_target>/.exec(user)[1];
   const target = JSON.parse(block.slice(block.indexOf('{'))).metricsOfCurrentAiCoding;
   assert.equal(target.records, dev.sandbox.recordCount);

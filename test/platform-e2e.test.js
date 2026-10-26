@@ -29,7 +29,7 @@ let server, baseUrl, browser, dataDir;
 test.before(async () => {
   if (skip) return;
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-platform-e2e-'));
-  Object.assign(process.env, testEnv({ SURVEY_DATA_DIR: dataDir, EMIS_API_KEY: '', SURVEY_GEO_HEADERS: 'cloudflare' }));
+  Object.assign(process.env, testEnv({ SURVEY_DATA_DIR: dataDir, SURVEY_GEO_HEADERS: 'cloudflare' }));
   const { start } = require('../server');
   server = await start(0);
   baseUrl = 'http://localhost:' + server.address().port;

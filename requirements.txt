@@ -4,7 +4,8 @@
 #
 networkx>=3.0
 
-# AI: MetaCode sends its AI requests from Python, with the official
-# OpenAI SDK when it's installed — the client the AI service documents. Without it,
-# Python's standard library is used, and without Python, Node.js.
+# AI: the AI service's gateway provider (EMIS; see docs/opencode-service.md)
+# sends its non-streamed requests from Python, with the official OpenAI SDK
+# when it's installed — the client the gateway documents. Without it, Python's
+# standard library is used, and without Python, Node.js.
 openai>=1.0

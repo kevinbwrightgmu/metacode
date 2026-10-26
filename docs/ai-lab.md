@@ -200,7 +200,7 @@ How the limits are applied:
 
 | Provider | When it is available | Capabilities |
 |---|---|---|
-| MetaCode AI service (`metacode`) | Whenever MetaCode's AI is configured (`EMIS_*`) | Chat, streaming. No embeddings and no fine-tuning |
+| MetaCode AI service (`metacode`) | Whenever MetaCode's AI is ready: its OpenCode service runs with at least one provider set up (OpenCode Zen or the AI gateway; [opencode-service.md](opencode-service.md)) | Chat, streaming. No embeddings and no fine-tuning |
 | OpenAI / OpenAI-compatible (`openai`) | `AI_LAB_OPENAI_API_KEY` is set | Chat, streaming. Fine-tuning only if `AI_LAB_FINE_TUNING=on` |
 
 Notes on providers and costs:
@@ -209,19 +209,25 @@ Notes on providers and costs:
   capability that isn't known is shown as "unknown", never assumed.
 - **Model checks.** Unknown model names are refused before any request is sent.
   The Models page's **Offered now** column says whether the provider lists each
-  model right now (for the MetaCode AI service, the catalog `emis-models.json`
-  checked against the service's own list). The full inventory and how the list
-  is built: [ai-models.md](ai-models.md).
+  model right now (for the MetaCode AI service: the AI gateway's catalog,
+  `emis-models.json`, checked against the gateway's own list; OpenCode Zen's
+  models are offered whenever they're listed). Model ids of the MetaCode AI
+  service name their provider (`emis/claude-opus-5.5`, `opencode/big-pickle`);
+  when two providers offer a model under the same name, the provider's name is
+  added to it. The full inventory and how the list is built:
+  [ai-models.md](ai-models.md).
 - **Price list.** MetaCode never invents prices. To show cost **estimates**,
   keep a price list at `ai-lab-pricing.json` (or `AI_LAB_PRICING_FILE`):
 
   ```json
   { "asOf": "2026-10-01", "currency": "USD",
     "models": { "openai:<model-id>": { "inputPerMTok": 0.0, "outputPerMTok": 0.0 },
-                "metacode:<model-id>": { "inputPerMTok": 0.0, "outputPerMTok": 0.0 } } }
+                "metacode:<provider>/<model-id>": { "inputPerMTok": 0.0, "outputPerMTok": 0.0 } } }
   ```
 
-  Fill in the prices from your provider's current price page. The values above
+  For the MetaCode AI service the key includes the model's provider, e.g.
+  `metacode:emis/claude-opus-5.5` or `metacode:opencode/big-pickle`. Fill in
+  the prices from your provider's current price page. The values above
   are placeholders. Without a price, a cost is "unknown". Estimates are labelled
   with the list's date and are never presented as amounts charged.
 - **Base URL.** `AI_LAB_OPENAI_BASE_URL` must be `https://` (or a localhost
@@ -626,9 +632,10 @@ one of the 503 types above.
 
 ## 12. Operations
 
-**Deploy.** No new services are needed.
+**Deploy.** The Lab needs no services of its own.
 
-1. Merge, then `git pull && npm install && pm2 reload metacode`.
+1. Merge, then `git pull && npm install && pm2 startOrReload ecosystem.config.cjs --update-env`
+   (MetaCode and its AI service; [deploy-vps.md](deploy-vps.md#10-updating)).
 2. The Lab uses the existing Supabase, Stripe and AI configuration.
 3. Make sure the process can write to `lab-data/`, or to `AI_LAB_DATA_DIR`.
 

@@ -11,7 +11,7 @@ let mock, server, port;
 test.before(async () => {
   mock = createMockReddit();
   const base = await mock.listen();
-  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: base, EMIS_API_KEY: '' }));
+  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: base }));
   const { start } = require('../server');
   server = await start(0);
   port = server.address().port;

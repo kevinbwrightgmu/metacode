@@ -15,7 +15,7 @@ const { ScraperError, cancelledError } = require('./scraper/errors');
 const { createSurveys } = require('./surveys');
 const { createAccounts } = require('./accounts');
 const { createProjects } = require('./projects');
-const { rankSimilar, renamedModel, sameModel, canonicalId } = require('./model-match');
+const { rankSimilar, renamedModel, sameModel, canonicalId, splitModel } = require('./model-match');
 const { createStatusMonitor, statusRoutes } = require('./status-page');
 
 const app = express();
@@ -39,7 +39,7 @@ const app = express();
 const statusSite = statusRoutes({ publicDir: path.join(__dirname, 'public') });
 app.use(statusSite.hostRouter);
 
-// The AI routes spend the EMIS quota of the key(s) configured on this server,
+// The AI routes spend the AI providers' quota of the key(s) set up for this server,
 // and the scraper routes make requests to Reddit on this server's behalf, so
 // only MetaCode's own pages (same origin) may call them. The other routes
 // keep the permissive CORS they always had.
@@ -152,105 +152,138 @@ app.get('/collector/*', (req, res) => {
   res.status(503).type('text/plain').send('The AI Scraper isn\'t built yet. In the MetaCode folder run:\n\n  npm run collector:install\n  npm run collector:build\n\nthen reload this page.');
 });
 
-// ── AI provider: EMIS ─────────────────────────────────────────────────────────
+// ── AI service: MetaCode's OpenCode service ───────────────────────────────────
 // Every AI feature (AI Coding, the MetaCode Assistant, column detection in
-// Import Data and Analyze CSV, Test Connection) posts to /api/ai on this
-// server, which forwards the request to EMIS, an OpenAI-compatible gateway:
+// Import Data and Analyze CSV, Test Connection, the AI Scraper, the AI Coding
+// Lab, the desktop app) posts to /api/ai on this server or goes through
+// scraperAi / labAi below. MetaCode forwards each request to its OpenCode
+// service, a separate process beside it (opencode/server.mjs, see
+// docs/opencode-service.md), which answers from the AI providers it is set up
+// for (OpenCode Zen, the AI gateway):
 //
-//   browser → POST /api/ai → POST {EMIS_BASE_URL}/chat/completions
+//   browser → POST /api/ai → POST {OPENCODE_SERVICE_URL}/chat/completions → a provider
 //
-// The EMIS base URL and key(s) come only from this server's environment
-// (.env). The browser can't supply or override them, and they are never
-// logged, returned by an endpoint or included in an error message.
+// The service owns everything provider-specific: keys, quotas, model catalogs,
+// the protocol of each model. MetaCode keeps what is the same for any
+// provider: checking requests, reading replies, streaming, choosing models and
+// switching to the closest one, batches, metering and the status pages.
+// MetaCode reaches the service directly (never through a proxy) with the
+// service's access token (OPENCODE_SERVICE_TOKEN, or the token file both
+// read: opencode/shared.js). The browser never sees the service, its token or
+// any provider key, and nothing here logs them or puts them in an error.
+//
+// OPENCODE_SERVICE_URL=off switches MetaCode's AI off. MetaCode starts the
+// service itself when nothing answers at the default address (see
+// opencode/supervisor.js and OPENCODE_SERVICE_MANAGED).
 
-const EMIS_DEFAULT_BASE_URL = 'https://emis.zxs-is-very.cool/v1';
-const EMIS_EXAMPLE_MODEL    = 'gpt-oss-120b';            // the model EMIS's documentation uses as its example
-// The default with emis-models.json and no EMIS_MODEL, when the file lists it.
-// The file is EMIS's /cli/opencode.json, in EMIS's order, so its first entry
-// (on 2026-10-22 a free-tier model) isn't a choice anyone made; this keeps the
-// default the earlier lists had first.
-const PREFERRED_DEFAULT_MODELS = ['claude-opus-5.5'];
-const MODEL_LIST_TTL_MS     = 5 * 60 * 1000;             // how long a fetched model list is reused
-const MODEL_LIST_TIMEOUT_MS = 20 * 1000;
-const MODEL_LIST_RETRY_MS   = 15 * 1000;             // after a failed fetch, wait this long before trying again
+const shared = require('./opencode/shared');
+const { createSupervisor } = require('./opencode/supervisor');
+
 const DEFAULT_TIMEOUT_MS    = 120 * 1000;
-const DEFAULT_COOLDOWN_SEC  = 30;                        // a 429 that carries no reset information
+const MODEL_LIST_TTL_MS     = 30 * 1000;                 // the service keeps the providers' own lists; this only spares it repeated calls
+const MODEL_LIST_TIMEOUT_MS = 20 * 1000;
+const MODEL_LIST_RETRY_MS   = 5 * 1000;                  // after a failed fetch, wait this long before trying again
+const STATUS_TIMEOUT_MS     = 3 * 1000;                  // GET /v1/status (readiness)
+const DEFAULT_PAUSE_SEC     = 30;                        // a provider that asked to pause without saying for how long
 const MAX_COOLDOWN_MS       = 400 * 24 * 3600 * 1000;    // reset times further out than this are ignored as bogus
 const MODEL_COOLDOWN_MS     = 60 * 1000;                 // a rate-limited model rests this long (doubling while it keeps happening)
 const MODEL_COOLDOWN_MAX_MS = 15 * 60 * 1000;
 const MAX_RATE_LIMIT_SWITCHES = 4;                       // similar models tried for one request when models are rate-limited
 
 // Model ids end up in the Settings dropdown, so only plain ids are accepted
-// (letters, digits and . _ - : / @ +), never markup.
-const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$/;
+// (letters, digits and . _ - : / @ + #), never markup. OpenCode ids are
+// "provider/model", optionally "#variant".
+const MODEL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+#-]{0,199}$/;
 function safeModelId(value) {
   if (typeof value !== 'string') return null;
   const id = value.trim();
   return MODEL_ID_PATTERN.test(id) ? id : null;
 }
 
-let EMIS = loadEmisConfig(process.env);   // replaced when .env is reloaded (see /api/settings/reload)
+let AI = loadAiConfig(process.env);   // replaced when .env is reloaded (see /api/settings/reload)
 
-// The model list file (see "Model list" below)
-const MODELS_FILE      = path.resolve(__dirname, String(process.env.EMIS_MODELS_FILE || '').trim() || 'emis-models.json');
-const MODELS_FILE_NAME = path.basename(MODELS_FILE);
+// The first of these variables that is set (the EMIS_* ones are older names)
+function firstSet(env, names) {
+  return names.find(n => env[n] !== undefined && String(env[n]).trim() !== '') || null;
+}
 
-function loadEmisConfig(env) {
-  const config = { baseUrl: null, keys: [], model: '', timeoutMs: DEFAULT_TIMEOUT_MS, problem: null, warnings: [] };
+// → { off, url, baseHost, custom, managed, model, modelVar, timeoutMs, switching, settings, problem, warnings }
+function loadAiConfig(env) {
+  const settings = shared.serviceSettings(env);
+  const config = { off: false, url: null, baseHost: null, custom: false, managed: 'auto', model: '', modelVar: null,
+    timeoutMs: DEFAULT_TIMEOUT_MS, switching: true, settings, problem: null, warnings: [] };
 
-  const rawUrl = String(env.EMIS_BASE_URL || '').trim() || EMIS_DEFAULT_BASE_URL;
-  let url = null;
-  try { url = new URL(rawUrl); } catch (e) { url = null; }
-  if (!url || (url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password) {
-    config.problem = 'EMIS_BASE_URL in the server\'s .env file is not a valid http(s) URL.';
-  } else {
-    config.baseUrl = (url.origin + url.pathname).replace(/\/+$/, '');
-    if (!/\/v1$/.test(config.baseUrl)) {
-      config.warnings.push('EMIS_BASE_URL normally ends in /v1 (default: ' + EMIS_DEFAULT_BASE_URL + ').');
-    }
-    if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
-      config.warnings.push('EMIS_BASE_URL uses plain http, so the API key would travel unencrypted. Use https.');
-    }
-  }
+  const managed = String(env.OPENCODE_SERVICE_MANAGED || '').trim().toLowerCase();
+  if (managed === 'on' || managed === 'always' || shared.isOn(managed)) config.managed = 'on';
+  else if (shared.isOff(managed)) config.managed = 'off';
+  else if (managed && managed !== 'auto') config.warnings.push('OPENCODE_SERVICE_MANAGED must be auto, on or off; using auto.');
 
-  // EMIS_API_KEY may list several keys, comma-separated (same convention as
-  // the old GROQ_API_KEY); they're used in rotation.
-  String(env.EMIS_API_KEY || '').split(',').forEach((raw, i) => {
-    const key = raw.replace(/[\s\u200B-\u200D\uFEFF]/g, '');
-    if (!key) return;
-    if (/\.\.\.|…/.test(key) || /^(your[-_]?(api[-_]?)?key|emis[-_]?key|changeme|<[^>]*>)$/i.test(key)) {
-      config.warnings.push('EMIS_API_KEY entry ' + (i + 1) + ' is still the placeholder from .env.example, so it was ignored.');
-    } else if (!/^[\x21-\x7E]+$/.test(key)) {
-      config.warnings.push('EMIS_API_KEY entry ' + (i + 1) + ' contains characters that cannot be sent in an HTTP header, so it was ignored.');
-    } else if (!config.keys.includes(key)) {
-      // The AI service's keys start with "emis-" (another OpenAI-compatible EMIS_BASE_URL may differ)
-      if (!/^emis-/i.test(key) && config.baseUrl === EMIS_DEFAULT_BASE_URL) {
-        config.warnings.push('EMIS_API_KEY entry ' + (i + 1) + ' doesn\'t start with "emis-" like the AI service\'s keys. It\'s used anyway; check it if AI requests are refused.');
-      }
-      config.keys.push(key);
-    }
-  });
-
-  const model = String(env.EMIS_MODEL || '').trim();
-  if (model && !safeModelId(model)) config.warnings.push('EMIS_MODEL is not a valid model id, so it was ignored.');
+  const modelVar = firstSet(env, ['OPENCODE_MODEL', 'EMIS_MODEL']);
+  const model = modelVar ? String(env[modelVar]).trim() : '';
+  if (model && !safeModelId(model)) config.warnings.push(modelVar + ' is not a valid model id, so it was ignored.');
   config.model = safeModelId(model) || '';
+  config.modelVar = config.model ? modelVar : null;
 
-  if (env.EMIS_TIMEOUT_MS !== undefined && String(env.EMIS_TIMEOUT_MS).trim() !== '') {
-    const ms = Number(env.EMIS_TIMEOUT_MS);
+  const timeoutVar = firstSet(env, ['AI_TIMEOUT_MS', 'EMIS_TIMEOUT_MS']);
+  if (timeoutVar) {
+    const ms = Number(env[timeoutVar]);
     if (Number.isInteger(ms) && ms >= 1000 && ms <= 600000) config.timeoutMs = ms;
-    else config.warnings.push('EMIS_TIMEOUT_MS must be a whole number of milliseconds between 1000 and 600000; using ' + DEFAULT_TIMEOUT_MS + '.');
+    else config.warnings.push(timeoutVar + ' must be a whole number of milliseconds between 1000 and 600000; using ' + DEFAULT_TIMEOUT_MS + '.');
   }
+  const switchVar = firstSet(env, ['AI_MODEL_SWITCH', 'EMIS_MODEL_SWITCH']);
+  config.switching = !(switchVar && shared.isOff(env[switchVar]));
+
+  const rawUrl = String(env.OPENCODE_SERVICE_URL || '').trim();
+  if (rawUrl && shared.isOff(rawUrl)) { config.off = true; return config; }
+  settings.warnings.filter(w => /OPENCODE_SERVICE_TOKEN/.test(w)).forEach(w => config.warnings.push(w));
+  if (!rawUrl) {
+    // the default: where opencode/server.mjs listens with the same .env
+    config.url = settings.url;
+    if (settings.problems.length) config.problem = settings.problems[0];
+    settings.warnings.filter(w => !/OPENCODE_SERVICE_TOKEN/.test(w)).forEach(w => config.warnings.push(w));
+  } else {
+    config.custom = true;
+    let url = null;
+    try { url = new URL(rawUrl); } catch (e) { url = null; }
+    if (!url || (url.protocol !== 'https:' && url.protocol !== 'http:') || url.username || url.password) {
+      config.problem = 'OPENCODE_SERVICE_URL in the server\'s .env file is not a valid http(s) URL.';
+    } else {
+      config.url = (url.origin + url.pathname).replace(/\/+$/, '');
+      if (!/\/v1$/.test(config.url)) config.warnings.push('OPENCODE_SERVICE_URL normally ends in /v1 (default: ' + settings.url + ').');
+      if (url.protocol === 'http:' && !shared.isLoopback(url.hostname)) {
+        config.warnings.push('OPENCODE_SERVICE_URL uses plain http to another machine, so MetaCode\'s requests (and the service\'s access token) travel unencrypted. Use https, or run the service on this machine.');
+      }
+    }
+  }
+  if (config.url) { try { config.baseHost = new URL(config.url).host; } catch (e) { config.baseHost = null; } }
   return config;
 }
 
-// Strips anything secret-looking from text that came from EMIS (or from an
-// exception) before it's logged or shown: the configured keys, bearer
-// tokens, emis- keys, and URLs (which could reveal internal infrastructure).
+// The service's access token: OPENCODE_SERVICE_TOKEN, else the token file in
+// OPENCODE_SERVICE_DATA_DIR (created when it's missing). Read when first
+// needed, and again when the service refuses it (it may have a new one).
+let serviceTokenCache = null;
+function serviceToken() {
+  if (!serviceTokenCache) serviceTokenCache = shared.readOrCreateToken(AI.settings.dataDir, AI.settings.tokenFromEnv);
+  return serviceTokenCache;
+}
+// → true when a fresh read gives a different token than the one refused
+function tokenChanged() {
+  const before = serviceTokenCache;
+  serviceTokenCache = null;
+  try { return serviceToken() !== before; } catch (e) { return false; }
+}
+
+// Strips anything secret-looking from text that came from the AI service, a
+// stand-in for it or an exception before it's logged or shown: the service's
+// token, bearer tokens, keys (emis-…, sk-…), and URLs (which could reveal
+// internal infrastructure).
 function redact(text, max) {
   let s = String(text === undefined || text === null ? '' : text);
-  EMIS.keys.forEach(k => { s = s.split(k).join('[redacted]'); });
+  if (serviceTokenCache) s = s.split(serviceTokenCache).join('[redacted]');
   s = s.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
-       .replace(/\bemis-[A-Za-z0-9._~+/=-]+/gi, '[redacted key]')
+       .replace(/\bemis-(?!models\b)[A-Za-z0-9._~+/=-]+/gi, '[redacted key]')
+       .replace(/\bsk-[A-Za-z0-9_-]{16,}/g, '[redacted key]')
        .replace(/\b(?:https?|wss?):\/\/[^\s"'<>]+/gi, '[url]')
        .replace(/[\u0000-\u001F\u007F]+/g, ' ')
        .replace(/\s{2,}/g, ' ')
@@ -258,182 +291,30 @@ function redact(text, max) {
   const limit = max || 300;
   return s.length > limit ? s.slice(0, limit - 1) + '…' : s;
 }
-
-// "…a1b2" for Settings → Key Rotation Status: only the last 4 characters.
-// Short keys show nothing.
-function maskKey(key) {
-  if (!key || key.length < 16) return '••••';
-  return '…' + key.slice(-4);
-}
-
-// How keys are named in the server log: by position, never by value.
-function keyLabel(key) {
-  return 'key ' + (EMIS.keys.indexOf(key) + 1) + '/' + EMIS.keys.length;
-}
-
-// ── Key rotation & EMIS quota ─────────────────────────────────────────────────
-// Keys are used round-robin, so load spreads across them. EMIS reports each
-// key's quota in X-RateLimit-* headers and answers 429 once the budget is
-// used up, until the window resets. A key in that state (or one EMIS asked
-// to pause) rests until the reset time EMIS gave and isn't called before
-// then; a key EMIS rejects (401/403) is tried after the working ones. Each
-// key is tried at most once per request, so nothing retries in a loop.
-// State lives in server memory: shared by every browser tab, reset on restart.
-
-// key -> { cooldownUntil, cooldownReason, requestCount, lastUsed, invalid, lastError, quota }
-const keyState = new Map();
-
-// EMIS's live model list, cached, and the parsed model list file (see "Model list" below)
-const modelList  = { ids: null, fetchedAt: 0, failure: null, failedAt: 0, pending: null };
-const modelsFile = { result: null, mtimeMs: null, checkedAt: 0, loads: 0 };
-
-function getKeyState(key) {
-  if (!keyState.has(key)) {
-    keyState.set(key, { cooldownUntil: null, cooldownReason: null, requestCount: 0, lastUsed: null, invalid: false, lastError: null, quota: null });
-  }
-  return keyState.get(key);
-}
-
-function isResting(state, now) {
-  return !!(state.cooldownUntil && state.cooldownUntil > now);
-}
-
-let rotationCursor = 0;
-
-// The keys to try for one request, in order: rotated start, resting keys
-// left out, rejected keys last.
-function keysForRequest(now) {
-  const pool = EMIS.keys;
-  if (!pool.length) return [];
-  const start = rotationCursor % pool.length;
-  rotationCursor = (rotationCursor + 1) % pool.length;
-  const ready = pool.slice(start).concat(pool.slice(0, start)).filter(k => !isResting(getKeyState(k), now));
-  return ready.filter(k => !getKeyState(k).invalid).concat(ready.filter(k => getKeyState(k).invalid));
-}
-
-const QUOTA_WINDOWS = new Set(['day', 'week', 'month']);
-
-// Reads EMIS's quota headers. Returns null when a response carries none.
-function readQuotaHeaders(headers) {
-  const num = name => {
-    const value = headers.get(name);
-    if (value === null || String(value).trim() === '') return null;
-    const n = Number(value);
-    return Number.isFinite(n) && n >= 0 ? n : null;
-  };
-  let reset = num('x-ratelimit-reset');                     // Unix timestamp (seconds)
-  if (reset !== null && reset > 1e11) reset = reset / 1000;  // tolerate milliseconds
-  const windowName = String(headers.get('x-ratelimit-window') || '').trim().toLowerCase();
-  const quota = {
-    window:           QUOTA_WINDOWS.has(windowName) ? windowName : null,
-    limitPrompts:     num('x-ratelimit-limit-prompts'),
-    limitTokens:      num('x-ratelimit-limit-tokens'),
-    remainingPrompts: num('x-ratelimit-remaining-prompts'),
-    remainingTokens:  num('x-ratelimit-remaining-tokens'),
-    resetAt:          reset ? Math.round(reset * 1000) : null
-  };
-  return Object.values(quota).some(v => v !== null) ? quota : null;
-}
-
-function plausibleResetTime(resetAt, now) {
-  return resetAt && resetAt > now && resetAt - now <= MAX_COOLDOWN_MS ? resetAt : null;
-}
-
-function isLow(quota) {
-  if (!quota) return false;
-  const low = (left, limit) => left !== null && limit > 0 && left / limit <= 0.1;
-  return low(quota.remainingPrompts, quota.limitPrompts) || low(quota.remainingTokens, quota.limitTokens);
-}
-
-function describeRemaining(quota) {
-  const parts = [];
-  if (quota.remainingPrompts !== null) parts.push(quota.remainingPrompts + ' prompt' + (quota.remainingPrompts === 1 ? '' : 's'));
-  if (quota.remainingTokens !== null) parts.push(quota.remainingTokens.toLocaleString() + ' tokens');
-  return parts.join(' and ') || 'little';
-}
-
-// Keeps the latest quota snapshot for a key; a key whose budget is used up
-// rests until the window resets.
-function recordQuota(key, quota, now) {
-  if (!quota) return;
-  const state = getKeyState(key);
-  const previous = state.quota;
-  state.quota = Object.assign({ updatedAt: now }, quota);
-  const usedUp = budgetUsedUp(quota);
-  const resetAt = plausibleResetTime(quota.resetAt, now);
-  if (usedUp && resetAt) {
-    if (!isResting(state, now)) {
-      console.warn('[ai] ' + keyLabel(key) + ' has used up its ' + (quota.window ? quota.window + ' ' : '') +
-        'quota; it rests until ' + new Date(resetAt).toLocaleString() + '.');
-    }
-    state.cooldownUntil = resetAt;
-    state.cooldownReason = 'quota';
-  } else if (isLow(quota) && !isLow(previous)) {
-    console.warn('[ai] ' + keyLabel(key) + ' is running low: ' + describeRemaining(quota) + ' left' +
-      (quota.window ? ' this ' + quota.window : '') + '.');
-  }
-}
-
-function retryAfterMs(value, now) {
-  if (!value) return null;
-  const seconds = Number(value);
-  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
-  const date = Date.parse(value);
-  return Number.isFinite(date) ? Math.max(0, date - now) : null;
-}
-
-// A 429 from EMIS: the key's budget is used up (or EMIS asked us to pause).
-// It rests until X-RateLimit-Reset, else Retry-After, else a short default.
-function onQuotaExhausted(key, quota, headers, now) {
-  const state = getKeyState(key);
-  const resetAt = plausibleResetTime(quota && quota.resetAt, now);
-  const waitMs = retryAfterMs(headers.get('retry-after'), now);
-  const until = resetAt || now + Math.min(MAX_COOLDOWN_MS, waitMs !== null ? Math.max(1000, waitMs) : DEFAULT_COOLDOWN_SEC * 1000);
-  const alreadyLogged = state.cooldownUntil === until;
-  state.cooldownUntil = until;
-  state.cooldownReason = resetAt ? 'quota' : 'paused';
-  state.lastError = 'HTTP 429';
-  if (!alreadyLogged) console.warn('[ai] ' + keyLabel(key) + ' got 429 from the AI service; it rests until ' + new Date(until).toLocaleString() + '.');
-}
-
-function markKeyRejected(key, r) {
-  const state = getKeyState(key);
-  state.invalid = true;
-  state.lastError = 'HTTP ' + r.status;
-  const detail = providerMessage(r);
-  console.error('[ai] The AI service rejected ' + keyLabel(key) + ' (HTTP ' + r.status + ')' + (detail ? ': ' + detail.replace(/\.$/, '') : '') + '.');
-}
-
-function markKeyUsed(key) {
-  const state = getKeyState(key);
-  state.requestCount++;
-  state.lastUsed = Date.now();
-  state.invalid = false;
-  state.lastError = null;
+// The service's own texts (written for MetaCode's operator, host names only):
+// shown as they are, short, without control characters
+function plainText(value, max) {
+  if (typeof value !== 'string') return null;
+  let s = value;
+  if (serviceTokenCache) s = s.split(serviceTokenCache).join('[redacted]');
+  s = s.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]').replace(/[\u0000-\u001F\u007F]+/g, ' ').replace(/\s{2,}/g, ' ').trim();
+  const limit = max || 400;
+  return s ? (s.length > limit ? s.slice(0, limit - 1) + '…' : s) : null;
 }
 
 // ── Rate-limited models ───────────────────────────────────────────────────────
-// A 429 means one of two things. If the quota headers say the key's budget is
-// used up, every model on that key would fail too: the key rests (above). If
-// the key still has budget, EMIS is throttling that one model: the model
-// rests instead, and requests for it are answered by the closest similar
-// model (closestModel, model-match.js) until it's back. A model that keeps
-// getting limited rests longer each time (1, 2, 4… up to 15 minutes, or what
-// Retry-After says). If one key gets 429s for three different models within
-// 20 seconds without quota headers, it's really the key being paused, so the
-// key rests as before. EMIS_MODEL_SWITCH=off in .env turns switching off;
-// each browser can also turn it off (Settings → AI models).
+// A 429 from the service says what is limited. scope "model": the provider
+// is throttling that one model, so the model rests and requests for it are
+// answered by the closest similar model (closestModel, model-match.js) until
+// it's back; a model that keeps getting limited rests longer each time (1, 2,
+// 4… up to 15 minutes, or what Retry-After says). scope "provider": the whole
+// provider can't be used for a while (see "Resting providers" below).
+// AI_MODEL_SWITCH=off in .env turns switching off; each browser can also
+// turn it off (Settings → AI models).
 
-// model -> { until, hits, lastAt, logged }
+// model -> { until, hits, lastAt }
 const modelLimits = new Map();
 
-// A key's budget is prompts and/or tokens per day, week or month (EMIS's
-// documentation). One kind is spent when nothing of it is left — unless its
-// limit is 0 too: a key without that kind of budget may report 0 of 0.
-function budgetUsedUp(quota) {
-  const spent = (left, limit) => left === 0 && limit !== 0;
-  return !!quota && (spent(quota.remainingPrompts, quota.limitPrompts) || spent(quota.remainingTokens, quota.limitTokens));
-}
 function modelRestingUntil(model, now) {
   const st = modelLimits.get(model);
   return st && st.until > now ? st.until : 0;
@@ -441,60 +322,95 @@ function modelRestingUntil(model, now) {
 function restingModels(now) {
   return Array.from(modelLimits.entries()).filter(([, st]) => st.until > now).map(([model, st]) => ({ model, until: st.until }));
 }
-// Several models refused on one key in a short time: the key is being paused.
-function keyWidePause(key, model, now) {
-  const state = getKeyState(key);
-  state.recentModelLimits = (state.recentModelLimits || []).filter(x => now - x.at < 20000 && x.model !== model);
-  state.recentModelLimits.push({ model, at: now });
-  if (state.recentModelLimits.length < 3) return false;
-  // It was the key all along: the models it refused aren't to blame
-  state.recentModelLimits.forEach(x => modelLimits.delete(x.model));
-  state.recentModelLimits = [];
-  return true;
+// How messages name a model: its name and provider from the service's list ("Claude Opus 5.5 (AI gateway)"), else its id
+function modelName(id) {
+  const info = modelList.result && modelList.result.info.get(id);
+  if (!info || !info.named) return id;
+  return info.name + (info.providerName ? ' (' + info.providerName + ')' : '');
 }
 function modelLimitedFailure(model, until, now) {
-  const f = fail(429, 'model_rate_limited', 'The AI service is rate-limiting the model "' + model + '" right now. It can be used again ' + describeWhen(until, now) + '.');
+  const f = fail(429, 'model_rate_limited', 'The AI service is rate-limiting the model "' + modelName(model) + '" right now. It can be used again ' + describeWhen(until, now) + '.');
   f.retryAfterSeconds = Math.max(1, Math.ceil((until - now) / 1000));
   f.model = model;
   return f;
 }
-function onModelLimited(model, headers, now) {
+// waitMs: how long the service said to wait (Retry-After), or null
+function onModelLimited(model, waitMs, now) {
   const st = modelLimits.get(model) || { until: 0, hits: 0, lastAt: 0 };
   st.hits = now - st.lastAt < MODEL_COOLDOWN_MAX_MS * 2 ? st.hits + 1 : 1;
   st.lastAt = now;
-  const waitMs = retryAfterMs(headers && headers.get('retry-after'), now);
   const backoff = Math.min(MODEL_COOLDOWN_MAX_MS, MODEL_COOLDOWN_MS * 2 ** Math.min(st.hits - 1, 6));
-  st.until = Math.max(st.until, now + (waitMs !== null ? Math.min(MODEL_COOLDOWN_MAX_MS, Math.max(1000, waitMs)) : backoff));
+  st.until = Math.max(st.until, now + (waitMs !== null && waitMs !== undefined ? Math.min(MODEL_COOLDOWN_MAX_MS, Math.max(1000, waitMs)) : backoff));
   modelLimits.set(model, st);
   console.warn('[ai] The AI service rate-limited the model "' + model + '"; it rests until ' + new Date(st.until).toLocaleTimeString() +
     (switchingAllowed() ? ' and requests for it use the closest similar model.' : '.'));
   return modelLimitedFailure(model, st.until, now);
 }
-function switchingAllowed() { return !/^(off|no|false|0)$/i.test(String(process.env.EMIS_MODEL_SWITCH || '').trim()); }
-// EMIS answers 429 when the key's budget runs out; its message can say so before the headers do
-// ("Token budget exceeded for this window"). Only wording about the budget counts: a model's own
-// limit passed on from its provider often says "quota" or "exhausted" ("Resource has been
-// exhausted (e.g. check quota)") while the key has plenty left, and resting the key for that
-// would stop every model until the window resets (days, for a weekly one).
-const BUDGET_MESSAGE = /\bbudget\b[^.]{0,40}\b(exceeded|used up|exhausted|spent|reached|run out|depleted)\b|\b(exceeded|used up|exhausted|spent|out of)\b[^.]{0,40}\bbudget\b/i;
-// A 429 from EMIS for this key and model: rest the key (→ true: try the next key) or only the model (→ the failure).
-function classifyLimit(key, model, quota, headers, now, detail) {
-  if (budgetUsedUp(quota) || BUDGET_MESSAGE.test(detail || '') || (!quota && model && keyWidePause(key, model, now)) || !model) {
-    onQuotaExhausted(key, quota, headers, now);
-    return true;
+function switchingAllowed() { return AI.switching; }
+
+// ── Resting providers ─────────────────────────────────────────────────────────
+// The service also says when a whole provider can't be used for a while: its
+// budget is used up (quota_exceeded: OpenCode Zen's free-model limit, every
+// gateway key's quota) or it asked to pause (rate_limited with scope
+// "provider"). Until the time the service gave, MetaCode doesn't send that
+// provider's models: requests for them are answered at once, or — with
+// switching on — by the closest model of another provider, like a
+// rate-limited model. The provider of a model is the part of its id before
+// the first "/" ('' for ids without one).
+const providerRest = new Map();    // provider -> { until, reason: 'quota' | 'paused', window, failure }
+const PAUSE_EXPLAINS_MS = 20 * 1000;   // the service pauses a gateway key after 429s for 3 models within 20 s
+
+const providerOf = id => splitModel(id).provider || '';
+function providerRestingUntil(provider, now) {
+  const st = providerRest.get(provider || '');
+  return st && st.until > now ? st.until : 0;
+}
+function restingProviders(now) {
+  return Array.from(providerRest.entries()).filter(([, st]) => st.until > now).map(([provider, st]) => ({ provider, until: st.until, reason: st.reason, window: st.window }));
+}
+function plausibleResetTime(resetAt, now) {
+  return resetAt && resetAt > now && resetAt - now <= MAX_COOLDOWN_MS ? resetAt : null;
+}
+function isProviderLimit(f) {
+  return !!f && f.status === 429 && (f.scope === 'provider' || f.type === 'quota_exceeded');
+}
+function onProviderLimited(failure, model, now) {
+  const provider = failure.provider || providerOf(model);
+  // A provider that asked to pause explains the 429s its models got just before (the gateway pausing
+  // the key, not each model): those models don't go on resting on their own after the pause
+  if (failure.type !== 'quota_exceeded') {
+    for (const [m, st] of modelLimits) if (providerOf(m) === provider && now - st.lastAt < PAUSE_EXPLAINS_MS) modelLimits.delete(m);
   }
-  return onModelLimited(model, headers, now);
+  const resetAt = plausibleResetTime(Date.parse(failure.resetAt || ''), now);
+  const until = resetAt || now + Math.min(MAX_COOLDOWN_MS, failure.retryAfterSeconds ? Math.max(1000, failure.retryAfterSeconds * 1000) : DEFAULT_PAUSE_SEC * 1000);
+  const before = providerRest.get(provider);
+  providerRest.set(provider, { until, reason: failure.type === 'quota_exceeded' ? 'quota' : 'paused', window: failure.window || null, failure });
+  if (!before || before.until !== until) {
+    console.warn('[ai] The AI service says ' + (provider ? 'the provider "' + provider + '"' : 'its provider') + ' can\'t be used until ' + new Date(until).toLocaleString() +
+      (failure.type === 'quota_exceeded' ? ' (usage quota used up)' : ' (asked to pause)') + (switchingAllowed() ? '; requests for its models use the closest model of another provider.' : '.'));
+  }
+  return providerRestFailure(provider, now);
+}
+// The failure a resting provider's requests get, without asking the service again
+function providerRestFailure(provider, now) {
+  const st = providerRest.get(provider || '');
+  return Object.assign({}, st.failure, { retryAfterSeconds: Math.max(1, Math.ceil((st.until - now) / 1000)), scope: 'provider', provider: provider || undefined });
+}
+// A 429 from the service: only this model (it rests; answerChat picks the closest one) or its whole provider
+function onLimited(failure, model, now) {
+  if (isProviderLimit(failure)) return onProviderLimited(failure, model, now);
+  return onModelLimited(model, failure.retryAfterSeconds ? failure.retryAfterSeconds * 1000 : null, now);
 }
 
-// Server errors (HTTP 5xx): EMIS can't run a model right now, or is having
-// problems overall. emisRequest has already retried by then. The model that
-// still failed rests a little (30 s, doubling while it keeps failing, up to
-// 5 minutes): requests for the server's default model go straight to the
+// Server errors (HTTP 5xx): the provider can't run a model right now, or is
+// having problems overall. aiRequest has already retried by then. The model
+// that still failed rests a little (30 s, doubling while it keeps failing, up
+// to 5 minutes): requests for the server's default model go straight to the
 // closest similar model meanwhile, and failing models aren't picked as
-// substitutes. When 3 different models fail within a minute, it's EMIS
-// itself: trying other models won't help, so MetaCode stops switching and
-// says so (and AI Coding batches pause; see /api/ai/batch). Any answer
-// clears this.
+// substitutes. When 3 different models fail within a minute, it's the
+// service (or the providers) as a whole: trying other models won't help, so
+// MetaCode stops switching and says so (and AI Coding batches pause; see
+// /api/ai/batch). Any answer clears this.
 const MODEL_DOWN_MS = 30 * 1000;
 const MODEL_DOWN_MAX_MS = 5 * 60 * 1000;
 const SERVICE_TROUBLE_WINDOW_MS = 60 * 1000;
@@ -535,13 +451,16 @@ function serviceTrouble(now) {
 }
 
 // The available model most like `target` that can take this request (not
-// rate-limited or failing, not tried yet, supports what the request needs), or null.
+// rate-limited or failing, its provider not resting, not tried yet, offered
+// right now, supports what the request needs), or null. The same model from
+// another provider comes first (rankSimilar).
 async function closestModel(target, chatRequest, tried) {
   const list = await getModelList(false);
   if (!list.ok) return null;
   const now = Date.now();
-  const candidates = list.ids.filter(id => !tried.has(id) && !NOT_A_CHAT_MODEL.test(id) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
-    !capabilityProblem(chatRequest, list.info ? list.info.get(id) : null));
+  const infoOf = id => list.info.get(id) || null;
+  const candidates = list.ids.filter(id => !tried.has(id) && !NOT_A_CHAT_MODEL.test(splitModel(id).model) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
+    !providerRestingUntil(providerOf(id), now) && !(infoOf(id) && infoOf(id).available === false) && !capabilityProblem(chatRequest, infoOf(id)));
   // The same model under another spelling of its id (claude-opus-4-8 / claude-opus-4.8) as one
   // already tried is most likely limited or failing too: a different model first, other spellings last
   const ranked = rankSimilar(target, candidates, list.info);
@@ -557,13 +476,24 @@ function noteSwitch(from, to, why) {
   console.warn('[ai] "' + from + '" ' + (why === 'rate_limited' ? 'is rate-limited' : 'failed') + '; answered with the closest model, "' + to + '".');
 }
 
-// ── Talking to EMIS ───────────────────────────────────────────────────────────
+// ── Talking to the service ────────────────────────────────────────────────────
 const TIMED_OUT   = new Error('AI request timed out');
 const CLIENT_GONE = new Error('Browser disconnected');
 const CANCELLED   = new Error('Request cancelled');
 
-function emisHeaders(key, accept, hasBody) {
-  const headers = { 'Authorization': 'Bearer ' + key, 'Accept': accept };
+// Straight to the service: HTTPS_PROXY and the like are for the service's own
+// requests to the providers, and a proxy would also see the access token.
+const undici = require('undici');
+let serviceAgent = null;
+function serviceDispatcher() {
+  if (!serviceAgent) serviceAgent = new undici.Agent({ connect: { timeout: 10000 } });
+  return serviceAgent;
+}
+
+// X-Request-Timeout-Ms: how long MetaCode waits, so the service gives up on
+// the provider a little earlier and can still say why.
+function serviceHeaders(token, accept, hasBody, timeoutMs) {
+  const headers = { 'Authorization': 'Bearer ' + token, 'Accept': accept, 'X-Request-Timeout-Ms': String(timeoutMs) };
   if (hasBody) headers['Content-Type'] = 'application/json';
   return headers;
 }
@@ -582,7 +512,7 @@ function linkedAbort(parentSignal) {
 }
 
 // Watches for the browser going away before the response is finished, so the
-// EMIS request can be cancelled instead of spending quota for nobody.
+// AI request can be cancelled instead of spending quota for nobody.
 function watchClient(res) {
   const controller = new AbortController();
   const onClose = () => { if (!res.writableFinished) controller.abort(CLIENT_GONE); };
@@ -601,83 +531,75 @@ function transportFailure(err, signal) {
   return { failed: 'network', code: String((cause && cause.code) || '') };
 }
 
-// One complete (non-streaming) HTTP exchange with EMIS. Never throws:
-// resolves to { status, ok, headers, text, json } or { failed: 'timeout' |
-// 'network' | 'aborted' }. Redirects are not followed, so the key is only
-// ever sent to the configured EMIS address.
-// Outbound proxy: Node's built-in fetch ignores HTTPS_PROXY, so on networks
-// that only allow traffic through a proxy (many school and office networks)
-// every EMIS request failed with a network error (HTTP 502). EMIS_PROXY, or
-// else HTTPS_PROXY / HTTP_PROXY (with NO_PROXY), is used when set.
-let proxyAgent = null;
-function proxyUrl() {
-  return String(process.env.EMIS_PROXY || process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy || '').trim();
+// The error the service answered with, when it is one of its own (§ error
+// types in docs/opencode-service.md); null for anything else (an older
+// service, or a stand-in that answers like a provider would).
+const SERVICE_ERROR_TYPES = new Set(['invalid_request', 'unsupported_feature', 'authentication_error', 'permission_error', 'blocked', 'model_not_found',
+  'not_configured', 'request_too_large', 'rate_limited', 'quota_exceeded', 'cancelled', 'upstream_error', 'malformed_response', 'network', 'timeout', 'internal_error']);
+function serviceError(r) {
+  const e = r && r.json && typeof r.json === 'object' && r.json.error && typeof r.json.error === 'object' ? r.json.error : null;
+  return e && SERVICE_ERROR_TYPES.has(e.type) ? e : null;
 }
-function emisFetch(url, init) {
-  if (!proxyUrl()) return fetch(url, init);
-  const undici = require('undici');
-  if (!proxyAgent) proxyAgent = process.env.EMIS_PROXY ? new undici.ProxyAgent(process.env.EMIS_PROXY.trim()) : new undici.EnvHttpProxyAgent();
-  return undici.fetch(url, Object.assign({}, init, { dispatcher: proxyAgent }));
+// A 401 about MetaCode's access token (not a provider refusing its key)
+function tokenRefused(r) {
+  if (r.status !== 401) return false;
+  const e = serviceError(r);
+  return !e || !e.provider;
 }
 
-// Retries an EMIS call that failed for a temporary reason (connection reset,
-// EMIS/gateway error 500/502/503/504, timeout status 408, unreadable body):
-// up to 2 more tries, 0.6 s then 1.8 s apart. Configuration problems (bad
-// address, wrong key, unknown model) aren't retried.
+// Retries a call to the service that failed for a temporary reason (a dropped
+// connection, a provider's server error 500/502/503/504, 408): up to 2 more
+// tries, 0.6 s then 1.8 s apart. This is the only place AI requests are
+// retried (the service never retries a provider itself). A service that
+// isn't running (connection refused), configuration problems, a timeout that
+// already took the whole AI_TIMEOUT_MS and unreadable answers aren't retried.
 const RETRY_STATUS = new Set([408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
 const PERMANENT_NETWORK = /^(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ERR_INVALID_URL)$|CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/i;
 function isTransient(r) {
   if (r.failed === 'network') return !PERMANENT_NETWORK.test(String(r.code || ''));
   if (r.failed) return false;
-  return RETRY_STATUS.has(r.status);   // a 200 is an answer: an empty or odd one is handled by switching to streaming, not by retrying
+  const e = serviceError(r);
+  if (e) {
+    if (e.type === 'upstream_error') return !e.upstream_status || RETRY_STATUS.has(Number(e.upstream_status));
+    if (e.type === 'network') return !PERMANENT_NETWORK.test(String(e.code || ''));
+    return false;
+  }
+  return RETRY_STATUS.has(r.status);   // a 200 is an answer, never retried
 }
-async function emisRequest(method, pathname, key, body, opts) {
+// One request to the service, retried as above. Never throws: resolves to
+// { status, ok, headers, text, json } or { failed: 'timeout' | 'network' | 'aborted' | 'token' }.
+async function aiRequest(method, pathname, body, opts) {
   const delays = opts.retry === false ? [] : [600, 1800];
-  let r = await emisRequestOnce(method, pathname, key, body, opts);
+  let r = await aiRequestOnce(method, pathname, body, opts);
   for (const ms of delays) {
     if (!isTransient(r) || (opts.signal && opts.signal.aborted)) break;
     console.warn('[ai] ' + method + ' ' + pathname + ' failed (' + (r.failed ? r.failed + ' ' + (r.code || '') : 'HTTP ' + r.status) + '); retrying in ' + (ms / 1000) + ' s');
     await new Promise(resolve => setTimeout(resolve, ms));
     if (opts.signal && opts.signal.aborted) break;
-    r = await emisRequestOnce(method, pathname, key, body, opts);
+    r = await aiRequestOnce(method, pathname, body, opts);
   }
   return r;
 }
-// EMIS's documentation shows curl and Python's OpenAI SDK. Requests go through
-// a Python worker (python/emis_fetch.py: the openai package if installed, else
-// httpx/urllib) when Python is available, and through Node.js otherwise or if
-// that fails; streaming always goes through Node.js. (EMIS's website runs a
-// browser check, which doesn't apply to API requests made with a key.)
-// EMIS_TRANSPORT: auto (default) | python | node.
-const { createEmisPython } = require('./emis-python');
-const emisPython = createEmisPython();
-function emisTransport() { const t = String(process.env.EMIS_TRANSPORT || 'auto').trim().toLowerCase(); return ['python', 'node'].includes(t) ? t : 'auto'; }
-
-async function emisRequestOnce(method, pathname, key, body, opts) {
-  const transport = emisTransport();
-  if (transport !== 'node' && (!(body && body.stream) || opts.buffered)) {
-    const r = await emisPython.request({ method, url: EMIS.baseUrl + pathname, key, body, timeoutMs: opts.timeoutMs, signal: opts.signal, proxy: String(process.env.EMIS_PROXY || '').trim() });
-    if (r && !r.failed) return { status: r.status, ok: r.ok, headers: r.headers, text: r.text, json: parseJson(r.text), pathname, via: 'python' };
-    if (r && r.failed === 'aborted') return { failed: 'aborted' };
-    if (r) console.warn('[ai] Python request to ' + pathname + ' failed (' + r.failed + ' ' + (r.code || '') + '): ' + redact(String(r.message || ''), 300));
-    if (transport === 'python') return r ? { failed: r.failed === 'client' ? 'network' : r.failed, code: r.code, detail: r.message } : { failed: 'network', code: 'NO_PYTHON', detail: 'Python wasn\'t found' };
-    // auto: try the same request from Node.js before giving up
-    const n = await emisRequestNode(method, pathname, key, body, opts);
-    if (n.failed && r) n.detail = 'Python: ' + (r.message || r.code) + (n.code ? '; Node.js: ' + n.code : '');
-    return n;
-  }
-  return emisRequestNode(method, pathname, key, body, opts);
+async function aiRequestOnce(method, pathname, body, opts) {
+  const r = await serviceFetch(method, pathname, body, opts);
+  // The service has another token now (its token file was made again, or .env changed): read it again, once
+  if (!r.failed && tokenRefused(r) && tokenChanged()) return serviceFetch(method, pathname, body, opts);
+  return r;
 }
-async function emisRequestNode(method, pathname, key, body, opts) {
+// Redirects are not followed, so the token is only ever sent to the configured address.
+async function serviceFetch(method, pathname, body, opts) {
+  let token;
+  try { token = serviceToken(); } catch (e) { return { failed: 'token', code: e.code || '' }; }
   const { controller, unlink } = linkedAbort(opts.signal);
   const timer = setTimeout(() => controller.abort(TIMED_OUT), opts.timeoutMs);
   try {
-    const response = await emisFetch(EMIS.baseUrl + pathname, {
+    const response = await undici.fetch(AI.url + pathname, {
       method,
-      headers: emisHeaders(key, body && body.stream ? 'text/event-stream' : 'application/json', !!body),
+      headers: serviceHeaders(token, body && body.stream ? 'text/event-stream' : 'application/json', !!body, opts.timeoutMs),
       body: body ? JSON.stringify(body) : undefined,
       redirect: 'manual',
-      signal: controller.signal
+      signal: controller.signal,
+      dispatcher: serviceDispatcher()
     });
     const text = await response.text();
     return { status: response.status, ok: response.ok, headers: response.headers, text, json: parseJson(text), pathname };
@@ -689,7 +611,8 @@ async function emisRequestNode(method, pathname, key, body, opts) {
   }
 }
 
-// EMIS's own explanation from an error response, made safe to log or show.
+// The provider's own explanation from an error response that isn't one of
+// the service's own (a stand-in answering like a provider), made safe to log or show.
 function providerMessage(r) {
   const j = r.json;
   let message = '';
@@ -704,13 +627,24 @@ function providerMessage(r) {
   return message ? redact(message, 200) : '';
 }
 
+function retryAfterMs(value, now) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) return seconds * 1000;
+  const date = Date.parse(value);
+  return Number.isFinite(date) ? Math.max(0, date - now) : null;
+}
+function retryAfterSecondsOf(r) {
+  const ms = r.headers && r.headers.get ? retryAfterMs(r.headers.get('retry-after'), Date.now()) : null;
+  return ms !== null ? Math.max(1, Math.ceil(ms / 1000)) : null;
+}
+
 // ── Errors ────────────────────────────────────────────────────────────────────
 // Every failure keeps MetaCode's existing error contract — an HTTP status
 // plus { error: { message } } — and adds a machine-readable `type`. Messages
-// say what to do, never echo keys, headers, URLs or stack traces, and avoid
-// pointing at the Settings key box, which EMIS doesn't use.
+// say what to do, never echo keys, tokens, headers, URLs or stack traces.
 function timeoutSeconds() {
-  return String(EMIS.timeoutMs / 1000);
+  return String(AI.timeoutMs / 1000);
 }
 
 function fail(status, type, message, log) {
@@ -718,75 +652,119 @@ function fail(status, type, message, log) {
 }
 
 function notConfigured() {
-  if (EMIS.problem) return fail(500, 'not_configured', 'MetaCode\'s AI isn\'t set up correctly: ' + EMIS.problem);
-  if (!EMIS.keys.length) {
-    return fail(401, 'not_configured', 'MetaCode\'s AI isn\'t set up yet: add your AI key to the server\'s .env file ' +
-      '(EMIS_API_KEY=…), then click "Reload .env" in Settings (or restart MetaCode).');
-  }
+  if (AI.off) return fail(503, 'not_configured', 'MetaCode\'s AI is switched off on this server (OPENCODE_SERVICE_URL=off).');
+  if (AI.problem) return fail(500, 'not_configured', 'MetaCode\'s AI isn\'t set up correctly: ' + AI.problem);
   return null;
 }
 
+// "isn't running at 127.0.0.1:4097" and what to do about it (startingNow: MetaCode has just started it)
+function notRunningMessage(startingNow) {
+  const sup = supervisor.state();
+  const where = AI.baseHost || 'its address';
+  if (sup.managed && sup.problem) return 'MetaCode\'s AI service (OpenCode) isn\'t running at ' + where + '. ' + sup.problem;
+  if (sup.managed || startingNow) return 'MetaCode\'s AI service (OpenCode) isn\'t running at ' + where + ' yet: MetaCode is starting it. Try again in a few seconds.';
+  if (AI.managed === 'off') return 'MetaCode\'s AI service (OpenCode) isn\'t running at ' + where + '. Start it (with pm2: "pm2 start ecosystem.config.cjs"), or check OPENCODE_SERVICE_URL in the server\'s .env file.';
+  return 'MetaCode\'s AI service (OpenCode) isn\'t running at ' + where + '. Start it ("node opencode/server.mjs", or with pm2: "pm2 start ecosystem.config.cjs"), or check OPENCODE_SERVICE_URL in the server\'s .env file.';
+}
+
 function networkMessage(code) {
-  if (/^(ENOTFOUND|EAI_AGAIN)$/.test(code)) return 'Couldn\'t find the AI service (address lookup failed). Check your internet connection and EMIS_BASE_URL in the server\'s .env file.';
-  if (code === 'ECONNREFUSED') return 'The AI service refused the connection. Check EMIS_BASE_URL in the server\'s .env file.';
-  if (/CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/i.test(code)) return 'Couldn\'t make a secure connection to the AI service (certificate problem).';
-  if (/^(ECONNRESET|EPIPE|UND_ERR_SOCKET)$/.test(code)) return 'The connection to the AI service dropped before it answered. Try again.';
-  if (/TIMEOUT|ETIMEDOUT/.test(code)) return 'Couldn\'t connect to the AI service in time. Check your internet connection and try again.';
-  return 'Couldn\'t reach the AI service. Check your internet connection and try again. If your network only allows the internet through a proxy, add HTTPS_PROXY=http://proxy:port (or EMIS_PROXY) to .env and click Reload .env in Settings.';
+  const where = AI.baseHost || 'its address';
+  if (code === 'ECONNREFUSED') return notRunningMessage(maybeStartService());
+  if (/^(ENOTFOUND|EAI_AGAIN)$/.test(code)) return 'Couldn\'t find MetaCode\'s AI service at ' + where + ' (address lookup failed). Check OPENCODE_SERVICE_URL in the server\'s .env file.';
+  if (/CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/i.test(code)) return 'Couldn\'t make a secure connection to MetaCode\'s AI service at ' + where + ' (certificate problem).';
+  if (/^(ECONNRESET|EPIPE|UND_ERR_SOCKET)$/.test(code)) return 'The connection to MetaCode\'s AI service dropped before it answered. Try again.';
+  if (/TIMEOUT|ETIMEDOUT/.test(code)) return 'Couldn\'t connect to MetaCode\'s AI service at ' + where + ' in time. Try again.';
+  return 'Couldn\'t reach MetaCode\'s AI service at ' + where + (code ? ' (' + code + ')' : '') + '. Check OPENCODE_SERVICE_URL in the server\'s .env file.';
 }
 
 const MODEL_MISSING = /model[^.]{0,80}(not\s+found|does\s*n[o']?t\s+exist|unknown|is\s+not\s+available|no\s+such)|(unknown|invalid|no\s+such)\s+model/i;
+const SERVICE_STATUS = { invalid_request: 400, unsupported_feature: 400, authentication_error: 401, permission_error: 403, blocked: 403, model_not_found: 404,
+  not_configured: 503, request_too_large: 413, rate_limited: 429, quota_exceeded: 429, cancelled: 499, upstream_error: 502, malformed_response: 502,
+  network: 502, timeout: 504, internal_error: 500 };
 
-// Turns a failed exchange with EMIS into MetaCode's error format.
-// ctx: { model, verified } — the model sent, and whether EMIS's list had it.
+// One of the service's own errors: its status, type and message (already
+// written for MetaCode's operator) as they are.
+function fromServiceError(r, e) {
+  const status = r.status >= 400 && r.status < 600 ? r.status : SERVICE_STATUS[e.type];
+  let message = plainText(e.message, 600) || 'The AI service couldn\'t answer (' + e.type + ').';
+  if (e.type === 'authentication_error' && !e.provider) {
+    message = 'MetaCode\'s AI service (OpenCode) didn\'t accept MetaCode\'s access token. If the service runs separately (pm2), give both the same ' +
+      'OPENCODE_SERVICE_TOKEN (or the same OPENCODE_SERVICE_DATA_DIR) in .env, restart the service and click Reload .env in Settings.';
+  }
+  const f = fail(status, e.type, message, 'HTTP ' + r.status + (e.provider ? ' from ' + plainText(e.provider, 40) : '') + ': ' + message);
+  const seconds = Number(e.retry_after_seconds);
+  f.retryAfterSeconds = Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : (retryAfterSecondsOf(r) || undefined);
+  if (typeof e.reset_at === 'string' && Number.isFinite(Date.parse(e.reset_at))) f.resetAt = new Date(Date.parse(e.reset_at)).toISOString();
+  if (['day', 'week', 'month'].includes(e.window)) f.window = e.window;
+  if (e.scope === 'model' || e.scope === 'provider') f.scope = e.scope;
+  if (safeModelId(e.provider)) f.provider = e.provider;
+  if (safeModelId(e.model)) f.model = e.model;
+  if (Number.isInteger(e.upstream_status)) f.upstreamStatus = e.upstream_status;
+  else if (e.type === 'upstream_error') f.upstreamStatus = 502;
+  if (typeof e.code === 'string' && /^[A-Za-z0-9_.-]{1,60}$/.test(e.code)) f.code = e.code;
+  if (e.type === 'network') f.transient = !PERMANENT_NETWORK.test(String(e.code || ''));
+  if (e.type === 'model_not_found') modelList.fetchedAt = 0;      // the list may have changed: fetch it again next time
+  return f;
+}
+
+// Turns a failed exchange with the service into MetaCode's error format.
+// ctx: { model, verified } — the model sent, and whether the service's list had it.
 function describeFailure(r, ctx) {
   ctx = ctx || {};
+  if (r.failed === 'token') {
+    return fail(500, 'not_configured', 'MetaCode couldn\'t read or create the AI service\'s access token in ' + AI.settings.dataDir + (r.code ? ' (' + r.code + ')' : '') +
+      '. Set OPENCODE_SERVICE_TOKEN in the server\'s .env file (at least 16 characters, the same for the service), or make that folder writable.');
+  }
   if (r.failed === 'timeout') {
     return fail(504, 'timeout', 'The AI service didn\'t answer within ' + timeoutSeconds() + ' seconds. Try again; if this keeps ' +
-      'happening, raise EMIS_TIMEOUT_MS in the server\'s .env file.');
+      'happening, raise AI_TIMEOUT_MS in the server\'s .env file.');
   }
   if (r.failed === 'network') {
-    return Object.assign(fail(502, 'network', networkMessage(r.code) + (r.detail ? ' (details: ' + redact(String(r.detail), 300) + ')' : ''), 'network error ' + (r.code || '(no code)') + (r.detail ? ' — ' + r.detail : '')),
+    return Object.assign(fail(502, 'network', networkMessage(r.code), 'network error ' + (r.code || '(no code)') + ' reaching the AI service at ' + (AI.baseHost || '?')),
       { transient: isTransient(r) });
   }
+  const e = serviceError(r);
+  if (e) return fromServiceError(r, e);
 
+  // Not one of the service's own errors: judged by the status, like a provider's answer
   const status = r.status;
   const detail = providerMessage(r);
   const log = 'HTTP ' + status + (detail ? ': ' + detail : '');
   if (status >= 300 && status < 400) {
-    return fail(502, 'bad_base_url', 'The AI service answered with a redirect instead of a result. Check EMIS_BASE_URL in the server\'s .env file.', log);
+    return fail(502, 'bad_base_url', 'MetaCode\'s AI service answered with a redirect instead of a result. Check OPENCODE_SERVICE_URL in the server\'s .env file.', log);
   }
   if (status === 401) {
-    return fail(401, 'authentication_error', 'The AI service didn\'t accept the configured key' + (detail ? ' ("' + detail + '")' : '') + '. Check EMIS_API_KEY in the server\'s .env file, then click Reload .env in Settings.', log);
+    return fail(401, 'authentication_error', 'The AI service didn\'t accept the request' + (detail ? ' ("' + detail + '")' : '') + '. Check the AI provider\'s key ' +
+      '(Settings → AI providers); if the service runs separately, give MetaCode and the service the same OPENCODE_SERVICE_TOKEN.', log);
   }
   if (status === 403) {
     if (/^\s*</.test(r.text || '')) {
-      return fail(403, 'blocked', 'A web page answered (HTTP 403) instead of the AI service\'s API. The AI service\'s website check doesn\'t apply to ' +
-        'API requests made with a key, so check that EMIS_BASE_URL is ' + EMIS_DEFAULT_BASE_URL + ' (the API address, ending in /v1) and that EMIS_API_KEY ' +
-        'holds your key, then click Reload .env in Settings. If both are right, a proxy or firewall on this network may be answering instead (see EMIS_PROXY / HTTPS_PROXY).', log);
+      return fail(403, 'blocked', 'A web page answered (HTTP 403) instead of MetaCode\'s AI service. Check that OPENCODE_SERVICE_URL in the server\'s .env file is the ' +
+        'service\'s address, ending in /v1 (default ' + AI.settings.url + '), then click Reload .env in Settings.', log);
     }
-    return fail(403, 'permission_error', 'The AI service refused this request' + (detail ? ': "' + detail + '"' : ' for the configured key') +
-      (ctx.model ? ' (model "' + ctx.model + '")' : '') + '. Check EMIS_API_KEY in the server\'s .env file, or pick another model in Settings → AI models.', log);
+    return fail(403, 'permission_error', 'The AI service refused this request' + (detail ? ': "' + detail + '"' : '') +
+      (ctx.model ? ' (model "' + modelName(ctx.model) + '")' : '') + '. Pick another model in Settings → AI models, or check the AI provider\'s key.', log);
   }
   if (ctx.model && (status === 404 || ((status === 400 || status === 422) && MODEL_MISSING.test(detail)))) {
-    modelList.fetchedAt = 0;                       // EMIS's list may have changed: fetch it again next time
+    modelList.fetchedAt = 0;                       // the list may have changed: fetch it again next time
     if (status !== 404 || /model/i.test(detail) || ctx.verified) {
-      if (ctx.source === 'file') {
-        return fail(404, 'model_not_found', 'The AI service doesn\'t offer the model "' + ctx.model + '", although it\'s listed in ' + MODELS_FILE_NAME + '. ' +
-          'Pick another model in Settings → AI models, or update ' + MODELS_FILE_NAME + '.', log);
-      }
-      return fail(404, 'model_not_found', 'The AI service doesn\'t offer the model "' + ctx.model + '". Pick a model in Settings → AI models, ' +
-        'or set EMIS_MODEL in the server\'s .env file.', log);
+      return fail(404, 'model_not_found', 'The AI service doesn\'t offer the model "' + modelName(ctx.model) + '". Pick a model in Settings → AI models, ' +
+        'or set OPENCODE_MODEL in the server\'s .env file.', log);
     }
-    return fail(404, 'not_found', 'The AI service answered "not found" for the model "' + ctx.model + '". Check the model (Settings → AI models) ' +
-      'and that EMIS_BASE_URL in the server\'s .env file ends in /v1.', log);
+    return fail(404, 'not_found', 'The AI service answered "not found" for the model "' + modelName(ctx.model) + '". Check the model (Settings → AI models) ' +
+      'and that OPENCODE_SERVICE_URL in the server\'s .env file ends in /v1.', log);
   }
   if (status === 404) {
-    return fail(502, 'bad_base_url', 'The AI service couldn\'t find the requested endpoint. Check that EMIS_BASE_URL in the server\'s .env file ends in /v1.', log);
+    return fail(502, 'bad_base_url', 'MetaCode\'s AI service couldn\'t find the requested endpoint. Check that OPENCODE_SERVICE_URL in the server\'s .env file ends in /v1.', log);
   }
   if (status === 408) return fail(504, 'timeout', 'The AI service took too long to answer. Try again.', log);
   if (status === 413) return fail(413, 'request_too_large', 'The request was too large for the AI service. Try a shorter text or a smaller sample.', log);
-  if (status === 429) return fail(429, 'rate_limited', 'The AI service answered "too many requests" — the AI key\'s budget for the day, week or month may be used up (it lasts until the window rolls over). Try again later, or add another key to EMIS_API_KEY.', log);
+  if (status === 429) {
+    const f = fail(429, 'rate_limited', 'The AI service answered "too many requests". Try again later.', log);
+    const wait = retryAfterSecondsOf(r);
+    if (wait) f.retryAfterSeconds = wait;
+    return f;
+  }
   if (status >= 500) return Object.assign(fail(502, 'upstream_error', 'The AI service had a temporary server problem (HTTP ' + status + '). Try again in a moment.', log), { upstreamStatus: status });
   if (status >= 400) {
     return fail(400, 'invalid_request', 'The AI service couldn\'t process the request' + (detail ? ': ' + detail : ' (HTTP ' + status + ').'), log);
@@ -803,31 +781,6 @@ function describeWhen(until, now) {
   else if (ms < 36 * 3600 * 1000) rel = 'in about ' + plural(Math.round(ms / 3600000), 'hour');
   else rel = 'in about ' + plural(Math.round(ms / 86400000), 'day');
   return rel + ' (' + new Date(until).toLocaleString() + ')';
-}
-
-function allKeysResting(now) {
-  return EMIS.keys.length > 0 && EMIS.keys.every(key => isResting(getKeyState(key), now));
-}
-
-// Every usable key is resting: answer 429 right away, without calling EMIS,
-// saying when the first key becomes available again.
-function quotaFailure(now) {
-  const resting = EMIS.keys.map(getKeyState).filter(state => isResting(state, now));
-  if (!resting.length) return fail(503, 'unavailable', 'No AI key is available right now. Try again in a moment.');
-  const next = resting.reduce((a, b) => (b.cooldownUntil < a.cooldownUntil ? b : a));
-  const until = next.cooldownUntil;
-  const when = describeWhen(until, now);
-  const windowName = next.quota && next.quota.window;
-  const usedUp = next.cooldownReason === 'quota';
-  let message;
-  if (!usedUp) message = 'The AI service asked MetaCode to pause. Try again ' + when + '.';
-  else if (EMIS.keys.length > 1) message = 'Every configured AI key has used up its usage quota. The first one resets ' + when + '.';
-  else message = 'Your AI usage quota' + (windowName ? ' for this ' + windowName : '') + ' is used up. It resets ' + when + '.';
-  const failure = fail(429, usedUp ? 'quota_exceeded' : 'rate_limited', message);
-  failure.retryAfterSeconds = Math.max(1, Math.ceil((until - now) / 1000));
-  failure.resetAt = new Date(until).toISOString();
-  if (windowName) failure.window = windowName;
-  return failure;
 }
 
 // Identical failures can repeat many times a second (AI Coding retries each
@@ -850,23 +803,138 @@ function sendFailure(res, f) {
   if (f.resetAt) error.resetAt = f.resetAt;
   if (f.retryAfterSeconds) error.retryAfterSeconds = f.retryAfterSeconds;
   if (f.window) error.window = f.window;
+  if (f.scope) error.scope = f.scope;
   res.status(f.status).json({ error });
 }
 
+// ── The service: readiness ────────────────────────────────────────────────────
+// AI counts as ready when it's configured (not switched off) and the service,
+// when last asked (GET /v1/status), was answering with at least one provider
+// set up. Before the first answer — and while MetaCode is starting the
+// service — it counts as ready, so pages don't flash "AI not set up". The
+// answer is kept, and asked again at start, after Reload .env, when the
+// Settings page reads it and it's older than 10 s, and by the status page.
+const serviceState = { ok: null, at: 0, status: null, failure: null, pending: null, generation: 0 };
+
+function probeService() {
+  if (notConfigured()) return Promise.resolve(serviceState);
+  if (serviceState.pending) return serviceState.pending;
+  const gen = serviceState.generation;
+  const pending = aiRequest('GET', '/status', null, { timeoutMs: STATUS_TIMEOUT_MS, retry: false })
+    .then(r => {
+      if (gen !== serviceState.generation) return serviceState;
+      serviceState.at = Date.now();
+      if (!r.failed && r.ok && r.json && typeof r.json === 'object' && !Array.isArray(r.json)) Object.assign(serviceState, { ok: true, status: r.json, failure: null });
+      // (an older service, or a stand-in, without /v1/status: it answers, so it counts as up)
+      else if (!r.failed && r.status === 404 && !serviceError(r)) Object.assign(serviceState, { ok: true, status: null, failure: null });
+      else Object.assign(serviceState, { ok: false, status: null, failure: describeFailure(r) });
+      return serviceState;
+    })
+    .catch(err => {
+      Object.assign(serviceState, { ok: false, at: Date.now(), status: null, failure: fail(500, 'internal_error', 'Couldn\'t ask the AI service how it is.', redact(err && err.message)) });
+      return serviceState;
+    })
+    .finally(() => { if (serviceState.pending === pending) serviceState.pending = null; });
+  serviceState.pending = pending;
+  return pending;
+}
+async function freshServiceState(maxAgeMs) {
+  if (!notConfigured() && !serviceStarting() && (serviceState.ok === null || Date.now() - serviceState.at > maxAgeMs)) await probeService();
+  return serviceState;
+}
+
+// MetaCode started the service and is waiting for its first answer
+function serviceStarting() {
+  const sup = supervisor.state();
+  return sup.starting && !sup.problem;
+}
+// MetaCode's own copy of the service keeps stopping (sup.problem says why)
+function serviceFailing() {
+  const sup = supervisor.state();
+  return sup.managed && !sup.ready && !!sup.problem;
+}
+function aiReady() {
+  if (notConfigured() || serviceFailing()) return false;
+  if (serviceState.ok === null || serviceStarting()) return true;
+  if (!serviceState.ok) return false;
+  return !serviceState.status || serviceState.status.ready !== false;
+}
+// Why AI isn't ready, for the AI Coding Lab and the AI Scraper (null: it is)
+function aiProblem() {
+  const f = notConfigured();
+  if (f) return f.message;
+  if (aiReady()) return null;
+  if (serviceFailing()) return notRunningMessage();
+  if (!serviceState.ok) return serviceState.failure ? serviceState.failure.message : notRunningMessage();
+  return 'MetaCode\'s AI service is running, but no AI provider is set up yet. Settings → AI providers shows what each one needs.';
+}
+// What's wrong with the service itself (Settings → AI connection), or null
+function serviceProblem() {
+  if (notConfigured()) return null;
+  const sup = supervisor.state();
+  if (sup.managed && sup.problem) return sup.problem;
+  if (serviceState.ok === false) return serviceState.failure ? serviceState.failure.message : notRunningMessage();
+  return null;
+}
+
+// MetaCode's own copy of the service (opencode/supervisor.js)
+const supervisor = createSupervisor({
+  onReady() {
+    probeService().then(st => { if (st.ok) console.log('[ai] ' + serviceSummary(st.status)); });
+  }
+});
+function serviceTarget() {
+  return { mode: AI.managed, url: AI.url, custom: AI.custom, token: AI.settings.tokenFromEnv ? 'env' : 'file:' + AI.settings.dataDir };
+}
+let serviceTargetKey = null;
+// Starts (or finds) the service for the current settings
+async function startService() {
+  const target = serviceTarget();
+  serviceTargetKey = JSON.stringify(target);
+  if (AI.off || AI.problem || AI.managed === 'off') return supervisor.stop();
+  let token = null;
+  try { token = serviceToken(); } catch (e) { console.warn('[ai] ' + describeFailure({ failed: 'token', code: e.code }).message); }
+  return supervisor.start({ mode: target.mode, url: target.url, custom: target.custom, token });
+}
+// A service that stopped answering while MetaCode doesn't run it: start it (at most every 30 s)
+let lastStartAttempt = 0;
+function maybeStartService() {
+  if (AI.off || AI.problem || AI.managed === 'off' || (AI.custom && AI.managed !== 'on')) return false;
+  if (supervisor.state().managed) return true;
+  const now = Date.now();
+  if (now - lastStartAttempt < 30000) return false;
+  lastStartAttempt = now;
+  startService().catch(e => console.error('[ai] Couldn\'t start the AI service: ' + redact(e && e.message)));
+  return true;
+}
+
+// "OpenCode Zen: ready (4 models, free only); AI gateway: not set up — …; default model: …"
+function serviceSummary(status) {
+  if (!status || typeof status !== 'object') return 'The AI service is answering.';
+  const providers = Array.isArray(status.providers) ? status.providers.filter(p => p && typeof p === 'object') : [];
+  const parts = providers.map(p => {
+    const name = plainText(p.name, 60) || plainText(p.id, 40) || 'a provider';
+    if (!p.ready) return name + ': not set up' + (p.problem ? ' — ' + plainText(p.problem, 200) : '');
+    const listed = p.models && Number.isFinite(p.models.listed) ? p.models.listed : null;
+    const resting = p.resting && p.resting.until && Date.parse(p.resting.until) > Date.now();
+    return name + ': ready' + (listed !== null ? ' (' + listed + ' model' + (listed === 1 ? '' : 's') + (p.free === true && p.keyCount === 0 ? ', free only' : '') + ')' : '') + (resting ? ', resting until ' + new Date(Date.parse(p.resting.until)).toLocaleString() : '');
+  });
+  const ready = providers.filter(p => p.ready).length;
+  return (parts.length ? parts.join('; ') : 'no providers') + (ready ? '' : ' — no provider is set up yet') +
+    (safeModelId(status.default) ? '; default model: ' + status.default : '');
+}
+
 // ── Model list ────────────────────────────────────────────────────────────────
-// Where MetaCode gets the models it offers (Settings → AI models) and
-// checks each request's model against:
-//  1. emis-models.json in this folder (or the file EMIS_MODELS_FILE names):
-//     EMIS's model list in OpenCode's config format, i.e. provider.emis.models =
-//     { "<model id>": { name, tool_call, reasoning, attachment } }. Edits are
-//     picked up without a restart. Only model ids, names and capability flags
-//     are read from it; the EMIS address and key always come from .env.
-//  2. If that file is missing or unusable: EMIS's live list,
-//     GET {EMIS_BASE_URL}/models, cached for a few minutes.
-// A request for a model that isn't listed (e.g. a Groq or Claude id still
-// saved in someone's browser) gets the default model instead.
-const MODELS_FILE_RECHECK_MS = 2000;
-const MODELS_FILE_MAX_BYTES  = 2 * 1024 * 1024;
+// The models MetaCode offers (Settings → AI models) and checks each request's
+// model against come from the service: GET {OPENCODE_SERVICE_URL}/models lists
+// the models of every provider that is set up, as "provider/model" ids with
+// their names, capabilities and limits, plus the service's default model.
+// Cached for 30 s; concurrent callers share one fetch, and a failure is
+// reused for a few seconds. A request for a model that isn't listed (e.g. an
+// id saved in someone's browser long ago) gets the model's current id when
+// it's one model under another spelling or without its provider
+// (renamedModel), else the default model.
+const modelList = { result: null, fetchedAt: 0, failure: null, failedAt: 0, pending: null, generation: 0 };
 
 // Display names go into the Settings dropdown's HTML, so only plain text is kept.
 function safeModelName(value) {
@@ -878,279 +946,179 @@ function safeModelName(value) {
 function capability(value) {
   return typeof value === 'boolean' ? value : null;
 }
+const tokenCount = v => (Number.isInteger(v) && v > 0 && v < 1e9 ? v : null);
 
-function parseModelsFile(json) {
-  const providers = json && typeof json === 'object' && json.provider && typeof json.provider === 'object' ? json.provider : null;
-  const providerNames = providers ? Object.keys(providers) : [];
-  const entry = providers ? (providers.emis || (providerNames.length === 1 ? providers[providerNames[0]] : null)) : null;
-  if (!entry || !entry.models || typeof entry.models !== 'object' || Array.isArray(entry.models)) {
-    return { ok: false, problem: MODELS_FILE_NAME + ' has no provider.emis.models section.' };
-  }
-  const models = [];
-  let skipped = 0;
-  Object.keys(entry.models).forEach(rawId => {
-    const id = safeModelId(rawId);
-    if (!id || models.some(m => m.id === id)) { skipped++; return; }
-    const meta = entry.models[rawId] && typeof entry.models[rawId] === 'object' ? entry.models[rawId] : {};
-    // limit.context / limit.output (OpenCode's format) when the file states them; never guessed
-    const limit = meta.limit && typeof meta.limit === 'object' ? meta.limit : {};
-    const tokens = v => (Number.isInteger(v) && v > 0 && v < 1e8 ? v : null);
-    models.push({ id, name: safeModelName(meta.name) || id, toolCall: capability(meta.tool_call),
-                  reasoning: capability(meta.reasoning), attachment: capability(meta.attachment),
-                  context: tokens(limit.context), output: tokens(limit.output) });
-  });
-  if (!models.length) return { ok: false, problem: MODELS_FILE_NAME + ' lists no usable models.' };
-  const options = entry.options && typeof entry.options === 'object' ? entry.options : {};
-  const apiKey = typeof options.apiKey === 'string' ? options.apiKey.trim() : '';
-  return {
-    ok: true, models, skipped,
-    ids: models.map(m => m.id),
-    info: new Map(models.map(m => [m.id, m])),
-    baseURL: typeof options.baseURL === 'string' ? options.baseURL.trim().replace(/\/+$/, '') : null,
-    hasLiteralKey: apiKey !== '' && !/^\{env:[A-Za-z0-9_]+\}$/.test(apiKey)
-  };
-}
-
-function reportModelsFile(result) {
-  if (!result.ok) {
-    if (result.missing) {
-      if (process.env.EMIS_MODELS_FILE) console.warn('[ai] EMIS_MODELS_FILE points to ' + MODELS_FILE + ', which doesn\'t exist; using the live model list.');
-      else if (modelsFile.loads) console.warn('[ai] ' + MODELS_FILE_NAME + ' was removed; using the live model list.');
-      return;
-    }
-    console.warn('[ai] ' + result.problem + ' Using the live model list instead.');
-    return;
-  }
-  if (modelsFile.loads) console.log('[ai] ' + MODELS_FILE_NAME + ' changed: ' + result.models.length + ' models loaded.');
-  if (result.skipped) console.warn('[ai] ' + MODELS_FILE_NAME + ': skipped ' + result.skipped + ' entr' + (result.skipped === 1 ? 'y' : 'ies') + ' without a usable model id.');
-  if (result.baseURL && EMIS.baseUrl && result.baseURL !== EMIS.baseUrl) {
-    console.warn('[ai] ' + MODELS_FILE_NAME + ' was written for ' + result.baseURL + ', but EMIS_BASE_URL is ' + EMIS.baseUrl + '. MetaCode uses EMIS_BASE_URL.');
-  }
-  if (result.hasLiteralKey) {
-    console.warn('[ai] ' + MODELS_FILE_NAME + ' contains an API key. MetaCode never reads keys from this file; keep the key in .env ' +
-      '(EMIS_API_KEY) and replace it in this file with {env:EMIS_API_KEY}.');
-  }
-}
-
-// The file's model list, re-read when the file changes (checked at most
-// every couple of seconds). { ok: true, ... } or { ok: false, missing | problem }.
-function readModelsFile() {
-  const now = Date.now();
-  if (modelsFile.result && now - modelsFile.checkedAt < MODELS_FILE_RECHECK_MS) return modelsFile.result;
-  modelsFile.checkedAt = now;
-  let stat = null;
-  try { stat = fs.statSync(MODELS_FILE); } catch (e) { stat = null; }
-  if (!stat || !stat.isFile()) {
-    if (!modelsFile.result || !modelsFile.result.missing) {
-      modelsFile.result = { ok: false, missing: true };
-      modelsFile.mtimeMs = null;
-      reportModelsFile(modelsFile.result);
-    }
-    return modelsFile.result;
-  }
-  if (modelsFile.result && !modelsFile.result.missing && modelsFile.mtimeMs === stat.mtimeMs) return modelsFile.result;
-  let result;
-  if (stat.size > MODELS_FILE_MAX_BYTES) {
-    result = { ok: false, problem: MODELS_FILE_NAME + ' is too large to be a model list.' };
-  } else {
-    try {
-      // (a byte-order mark, as some Windows editors add, isn't valid JSON)
-      result = parseModelsFile(JSON.parse(fs.readFileSync(MODELS_FILE, 'utf8').replace(/^\uFEFF/, '')));
-    } catch (e) {
-      result = { ok: false, problem: MODELS_FILE_NAME + ' couldn\'t be read as JSON (' + redact(e.message, 120) + ').' };
-    }
-  }
-  reportModelsFile(result);
-  if (result.ok) modelsFile.loads++;
-  modelsFile.result = result;
-  modelsFile.mtimeMs = stat.mtimeMs;
-  return result;
-}
-
-function listLabel(source) {
-  return source === 'file' ? MODELS_FILE_NAME : 'the live model list';
-}
-
+// → { ids, info: Map(id → { id, name, named, provider, providerName, model, free, available, toolCall, reasoning, attachment, context, output, variants }), providers, default } or null
 function parseModelList(json) {
   if (!json || typeof json !== 'object' || !Array.isArray(json.data)) return null;
   const ids = [];
+  const info = new Map();
   let skipped = 0;
   json.data.forEach(entry => {
     const id = entry && typeof entry === 'object' ? safeModelId(entry.id) : null;
-    if (!id) skipped++;
-    else if (!ids.includes(id)) ids.push(id);
+    if (!id) { skipped++; return; }
+    if (info.has(id)) return;
+    const split = splitModel(id);
+    const name = safeModelName(entry.name);
+    ids.push(id);
+    info.set(id, {
+      id, name: name || id, named: !!name,
+      provider: safeModelId(entry.provider) || split.provider, providerName: safeModelName(entry.provider_name),
+      model: typeof entry.model === 'string' && safeModelId(entry.model) ? entry.model : split.model,
+      free: capability(entry.free),
+      // (a list without this field is a stand-in's: listed = offered)
+      available: entry.available === undefined ? true : capability(entry.available),
+      toolCall: capability(entry.tool_call), reasoning: capability(entry.reasoning), attachment: capability(entry.attachment),
+      context: tokenCount(entry.context_window), output: tokenCount(entry.max_output),
+      variants: Array.isArray(entry.variants) ? entry.variants.filter(v => typeof v === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(v)).slice(0, 20) : []
+    });
   });
   if (skipped) console.warn('[ai] Skipped ' + skipped + ' model list entr' + (skipped === 1 ? 'y' : 'ies') + ' without a usable id.');
-  return ids;
+  const providers = Array.isArray(json.providers)
+    ? json.providers.filter(p => p && typeof p === 'object' && safeModelId(p.id)).map(p => ({ id: p.id, name: safeModelName(p.name) || p.id, ready: p.ready !== false }))
+    : [];
+  const listedDefault = safeModelId(json.default);
+  const flagged = json.data.find(entry => entry && entry.default === true && info.has(entry.id));
+  return { ids, info, providers, default: listedDefault && info.has(listedDefault) ? listedDefault : (flagged ? flagged.id : null) };
 }
 
 async function fetchModelList() {
-  const keys = EMIS.keys.slice().sort((a, b) => Number(getKeyState(a).invalid) - Number(getKeyState(b).invalid));
-  let failure = null;
-  for (const key of keys) {
-    const r = await emisRequest('GET', '/models', key, null, { timeoutMs: Math.min(EMIS.timeoutMs, MODEL_LIST_TIMEOUT_MS) });
-    if (r.failed) return describeFailure(r);
-    if (r.status === 403 && /^\s*</.test(r.text || '')) return describeFailure(r);      // a web page: not the key's fault
-    if (r.status === 401 || r.status === 403) { markKeyRejected(key, r); failure = describeFailure(r); continue; }
-    if (r.status === 429) { failure = describeFailure(r); continue; }
-    if (!r.ok) return describeFailure(r);
-    const ids = parseModelList(r.json);
-    if (!ids) {
-      const what = describeReply(r);
-      return fail(502, 'malformed_response', 'The AI service sent its model list in a format MetaCode couldn\'t read (it sent ' + what + ').' +
-        (/web page/.test(what) ? ' Check that EMIS_BASE_URL is the API address ending in /v1 (default ' + EMIS_DEFAULT_BASE_URL + ').' : ''), 'HTTP ' + r.status + ': ' + what);
-    }
-    getKeyState(key).invalid = false;
-    return { ok: true, ids };
+  const r = await aiRequest('GET', '/models', null, { timeoutMs: Math.min(AI.timeoutMs, MODEL_LIST_TIMEOUT_MS) });
+  if (r.failed || !r.ok) return describeFailure(r);
+  const list = parseModelList(r.json);
+  if (!list) {
+    const what = describeReply(r);
+    return fail(502, 'malformed_response', 'MetaCode\'s AI service sent its model list in a format MetaCode couldn\'t read (it sent ' + what + ').' +
+      (/web page/.test(what) ? ' Check that OPENCODE_SERVICE_URL is the service\'s address ending in /v1 (default ' + AI.settings.url + ').' : ''), 'HTTP ' + r.status + ': ' + what);
   }
-  return failure || notConfigured() || fail(503, 'unavailable', 'No AI key is available right now.');
+  return Object.assign({ ok: true, source: 'opencode' }, list);
 }
 
-// Resolves to { ok: true, ids, info, source } — info is a Map of id → { name,
-// toolCall, reasoning, attachment } for the file, null for EMIS's live list —
-// or to a failure. For the live list, concurrent callers share one fetch and
-// a failure is reused for a few seconds, so a burst of AI requests doesn't
-// refetch the list once per request.
+// Resolves to { ok: true, ids, info, providers, default, source: 'opencode' } or to a failure.
 function getModelList(forceRefresh) {
-  const file = readModelsFile();
-  if (file.ok) return Promise.resolve({ ok: true, ids: file.ids, info: file.info, source: 'file' });
-  return getLiveModelList(forceRefresh);
-}
-
-// EMIS's own list (GET /models), shared and cached as described above.
-function getLiveModelList(forceRefresh) {
   const now = Date.now();
   if (!forceRefresh) {
-    if (modelList.ids && now - modelList.fetchedAt < MODEL_LIST_TTL_MS) return Promise.resolve({ ok: true, ids: modelList.ids, info: null, source: 'emis' });
+    if (modelList.result && now - modelList.fetchedAt < MODEL_LIST_TTL_MS) return Promise.resolve(modelList.result);
     if (modelList.failure && now - modelList.failedAt < MODEL_LIST_RETRY_MS) return Promise.resolve(modelList.failure);
   }
   if (!modelList.pending) {
-    modelList.pending = fetchModelList()
+    const gen = modelList.generation;
+    const pending = fetchModelList()
       .catch(err => fail(500, 'internal_error', 'Couldn\'t load the model list.', 'model list: ' + redact(err && err.message)))
       .then(result => {
-        if (result.ok) {
-          modelList.ids = result.ids;
-          modelList.fetchedAt = Date.now();
-          modelList.failure = null;
-        } else {
-          modelList.failure = result;
-          modelList.failedAt = Date.now();
+        if (gen === modelList.generation) {
+          if (result.ok) {
+            modelList.result = result;
+            modelList.fetchedAt = Date.now();
+            modelList.failure = null;
+          } else {
+            modelList.failure = result;
+            modelList.failedAt = Date.now();
+          }
         }
-        modelList.pending = null;
-        return result.ok ? { ok: true, ids: result.ids, info: null, source: 'emis' } : result;
+        if (modelList.pending === pending) modelList.pending = null;
+        return result;
       });
+    modelList.pending = pending;
   }
   return modelList.pending;
 }
 
-// Which of emis-models.json's models the AI service lists right now. The file
-// is the operator's catalog and stays authoritative (a model the service
-// leaves out of GET /models may still answer), but the list says which ones
-// the service doesn't offer, so pickers don't present them as plainly
-// usable. → { checked: true, listed: Set, at } or { checked: false, problem }.
-// With the live list as the source every model is listed by definition.
-// waitMs: how long a caller waits for a fetch (none: use the cached list and
-// refresh it in the background, so AI requests never wait for the check).
-async function serviceAvailability(forceRefresh, waitMs) {
-  const fresh = () => modelList.ids && Date.now() - modelList.fetchedAt < MODEL_LIST_TTL_MS;
-  const done = () => ({ checked: true, listed: new Set(modelList.ids), at: new Date(modelList.fetchedAt).toISOString() });
-  if (!forceRefresh && fresh()) return done();
-  const pending = getLiveModelList(forceRefresh).catch(() => null);
-  if (!waitMs) return { checked: false, problem: 'not checked yet' };
-  const live = await Promise.race([pending, new Promise(r => setTimeout(() => r('late'), waitMs))]);
-  if (live === 'late') return { checked: false, problem: 'the AI service didn\'t send its model list in time.' };
-  if (!live || !live.ok) return { checked: false, problem: (live && live.message) || 'the AI service\'s model list couldn\'t be loaded.' };
-  return done();
-}
-
-// Default model: EMIS_MODEL if set (also under an older spelling of its id);
-// otherwise Claude Opus 5.5 if emis-models.json lists it (PREFERRED_DEFAULT_MODELS),
-// else the file's first model. With EMIS's live list (no file): EMIS's
-// documented example model when it's listed, otherwise the first listed model
-// that isn't obviously an image, audio or embedding model.
+// Default model: OPENCODE_MODEL (or the older EMIS_MODEL) if the service
+// offers it, also under another spelling or without its provider; otherwise
+// the service's own default (it reads OPENCODE_MODEL too, and skips models it
+// can't use), else the first listed model that isn't obviously an image,
+// audio or embedding model. → { model, warning? } or { error }
 const NOT_A_CHAT_MODEL = /(image|video|dall-?e|sora|veo|imagen|flux|stable-?diffusion|sdxl|tts|whisper|transcri|speech|audio|embed|moderation|rerank|guard)/i;
 
-function chooseDefaultModel(ids, source) {
-  if (EMIS.model) {
-    if (ids.includes(EMIS.model)) return { model: EMIS.model };
-    const renamed = renamedModel(EMIS.model, ids);
-    if (renamed) { noteRename(EMIS.model, renamed, source, 'EMIS_MODEL'); return { model: renamed }; }
-    return { error: fail(500, 'model_not_found', 'The model set in EMIS_MODEL ("' + EMIS.model + '") isn\'t in ' + listLabel(source) + '. ' +
-      'Change EMIS_MODEL in the server\'s .env file, or remove it to let MetaCode choose.') };
+function noModelsFailure() {
+  return fail(503, 'not_configured', 'MetaCode\'s AI service has no AI provider set up yet, so there are no models to use. Settings → AI providers shows what each one needs.');
+}
+
+function chooseDefaultModel(list) {
+  const ids = list.ids;
+  let warning = null;
+  if (AI.model) {
+    if (ids.includes(AI.model)) return { model: AI.model };
+    const renamed = renamedModel(AI.model, ids);
+    if (renamed) { noteRename(AI.model, renamed, AI.modelVar); return { model: renamed }; }
+    warning = 'The model set in ' + AI.modelVar + ' ("' + AI.model + '") isn\'t offered by the AI service right now, so its default model is used. ' +
+      'Change ' + AI.modelVar + ' in the server\'s .env file, or remove it to let the service choose.';
   }
-  if (source === 'file') {
-    const preferred = PREFERRED_DEFAULT_MODELS.find(id => ids.includes(id));
-    return preferred ? { model: preferred } : ids.length ? { model: ids[0] } : { error: fail(500, 'no_models', MODELS_FILE_NAME + ' lists no models.') };
-  }
-  if (ids.includes(EMIS_EXAMPLE_MODEL)) return { model: EMIS_EXAMPLE_MODEL };
-  const model = ids.find(id => !NOT_A_CHAT_MODEL.test(id)) || ids[0];
-  return model ? { model } : { error: fail(502, 'no_models', 'The AI service returned an empty model list.') };
+  const usable = id => { const i = list.info.get(id); return !i || i.available !== false; };
+  const model = (list.default && ids.includes(list.default) ? list.default : null) ||
+    ids.find(id => usable(id) && !NOT_A_CHAT_MODEL.test(splitModel(id).model)) || ids[0];
+  if (!model) return { error: noModelsFailure() };
+  if (warning) noteOnce('default:' + AI.model, '[ai] The model set in ' + AI.modelVar + ' ("' + AI.model + '") isn\'t offered by the AI service right now; using its default, "' + model + '".');
+  return warning ? { model, warning } : { model };
 }
 
 const substitutionsLogged = new Set();
-function noteSubstitution(from, to, source) {
-  if (substitutionsLogged.has(from)) return;
-  substitutionsLogged.add(from);
-  console.warn('[ai] "' + from + '" isn\'t in ' + listLabel(source) + ', so "' + to + '" is used instead. Choose a model in ' +
-    'Settings → AI models, or set EMIS_MODEL in .env.');
+function noteOnce(key, line) {
+  if (substitutionsLogged.has(key)) return;
+  substitutionsLogged.add(key);
+  console.warn(line);
 }
-// A model asked for under an older spelling of its id (claude-opus-5-5 → claude-opus-5.5)
-function noteRename(from, to, source, where) {
-  if (substitutionsLogged.has('rename:' + from)) return;
-  substitutionsLogged.add('rename:' + from);
-  console.warn('[ai] "' + from + '" is called "' + to + '" in ' + listLabel(source) + ' now; "' + to + '" is used.' +
-    (where === 'EMIS_MODEL' ? ' Update EMIS_MODEL in .env.' : ''));
+function noteSubstitution(from, to) {
+  noteOnce(from, '[ai] "' + from + '" isn\'t offered by the AI service, so "' + to + '" is used instead. Choose a model in ' +
+    'Settings → AI models, or set OPENCODE_MODEL in .env.');
+}
+// A model asked for under an older spelling of its id (claude-opus-5-5 → emis/claude-opus-5.5)
+function noteRename(from, to, where) {
+  noteOnce('rename:' + from, '[ai] "' + from + '" is called "' + to + '" by the AI service now; "' + to + '" is used.' +
+    (where ? ' Update ' + where + ' in .env.' : ''));
 }
 
 // When the model list itself can't be loaded for these reasons, a chat
 // request would fail the same way, so the request stops here.
 const FATAL_LIST_FAILURES = new Set(['timeout', 'network', 'authentication_error', 'permission_error', 'not_configured', 'bad_base_url']);
 
-// → { ok: true, model, verified, source, info } (info: the model's entry
-// from emis-models.json, if that's the source) or a failure.
+// → { ok: true, model, verified, source, info } (info: the model's entry in the list) or a failure.
 async function resolveModel(requested) {
   const wanted = safeModelId(requested) || '';
   const list = await getModelList(false);
   if (!list.ok) {
     if (FATAL_LIST_FAILURES.has(list.type)) return list;
-    // The list is unavailable for another reason (EMIS hiccup): send the
-    // configured or requested model unverified and let EMIS decide.
-    const model = EMIS.model || wanted;
-    return model ? { ok: true, model, verified: false, source: 'emis', info: null } : list;
+    // The list is unavailable for another reason (a hiccup): send the
+    // configured or requested model unverified and let the service decide.
+    const model = AI.model || wanted;
+    return model ? { ok: true, model, verified: false, source: 'opencode', info: null } : list;
   }
-  const pick = model => ({ ok: true, model, verified: true, source: list.source, info: list.info ? list.info.get(model) || null : null });
+  const pick = model => ({ ok: true, model, verified: true, source: list.source, info: list.info.get(model) || null });
   if (wanted && list.ids.includes(wanted)) return pick(wanted);
-  // The same model under the id the list spells it with now
+  // The same model under the id the list spells it with now (or with its provider)
   const renamed = renamedModel(wanted, list.ids);
-  if (renamed) { noteRename(wanted, renamed, list.source); return Object.assign(pick(renamed), { renamedFrom: wanted }); }
+  if (renamed) { noteRename(wanted, renamed); return Object.assign(pick(renamed), { renamedFrom: wanted }); }
   // Anything else gets the default — the same model Settings shows as selected
   // when the saved one isn't listed, so what's shown is what's used.
-  const choice = chooseDefaultModel(list.ids, list.source);
+  const choice = chooseDefaultModel(list);
   if (choice.error) return choice.error;
-  if (wanted) noteSubstitution(wanted, choice.model, list.source);
+  if (wanted) noteSubstitution(wanted, choice.model);
   return pick(choice.model);
 }
 
-// Capability flags from emis-models.json: a request that needs something the
-// model doesn't support is refused with a clear message before calling EMIS.
+// Capability flags from the service's model list: a request that needs
+// something the model doesn't support is refused with a clear message before
+// it's sent.
 function capabilityProblem(chatRequest, info) {
   if (!info) return null;
-  const per = ' (according to ' + MODELS_FILE_NAME + ')';
+  const per = ' (according to the AI service\'s model list)';
   if (info.toolCall === false && Array.isArray(chatRequest.tools) && chatRequest.tools.length) {
-    return fail(400, 'unsupported_feature', 'The model "' + info.id + '" doesn\'t support tool calling' + per + '. Pick a model that does.');
+    return fail(400, 'unsupported_feature', 'The model "' + modelName(info.id) + '" doesn\'t support tool calling' + per + '. Pick a model that does.');
   }
   const hasAttachment = chatRequest.messages.some(m => Array.isArray(m.content) && m.content.some(part => part && part.type && part.type !== 'text'));
   if (info.attachment === false && hasAttachment) {
-    return fail(400, 'unsupported_feature', 'The model "' + info.id + '" doesn\'t accept images or files' + per + '. Pick a model that does, or send text only.');
+    return fail(400, 'unsupported_feature', 'The model "' + modelName(info.id) + '" doesn\'t accept images or files' + per + '. Pick a model that does, or send text only.');
   }
   return null;
 }
 
 // ── Request formats ───────────────────────────────────────────────────────────
 // The frontend still names the request format it speaks in the x-provider
-// header: "groq" = OpenAI chat format (the default), "anthropic" = Messages
-// format (if Anthropic was picked in Settings). Both are answered by EMIS in
-// the matching format; the header no longer selects a provider.
+// header: "openai" (or the older "groq" / "emis") = OpenAI chat format, the
+// default; "anthropic" = Messages format. Both are answered by the AI service
+// in the matching format; the header doesn't select a provider (the model id
+// does).
 const FORMATS = { groq: 'openai', openai: 'openai', emis: 'openai', anthropic: 'anthropic' };
 
 class RequestError extends Error {}
@@ -1183,8 +1151,8 @@ function requireObject(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) throw new RequestError('The request body must be a JSON object.');
 }
 
-// OpenAI chat format → the EMIS request. Only known chat-completion fields
-// are forwarded; everything else in the body is dropped.
+// OpenAI chat format → the request sent to the AI service. Only known
+// chat-completion fields are forwarded; everything else in the body is dropped.
 function fromOpenAIRequest(body) {
   requireObject(body);
   if (!Array.isArray(body.messages) || !body.messages.length) throw new RequestError('"messages" must be a non-empty list.');
@@ -1238,7 +1206,7 @@ function anthropicText(value, where) {
   throw new RequestError(where + ' must be text (images and tool blocks are only supported in OpenAI-format requests).');
 }
 
-// Anthropic Messages format → the EMIS (OpenAI) request: `system` becomes the
+// Anthropic Messages format → the (OpenAI-format) request: `system` becomes the
 // first message, text blocks become text. Streaming and tools are only
 // offered in the OpenAI format, and say so instead of failing obscurely.
 function fromAnthropicRequest(body) {
@@ -1276,7 +1244,7 @@ function textContent(content) {
   return '';
 }
 
-// Reads EMIS's reply whatever shape it comes in, as an OpenAI chat completion:
+// Reads the AI service's reply whatever shape it comes in, as an OpenAI chat completion:
 //   • OpenAI chat JSON (choices[].message) — the normal case;
 //   • a server-sent-event stream ("data: {…}" chunks), which some gateways send
 //     even when no stream was asked for — the chunks are joined;
@@ -1332,14 +1300,6 @@ function fromSse(text) {
   if (!content && finalText) content = finalText;
   return { id: id || 'chatcmpl-' + Date.now().toString(36), object: 'chat.completion', model, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: finish || 'stop' }], usage };
 }
-// Per model: does EMIS answer it properly when streamed, or plainly? Learned from replies.
-const streamPref = new Map();
-function streamPreferred(model) { return streamPref.has(model) ? streamPref.get(model) : !!streamPref.get('*'); }
-function setStreamPreferred(model, v) {
-  if (streamPref.get(model) !== v) console.log('[ai] ' + model + ': using ' + (v ? 'streamed' : 'plain') + ' replies from now on.');
-  streamPref.set(model, v);
-  if (v) streamPref.set('*', true);   // new models start with what worked
-}
 function replyHeaders(r) {
   if (!r || !r.headers || !r.headers.get) return '';
   const h = ['content-type', 'content-length', 'transfer-encoding', 'content-encoding'].map(k => r.headers.get(k) ? k + '=' + r.headers.get(k) : '').filter(Boolean).join(', ');
@@ -1359,7 +1319,7 @@ function describeReply(r) {
   return (type || 'text') + ' starting "' + redact(text.replace(/\s+/g, ' ').slice(0, 200), 200) + '"';
 }
 
-// Checks EMIS's completion and makes every choice's message.content a string
+// Checks the completion and makes every choice's message.content a string
 // (the frontend calls .trim() on it), keeping all other fields. null =
 // malformed.
 function normalizeCompletion(json) {
@@ -1409,81 +1369,39 @@ function noteEmptyAnswer(completion, model) {
 
 // ── Chat completion (normal JSON response) ───────────────────────────────────
 async function completeChat(chatRequest, ctx, signal, retriedLength) {
-  const keys = keysForRequest(Date.now());
-  if (!keys.length) return quotaFailure(Date.now());
-  let rejection = null;
-  let limited = false;
-  for (const key of keys) {
-    const streamFirst = streamPreferred(chatRequest.model);
-    const r = await emisRequest('POST', '/chat/completions', key, streamFirst ? Object.assign({}, chatRequest, { stream: true }) : chatRequest, { timeoutMs: EMIS.timeoutMs, signal, buffered: streamFirst });
-    if (r.failed === 'aborted') return { aborted: true };
-    if (r.failed) return describeFailure(r, ctx);                 // network/timeout: another key won't help
-    const now = Date.now();
-    const quota = readQuotaHeaders(r.headers);
-    recordQuota(key, quota, now);
-    if (r.status === 429) {
-      const limit = classifyLimit(key, chatRequest.model, quota, r.headers, now, providerMessage(r));
-      if (limit === true) { limited = true; continue; }       // the key's budget: another key may have some
-      return limit;                                           // this model only: answerChat picks the closest one
-    }
-    if (r.status === 401 || (r.status === 403 && !/^\s*</.test(r.text || '') && !/model/i.test(providerMessage(r)))) { markKeyRejected(key, r); rejection = describeFailure(r, ctx); continue; }
-    if (r.status === 403) return describeFailure(r, ctx);   // a website check or a model this key can't use: not the key's fault
-    if (!r.ok) return describeFailure(r, ctx);
-    let completion = readReply(r);
-    if (!completion && /web page/.test(describeReply(r)) && !/\/v1$/.test(EMIS.baseUrl)) {
-      // EMIS_BASE_URL is missing /v1, so the website answered instead of the API: try the API address
-      const fixed = EMIS.baseUrl + '/v1';
-      console.warn('[ai] ' + EMIS.baseUrl + ' answered with a web page; trying ' + fixed + ' (set EMIS_BASE_URL=' + fixed + ' in .env).');
-      const prev = EMIS.baseUrl;
-      EMIS.baseUrl = fixed;
-      const r2 = await emisRequest('POST', '/chat/completions', key, chatRequest, { timeoutMs: EMIS.timeoutMs, signal });
-      completion = r2.ok ? readReply(r2) : null;
-      if (!completion) EMIS.baseUrl = prev;
-      else EMIS.warnings.push('EMIS_BASE_URL should end in /v1; MetaCode is using ' + fixed + ' until you change .env.');
-    }
-    let other = null;
-    if (!completion) {
-      // Empty or unreadable: ask the other way — streamed (as in EMIS's own example) or plain —
-      // straight away, and remember what works for this model.
-      const asStream = !streamFirst;
-      console.warn('[ai] ' + (streamFirst ? 'Streamed' : 'Non-streamed') + ' reply from ' + chatRequest.model + ' unreadable (' + describeReply(r) + replyHeaders(r) + '); asking again ' + (asStream ? 'with stream: true' : 'without streaming') + '.');
-      other = await emisRequest('POST', '/chat/completions', key, Object.assign({}, chatRequest, { stream: asStream }), { timeoutMs: EMIS.timeoutMs, signal, buffered: asStream, retry: false });
-      if (other.ok) completion = readReply(other);
-      if (completion) {
-        completion = Object.assign({}, completion, { model: completion.model || chatRequest.model });
-        setStreamPreferred(chatRequest.model, asStream);
-      }
-    } else if (streamFirst === false && streamPref.get(chatRequest.model) === undefined) setStreamPreferred(chatRequest.model, false);
-    if (!completion) {
-      const what = describeReply(r) + (other ? '; asked ' + (streamFirst ? 'without streaming' : 'with stream: true') + ', it sent ' + (other.failed ? 'nothing (' + other.failed + ' ' + (other.code || '') + ')' : (other.ok ? describeReply(other) : 'HTTP ' + other.status)) : '');
-      console.error('[ai] Details: ' + (r.via || 'node') + replyHeaders(r));
-      console.error('[ai] Unreadable reply to chat/completions (model ' + chatRequest.model + ', HTTP ' + r.status + '): ' + what);
-      return fail(502, 'malformed_response', 'The AI service answered, but not with a chat reply MetaCode can read — it sent ' + what + '.' +
-        (/web page/.test(what) ? ' Check that EMIS_BASE_URL in .env is the API address ending in /v1 (default ' + EMIS_DEFAULT_BASE_URL + ').' : ''),
-        'HTTP ' + r.status + ': ' + what);
-    }
-    // A reasoning model can use its whole token budget thinking and return no
-    // text: ask once more with a bigger budget.
-    const c0 = completion.choices[0];
-    if (!String(c0.message.content || '').trim() && c0.finish_reason === 'length' && !retriedLength) {
-      const bigger = Math.min(8192, Math.max(1024, (Number(chatRequest.max_tokens) || 256) * 4));
-      console.warn('[ai] ' + chatRequest.model + ' used all ' + (chatRequest.max_tokens || '?') + ' tokens without answering; retrying with ' + bigger + '.');
-      return completeChat(Object.assign({}, chatRequest, { max_tokens: bigger }), ctx, signal, true);
-    }
-    markKeyUsed(key);
-    noteEmptyAnswer(completion, chatRequest.model);
-    return { ok: true, completion };
+  const r = await aiRequest('POST', '/chat/completions', chatRequest, { timeoutMs: AI.timeoutMs, signal });
+  if (r.failed === 'aborted') return { aborted: true };
+  if (r.failed) return describeFailure(r, ctx);
+  // Rate limits: the model rests (answerChat picks the closest one), or its whole provider does
+  if (r.status === 429) return onLimited(describeFailure(r, ctx), chatRequest.model, Date.now());
+  if (!r.ok) return describeFailure(r, ctx);
+  const completion = readReply(r);
+  if (!completion) {
+    const what = describeReply(r);
+    console.error('[ai] Unreadable reply to chat/completions (model ' + chatRequest.model + ', HTTP ' + r.status + '): ' + what + replyHeaders(r));
+    return fail(502, 'malformed_response', 'The AI service answered, but not with a chat reply MetaCode can read — it sent ' + what + '.' +
+      (/web page/.test(what) ? ' Check that OPENCODE_SERVICE_URL in .env is the AI service\'s address ending in /v1 (default ' + AI.settings.url + ').' : ''),
+      'HTTP ' + r.status + ': ' + what);
   }
-  return limited ? quotaFailure(Date.now()) : rejection;
+  // A reasoning model can use its whole token budget thinking and return no
+  // text: ask once more with a bigger budget.
+  const c0 = completion.choices[0];
+  if (!String(c0.message.content || '').trim() && c0.finish_reason === 'length' && !retriedLength) {
+    const bigger = Math.min(8192, Math.max(1024, (Number(chatRequest.max_tokens) || 256) * 4));
+    console.warn('[ai] ' + chatRequest.model + ' used all ' + (chatRequest.max_tokens || '?') + ' tokens without answering; retrying with ' + bigger + '.');
+    return completeChat(Object.assign({}, chatRequest, { max_tokens: bigger }), ctx, signal, true);
+  }
+  noteEmptyAnswer(completion, chatRequest.model);
+  return { ok: true, completion };
 }
 
 // ── Chat completion (streaming) ───────────────────────────────────────────────
-// With "stream": true (OpenAI format), EMIS's own server-sent events are
-// relayed to the browser as they arrive: each chat.completion.chunk once, in
-// order, ending with "data: [DONE]". A failure before the stream starts is a
-// normal JSON error; a failure after it starts is sent as a final
+// With "stream": true (OpenAI format), the AI service's server-sent events
+// are relayed to the browser as they arrive: each chat.completion.chunk once,
+// in order, ending with "data: [DONE]". A failure before the stream starts is
+// a normal JSON error; a failure after it starts is sent as a final
 // `data: {"error": {...}}` event and the stream ends without [DONE]. If the
-// browser disconnects, the EMIS request is cancelled.
+// browser disconnects, the AI request is cancelled.
 const STREAM_DONE = { done: true };
 
 // Minimal Server-Sent Events parser (WHATWG rules): an event ends at a blank
@@ -1546,25 +1464,29 @@ function writeSse(res, text) {
   });
 }
 
-// Opens a streaming request to EMIS. Resolves to an attempt { response, ... }
-// or { failed }. The attempt's timer covers the wait for EMIS's response
-// headers and, once restarted per chunk, silence between chunks.
-async function openStream(key, chatRequest, clientSignal) {
+// Opens a streaming request to the AI service. Resolves to an attempt
+// { response, ... } or { failed }. The attempt's timer covers the wait for the
+// response headers (the service sends them with the first part of the answer)
+// and, once restarted per chunk, silence between chunks.
+async function openStream(chatRequest, clientSignal) {
+  let token;
+  try { token = serviceToken(); } catch (e) { return { failed: 'token', code: e.code || '' }; }
   const { controller, unlink } = linkedAbort(clientSignal);
-  let timer = setTimeout(() => controller.abort(TIMED_OUT), EMIS.timeoutMs);
+  let timer = setTimeout(() => controller.abort(TIMED_OUT), AI.timeoutMs);
   const attempt = {
     controller,
-    restartTimer() { clearTimeout(timer); timer = setTimeout(() => controller.abort(TIMED_OUT), EMIS.timeoutMs); },
+    restartTimer() { clearTimeout(timer); timer = setTimeout(() => controller.abort(TIMED_OUT), AI.timeoutMs); },
     cancel() { if (!controller.signal.aborted) controller.abort(CANCELLED); },
     finish() { clearTimeout(timer); unlink(); }
   };
   try {
-    attempt.response = await emisFetch(EMIS.baseUrl + '/chat/completions', {
+    attempt.response = await undici.fetch(AI.url + '/chat/completions', {
       method: 'POST',
-      headers: emisHeaders(key, 'text/event-stream', true),
+      headers: serviceHeaders(token, 'text/event-stream', true, AI.timeoutMs),
       body: JSON.stringify(Object.assign({}, chatRequest, { stream: true })),
       redirect: 'manual',
-      signal: controller.signal
+      signal: controller.signal,
+      dispatcher: serviceDispatcher()
     });
     return attempt;
   } catch (err) {
@@ -1586,7 +1508,7 @@ async function readErrorBody(attempt) {
   }
 }
 
-async function relayStream(res, attempt, key, model) {
+async function relayStream(res, attempt, model) {
   res.status(200);
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');
   res.setHeader('Cache-Control', 'no-cache, no-transform');
@@ -1611,6 +1533,13 @@ async function relayStream(res, attempt, key, model) {
                log: 'unreadable stream event (' + payload.length + ' characters)' };
     }
     if (event.event === 'error' || chunk.error) {
+      // The service's own errors keep their type and message (a rate limit is noted for the next requests)
+      const own = serviceError({ json: chunk });
+      if (own) {
+        const f = fromServiceError({ status: SERVICE_STATUS[own.type] || 502 }, own);
+        if (f.status === 429) onLimited(f, model, Date.now());
+        return { type: f.type, message: f.message };
+      }
       const raw = chunk.error && typeof chunk.error === 'object' ? chunk.error.message : chunk.error;
       const detail = redact(raw, 200);
       return { type: 'upstream_error', message: 'The AI service reported a problem while answering' + (detail ? ': ' + detail : '.') };
@@ -1658,7 +1587,6 @@ async function relayStream(res, attempt, key, model) {
   }
   if (outcome === STREAM_DONE || (!outcome && finishSeen)) {
     reader.cancel().catch(() => {});
-    markKeyUsed(key);
     await writeSse(res, 'data: [DONE]\n\n');
     if (!res.writableEnded) res.end();
     return;
@@ -1667,55 +1595,42 @@ async function relayStream(res, attempt, key, model) {
   attempt.cancel();
   reader.cancel().catch(() => {});
   logFailure(fail(502, problem.type, problem.message, (problem.log || problem.message).replace(/\.$/, '') + ' (after ' + forwarded +
-    ' chunk' + (forwarded === 1 ? '' : 's') + '; model ' + model + ', ' + keyLabel(key) + ')'));
+    ' chunk' + (forwarded === 1 ? '' : 's') + '; model ' + model + ')'));
   await writeSse(res, 'data: ' + JSON.stringify({ error: { message: problem.message, type: problem.type } }) + '\n\n');
   if (!res.writableEnded) res.end();
 }
 
 // One model's attempt: relays the stream, or sends the failure; → { modelLimited }
-// when EMIS is rate-limiting this model (nothing has been sent yet).
-async function streamWith(res, chatRequest, ctx, signal) {
+// when the model (or its provider) is rate-limited and nothing has been sent yet.
+async function streamWith(res, chatRequest, ctx, signal, tokenRetried) {
   const now0 = Date.now();
   const resting = modelRestingUntil(chatRequest.model, now0);
   if (resting) return { modelLimited: modelLimitedFailure(chatRequest.model, resting, now0) };
-  const keys = keysForRequest(Date.now());
-  if (!keys.length) return sendFailure(res, quotaFailure(Date.now()));
-  let rejection = null;
-  let limited = false;
-  for (const key of keys) {
-    const attempt = await openStream(key, chatRequest, signal);
-    if (attempt.failed === 'aborted') return;
-    if (attempt.failed) return sendFailure(res, describeFailure(attempt, ctx));
-    const upstream = attempt.response;
-    const now = Date.now();
-    const quota = readQuotaHeaders(upstream.headers);
-    recordQuota(key, quota, now);
-    if (!upstream.ok) {
-      const r = await readErrorBody(attempt);
-      if (r.failed === 'aborted') return;
-      if (r.failed) return sendFailure(res, describeFailure(r, ctx));
-      if (r.status === 429) {
-        const limit = classifyLimit(key, chatRequest.model, quota, r.headers, now, providerMessage(r));
-        if (limit === true) { limited = true; continue; }
-        return { modelLimited: limit };
-      }
-      // (as for plain requests: a web page or a model this key can't use isn't the key's fault)
-      if (r.status === 401 || (r.status === 403 && !/^\s*</.test(r.text || '') && !/model/i.test(providerMessage(r)))) { markKeyRejected(key, r); rejection = describeFailure(r, ctx); continue; }
-      return sendFailure(res, describeFailure(r, ctx));
-    }
-    if (!/^text\/event-stream/i.test(upstream.headers.get('content-type') || '')) {
-      attempt.cancel();
-      attempt.finish();
-      return sendFailure(res, fail(502, 'malformed_response', 'The AI service didn\'t send a stream for a streaming request.',
-        'content-type ' + redact(upstream.headers.get('content-type') || 'missing', 60)));
-    }
-    return await relayStream(res, attempt, key, chatRequest.model);
+  const provider = providerOf(chatRequest.model);
+  if (providerRestingUntil(provider, now0)) return { modelLimited: providerRestFailure(provider, now0) };
+  const attempt = await openStream(chatRequest, signal);
+  if (attempt.failed === 'aborted') return;
+  if (attempt.failed) return sendFailure(res, describeFailure(attempt, ctx));
+  const upstream = attempt.response;
+  if (!upstream.ok) {
+    const r = await readErrorBody(attempt);
+    if (r.failed === 'aborted') return;
+    if (r.failed) return sendFailure(res, describeFailure(r, ctx));
+    if (!tokenRetried && tokenRefused(r) && tokenChanged()) return streamWith(res, chatRequest, ctx, signal, true);
+    if (r.status === 429) return { modelLimited: onLimited(describeFailure(r, ctx), chatRequest.model, Date.now()) };
+    return sendFailure(res, describeFailure(r, ctx));
   }
-  return sendFailure(res, limited ? quotaFailure(Date.now()) : rejection);
+  if (!/^text\/event-stream/i.test(upstream.headers.get('content-type') || '')) {
+    attempt.cancel();
+    attempt.finish();
+    return sendFailure(res, fail(502, 'malformed_response', 'The AI service didn\'t send a stream for a streaming request.',
+      'content-type ' + redact(upstream.headers.get('content-type') || 'missing', 60)));
+  }
+  return await relayStream(res, attempt, chatRequest.model);
 }
 
-// Streaming chat; a rate-limited model is swapped for the closest similar one
-// before anything is sent (see answerChat).
+// Streaming chat; a rate-limited model (or one whose provider is resting) is
+// swapped for the closest similar one before anything is sent (see answerChat).
 async function streamChat(res, prep) {
   const client = watchClient(res);
   try {
@@ -1740,16 +1655,16 @@ async function streamChat(res, prep) {
 
 // ── AI routes ─────────────────────────────────────────────────────────────────
 // POST /api/ai — chat completion. The frontend's existing contract is kept:
-// the body is an OpenAI-format request (x-provider: groq, the default) or an
+// the body is an OpenAI-format request (x-provider: openai, the default) or an
 // Anthropic-format one (x-provider: anthropic); the answer comes back in the
 // same format; errors are { error: { message } } with an HTTP status. Any
 // API key the browser sends (x-api-key, from the old Settings key box) is
-// ignored: EMIS is only called with the server's own key.
+// ignored: the providers' keys live only in the AI service.
 // Checks and resolves one chat request (the body of POST /api/ai).
 // → { failure } or { format, chatRequest, ctx, explicit }
 // opts.switchModels: false = don't answer with a similar model when this one is rate-limited, or when a
-//   model picked in Settings is failing (the server's default model still falls back when EMIS can't run it)
-// opts.pickedFallback: false = a model picked in Settings that EMIS can't run right now isn't swapped
+//   model picked in Settings is failing (the server's default model still falls back when its provider can't run it)
+// opts.pickedFallback: false = a model picked in Settings that its provider can't run right now isn't swapped
 //   (AI Coding batches pause and try the same model again instead, so every post is coded by it)
 async function prepareChat(body, formatName, opts) {
   const format = FORMATS[formatName];
@@ -1763,7 +1678,6 @@ async function prepareChat(body, formatName, opts) {
     if (err instanceof RequestError) return { failure: fail(400, 'invalid_request', 'Invalid AI request: ' + err.message) };
     throw err;
   }
-  if (allKeysResting(Date.now())) return { failure: quotaFailure(Date.now()) };
   const resolved = await resolveModel(chatRequest.model);
   if (!resolved.ok) return { failure: resolved };
   chatRequest.model = resolved.model;
@@ -1784,14 +1698,16 @@ async function prepareChat(body, formatName, opts) {
 //   (json in the request's format; fallback = the model that answered instead
 //   of the requested one, fallbackReason = 'rate_limited' | 'failed')
 //
-// When the model is rate-limited (now, or still resting from earlier), the
-// closest similar model answers instead — even one picked in Settings, unless
-// switching is turned off. When the server's default model fails in other
-// ways (EMIS can't run it right now), the closest models are tried too. A
-// model the user picked is swapped only when EMIS can't run it right now
-// (server errors, after retries) and switching is on — not when it doesn't
-// exist, the key may not use it or its answers can't be read (the user should
-// pick another), and not in AI Coding batches (opts.pickedFallback, prepareChat).
+// When the model is rate-limited, or its provider is resting (now, or still
+// from earlier), the closest similar model answers instead — even one picked
+// in Settings, unless switching is turned off; the same model from another
+// provider comes first. When the server's default model fails in other ways
+// (its provider can't run it right now, or isn't set up), the closest models
+// are tried too. A model the user picked is swapped only when its provider
+// can't run it right now (server errors, after retries) and switching is on —
+// not when it doesn't exist, the key may not use it or its answers can't be
+// read (the user should pick another), and not in AI Coding batches
+// (opts.pickedFallback, prepareChat).
 async function answerChat(prep, signal) {
   const { chatRequest, ctx, explicit } = prep;
   const swapPicked = explicit && prep.switchModels && prep.pickedFallback;
@@ -1803,22 +1719,24 @@ async function answerChat(prep, signal) {
     tried.add(model);
     const now = Date.now();
     const resting = modelRestingUntil(model, now);
+    const providerResting = !resting && providerRestingUntil(providerOf(model), now);
     // The model is failing at the moment: a similar model answers, without waiting on it
-    if (!resting && model === ctx.model && (!explicit || swapPicked) && modelDownUntil(model, now) && !serviceTrouble(now)) {
+    if (!resting && !providerResting && model === ctx.model && (!explicit || swapPicked) && modelDownUntil(model, now) && !serviceTrouble(now)) {
       const alt = await closestModel(ctx.model, chatRequest, tried);
       if (alt) { own = modelDownFailure(ctx.model); otherSwitches++; noteSwitch(ctx.model, alt, 'failed'); model = alt; fallback = alt; fallbackReason = 'failed'; continue; }
     }
     result = resting ? modelLimitedFailure(model, resting, now)
+      : providerResting ? providerRestFailure(providerOf(model), now)
       : await completeChat(Object.assign({}, chatRequest, { model }), Object.assign({}, ctx, { model, verified: ctx.verified || model !== ctx.model }), signal);
     if (result.aborted) return { aborted: true };
     if (result.ok) { onModelAnswered(model); break; }
     if (result.type === 'upstream_error') onModelServerError(model, result.upstreamStatus, Date.now());
     if (model === ctx.model) own = result;
     let why = null;
-    if (result.type === 'model_rate_limited' && prep.switchModels && rateSwitches < MAX_RATE_LIMIT_SWITCHES) why = 'rate_limited';
+    if ((result.type === 'model_rate_limited' || isProviderLimit(result)) && prep.switchModels && rateSwitches < MAX_RATE_LIMIT_SWITCHES) why = 'rate_limited';
     // (once switching, a similar model that fails in its own way — not offered, not allowed for the
-    // key, unreadable answers — is skipped too; when EMIS as a whole is failing, other models would fail too)
-    else if ((((!explicit || fallbackReason) && MODEL_FALLBACK_TYPES.has(result.type)) || (swapPicked && TEMPORARY_MODEL_FAILURES.has(result.type))) &&
+    // key, unreadable answers — is skipped too; when the service as a whole is failing, other models would fail too)
+    else if ((((!explicit || fallbackReason) && fallbackType(result)) || (swapPicked && TEMPORARY_MODEL_FAILURES.has(result.type))) &&
       otherSwitches < 2 && !(result.type === 'upstream_error' && serviceTrouble(Date.now()))) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
     if (!why) break;
     const alt = await closestModel(ctx.model, chatRequest, tried);     // closest to what was asked for
@@ -1827,35 +1745,35 @@ async function answerChat(prep, signal) {
     noteSwitch(ctx.model, alt, why);
     model = alt; fallback = alt; fallbackReason = why;
   }
-  // The search ended on a similar model's own problem (not offered, not allowed for the key, rate-limited…):
-  // what to report is what happened to the model asked for. Not when the key or the AI service as a
-  // whole is the problem (a paused key, a used-up budget, EMIS failing for every model): that applies to any model
-  if (!result.ok && model !== ctx.model && own && (result.type === 'model_rate_limited' || MODEL_FALLBACK_TYPES.has(result.type)) &&
+  // The search ended on a similar model's own problem (not offered, not allowed for the key, rate-limited,
+  // its provider resting…): what to report is what happened to the model asked for. Not when the AI
+  // service as a whole is the problem (failing for every model): that applies to any model
+  if (!result.ok && model !== ctx.model && own && (result.type === 'model_rate_limited' || isProviderLimit(result) || fallbackType(result)) &&
     !(result.type === 'upstream_error' && serviceTrouble(Date.now()))) result = own;
   if (!result.ok && result.type === 'model_rate_limited') {
     const others = Array.from(tried).filter(m => m !== ctx.model && modelRestingUntil(m, Date.now()));
     const soonest = Math.min(...Array.from(tried).map(m => modelRestingUntil(m, Date.now()) || Infinity));
-    let message = 'The AI service is rate-limiting the model "' + ctx.model + '"' + (others.length ? ' and the most similar models (' + others.map(m => '"' + m + '"').join(', ') + ')' : '') + ' right now.';
+    let message = 'The AI service is rate-limiting the model "' + modelName(ctx.model) + '"' + (others.length ? ' and the most similar models (' + others.map(m => '"' + modelName(m) + '"').join(', ') + ')' : '') + ' right now.';
     if (Number.isFinite(soonest)) message += ' The first one can be used again ' + describeWhen(soonest, Date.now()) + '.';
-    if (!prep.switchModels) message += switchingAllowed() ? ' (Switching to a similar model is turned off in Settings → AI models.)' : ' (EMIS_MODEL_SWITCH=off in .env turns off switching to a similar model.)';
+    if (!prep.switchModels) message += switchingAllowed() ? ' (Switching to a similar model is turned off in Settings → AI models.)' : ' (AI_MODEL_SWITCH=off in .env turns off switching to a similar model.)';
     result = Object.assign({}, result, { message, retryAfterSeconds: Number.isFinite(soonest) ? Math.max(1, Math.ceil((soonest - Date.now()) / 1000)) : result.retryAfterSeconds });
   }
   if (!result.ok && result.type === 'upstream_error') {
-    // Say which models failed, and whether it's EMIS as a whole
+    // Say which models failed, and whether it's the service as a whole
     const trouble = serviceTrouble(Date.now());
     const code = 'HTTP ' + (result.upstreamStatus || 502);
     const others = Array.from(tried).filter(m => m !== ctx.model && modelDownUntil(m, Date.now()));
     result = Object.assign({}, result, trouble ? {
       message: 'The AI service is having server problems right now: ' + trouble.models.length + ' different models answered with server errors (' + code + ') in the last minute. ' +
-        'This is on the AI service\'s side, not MetaCode\'s — try again in a few minutes.',
+        'This is on the AI providers\' side, not MetaCode\'s — try again in a few minutes.',
       retryAfterSeconds: 30, serviceTrouble: true
     } : {
-      message: 'The AI service couldn\'t run the model "' + ctx.model + '"' + (others.length ? ' or the most similar model' + (others.length === 1 ? '' : 's') + ' (' + others.map(m => '"' + m + '"').join(', ') + ')' : '') +
-        ' right now: it answered with a server error (' + code + ') each time MetaCode tried. This is on the AI service\'s side and usually passes; try again in a moment.'
+      message: 'The AI service couldn\'t run the model "' + modelName(ctx.model) + '"' + (others.length ? ' or the most similar model' + (others.length === 1 ? '' : 's') + ' (' + others.map(m => '"' + modelName(m) + '"').join(', ') + ')' : '') +
+        ' right now: it answered with a server error (' + code + ') each time MetaCode tried. This is on the AI provider\'s side and usually passes; try again in a moment.'
     });
   }
-  if (!result.ok && explicit && MODEL_FALLBACK_TYPES.has(result.type) && result.type !== 'malformed_response' && !result.serviceTrouble) {
-    result = Object.assign({}, result, { message: result.message.replace(/\.?$/, '.') + ' This happened with the model "' + ctx.model +
+  if (!result.ok && explicit && fallbackType(result) && result.type !== 'malformed_response' && !result.serviceTrouble) {
+    result = Object.assign({}, result, { message: result.message.replace(/\.?$/, '.') + ' This happened with the model "' + modelName(ctx.model) +
       '" you picked — choose another one in Settings → AI models (or "Server default").' });
   }
   if (!result.ok) return { failure: result };
@@ -1902,12 +1820,12 @@ app.post('/api/ai', accounts.aiSingle, async (req, res) => {
 //   { id, ok: true, data, fallback?, fallbackReason?, requested? }  or  { id, ok: false, status, error: { message, type } }
 // (fallback: the similar model that answered because the requested one was rate-limited or failing)
 // then { done: true, parallel } — parallel is how many ran at the end (it is
-// lowered when EMIS rate-limits). Closing the connection stops the batch.
-// When EMIS answers with server errors (or the connection drops), the batch pauses
+// lowered when the AI service rate-limits). Closing the connection stops the batch.
+// When the AI service answers with server errors (or the connection drops), the batch pauses
 // (5 s — AI_BATCH_PAUSE_SECONDS — doubling up to 60 s), runs fewer at once and tries the request
 // again (up to 4 times); it goes back up as answers arrive. Each pause is
 // announced with a line { notice: { type, message, waitSeconds, parallel } }.
-// If EMIS keeps failing through 5 pauses (about 2 minutes) without a single
+// If the AI service keeps failing through 5 pauses (about 2 minutes) without a single
 // answer, the rest of the batch fails with type 'service_unavailable'
 // instead of being sent.
 const AI_BATCH_MAX_REQUESTS = 2000;
@@ -1964,7 +1882,7 @@ async function aiBatchRoute(req, res) {
     }
     if (out.aborted) return;
     if (out.failure && out.failure.status === 429 && (out.failure.type === 'rate_limited' || out.failure.type === 'model_rate_limited') && item.tries < 3) {
-      // EMIS asked us to slow down: fewer copies at once, a short pause, then this one again
+      // The AI service asked us to slow down: fewer copies at once, a short pause, then this one again
       item.tries++;
       if (parallel > 1) { parallel = Math.max(1, Math.floor(parallel / 2)); console.warn('[ai] Rate-limited during a batch; running ' + parallel + ' at once now.'); }
       ceiling = Math.min(ceiling, parallel);
@@ -2014,7 +1932,7 @@ async function aiBatchRoute(req, res) {
         continue;
       }
       if (!queue.length) { if (!active) return; await wait(100); continue; }
-      if (gaveUp) { await one(queue.shift()); continue; }      // the rest fails at once, without calling EMIS
+      if (gaveUp) { await one(queue.shift()); continue; }      // the rest fails at once, without calling the AI service
       const now = Date.now();
       if (pausedUntil > now) { await wait(pausedUntil - now); continue; }
       if (!first && delayMs) await wait(delayMs);
@@ -2035,97 +1953,123 @@ async function aiBatchRoute(req, res) {
   }
 }
 
-// Batch failures worth a pause and another try: EMIS server errors (and dropped connections, flagged `transient`).
-// Timeouts aren't: each one already took EMIS_TIMEOUT_MS.
+// Batch failures worth a pause and another try: provider server errors (and dropped connections, flagged `transient`).
+// Timeouts aren't: each one already took AI_TIMEOUT_MS.
 const BATCH_TRANSIENT = new Set(['upstream_error']);
-// Failures that a different model may not have (EMIS can't run one model right now).
-const MODEL_FALLBACK_TYPES = new Set(['upstream_error', 'malformed_response', 'model_not_found', 'not_found', 'permission_error']);
-// …of which this one passes (EMIS can't run the model right now): a model picked in Settings is swapped only for it
+// Failures that a different model may not have (its provider can't run it right now, or isn't set up).
+const MODEL_FALLBACK_TYPES = new Set(['upstream_error', 'malformed_response', 'model_not_found', 'not_found', 'permission_error', 'not_configured']);
+// …of which this one passes (the provider can't run the model right now): a model picked in Settings is swapped only for it
 const TEMPORARY_MODEL_FAILURES = new Set(['upstream_error']);
+// (not_configured counts only for one provider: MetaCode's own setup problems apply to every model)
+function fallbackType(f) {
+  return MODEL_FALLBACK_TYPES.has(f.type) && !(f.type === 'not_configured' && !f.provider);
+}
 
-// GET /api/models — the model list for the Settings dropdown (from
-// emis-models.json, or EMIS's live list), default model first: the frontend
-// selects the first entry when the saved model isn't listed. Same shape as
-// before — { models: [{ id, name }], note? } — plus each model's capability
-// flags when the file provides them.
+// GET /api/models — the model list for the Settings dropdown, from the AI
+// service, default model first (the frontend selects the first entry when the
+// saved model isn't listed), then in the service's order (by provider). Shape:
+//   { models: [{ id, name, provider?, providerName?, free?, available?, toolCall?, reasoning?, attachment?, contextWindow?, maxOutput? }],
+//     providers: [{ id, name, ready }], provider: 'opencode', source: 'opencode', note? }
+// available: true = offered now; false = listed but not offered right now; absent = not known.
 app.get('/api/models', async (req, res) => {
+  const base = { provider: 'opencode', source: 'opencode' };
   try {
     const notReady = notConfigured();
-    if (notReady) return res.json({ models: [], note: notReady.message });
+    if (notReady) return res.json(Object.assign({ models: [], providers: [] }, base, { note: notReady.message }));
     const list = await getModelList(true);
     if (!list.ok) {
       logFailure(list);
-      return res.json({ models: [], note: list.message });
+      return res.json(Object.assign({ models: [], providers: [] }, base, { note: list.message }));
     }
-    const choice = chooseDefaultModel(list.ids, list.source);
-    // the file's models, checked against the service's own list when it can be read
-    const avail = list.source === 'file' ? await serviceAvailability(true, 4000) : null;
-    const others = list.ids.filter(id => id !== choice.model);
-    if (list.source !== 'file') others.sort((a, b) => a.localeCompare(b));   // the file keeps its own order
-    const ordered = (choice.model ? [choice.model] : []).concat(others);
-    const infoOf = id => (list.info && list.info.get(id)) || null;
-    const nameOf = id => (infoOf(id) ? infoOf(id).name : id);
-    const nameCount = {};
-    ordered.forEach(id => { nameCount[nameOf(id)] = (nameCount[nameOf(id)] || 0) + 1; });
+    const choice = chooseDefaultModel(list);
+    const ordered = (choice.model ? [choice.model] : []).concat(list.ids.filter(id => id !== choice.model));
+    const labels = modelLabels(ordered, list.info);
     const models = ordered.map(id => {
-      let name = nameOf(id);
-      if (nameCount[name] > 1) name += ' (' + id + ')';          // e.g. two entries both called "GPT-5.5"
-      if (id === choice.model) name += ' (default)';
-      const entry = { id, name };
-      const info = infoOf(id);
-      if (info) {
-        if (info.toolCall !== null) entry.toolCall = info.toolCall;
-        if (info.reasoning !== null) entry.reasoning = info.reasoning;
-        if (info.attachment !== null) entry.attachment = info.attachment;
-        if (info.context) entry.contextWindow = info.context;
-        if (info.output) entry.maxOutput = info.output;
-      }
-      // true: the service lists it; false: it doesn't (right now); absent: not known
-      if (avail && avail.checked) entry.available = avail.listed.has(id);
-      else if (!avail) entry.available = true;
+      const info = list.info.get(id);
+      const entry = { id, name: labels.get(id) + (id === choice.model ? ' (default)' : '') };
+      if (info.provider) entry.provider = info.provider;
+      if (info.providerName) entry.providerName = info.providerName;
+      if (info.free !== null) entry.free = info.free;
+      if (info.available !== null) entry.available = info.available;
+      if (info.toolCall !== null) entry.toolCall = info.toolCall;
+      if (info.reasoning !== null) entry.reasoning = info.reasoning;
+      if (info.attachment !== null) entry.attachment = info.attachment;
+      if (info.context) entry.contextWindow = info.context;
+      if (info.output) entry.maxOutput = info.output;
       return entry;
     });
-    const body = { models, provider: 'emis', source: list.source === 'file' ? MODELS_FILE_NAME : 'emis' };
-    if (avail) {
-      body.availability = avail.checked
-        ? { checked: true, at: avail.at, listed: models.filter(m => m.available).length, notListed: models.filter(m => m.available === false).map(m => m.id) }
-        : { checked: false, note: 'Couldn\'t check which models the AI service offers right now (' + avail.problem.replace(/\.$/, '') + ').' };
-    }
-    if (choice.error) body.note = choice.error.message;
+    const body = Object.assign({ models, providers: list.providers }, base);
+    const note = choice.error ? choice.error.message : choice.warning;
+    if (note) body.note = note;
     res.json(body);
   } catch (err) {
     console.error('[ai] Unexpected error in /api/models: ' + redact(err && err.message));
-    res.json({ models: [], note: 'Couldn\'t load the model list.' });
+    res.json(Object.assign({ models: [], providers: [] }, base, { note: 'Couldn\'t load the model list.' }));
   }
 });
 
-// GET /api/keys/status — Settings → Key Rotation Status, for the EMIS keys
-// configured on this server: masked id, availability, request count and the
-// latest quota EMIS reported. Never the keys themselves.
-app.get('/api/keys/status', (req, res) => {
-  const now = Date.now();
-  const keys = EMIS.keys.map(key => {
-    const state = getKeyState(key);
-    const resting = isResting(state, now);
-    const entry = {
-      masked: maskKey(key),
-      status: state.invalid ? 'invalid' : (resting ? 'cooling_down' : 'available'),
-      cooldownSecondsLeft: resting ? Math.ceil((state.cooldownUntil - now) / 1000) : 0,
-      requestCount: state.requestCount,
-      source: 'env'
-    };
-    if (state.quota) {
-      const q = state.quota;
-      entry.quota = {
-        window: q.window, limitPrompts: q.limitPrompts, limitTokens: q.limitTokens,
-        remainingPrompts: q.remainingPrompts, remainingTokens: q.remainingTokens,
-        resetAt: q.resetAt ? new Date(q.resetAt).toISOString() : null,
-        updatedAt: new Date(q.updatedAt).toISOString()
-      };
-    }
+// Display names for a list of models: two providers offering a model under the
+// same name get " · <provider name>" ("Claude Opus 5.5 · OpenCode Zen"); two
+// entries of one provider with the same name get their model id.
+function modelLabels(ids, info) {
+  const labels = new Map(ids.map(id => [id, (info.get(id) || {}).name || id]));
+  const count = () => { const n = {}; labels.forEach(l => { n[l] = (n[l] || 0) + 1; }); return n; };
+  let n = count();
+  ids.forEach(id => { const i = info.get(id); if (n[labels.get(id)] > 1 && i && i.providerName) labels.set(id, labels.get(id) + ' · ' + i.providerName); });
+  n = count();
+  ids.forEach(id => { if (n[labels.get(id)] > 1) labels.set(id, labels.get(id) + ' (' + splitModel(id).model + ')'); });
+  return labels;
+}
+
+// What the service reports about a provider, field by field (so nothing else
+// it might add reaches the browser); keys only as their masked ids.
+function publicProvider(p) {
+  if (!p || typeof p !== 'object' || !safeModelId(p.id)) return null;
+  const num = v => (Number.isFinite(v) ? v : null);
+  const text = (v, max) => plainText(v, max);
+  const quota = q => (q && typeof q === 'object' ? {
+    window: ['day', 'week', 'month'].includes(q.window) ? q.window : null, limitPrompts: num(q.limitPrompts), limitTokens: num(q.limitTokens),
+    remainingPrompts: num(q.remainingPrompts), remainingTokens: num(q.remainingTokens), resetAt: text(q.resetAt, 40), updatedAt: text(q.updatedAt, 40)
+  } : null);
+  const key = k => {
+    if (!k || typeof k !== 'object') return null;
+    const masked = typeof k.masked === 'string' && k.masked.length <= 8 ? k.masked : '••••';
+    const entry = { masked, status: ['available', 'cooling_down', 'invalid'].includes(k.status) ? k.status : 'available',
+      cooldownSecondsLeft: num(k.cooldownSecondsLeft) || 0, requestCount: num(k.requestCount) || 0 };
+    if (quota(k.quota)) entry.quota = quota(k.quota);
     return entry;
-  });
-  res.json({ keys, provider: 'emis' });
+  };
+  const models = p.models && typeof p.models === 'object' ? p.models : null;
+  const catalog = p.catalog && typeof p.catalog === 'object' ? p.catalog : null;
+  const resting = p.resting && typeof p.resting === 'object' && text(p.resting.until, 40) ? p.resting : null;
+  return {
+    id: p.id, name: safeModelName(p.name) || p.id, kind: text(p.kind, 40), ready: p.ready === true, problem: text(p.problem),
+    warnings: Array.isArray(p.warnings) ? p.warnings.map(w => text(w)).filter(Boolean).slice(0, 20) : [],
+    keyCount: Number.isInteger(p.keyCount) ? p.keyCount : 0, free: typeof p.free === 'boolean' ? p.free : null, note: text(p.note),
+    models: models ? { listed: num(models.listed), available: num(models.available), source: text(models.source, 80), checkedAt: text(models.checkedAt, 40) } : null,
+    catalog: catalog ? { source: text(catalog.source, 20), updatedAt: text(catalog.updatedAt, 40), models: num(catalog.models) } : null,
+    resting: resting ? { until: text(resting.until, 40), reason: text(resting.reason, 20), window: text(resting.window, 20) } : null,
+    baseHost: text(p.baseHost, 200), proxy: text(p.proxy, 200), transport: text(p.transport, 120),
+    keys: Array.isArray(p.keys) ? p.keys.map(key).filter(Boolean).slice(0, 100) : []
+  };
+}
+function serviceProviders(st) {
+  return st && st.ok && st.status && Array.isArray(st.status.providers) ? st.status.providers.map(publicProvider).filter(Boolean) : [];
+}
+
+// GET /api/keys/status — Settings → AI providers: each provider the service
+// has (set up or not, its keys as masked ids with their state and latest
+// quota), and the keys flattened for older pages. Never the keys themselves.
+app.get('/api/keys/status', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const body = { provider: 'opencode', providers: [], keys: [] };
+  const off = notConfigured();
+  if (off) return res.json(Object.assign(body, { problem: off.message }));
+  const st = await freshServiceState(2000);
+  if (!st.ok) return res.json(Object.assign(body, { problem: st.failure ? st.failure.message : serviceStarting() ? notRunningMessage() : 'MetaCode\'s AI service didn\'t answer.' }));
+  body.providers = serviceProviders(st);
+  body.keys = [].concat(...body.providers.map(p => p.keys.map(k => Object.assign({ provider: p.id, source: 'env' }, k))));
+  res.json(body);
 });
 
 // ── Python / NetworkX bridge ──────────────────────────────────────────────────
@@ -2230,16 +2174,13 @@ app.post('/api/network/analyze', accounts.feature('network', { meter: 'networkRu
 // /scramjet/* serves the in-app Reddit browser's Scramjet files; the Wisp
 // WebSocket endpoint (/wisp/) is attached to the HTTP server in start().
 // The AI Scraper (beta) asks MetaCode's AI service like the other AI features
-// (same key, models, fallbacks and quota handling). Its agent
-// (python/ai_scraper.py) never sees the key.
+// (same models, fallbacks and quota handling). Its agent
+// (python/ai_scraper.py) never sees a key.
 const scraperAi = {
-  problem() {
-    const f = notConfigured();
-    return f ? f.message : null;
-  },
+  problem() { return aiProblem(); },
   async chat(messages, opts) {
     const aiError = f => new ScraperError('ai_error', 'MetaCode\'s AI service: ' + f.message, { status: f.status || 502 });
-    const prep = await prepareChat({ model: (opts && opts.model) || undefined, messages, temperature: 0.2, max_tokens: 1000 }, 'emis');
+    const prep = await prepareChat({ model: (opts && opts.model) || undefined, messages, temperature: 0.2, max_tokens: 1000 }, 'openai');
     if (prep.failure) throw aiError(prep.failure);
     const out = await answerChat(prep, opts && opts.signal);
     if (out.aborted) throw cancelledError();
@@ -2252,13 +2193,13 @@ const scraper = createScraper({ ai: scraperAi, policy: accounts.scraperPolicy, a
 
 // ── AI Coding Lab (ai-lab/, Ultra) ────────────────────────────────────────────
 // The Lab reaches MetaCode's AI service through this narrow interface, like the
-// AI Scraper: the same keys, quotas and model list, never the key itself. It
+// AI Scraper: the same providers, quotas and model list, never a key. It
 // asks for exactly the model it names — no similar-model switching — so a
 // conversation or an evaluation run records the model that really answered.
 //
 // A response object that collects what streamChat() writes (server-sent
 // events, or a JSON error before the stream starts) and hands each chunk on,
-// so the Lab can stream EMIS's answer without a second streaming client.
+// so the Lab can stream the AI service's answer without a second streaming client.
 class CapturedResponse extends require('events').EventEmitter {
   constructor(onText) {
     super();
@@ -2275,28 +2216,27 @@ class CapturedResponse extends require('events').EventEmitter {
   write(chunk) { if (this.destroyed) return false; this.headersSent = true; this.onText(String(chunk)); return true; }
   json(obj) { this.headersSent = true; this.jsonBody = obj; this.end(); return this; }
   end(chunk) { if (chunk) this.write(chunk); if (this.writableEnded) return; this.writableEnded = true; this.writableFinished = true; this.emit('finish'); this.emit('close'); }
-  // The Lab's caller went away (Stop): watchClient() sees the close and cancels the EMIS request
+  // The Lab's caller went away (Stop): watchClient() sees the close and cancels the AI request
   destroy() { if (this.destroyed || this.writableEnded) return; this.destroyed = true; this.emit('close'); }
 }
 
 const labAi = {
   name: 'MetaCode AI service',
-  problem() { const f = notConfigured(); return f ? f.message : null; },
-  // → { ok, models: [{ id, name, toolCall, reasoning, contextWindow, maxOutput }], default } | { ok: false, message }
+  problem() { return aiProblem(); },
+  // → { ok, models: [{ id, name, provider, providerName, free, toolCall, reasoning, contextWindow, maxOutput, available }], default } | { ok: false, message }
+  // (ids that look like image or audio models are left out unless the service named them)
   async models() {
     const notReady = notConfigured();
     if (notReady) return { ok: false, message: notReady.message };
     const list = await getModelList(false);
     if (!list.ok) return { ok: false, message: list.message };
-    const choice = chooseDefaultModel(list.ids, list.source);
-    const avail = list.source === 'file' ? await serviceAvailability(false, 0) : null;
+    const choice = chooseDefaultModel(list);
     return {
       ok: true, default: choice.model || null, source: list.source,
-      models: list.ids.filter(id => !NOT_A_CHAT_MODEL.test(id) || (list.info && list.info.has(id))).map(id => {
-        const info = list.info ? list.info.get(id) : null;
-        return { id, name: info ? info.name : id, toolCall: info ? info.toolCall : null, reasoning: info ? info.reasoning : null,
-          contextWindow: info ? info.context || null : null, maxOutput: info ? info.output || null : null,
-          available: !avail ? true : avail.checked ? avail.listed.has(id) : null };
+      models: list.ids.filter(id => list.info.get(id).named || !NOT_A_CHAT_MODEL.test(splitModel(id).model)).map(id => {
+        const info = list.info.get(id);
+        return { id, name: info.name, provider: info.provider || null, providerName: info.providerName || null, free: info.free,
+          toolCall: info.toolCall, reasoning: info.reasoning, contextWindow: info.context || null, maxOutput: info.output || null, available: info.available };
       })
     };
   },
@@ -2353,21 +2293,28 @@ app.get('/wisp/', scraper.wispPlainHttp);         // only reached when a proxy d
 
 // ── Status page (status.metac0.de, /status) ───────────────────────────────────
 // Public: says whether each part works, never how it's configured.
-let aiProbe = { at: 0, result: null };
+// The AI part asks the service how it is (GET /v1/status, at most once a minute, no prompts spent).
 async function aiStatusCheck() {
   if (notConfigured()) return { status: 'off', note: 'AI isn\'t set up on this server.' };
+  const st = await freshServiceState(60000);
+  if (serviceStarting()) return { status: 'degraded', note: 'The AI service is starting.' };
+  if (!st.ok) return { status: 'outage', note: 'The AI service isn\'t answering.' };
   let now = Date.now();
-  if (allKeysResting(now)) {
-    const f = quotaFailure(now);
-    const when = f.resetAt ? describeWhen(Date.parse(f.resetAt), now).replace(/ \(.*\)$/, '') : 'soon';
-    return { status: 'degraded', note: f.type === 'quota_exceeded' ? 'The usage quota is used up; AI features resume ' + when + '.' : 'Paused briefly at the AI service\'s request; back ' + when + '.' };
-  }
-  if (Date.now() - aiProbe.at > 60000) aiProbe = { at: Date.now(), result: await fetchModelList() };   // no prompts spent
-  const r = aiProbe.result;
-  if (!r.ok) {
-    // (a 429 is how the AI service says a key's budget for the day, week or month is used up)
-    if (r.status === 429) return { status: 'degraded', note: 'The AI service answered "too many requests": the usage quota is probably used up until it resets.' };
-    return { status: 'outage', note: r.type === 'timeout' || r.type === 'network' ? 'The AI service can\'t be reached.' : 'The AI service isn\'t accepting requests.' };
+  const providers = st.status && Array.isArray(st.status.providers) ? st.status.providers.filter(p => p && typeof p === 'object') : null;
+  const ready = providers ? providers.filter(p => p.ready === true) : null;
+  if (st.status && (st.status.ready === false || (ready && !ready.length))) return { status: 'off', note: 'AI isn\'t set up on this server.' };
+  if (ready && ready.length) {
+    // Every provider that is set up is resting (usage quota used up, or asked to pause)
+    const rest = ready.map(p => {
+      const own = providerRest.get(p.id);
+      const until = Math.max(own && own.until > now ? own.until : 0, p.resting && Date.parse(p.resting.until) > now ? Date.parse(p.resting.until) : 0);
+      return until ? { until, quota: (own && own.until > now && own.reason === 'quota') || (p.resting && p.resting.reason === 'quota') } : null;
+    });
+    if (rest.every(Boolean)) {
+      const first = rest.reduce((a, b) => (b.until < a.until ? b : a));
+      const when = describeWhen(first.until, now).replace(/ \(.*\)$/, '');
+      return { status: 'degraded', note: rest.some(r => r.quota) ? 'The usage quota is used up; AI features resume ' + when + '.' : 'Paused briefly at the AI service\'s request; back ' + when + '.' };
+    }
   }
   now = Date.now();
   if (serviceTrouble(now)) return { status: 'outage', note: 'The AI service is answering with server errors for several models; AI requests are failing.' };
@@ -2411,11 +2358,10 @@ const statusMonitor = createStatusMonitor({
 });
 app.get('/api/status', statusMonitor.handler);
 
-// ── Health ────────────────────────────────────────────────────────────────────
 // ── Settings status (Settings page) ───────────────────────────────────────────
 // What MetaCode read from .env and whether AI is ready: file name and
 // location, encoding, the NAMES of the settings found (never their values),
-// warnings, and the EMIS setup. Same-origin only (AI_ROUTE).
+// warnings, and the AI service with its providers. Same-origin only (AI_ROUTE).
 const STARTED_AT = new Date().toISOString();
 const VERSION = (() => {
   try {
@@ -2425,59 +2371,115 @@ const VERSION = (() => {
     return sha ? sha.slice(0, 7) : null;
   } catch (e) { return null; }
 })();
+// settings.ai: { provider: 'opencode', ready, problem, warnings,
+//   service: { host, mode, managed, running, version, opencode, startedAt, problem },
+//   providers: [{ id, name, ready, problem, keyCount, free, note, models: { listed, available }, resting }],
+//   defaultModel, defaultModelName, modelSwitch, rateLimitedModels, restingProviders, maxParallel }
+// (service.mode is OPENCODE_SERVICE_MANAGED; service.managed: MetaCode runs the service itself;
+// service.running: null = not asked yet)
+function aiSettings() {
+  const now = Date.now();
+  const off = notConfigured();
+  const sup = supervisor.state();
+  const st = serviceState;
+  const status = !off && st.ok && st.status && typeof st.status === 'object' ? st.status : null;
+  const svc = status && status.service && typeof status.service === 'object' ? status.service : {};
+  const ready = aiReady();
+  const list = modelList.result;
+  const choice = list ? chooseDefaultModel(list) : null;
+  const defaultModel = (choice && choice.model) || (status && safeModelId(status.default)) || AI.model || null;
+  const defaultInfo = list && defaultModel ? list.info.get(defaultModel) : null;
+  return {
+    provider: 'opencode', ready,
+    problem: off ? off.message : ready ? null : aiProblem(),
+    warnings: AI.warnings.concat(status && Array.isArray(status.warnings) ? status.warnings.map(w => plainText(w)).filter(Boolean).slice(0, 30) : []),
+    service: {
+      host: AI.off ? null : AI.baseHost, mode: AI.managed, managed: sup.managed,
+      running: off || serviceStarting() || serviceFailing() ? false : st.ok === null ? null : !!st.ok,
+      version: plainText(svc.version, 40), opencode: plainText(svc.opencode, 40), startedAt: plainText(svc.startedAt, 40),
+      problem: serviceProblem()
+    },
+    providers: serviceProviders(off ? null : st).map(p => ({ id: p.id, name: p.name, ready: p.ready, problem: p.problem, keyCount: p.keyCount, free: p.free, note: p.note,
+      models: p.models ? { listed: p.models.listed, available: p.models.available } : null, resting: p.resting })),
+    defaultModel, defaultModelName: defaultInfo && defaultInfo.named ? defaultInfo.name : null,
+    modelSwitch: switchingAllowed(),
+    rateLimitedModels: restingModels(now).map(x => ({ model: x.model, until: new Date(x.until).toISOString() })),
+    restingProviders: restingProviders(now).map(x => ({ provider: x.provider, until: new Date(x.until).toISOString(), reason: x.reason })),
+    maxParallel: aiMaxParallel()
+  };
+}
 function settingsStatus() {
   const env = envLoader.info || {};
-  const ready = !notConfigured();
   return {
     env: {
       found: !!env.found, name: env.name || null, where: env.where || null, encoding: env.encoding || null,
       error: env.error || null, keys: env.keys || [], overridden: env.overridden || [], warnings: env.warnings || [],
-      searched: env.searched || [], loadedAt: env.loadedAt || null
+      searched: env.searched || [], loadedAt: env.loadedAt || null, disabled: !!env.disabled
     },
-    ai: {
-      provider: 'emis', ready, keyCount: EMIS.keys.length, maxParallel: aiMaxParallel(), modelSwitch: switchingAllowed(), rateLimitedModels: restingModels(Date.now()).map(x => ({ model: x.model, until: new Date(x.until).toISOString() })), problem: EMIS.problem || (EMIS.keys.length ? null : 'EMIS_API_KEY isn\'t set in .env.'),
-      warnings: EMIS.warnings, baseHost: (() => { try { return new URL(EMIS.baseUrl).host; } catch (e) { return null; } })(),
-      defaultModel: EMIS.model || null,
-      transport: emisTransport() === 'node' ? 'Node.js' : (emisPython.status().ok ? 'Python ' + emisPython.status().python + ' (' + emisPython.status().client + ')' : (emisTransport() === 'python' ? 'Python — not available: ' + (emisPython.status().problem || 'not started') : 'Node.js (Python not found)')),
-      proxy: (() => { const u = proxyUrl(); if (!u) return null; try { return new URL(u).host; } catch (e) { return 'set'; } })()
-    },
+    ai: aiSettings(),
     server: { version: VERSION, startedAt: STARTED_AT, node: process.version },
     accounts: (() => { const a = accounts.config(); return { enabled: a.enabled, billing: a.stripe.enabled, webhook: !!a.stripe.webhookSecret, problems: a.problems }; })()
   };
 }
-app.get('/api/settings/status', (req, res) => { res.set('Cache-Control', 'no-store'); res.json(settingsStatus()); });
-// Re-reads .env without restarting: the AI (EMIS) settings apply at once;
-// scraper/port settings still need a restart.
-app.post('/api/settings/reload', async (req, res) => {
-  envLoader.load();
-  EMIS = loadEmisConfig(process.env);
-  keyState.clear();
-  streamPref.clear();
-  proxyAgent = null;
-  // The Python worker starts again with the new environment (EMIS_PYTHON, proxies…); requests it
-  // was already working on are answered first, not sent again
-  modelList.ids = null; modelList.fetchedAt = 0; modelList.failure = null; modelList.failedAt = 0;
-  emisPython.stop({ finishRequests: true });
-  if (emisTransport() !== 'node') await emisPython.warm();
-  const env = envLoader.info;
-  console.log('[settings] .env reloaded: ' + (env.found ? env.keys.length + ' value(s) from ' + env.file : 'no .env file found') + '; AI ' + (notConfigured() ? 'not ready' : 'ready (' + EMIS.keys.length + ' key(s))'));
+app.get('/api/settings/status', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  await freshServiceState(10000);
   res.json(settingsStatus());
 });
 
+// Everything MetaCode learned about the service and its models starts over
+function resetAiState() {
+  modelList.generation++;
+  Object.assign(modelList, { result: null, fetchedAt: 0, failure: null, failedAt: 0, pending: null });
+  serviceState.generation++;
+  Object.assign(serviceState, { ok: null, at: 0, status: null, failure: null, pending: null });
+  modelLimits.clear();
+  modelDown.clear();
+  serverErrors = [];
+  providerRest.clear();
+  substitutionsLogged.clear();
+  serviceTokenCache = null;
+  lastStartAttempt = 0;
+}
+
+// Re-reads .env without restarting: the AI settings apply at once, and the AI
+// service re-reads it too (its providers' keys and models). A service MetaCode
+// runs itself is started again when its address or token changed.
+// Scraper/port settings still need a restart.
+app.post('/api/settings/reload', async (req, res) => {
+  envLoader.load();
+  AI = loadAiConfig(process.env);
+  resetAiState();
+  try {
+    if (JSON.stringify(serviceTarget()) !== serviceTargetKey) await startService();
+    else if (!notConfigured()) {
+      // (POST /v1/reload: the service re-reads .env, its config and catalogs; requests it's working on finish first)
+      const r = await aiRequest('POST', '/reload', null, { timeoutMs: 30000, retry: false });
+      if (r.failed === 'network' && r.code === 'ECONNREFUSED') {
+        if (AI.managed !== 'off') await startService();
+      } else if (r.failed || !r.ok) logFailure(describeFailure(r));
+    }
+  } catch (err) {
+    console.error('[settings] Couldn\'t reload the AI service: ' + redact(err && err.message));
+  }
+  if (!serviceStarting()) await probeService();
+  const env = envLoader.info;
+  const ai = aiSettings();
+  console.log('[settings] .env reloaded: ' + (env.found ? env.keys.length + ' value(s) from ' + env.file : 'no .env file found') + '; AI ' +
+    (ai.ready ? 'ready' : 'not ready') + (AI.off ? ' (switched off)' : ' (' + ai.providers.filter(p => p.ready).length + ' provider(s) ready)'));
+  res.json(settingsStatus());
+});
+
+// ── Health ────────────────────────────────────────────────────────────────────
+// aiConfigured: AI isn't switched off or set up wrongly; aiReady: and the AI
+// service answered (as last asked) with a provider set up.
 app.get('/api/health', (req, res) => {
-  const ready = !notConfigured();
-  const keyCount = ready ? EMIS.keys.length : 0;
   res.json({
-    status:               'ok',
-    provider:             'emis',
-    emisConfigured:       ready,
-    emisKeyCount:         keyCount,
-    // Read by the frontend to tell whether AI is available. Every provider
-    // choice in Settings is now answered by EMIS, so both report the number
-    // of EMIS keys configured on this server.
-    groqEnvKeyCount:      keyCount,
-    anthropicEnvKeyCount: keyCount,
-    node:                 process.version
+    status:       'ok',
+    provider:     'opencode',
+    aiConfigured: !notConfigured(),
+    aiReady:      aiReady(),
+    node:         process.version
   });
 });
 
@@ -2501,10 +2503,12 @@ app.use((err, req, res, next) => {
 // start(port) is also used by the test suite (port 0 = any free port).
 function start(port) {
   return new Promise((resolve, reject) => {
-    const server = app.listen(port, () => {
+    const server = app.listen(port, async () => {
       scraper.setPort(server.address().port);
       aiLab.start();                                         // AI Coding Lab: reloads saved evaluation runs
-      if (emisTransport() !== 'node') emisPython.warm();   // start the Python EMIS worker early
+      // MetaCode's AI service: started here when nothing answers at its address (opencode/supervisor.js)
+      try { await startService(); } catch (err) { console.error('[ai] Couldn\'t start the AI service: ' + redact(err && err.message)); }
+      if (!serviceStarting()) probeService();
       statusMonitor.start();
       resolve(server);
     });
@@ -2518,14 +2522,29 @@ function start(port) {
       collab.shutdown();
       statusMonitor.stop();
       scraper.onUpgrade.closeAll();
-      emisPython.stop();
-      return close(cb);
+      // the AI service MetaCode started goes too (closed is called once it has stopped)
+      const stopped = supervisor.stop();
+      return close(err => { stopped.then(() => { if (cb) cb(err); }); });
     };
   });
 }
 
-function printBanner(PORT) {
-  const fileModels = readModelsFile();        // reports problems with the model list file first
+// "OpenCode service at 127.0.0.1:4097 (started by MetaCode) — OpenCode Zen: ready (4 models, free only); …"
+function aiBanner() {
+  const off = notConfigured();
+  if (AI.off) return 'switched off (OPENCODE_SERVICE_URL=off)';
+  if (off) return 'NOT READY — ' + AI.problem;
+  const sup = supervisor.state();
+  const how = sup.managed ? 'started by MetaCode' : 'external';
+  const head = 'OpenCode service at ' + AI.baseHost + ' (' + how + ')';
+  if (sup.managed && sup.problem) return head + ' — not running: ' + sup.problem;
+  if (serviceStarting()) return head + ' — starting…';
+  if (serviceState.ok === false) return head + ' — not answering: ' + (serviceState.failure ? serviceState.failure.message : 'no answer');
+  return head + ' — ' + serviceSummary(serviceState.status);
+}
+
+async function printBanner(PORT) {
+  if (!notConfigured() && !serviceStarting() && serviceState.ok === null) await probeService();   // so the banner can say how the service is
   console.log('\n  ╔══════════════════════════════════════════╗');
   console.log('  ║   MetaCode — Social Media Coding Platform ║');
   console.log('  ╚══════════════════════════════════════════╝\n');
@@ -2537,21 +2556,10 @@ function printBanner(PORT) {
   else if (!env.disabled) console.log('  Settings   → no .env file in ' + __dirname + ' (copy .env.example to .env to add keys)');
   env.warnings.forEach(w => console.warn('  ⚠ ' + w));
   if (env.overridden.length) console.warn('  ⚠ .env replaced system environment variables: ' + env.overridden.join(', '));
-  const keyCount = EMIS.keys.length;
-  console.log('  AI         → ' + (EMIS.problem ? 'NOT READY — ' + EMIS.problem
-    : keyCount ? keyCount + ' key' + (keyCount === 1 ? '' : 's') + ' set via .env ✓'
-    : 'Not set — add EMIS_API_KEY=emis-… to .env to turn on AI features (keys are issued by hand: message @kawaii_zxs on Discord, user ID 1079096114273320971)'));
-  if (EMIS.baseUrl) console.log('  AI API     → ' + EMIS.baseUrl + (emisTransport() === 'node' ? ' (via Node.js)' : ' (via Python when available; EMIS_TRANSPORT=' + emisTransport() + ')'));
-  if (fileModels.ok) {
-    const choice = chooseDefaultModel(fileModels.ids, 'file');
-    console.log('  Models     → ' + fileModels.models.length + ' from ' + MODELS_FILE_NAME + '; default: ' +
-      (choice.model ? choice.model + (EMIS.model ? ' (EMIS_MODEL)' : '') : 'none — ' + choice.error.message));
-  } else {
-    console.log('  Models     → the live model list (GET /models)' + (EMIS.model ? '; default: ' + EMIS.model + ' (EMIS_MODEL)' : ''));
-  }
-  EMIS.warnings.forEach(w => console.warn('  ⚠ ' + w));
+  console.log('  AI         → ' + aiBanner());
+  AI.warnings.forEach(w => console.warn('  ⚠ ' + w));
   ['GROQ_API_KEY', 'ANTHROPIC_API_KEY'].forEach(name => {
-    if (process.env[name]) console.warn('  ⚠ ' + name + ' is set but no longer used: MetaCode now uses the AI key in EMIS_API_KEY.');
+    if (process.env[name]) console.warn('  ⚠ ' + name + ' is set but no longer used: MetaCode\'s AI goes through its OpenCode service.');
   });
   console.log('  Python     → child_process bridge ready (auto-detects python3/python)');
   const sc = scraper.status();
@@ -2575,7 +2583,17 @@ function printBanner(PORT) {
 
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
-  start(PORT).then(server => printBanner(server.address().port), err => {
+  start(PORT).then(server => {
+    printBanner(server.address().port);
+    // Ctrl+C / pm2 stop: the AI service MetaCode started stops with it
+    const shutdown = () => {
+      server.close();
+      supervisor.stop().then(() => process.exit(0));
+      setTimeout(() => process.exit(0), 7000).unref();
+    };
+    process.once('SIGINT', shutdown);
+    process.once('SIGTERM', shutdown);
+  }, err => {
     console.error('[server] Couldn\'t start: ' + redact(err && err.message));
     process.exit(1);
   });

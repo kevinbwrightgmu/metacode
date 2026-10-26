@@ -60,7 +60,7 @@ test.before(async () => {
   const xBase = await xm.listen();
   const liBase = await li.listen();
   Object.assign(process.env, testEnv({ YOUTUBE_API_BASE_URL: ytBase, X_API_BASE_URL: xBase, LINKEDIN_API_BASE_URL: liBase, X_BEARER_TOKEN: 'server-x-token-000000000000',
-    YOUTUBE_MIN_DELAY_MS: '0', X_MIN_DELAY_MS: '0', LINKEDIN_MIN_DELAY_MS: '0', EMIS_API_KEY: '' }));
+    YOUTUBE_MIN_DELAY_MS: '0', X_MIN_DELAY_MS: '0', LINKEDIN_MIN_DELAY_MS: '0' }));
   delete process.env.YOUTUBE_API_KEY;
   delete process.env.LINKEDIN_ACCESS_TOKEN;
   const { start } = require('../server');

@@ -39,7 +39,7 @@
     return '<div class="table-wrap"><table class="table"><thead><tr><th><span class="lab-visually-hidden">Select</span></th><th>Run</th><th>Profile</th><th>Model</th><th>Status</th><th>Pass rate</th><th>Started</th></tr></thead><tbody>' +
       runs.map(r => '<tr><td><input type="checkbox" data-pick="' + esc(r.id) + '" data-created="' + esc(r.createdAt) + '"' + (r.metrics ? '' : ' disabled') + ' aria-label="Select run for comparison"></td>' +
         '<td><a href="#run/' + esc(r.id) + '">' + esc(nameOf(r)) + '</a>' + (r.note ? '<div class="lab-muted">' + esc(r.note) + '</div>' : '') + '</td>' +
-        '<td>' + (r.profileId ? '<a href="#profile/' + esc(r.profileId) + '">v' + r.profileVersion + '</a>' : '<span class="lab-muted">none</span>') + '</td><td>' + esc(r.model) + '</td>' +
+        '<td>' + (r.profileId ? '<a href="#profile/' + esc(r.profileId) + '">v' + r.profileVersion + '</a>' : '<span class="lab-muted">none</span>') + '</td><td>' + esc(Lab.modelName(r.provider, r.model)) + '</td>' +
         '<td>' + badge(r.status) + (ACTIVE.includes(r.status) ? ' <span class="lab-muted">' + fmt(r.progress.done) + ' / ' + fmt(r.progress.total) + '</span>' : '') + '</td>' +
         '<td>' + (r.metrics ? pct(r.metrics.passRate) + ' <span class="lab-muted">of ' + fmt(r.metrics.graded) + ' graded</span>' : '—') + '</td><td>' + when(r.createdAt) + '</td></tr>').join('') +
       '</tbody></table></div><div class="lab-actions mt-3"><button class="btn btn-secondary btn-sm" id="rt-cmp" disabled>Compare selected (2)</button><span class="lab-muted">Pick two runs with results: the older one is the baseline.</span></div>';
@@ -125,9 +125,9 @@
         '<div class="lab-actions mt-3"><button class="btn btn-primary btn-sm" id="su-run">Start run</button><span class="lab-muted">Uses ' + fmt(tasks * c.repeats) + ' model request(s) from your allowance' + (c.checks.some(x => x.type === 'ai_rubric') ? ', plus grading requests' : '') + '.</span></div></div>' +
       '<div class="card"><div class="card-title">Configuration (v' + s.currentVersion + ')</div><dl class="lab-kv"><dt>Dataset</dt><dd>' + (ds ? '<a href="#dataset/' + esc(ds.id) + '">' + esc(ds.name) + '</a>' : '(deleted)') + ' v' + c.datasetVersion + '</dd>' +
         '<dt>Split</dt><dd>' + esc(c.split) + '</dd><dt>Repeats</dt><dd>' + c.repeats + '</dd><dt>Knowledge</dt><dd>' + (c.retrieval.enabled ? c.retrieval.k + ' passages per task' : 'not used') + '</dd>' +
-        '<dt>Grading model</dt><dd>' + esc(c.judgeModel || 'the run\'s model') + '</dd><dt>Extra checks</dt><dd>' + (c.checks.length ? c.checks.map(x => esc(x.label || x.type)).join(', ') : 'none (each example\'s own checks apply)') + '</dd></dl>' +
+        '<dt>Grading model</dt><dd>' + esc(c.judgeModel ? Lab.modelName(null, c.judgeModel) : 'the run\'s model') + '</dd><dt>Extra checks</dt><dd>' + (c.checks.length ? c.checks.map(x => esc(x.label || x.type)).join(', ') : 'none (each example\'s own checks apply)') + '</dd></dl>' +
         (s.versions.length > 1 ? '<h4 class="lab-muted mt-3">Versions</h4><ul class="lab-list">' + s.versions.slice().reverse().map(v => '<li><span>v' + v.version + ' ' + esc(v.note || '') + '</span><span class="lab-muted">' + when(v.createdAt) + '</span></li>').join('') + '</ul>' : '') + '</div></div>' +
-      '<div class="card"><div class="card-title">Runs of this suite</div>' + runsTable(runs, r => r.model + ' · ' + when(r.createdAt)) + '</div>';
+      '<div class="card"><div class="card-title">Runs of this suite</div>' + runsTable(runs, r => Lab.modelName(r.provider, r.model) + ' · ' + when(r.createdAt)) + '</div>';
     wireRunsTable(main);
     const fillPv = () => {
       const p = profiles.find(x => x.id === $('su-prof').value);
@@ -185,7 +185,7 @@
     const canResume = ['interrupted', 'cancelled', 'failed'].includes(run.status) && !run.active;
     const share = run.progress.total ? Math.round(run.progress.done / run.progress.total * 100) : 0;
     if (!main.isConnected) return;
-    main.innerHTML = '<div class="lab-head"><div><h2>' + (suite ? '<a href="#suite/' + esc(suite.id) + '">' + esc(suite.name) + '</a>' : 'Evaluation run') + ' · ' + esc(run.model) + ' ' + badge(run.status) + '</h2>' +
+    main.innerHTML = '<div class="lab-head"><div><h2>' + (suite ? '<a href="#suite/' + esc(suite.id) + '">' + esc(suite.name) + '</a>' : 'Evaluation run') + ' · ' + esc(Lab.modelName(run.provider, run.model)) + ' ' + badge(run.status) + '</h2>' +
         '<p>' + (run.profileId ? 'Profile ' + (profile ? '<a href="#profile/' + esc(profile.id) + '">' + esc(profile.name) + '</a>' : '(deleted)') + ' v' + run.profileVersion : 'No profile') + ' · ' + esc(run.provider) + ' · temperature ' + (run.settings.temperature === null ? 'default' : run.settings.temperature) +
         ' · ' + fmt(run.settings.maxTokens) + ' max tokens · dataset v' + run.datasetVersion + ' · suite v' + run.suiteVersion + (run.note ? ' · ' + esc(run.note) : '') + '</p></div>' +
       '<div class="lab-actions">' + (active ? '<button class="btn btn-secondary btn-sm" id="rn-cancel">Cancel</button>' : '') + (canResume ? '<button class="btn btn-primary btn-sm" id="rn-resume">Resume</button>' : '') +
@@ -244,7 +244,7 @@
   async function compareWith(run) {
     const runs = (await get('/runs?suiteId=' + run.suiteId)).runs.filter(r => r.id !== run.id && r.metrics);
     if (!runs.length) { notify('No other run of this suite has results yet.', 'info'); return; }
-    openModal('Compare with another run', field('Other run', '<select class="form-select" id="cw-r">' + runs.map(r => '<option value="' + esc(r.id) + '" data-created="' + esc(r.createdAt) + '">' + esc(r.model) + (r.profileVersion ? ' · profile v' + r.profileVersion : '') + ' · ' + when(r.createdAt) + ' · ' + pct(r.metrics.passRate) + '</option>').join('') + '</select>'),
+    openModal('Compare with another run', field('Other run', '<select class="form-select" id="cw-r">' + runs.map(r => '<option value="' + esc(r.id) + '" data-created="' + esc(r.createdAt) + '">' + esc(Lab.modelName(r.provider, r.model)) + (r.profileVersion ? ' · profile v' + r.profileVersion : '') + ' · ' + when(r.createdAt) + ' · ' + pct(r.metrics.passRate) + '</option>').join('') + '</select>'),
       '<button class="btn btn-secondary" onclick="Lab.closeModal()">Cancel</button><button class="btn btn-primary" id="cw-go">Compare</button>');
     $('cw-go').onclick = () => {
       const other = runs.find(r => r.id === $('cw-r').value);
@@ -288,7 +288,7 @@
     let profile = null;
     if (rb.profileId) { try { profile = (await get('/profiles/' + rb.profileId)).profile; } catch (e) { profile = null; } }
     const vB = profile && profile.versions.find(v => v.version === rb.profileVersion);
-    const label = x => (x.profileVersion ? 'profile v' + x.profileVersion : 'no profile') + ' · ' + x.model;
+    const label = x => (x.profileVersion ? 'profile v' + x.profileVersion : 'no profile') + ' · ' + Lab.modelName(x.provider, x.model);
     const delta = (x, fmtFn, goodWhenUp) => {
       if (x === null || x === undefined) return '—';
       const cls = x === 0 ? '' : (x > 0) === goodWhenUp ? 'lab-delta-pos' : 'lab-delta-neg';

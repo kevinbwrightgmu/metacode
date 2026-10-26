@@ -99,7 +99,7 @@ const CollectorView = (() => {
           <p>The AI Scraper is a separate app in the <code>collector/</code> folder. Build it once on the server, then reload this page:</p>
           <pre class="sc-pre">npm run collector:install
 npm run collector:build</pre>
-          <p class="form-hint">On a server managed by pm2, run these in the MetaCode folder and then <code>pm2 reload metacode</code> — see docs/deploy-vps.md.</p>
+          <p class="form-hint">On a server managed by pm2, run these in the MetaCode folder and then reload both apps (MetaCode and its AI service) with <code>pm2 startOrReload ecosystem.config.cjs --update-env</code> — see docs/deploy-vps.md.</p>
         </div>
       </div>`;
     window.addEventListener('message', onMessage);

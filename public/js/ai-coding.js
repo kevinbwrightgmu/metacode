@@ -306,7 +306,7 @@ const AICoder = (() => {
     let toCode = filterPosts(posts).filter(p => !Object.keys(p.aiCodes || {}).length);
 
     if (!toCode.length) { App.notify('All visible posts are already coded', 'info'); return; }
-    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add your AI key (EMIS_API_KEY) to the server\'s .env file (see Settings)', 'error'); return; }
+    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up on this server — Settings → AI connection shows why', 'error'); return; }
     // Accounts on: sign in first, and say so up front when the plan has fewer posts left than this run needs
     if (window.Account && Account.enabled()) {
       if (!Account.signedIn()) { Account.openSignIn({ reason: 'Sign in to use AI coding — free accounts include ' + MetaPlans.get('free').limits.aiPostsPerWeek.toLocaleString() + ' posts a week.' }); return; }
@@ -364,7 +364,7 @@ const AICoder = (() => {
               if (serverSide) { serverFailed++; serverProblems = true; }
               if (r.type === 'service_unavailable') gaveUp = true;     // the server stopped this run: no more rounds
               if (r.type === 'limit_reached') { gaveUp = true; limitHit = r.error; }   // the plan's posts for this week are used up
-              // An unreadable answer, or a passing EMIS problem, is worth another try
+              // An unreadable answer, or a passing problem at the AI service, is worth another try
               // (not once the server has given up on the AI service for this run)
               if (round < 2 && (r.ok || (serverSide && r.type !== 'service_unavailable'))) { retry.push(post); console.warn('[AICoder] post', post.id, '— will try again:', problem); }
               else { failed++; done++; settled.add(post.id); console.error('[AICoder] post', post.id, problem); }
@@ -399,7 +399,7 @@ const AICoder = (() => {
     updateProgress(done, toCode.length);
 
     const subs = Object.keys(substitutes);
-    const subMsg = subs.length ? ' ' + subs.map(m => substitutes[m] + ' of them by “' + m + '”').join(', ') + ' — the closest model, used while the chosen one was rate-limited or unavailable.' : '';
+    const subMsg = subs.length ? ' ' + subs.map(m => substitutes[m] + ' of them by “' + App.modelName(m) + '”').join(', ') + ' — the closest model, used while the chosen one was rate-limited or unavailable.' : '';
     const doneMsg = (stopFlag
       ? 'Stopped after ' + coded + ' posts.'
       : (coded || !failed ? '✓ Done — ' : 'Nothing was coded — ') + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError.replace(/\.$/, '') + ')' : '') : '') + '.' +
@@ -437,7 +437,7 @@ const AICoder = (() => {
 
   /* ── Single-post coding ──────────────────────*/
   async function codeOne(postId) {
-    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up — add your AI key (EMIS_API_KEY) to the server\'s .env file (see Settings)', 'error'); return; }
+    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up on this server — Settings → AI connection shows why', 'error'); return; }
     const post = App.getState().posts.find(p => p.id === postId);
     if (!post) return;
 

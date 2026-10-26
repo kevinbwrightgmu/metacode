@@ -29,7 +29,7 @@ const noBrowser = !chromiumPath && 'no Chromium found (set CHROMIUM_PATH)';
 const MB = 1024 * 1024;
 const KEY = 'sb_publishable_request_size_0123456789';
 const chats = [];             // what the AI service received: { system: length of the system message, user }
-let tmp, sb, sbFront, emis, server, front, direct, browser, mod, ctx, page;
+let tmp, sb, sbFront, aiService, server, front, direct, browser, mod, ctx, page;
 const consoleErrors = [];
 
 test.before(async () => {
@@ -39,23 +39,23 @@ test.before(async () => {
   sb.addUser('owner@example.org', 'password-owner');
   sbFront = bodyLimitProxy(sb.url, 1 * MB, { cors: true });
   await sbFront.start();
-  emis = http.createServer((req, res) => {
+  aiService = http.createServer((req, res) => {
     let body = '';
     req.on('data', c => { body += c; });
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'coder-model' }] }));
+      if (req.url !== '/v1/chat/completions') { res.statusCode = 404; return res.end('{}'); }
       const j = JSON.parse(body || '{}');
       const sys = (j.messages || []).find(m => m.role === 'system');
       chats.push({ system: sys ? String(sys.content).length : 0, user: String(((j.messages || []).find(m => m.role === 'user') || {}).content || '').slice(0, 40) });
       res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: '{"codings":{"d1":{"code":"pos","confidence":0.9,"reasoning":"ok"}}}' }, finish_reason: 'stop' }] }));
     });
   });
-  await new Promise(r => emis.listen(0, '127.0.0.1', r));
+  await new Promise(r => aiService.listen(0, '127.0.0.1', r));
   Object.assign(process.env, testEnv({
     SUPABASE_URL: sbFront.url, SUPABASE_PUBLISHABLE_KEY: KEY, STRIPE_SECRET_KEY: '', ACCOUNT_PLAN_OVERRIDES: 'owner@example.org=ultra',
-    EMIS_BASE_URL: 'http://127.0.0.1:' + emis.address().port + '/v1', EMIS_API_KEY: 'emis-request-size-test-0123456789', EMIS_TRANSPORT: 'node',
-    EMIS_MODELS_FILE: path.join(tmp, 'none.json'), EMIS_MODEL: 'coder-model',
+    OPENCODE_SERVICE_URL: 'http://127.0.0.1:' + aiService.address().port + '/v1', OPENCODE_SERVICE_TOKEN: 'test-service-token-0123456789', OPENCODE_MODEL: 'coder-model',
     ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects'),
     COLLAB_DATA_DIR: path.join(tmp, 'collab'), PUBLIC_URL: '', DESKTOP_RELEASES_REPO: 'off'
   }));
@@ -85,7 +85,7 @@ test.after(async () => {
   if (server) { server.closeAllConnections(); await new Promise(r => server.close(r)); }
   if (sbFront) await sbFront.close();
   if (sb) await sb.close();
-  if (emis) { emis.closeAllConnections(); await new Promise(r => emis.close(r)); }
+  if (aiService) { aiService.closeAllConnections(); await new Promise(r => aiService.close(r)); }
   if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
 });
 

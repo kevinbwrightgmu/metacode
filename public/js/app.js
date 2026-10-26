@@ -25,24 +25,26 @@ const App = (() => {
     // A shared project: send what changed to the server (collab.js)
     if (typeof Collab !== 'undefined') { try { Collab.noteChange(); } catch (e) { /* never block saving */ } }
   }
+  // The AI service respelled these ids (2026-10-22): a model picked under the old id keeps being picked
+  const RENAMED_MODELS = { 'claude-opus-5-5': 'claude-opus-5.5', 'claude-sonnet-5-5': 'claude-sonnet-5.5', 'claude-opus-4-6': 'claude-opus-4.6',
+    'gpt-6-1-sol': 'gpt-6.1-sol', 'gpt-5-6': 'gpt-5.6-sol', 'gpt-5-5': 'gpt-5.5', 'gemini-3-8-flash': 'gemini-3.8-flash', 'kimi-k2-6': 'kimi-k2.6',
+    'grok-4-7': 'grok-4.7', 'qwen-3-7-max': 'qwen-3.7-max', 'glm-5-3': 'glm-5.3', 'glm-5-3-flash': 'glm-5.3-flash' };
+
   function load() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (raw) state = { ...state, ...JSON.parse(raw) };
     } catch(e) {}
-    // AI runs through the server's EMIS key (.env). Keys once typed into the
-    // old Settings key box are no longer used, so they aren't kept; old
-    // default model ids (Groq/Anthropic) are cleared so the server's default
-    // model is used until one is picked in Settings → AI models.
+    // AI runs through MetaCode's server and its AI service; any keys live in
+    // the server's .env. Keys once typed into the old Settings key box are no
+    // longer used, so they aren't kept; old default model ids (Groq/Anthropic)
+    // are cleared so the server's default model is used until one is picked in
+    // Settings → AI models.
     if (!state.settings || typeof state.settings !== 'object') state.settings = {};
     delete state.settings.apiKeys; delete state.settings.apiKey; delete state.settings.provider;
     if (['openai/gpt-oss-20b', 'claude-sonnet-4-6'].includes(state.settings.model)) state.settings.model = '';
     if (typeof state.settings.model !== 'string') state.settings.model = '';
     if (!state.settings.models || typeof state.settings.models !== 'object') state.settings.models = {};
-    // The AI service respelled these ids (2026-10-22): a model picked under the old id keeps being picked
-    const RENAMED_MODELS = { 'claude-opus-5-5': 'claude-opus-5.5', 'claude-sonnet-5-5': 'claude-sonnet-5.5', 'claude-opus-4-6': 'claude-opus-4.6',
-      'gpt-6-1-sol': 'gpt-6.1-sol', 'gpt-5-6': 'gpt-5.6-sol', 'gpt-5-5': 'gpt-5.5', 'gemini-3-8-flash': 'gemini-3.8-flash', 'kimi-k2-6': 'kimi-k2.6',
-      'grok-4-7': 'grok-4.7', 'qwen-3-7-max': 'qwen-3.7-max', 'glm-5-3': 'glm-5.3', 'glm-5-3-flash': 'glm-5.3-flash' };
     if (RENAMED_MODELS[state.settings.model]) state.settings.model = RENAMED_MODELS[state.settings.model];
     Object.keys(state.settings.models).forEach(f => { if (RENAMED_MODELS[state.settings.models[f]]) state.settings.models[f] = RENAMED_MODELS[state.settings.models[f]]; });
     if (!Number.isFinite(Number(state.settings.delay))) state.settings.delay = 500;
@@ -307,7 +309,7 @@ const App = (() => {
             </div>
             <div class="form-group">
               <label class="s-check-row" for="s-switch"><input type="checkbox" id="s-switch" ${settings.switchModels !== false ? 'checked' : ''}> If a model is rate-limited or failing, use the closest similar model</label>
-              <div class="form-hint">When the AI service throttles the model you picked, or can't run it right now, requests go to the most similar available model — same family and line, nearest version and size (e.g. Claude Opus 5.5 → Claude Opus 5) — until it can be used again, and a note says which one answered. (AI Coding waits and tries your model again when the AI service can't run it, so every post is coded by the model you picked.) Turn off to wait for your model instead (with “Server default”, the server still uses a similar model when the AI service can't run its default). A used-up AI budget can't be avoided this way: it applies to every model.</div>
+              <div class="form-hint">When the AI service throttles the model you picked, or can't run it right now, requests go to the most similar available model — the same model from another provider first, else the same family and line, nearest version and size (e.g. Claude Opus 5.5 → Claude Opus 5) — until it can be used again, and a note says which one answered. The same happens to every model of a provider whose usage limit is used up, until the limit resets. (AI Coding waits and tries your model again when the AI service can't run it, so every post is coded by the model you picked.) Turn off to wait for your model instead (with “Server default”, the server still uses a similar model when the AI service can't run its default).</div>
               <div class="form-hint" id="s-limited"></div>
             </div>
             <div class="form-group">
@@ -335,12 +337,13 @@ const App = (() => {
 
         <div class="card" style="grid-column:1/-1">
           <div class="card-title" style="display:flex;align-items:center;justify-content:space-between">
-            AI keys
+            AI providers
             <button class="btn btn-ghost btn-sm" onclick="App.fetchKeyStatus()" style="font-size:11.5px;padding:2px 8px">&#8635; Refresh</button>
           </div>
           <div style="font-size:12.5px;color:var(--tx-second);margin-bottom:12px">
-            Keys come only from <code>EMIS_API_KEY</code> in the server's .env file (several keys can be comma-separated; MetaCode rotates
-            between them and rests a key whose quota is used up). The keys never reach this page — only a masked form.
+            Where MetaCode's AI service (OpenCode) gets its models, as it reports them: whether each provider is set up, its free models,
+            its keys and the quota they have left, and whether it's resting until a limit resets. Keys are set only in the server's .env
+            file and never reach this page — only a masked form.
           </div>
           <div id="key-status-list" style="display:flex;flex-direction:column;gap:6px">
             <div class="text-muted" style="font-size:12.5px">Loading…</div>
@@ -357,7 +360,8 @@ const App = (() => {
         </div>
       </div>
     `;
-    setTimeout(() => { renderEnvStatus(); fetchModels(); fetchKeyStatus(); }, 0);
+    // (what the server knew when the app opened, then what it knows now: rate-limited models, resting providers)
+    setTimeout(() => { renderEnvStatus(); refreshServerKeyInfo(); fetchModels(); fetchKeyStatus(); }, 0);
   }
 
   function saveProject() {
@@ -424,7 +428,7 @@ const App = (() => {
     el.innerHTML = '<span style="color:var(--tx-muted)">Testing connection…</span>';
     try {
       const text = await callClaude([{ role: 'user', content: 'Reply with exactly one word: ok' }], '', 256, { feature: null });
-      el.innerHTML = '<span style="color:var(--success)">✓ Connected — model ' + esc(lastModelUsed || 'default') + ' replied: ' + esc(String(text).trim().slice(0, 60)) + '</span>';
+      el.innerHTML = '<span style="color:var(--success)">✓ Connected — model ' + esc(modelName(lastModelUsed) || 'default') + ' replied: ' + esc(String(text).trim().slice(0, 60)) + '</span>';
       updateApiStatus(true);
       fetchKeyStatus();
     } catch (e) {
@@ -601,23 +605,59 @@ const App = (() => {
     notify('Exported NetworkX analysis (2 files)', 'success');
   }
 
-  /* ── AI settings (server .env status, models, keys) ─────*/
-  let serverStatus = null;      // /api/settings/status: what the server read from .env
+  /* ── AI settings (server .env status, the AI service, models, providers) ─────*/
+  let serverStatus = null;      // /api/settings/status: what the server read from .env, and how its AI service is
 
-  // Shows what the server read from .env and whether AI is ready — names of
-  // settings only, never values.
-  // Settings → AI models: which models EMIS is rate-limiting right now
+  // "14:05" today, "Mon 09:00" within a day or so, else the date
+  function whenText(t) {
+    const d = new Date(t);
+    if (t - Date.now() >= 86400 * 1000) return d.toLocaleDateString();
+    return d.toDateString() === new Date().toDateString() ? d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : d.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' });
+  }
+
+  // A provider's name as the AI service reports it ("OpenCode Zen"), not its id
+  function providerTitle(id) {
+    const ai = serverStatus && serverStatus.ai;
+    const p = (ai && Array.isArray(ai.providers) ? ai.providers : []).concat(modelProviders).find(x => x && x.id === id);
+    return (p && p.name) || 'an AI provider';
+  }
+
+  // Settings → AI models: which models the AI service is rate-limiting right
+  // now, and which providers rest until a usage limit resets
   function renderLimited(st) {
     const el = document.getElementById('s-limited');
     if (!el) return;
-    const list = (st && st.ai && st.ai.rateLimitedModels) || [];
+    const ai = (st && st.ai) || {};
     const sw = document.getElementById('s-switch');
-    if (sw && st && st.ai && st.ai.modelSwitch === false) { sw.checked = false; sw.disabled = true; sw.title = 'Turned off for this server (EMIS_MODEL_SWITCH=off in .env)'; }
-    el.innerHTML = list.length
-      ? '<b>Rate-limited right now:</b> ' + list.map(x => esc(x.model) + ' (until ' + esc(new Date(x.until).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })) + ')').join(', ')
-      : '';
+    if (sw && ai.modelSwitch === false) { sw.checked = false; sw.disabled = true; sw.title = 'Turned off for this server (AI_MODEL_SWITCH=off in .env)'; }
+    const until = list => (Array.isArray(list) ? list : []).filter(x => x && Number.isFinite(Date.parse(x.until)));
+    const parts = [];
+    const limited = until(ai.rateLimitedModels);
+    if (limited.length) parts.push('<b>Rate-limited right now:</b> ' + limited.map(x => esc(modelName(x.model)) + ' (until ' + esc(whenText(Date.parse(x.until))) + ')').join(', '));
+    const resting = until(ai.restingProviders);
+    if (resting.length) parts.push('<b>Resting until a limit resets:</b> ' + resting.map(x => esc(providerTitle(x.provider)) + ' (until ' + esc(whenText(Date.parse(x.until))) + ')').join(', '));
+    el.innerHTML = parts.join('<br>');
   }
 
+  // "OpenCode service at 127.0.0.1:4097 (started by MetaCode) · 2 providers ready · default model Claude Opus 5.5"
+  function aiSummary(ai) {
+    const parts = [];
+    const svc = ai.service && typeof ai.service === 'object' ? ai.service : null;
+    if (svc) parts.push('OpenCode service' + (svc.host ? ' at ' + esc(svc.host) : '') + (svc.managed ? ' (started by MetaCode)' : svc.running ? ' (running separately)' : ''));
+    const providers = Array.isArray(ai.providers) ? ai.providers.filter(p => p && typeof p === 'object') : [];
+    if (providers.length) {
+      const ready = providers.filter(p => p.ready).length;
+      parts.push((ready === providers.length ? ready : ready + ' of ' + providers.length) + ' provider' + (providers.length === 1 ? '' : 's') + ' ready');
+    }
+    // (named as the pickers name it once the model list is here)
+    const listed = ai.defaultModel && (modelCache || []).some(m => m.id === ai.defaultModel);
+    const def = listed ? modelName(ai.defaultModel) : ai.defaultModelName || modelName(ai.defaultModel);
+    if (def) parts.push('default model ' + esc(def));
+    return parts.join(' · ') || 'MetaCode\'s AI service is answering.';
+  }
+
+  // Shows what the server read from .env and whether AI is ready — names of
+  // settings only, never values.
   function renderEnvStatus(statusOverride) {
     renderLimited(statusOverride || serverStatus);
     const box = document.getElementById('s-env-status');
@@ -625,26 +665,30 @@ const App = (() => {
     const st = statusOverride || serverStatus;
     if (!box) return;
     if (!st) { box.innerHTML = '<div style="color:var(--error)">Couldn\'t reach the MetaCode server to check its settings.</div>'; return; }
-    const env = st.env, ai = st.ai;
+    const env = st.env || {}, ai = st.ai || {}, server = st.server || {};
     if (badge) badge.innerHTML = ai.ready ? '<span class="badge badge-green">Ready</span>' : '<span class="badge badge-red">Not set up</span>';
     const rows = [];
+    const keys = Array.isArray(env.keys) ? env.keys : [];
     if (env.found && !env.error) {
       rows.push('<div>✓ Settings file <code>' + esc(env.name) + '</code> read from ' + esc(env.where) + (env.encoding && env.encoding !== 'UTF-8' ? ' (' + esc(env.encoding) + ')' : '') +
-        ' — ' + env.keys.length + ' setting' + (env.keys.length === 1 ? '' : 's') + (env.keys.length ? ': ' + env.keys.map(k => '<code>' + esc(k) + '</code>').join(' ') : '') + '</div>');
+        ' — ' + keys.length + ' setting' + (keys.length === 1 ? '' : 's') + (keys.length ? ': ' + keys.map(k => '<code>' + esc(k) + '</code>').join(' ') : '') + '</div>');
     } else if (env.error) {
       rows.push('<div style="color:var(--error)">✗ Found <code>' + esc(env.name) + '</code> in ' + esc(env.where) + ' but couldn\'t read it: ' + esc(env.error) + '</div>');
-    } else if (env.disabled) {
+    } else if (env.disabled || (Array.isArray(env.searched) && !env.searched.length)) {
       rows.push('<div class="text-muted">The .env file is switched off for this server (METACODE_ENV_FILE=none).</div>');
     } else {
       rows.push('<div style="color:var(--error)">✗ No <code>.env</code> file found (looked in ' + esc((env.searched || []).join(', ')) + ').</div>' +
-        '<div class="form-hint">Copy <code>.env.example</code> to a file named exactly <code>.env</code> next to <code>server.js</code>, put your AI key in it as <code>EMIS_API_KEY=…</code>, save, then click <b>Reload .env</b>.</div>');
+        '<div class="form-hint">The free AI models work without one. For other settings (keys for more AI models, accounts, the scraper…), copy <code>.env.example</code> to a file named exactly <code>.env</code> next to <code>server.js</code>, fill in what you need, save, then click <b>Reload .env</b>.</div>');
     }
     (env.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
     if (env.overridden && env.overridden.length) rows.push('<div style="color:#B45309">⚠ .env replaced older values set in this computer\'s environment for: ' + env.overridden.map(k => '<code>' + esc(k) + '</code>').join(' ') + '</div>');
-    if (ai.ready) rows.push('<div>✓ AI is ready: ' + ai.keyCount + ' AI key' + (ai.keyCount === 1 ? '' : 's') + (ai.baseHost ? ' · ' + esc(ai.baseHost) : '') + (ai.defaultModel ? ' · EMIS_MODEL=' + esc(ai.defaultModel) : '') + (ai.proxy ? ' · via proxy ' + esc(ai.proxy) : '') + (ai.transport ? ' · requests sent by ' + esc(ai.transport) : '') + '</div>');
-    else rows.push('<div style="color:var(--error)">✗ AI isn\'t ready: ' + esc(ai.problem || 'EMIS_API_KEY isn\'t set.') + '</div>');
+    if (ai.ready) rows.push('<div>✓ AI is ready: ' + aiSummary(ai) + '</div>');
+    else rows.push('<div style="color:var(--error)">✗ AI isn\'t ready: ' + esc(ai.problem || 'MetaCode\'s AI service isn\'t answering.') + '</div>');
+    const svc = ai.service && typeof ai.service === 'object' ? ai.service : {};
+    if (svc.problem && svc.problem !== ai.problem) rows.push('<div style="color:#B45309">⚠ ' + esc(svc.problem) + '</div>');
     (ai.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
-    rows.push('<div class="form-hint">Server ' + esc(st.server.version || '') + ' started ' + esc(new Date(st.server.startedAt).toLocaleString()) + (env.loadedAt ? ' · .env read ' + esc(new Date(env.loadedAt).toLocaleTimeString()) : '') + '</div>');
+    rows.push('<div class="form-hint">Server ' + esc(server.version || '') + (server.startedAt ? ' started ' + esc(new Date(server.startedAt).toLocaleString()) : '') + (env.loadedAt ? ' · .env read ' + esc(new Date(env.loadedAt).toLocaleTimeString()) : '') +
+      (svc.opencode || svc.startedAt ? ' · AI service' + (svc.opencode ? ' (OpenCode ' + esc(svc.opencode) + ')' : '') + (svc.startedAt ? ' started ' + esc(new Date(svc.startedAt).toLocaleString()) : '') : '') + '</div>');
     box.innerHTML = rows.join('');
   }
 
@@ -665,7 +709,113 @@ const App = (() => {
     } finally { if (btn) btn.disabled = false; }
   }
 
-  let modelCache = null;
+  /* ── The model list (/api/models) ── */
+  // { models: [{ id, name, provider, providerName, free, available }], providers: [{ id, name, ready }], note }
+  // Model ids are "provider/model" (opencode/big-pickle); pickers and notes
+  // show names. Kept for the page's lifetime: the Settings page asks again.
+  let modelCache = null;        // the last list's models
+  let modelProviders = [];      // …and its providers, in the AI service's order
+  let modelsPending = null;
+  function requestModels() {
+    if (!modelsPending) {
+      modelsPending = fetch('/api/models').then(res => res.json()).then(data => {
+        data = data && typeof data === 'object' ? data : {};
+        const models = (Array.isArray(data.models) ? data.models : []).filter(m => m && typeof m.id === 'string' && m.id);
+        modelCache = models;
+        modelProviders = (Array.isArray(data.providers) ? data.providers : []).filter(p => p && typeof p.id === 'string');
+        migrateSavedModels(models);
+        // (the AI connection line names the default model)
+        if (serverStatus) renderEnvStatus();
+        return Object.assign({}, data, { models });
+      }).finally(() => { modelsPending = null; });
+    }
+    return modelsPending;
+  }
+
+  const providerOf = id => { const s = String(id || ''), i = s.indexOf('/'); return i > 0 ? s.slice(0, i) : ''; };
+  const modelPart = id => { const s = String(id || ''), i = s.indexOf('/'); return i > 0 ? s.slice(i + 1) : s; };
+  // "-" or "_" between two digits reads as "." and case doesn't count (claude-opus-5-5 = claude-opus-5.5), as on the server (model-match.js)
+  const canonicalPart = m => String(m || '').toLowerCase().replace(/(\d)[-_](?=\d)/g, '$1.');
+  const isDefaultEntry = m => m.default === true || / \(default\)$/.test(String(m.name || ''));
+  // A list entry's name without the "(default)" the server adds; an entry without a name shows its id without the provider
+  function baseName(m) {
+    const name = String(m.name || '').replace(/ \(default\)$/, '');
+    return name && name !== m.id ? name : modelPart(m.id);
+  }
+
+  // A model's display name ("Claude Opus 5.5"), for notes and summaries; a
+  // model the list doesn't have shows its id without the provider part
+  function modelName(id) {
+    if (!id) return '';
+    const m = (modelCache || []).find(x => x.id === id);
+    return m ? baseName(m) : modelPart(id);
+  }
+
+  // The list's id for a model saved under another id: saved before ids had a
+  // provider ("claude-opus-5.5" → "<provider>/claude-opus-5.5"), or under an
+  // older spelling. On several providers: the first in the AI service's
+  // order that has it under any spelling, the one the server would use for
+  // the old id too. Else null.
+  function listedModel(wanted, models) {
+    const provider = providerOf(wanted), part = modelPart(wanted);
+    const rank = p => { const i = modelProviders.findIndex(x => x.id === p); return i < 0 ? modelProviders.length : i; };
+    const pool = models.filter(m => m.id !== wanted && (!provider || providerOf(m.id) === provider));
+    const renamed = RENAMED_MODELS[part];
+    const find = group => {
+      const hit = test => (group.find(m => test(modelPart(m.id))) || {}).id || null;
+      return hit(p => p === part) || (renamed && hit(p => p === renamed)) || hit(p => canonicalPart(p) === canonicalPart(part));
+    };
+    if (provider) return find(pool);
+    const providers = [...new Set(pool.map(m => providerOf(m.id)))].sort((a, b) => rank(a) - rank(b));
+    for (const p of providers) {
+      const id = find(pool.filter(m => providerOf(m.id) === p));
+      if (id) return id;
+    }
+    return null;
+  }
+  // Saved model choices the list doesn't have become the list's id for that model (and are saved)
+  function migrateSavedModels(models) {
+    if (!models.length) return;
+    const ids = new Set(models.map(m => m.id));
+    let changed = false;
+    const fix = id => {
+      const to = id && !ids.has(id) ? listedModel(id, models) : null;
+      if (to) changed = true;
+      return to || id;
+    };
+    state.settings.model = fix(state.settings.model);
+    const per = state.settings.models || {};
+    Object.keys(per).forEach(f => { per[f] = fix(per[f]); });
+    if (changed) save();
+  }
+
+  // One option: the model's name (with its provider's name when two providers
+  // offer a model under the same name, so a closed picker still tells them
+  // apart), " · free", "(default)", and "— not offered now" when the AI
+  // service lists it but can't offer it right now
+  function modelOption(m, cur) {
+    return '<option value="' + esc(m.id) + '"' + (m.id === cur ? ' selected' : '') + (m.available === false ? ' title="Listed by the AI service, but not offered right now"' : '') + '>' +
+      esc(baseName(m)) + (m.free === true ? ' · free' : '') + (isDefaultEntry(m) ? ' (default)' : '') + (m.available === false ? ' — not offered now' : '') + '</option>';
+  }
+  // A picker's options: a group per provider (in the AI service's order), then any models without a provider
+  function modelOptions(models, cur) {
+    const groups = new Map(), loose = [];
+    models.forEach(m => {
+      const p = m.provider || providerOf(m.id);
+      if (!p) { loose.push(m); return; }
+      if (!groups.has(p)) groups.set(p, []);
+      groups.get(p).push(m);
+    });
+    const rank = p => { const i = modelProviders.findIndex(x => x.id === p); return i < 0 ? modelProviders.length : i; };
+    return [...groups.keys()].sort((a, b) => rank(a) - rank(b)).map(p => {
+      const list = groups.get(p);
+      const known = modelProviders.find(x => x.id === p);
+      const label = (list.find(m => m.providerName) || {}).providerName || (known && known.name) || 'Other models';
+      return '<optgroup label="' + esc(label) + '">' + list.map(m => modelOption(m, cur)).join('') + '</optgroup>';
+    }).join('') + loose.map(m => modelOption(m, cur)).join('');
+  }
+  const notListedOption = id => '<option value="' + esc(id) + '" selected>' + esc(modelPart(id)) + ' (not in the list)</option>';
+
   async function fetchModels() {
     const modelSel = document.getElementById('s-model');
     const hintEl   = document.getElementById('s-model-hint');
@@ -673,80 +823,116 @@ const App = (() => {
     if (!modelSel) return;
     modelSel.innerHTML = '<option value="">Loading models…</option>';
     try {
-      const res  = await fetch('/api/models');
-      const data = await res.json();
-      const models = data.models || [];
-      modelCache = models;
-      // models emis-models.json lists but the AI service doesn't (right now) are marked, not hidden
-      const opt = (m, cur) => '<option value="' + esc(m.id) + '"' + (m.id === cur ? ' selected' : '') + (m.available === false ? ' title="In ' + esc(data.source || 'the catalog') + ', but the AI service doesn\'t list it right now"' : '') + '>' +
-        esc(m.name || m.id) + (m.available === false ? ' — not offered by the AI service now' : '') + '</option>';
+      const data = await requestModels();
+      const models = data.models;
       if (!models.length) {
         modelSel.innerHTML = '<option value="">No models available</option>';
         if (hintEl) hintEl.textContent = data.note || 'No models returned — check the AI connection above.';
       } else {
         const current = state.settings.model || '';
-        modelSel.innerHTML = '<option value="">Server default (' + esc(models[0].id) + ')</option>' + models.map(m => opt(m, current)).join('');
-        if (current && !models.find(m => m.id === current)) {
-          modelSel.insertAdjacentHTML('beforeend', '<option value="' + esc(current) + '" selected>' + esc(current) + ' (not in the list)</option>');
-        }
+        const def = models.find(isDefaultEntry) || models[0];
+        modelSel.innerHTML = '<option value="">Server default (' + esc(baseName(def)) + ')</option>' + modelOptions(models, current);
+        if (current && !models.find(m => m.id === current)) modelSel.insertAdjacentHTML('beforeend', notListedOption(current));
         if (hintEl) {
-          const av = data.availability;
-          hintEl.textContent = models.length + ' model' + (models.length !== 1 ? 's' : '') + (data.source ? ' in ' + (data.source === 'emis' ? 'the live model list' : data.source) : '') +
-            (av && av.checked ? (av.notListed.length ? '; ' + av.listed + ' offered by the AI service now, ' + av.notListed.length + ' not (marked)' : '; all offered by the AI service now') + '.'
-              : av ? '. ' + av.note : '.');
+          const free = models.filter(m => m.free === true).length;
+          const notOffered = models.filter(m => m.available === false).length;
+          hintEl.textContent = models.length + ' model' + (models.length !== 1 ? 's' : '') + ' from the AI service (OpenCode)' +
+            (free ? (free === models.length ? ', all free' : ', ' + free + ' of them free') : '') +
+            (notOffered ? '; ' + notOffered + ' not offered right now (marked)' : '') + '.' + (data.note ? ' ' + data.note : '');
         }
       }
       if (feats) {
         const per = state.settings.models || {};
         feats.innerHTML = AI_FEATURES.map(([id, label, what]) => {
           const cur = per[id] || '';
-          let options = '<option value="">Same as default</option>' + models.map(m => opt(m, cur)).join('');
-          if (cur && !models.find(m => m.id === cur)) options += '<option value="' + esc(cur) + '" selected>' + esc(cur) + ' (not in the list)</option>';
+          let options = '<option value="">Same as default</option>' + modelOptions(models, cur);
+          if (cur && !models.find(m => m.id === cur)) options += notListedOption(cur);
           return '<div class="s-feature-row"><label for="s-fm-' + id + '"><b>' + esc(label) + '</b><span>' + esc(what) + '</span></label>' +
             '<select class="form-select" id="s-fm-' + id + '" data-feature="' + id + '">' + options + '</select></div>';
         }).join('');
       }
+      renderLimited(serverStatus);
     } catch (err) {
       modelSel.innerHTML = '<option value="">Couldn\'t load models</option>';
       if (hintEl) hintEl.textContent = 'Error: ' + err.message;
     }
   }
 
-  // Settings → EMIS keys: each configured key's masked form, availability,
-  // request count and quota.
+  // Settings → AI providers: what the AI service reports for each provider —
+  // set up or not (and what's missing), its models, its keys as masked ids
+  // with their state and the quota they have left, and whether it rests
+  // until a usage limit resets.
   async function fetchKeyStatus() {
     const listEl = document.getElementById('key-status-list');
     if (!listEl) return;
-    listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">Loading…</div>';
+    const muted = text => '<div class="text-muted" style="font-size:12.5px">' + text + '</div>';
+    listEl.innerHTML = muted('Loading…');
     try {
       const res  = await fetch('/api/keys/status');
       const data = await res.json();
-      const items = data.keys || [];
-      if (!items.length) {
-        listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px">No AI keys loaded — add <code>EMIS_API_KEY=…</code> (your key) to .env and click Reload .env above.</div>';
+      if (!Array.isArray(data.providers)) {
+        // (an older server: its keys only)
+        const keys = Array.isArray(data.keys) ? data.keys : [];
+        listEl.innerHTML = keys.length ? keys.map(keyRow).join('') : muted('No AI keys loaded.');
         return;
       }
-      listEl.innerHTML = items.map(k => {
-        // A used-up budget rests the key until its day, week or month rolls over
-        const back = new Date(Date.now() + (k.cooldownSecondsLeft || 0) * 1000);
-        const statusBadge = k.status === 'available'
-          ? '<span class="badge badge-green">Available</span>'
-          : k.status === 'cooling_down'
-            ? '<span class="badge badge-amber" title="' + esc(back.toLocaleString()) + '">Resting ' + (k.cooldownSecondsLeft < 120 ? k.cooldownSecondsLeft + 's' : 'until ' + esc(k.cooldownSecondsLeft >= 86400 ? back.toLocaleDateString() : back.toDateString() === new Date().toDateString() ? back.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : back.toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' }))) + '</span>'
-            : '<span class="badge badge-red">Rejected by the AI service</span>';
-        // The budget is prompts and/or tokens: show whichever the AI service reports (0 of 0: the key has no budget of that kind)
-        const q = k.quota || {};
-        const has = (v, limit) => v !== null && v !== undefined && !(v === 0 && limit === 0);
-        const left = [has(q.remainingPrompts, q.limitPrompts) ? Number(q.remainingPrompts).toLocaleString() + ' prompt' + (q.remainingPrompts === 1 ? '' : 's') : '',
-          has(q.remainingTokens, q.limitTokens) ? Number(q.remainingTokens).toLocaleString() + ' tokens' : ''].filter(Boolean).join(' · ');
-        const quota = left ? '<span style="color:var(--tx-muted)">' + left + ' left' + (q.window ? ' this ' + esc(q.window) : '') + '</span>' : '';
-        return '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg-muted);border-radius:var(--r-sm);font-size:12.5px">' +
-          '<span class="font-mono">' + esc(k.masked) + '</span><span class="badge badge-gray" style="font-size:10px">.env</span>' + quota +
-          '<span style="margin-left:auto;color:var(--tx-muted)">' + k.requestCount + ' req</span>' + statusBadge + '</div>';
-      }).join('');
+      const providers = data.providers.filter(p => p && typeof p === 'object');
+      listEl.innerHTML = providers.length ? providers.map(providerBlock).join('<div style="border-top:1px solid var(--border);margin:4px 0"></div>') : muted(esc(data.problem || 'The AI service didn\'t report any providers.'));
     } catch(e) {
       listEl.innerHTML = '<div class="text-muted" style="font-size:12.5px;color:var(--error)">Could not load status: ' + esc(e.message) + '</div>';
     }
+  }
+
+  // "Its usage limit for this week is used up — it resets Mon 09:00"
+  function restingText(r, until) {
+    if (r.reason === 'quota') return 'Its usage limit' + (r.window ? ' for this ' + r.window : '') + ' is used up — it resets ' + whenText(until) + '.';
+    if (r.reason === 'paused') return 'It asked MetaCode to pause until ' + whenText(until) + '.';
+    return 'It can\'t be used until ' + whenText(until) + '.';
+  }
+
+  // One provider: its name and state, what it offers, what's missing, then its keys
+  function providerBlock(p) {
+    const until = p.resting ? Date.parse(p.resting.until) : NaN;
+    const resting = !!p.ready && until > Date.now();
+    const badge = !p.ready ? '<span class="badge badge-red">Not set up</span>'
+      : resting ? '<span class="badge badge-amber" title="' + esc(new Date(until).toLocaleString()) + '">Resting until ' + esc(whenText(until)) + '</span>'
+        : '<span class="badge badge-green">Ready</span>';
+    const keys = Array.isArray(p.keys) ? p.keys.filter(k => k && typeof k === 'object') : [];
+    const keyCount = Number.isInteger(p.keyCount) ? p.keyCount : keys.length;
+    const m = p.models && typeof p.models === 'object' ? p.models : {};
+    const facts = [];
+    if (Number.isFinite(m.listed) && (m.listed || p.ready)) facts.push(m.listed.toLocaleString() + ' model' + (m.listed === 1 ? '' : 's') + (Number.isFinite(m.available) && m.available < m.listed ? ', ' + m.available.toLocaleString() + ' offered now' : ''));
+    facts.push(keyCount ? keyCount + ' key' + (keyCount === 1 ? '' : 's') : p.free === true ? 'free models, no key needed' : 'no key');
+    const lines = [];
+    if (p.problem) lines.push('<div style="color:var(--error)">' + esc(p.problem) + '</div>');
+    if (resting) lines.push('<div style="color:#B45309">' + esc(restingText(p.resting, until)) + '</div>');
+    if (p.note) lines.push('<div style="color:var(--tx-second)">' + esc(p.note) + '</div>');
+    (Array.isArray(p.warnings) ? p.warnings : []).forEach(w => lines.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
+    return '<div class="s-provider" style="display:flex;flex-direction:column;gap:6px;font-size:12.5px">' +
+      '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:13px"><b>' + esc(p.name || 'AI provider') + '</b>' + badge +
+      '<span style="color:var(--tx-muted);font-size:12.5px">' + esc(facts.join(' · ')) + '</span></div>' +
+      lines.join('') + keys.map(keyRow).join('') + '</div>';
+  }
+
+  // One key: its masked form, the quota left, requests, and Available / Resting / Rejected
+  function keyRow(k) {
+    const left = Number(k.cooldownSecondsLeft) || 0;
+    // A used-up budget rests the key until its day, week or month rolls over
+    const back = Date.now() + left * 1000;
+    const statusBadge = k.status === 'available'
+      ? '<span class="badge badge-green">Available</span>'
+      : k.status === 'cooling_down'
+        ? '<span class="badge badge-amber" title="' + esc(new Date(back).toLocaleString()) + '">Resting ' + (left < 120 ? left + 's' : 'until ' + esc(whenText(back))) + '</span>'
+        : '<span class="badge badge-red">Rejected by the provider</span>';
+    // The budget is prompts and/or tokens: show whichever the provider reports (0 of 0: the key has no budget of that kind)
+    const q = k.quota && typeof k.quota === 'object' ? k.quota : {};
+    const has = (v, limit) => v !== null && v !== undefined && !(v === 0 && limit === 0);
+    const quotaLeft = [has(q.remainingPrompts, q.limitPrompts) ? Number(q.remainingPrompts).toLocaleString() + ' prompt' + (q.remainingPrompts === 1 ? '' : 's') : '',
+      has(q.remainingTokens, q.limitTokens) ? Number(q.remainingTokens).toLocaleString() + ' tokens' : ''].filter(Boolean).join(' · ');
+    const quota = quotaLeft ? '<span style="color:var(--tx-muted)">' + quotaLeft + ' left' + (q.window ? ' this ' + esc(q.window) : '') + '</span>' : '';
+    return '<div style="display:flex;align-items:center;gap:8px;padding:6px 10px;background:var(--bg-muted);border-radius:var(--r-sm);font-size:12.5px">' +
+      '<span class="font-mono">' + esc(k.masked) + '</span><span class="badge badge-gray" style="font-size:10px">.env</span>' + quota +
+      '<span style="margin-left:auto;color:var(--tx-muted)">' + (Number(k.requestCount) || 0) + ' req</span>' + statusBadge + '</div>';
   }
 
   /* ── API helpers ─────────────────────────────*/
@@ -758,20 +944,22 @@ const App = (() => {
   }
   let lastModelUsed = '';
 
-  // Sends a chat request to MetaCode's server, which calls EMIS with the key
-  // from .env. opts.feature ('coding' | 'assistant' | 'import' | 'csv') picks
+  // Sends a chat request to MetaCode's server, which passes it to its AI
+  // service. opts.feature ('coding' | 'assistant' | 'import' | 'csv') picks
   // that feature's model.
-  // A similar model answered because the one asked for is rate-limited (or failing):
-  // say so once in a while, not on every request.
+  // A similar model answered because the one asked for is rate-limited (or failing,
+  // or its provider is resting): say so once in a while, not on every request,
+  // naming the models as the pickers do.
   const fallbackNoted = new Map();
   function noteFallback(requested, used, reason) {
     if (!requested || !used || requested === used) return;
     const k = requested + '>' + used, now = Date.now();
     if (now - (fallbackNoted.get(k) || 0) < 10 * 60 * 1000) return;
     fallbackNoted.set(k, now);
+    const asked = modelName(requested), answered = modelName(used);
     notify(reason === 'rate_limited'
-      ? 'The AI service is rate-limiting “' + requested + '”, so the closest similar model, “' + used + '”, is answering until it\'s available again.'
-      : '“' + requested + '” isn\'t working at the AI service right now, so the closest model, “' + used + '”, answered.', 'warning', 7000);
+      ? 'The AI service is rate-limiting “' + asked + '”, so the closest similar model, “' + answered + '”, is answering until it\'s available again.'
+      : '“' + asked + '” isn\'t working at the AI service right now, so the closest model, “' + answered + '”, answered.', 'warning', 7000);
   }
   const switchHeader = () => (state.settings.switchModels === false ? { 'X-MetaCode-Model-Switch': 'off' } : {});
 
@@ -925,10 +1113,15 @@ const App = (() => {
     return { parallel: finished.parallel };
   }
 
-  // Number of EMIS keys the server loaded from .env (0 when it can't be reached).
-  function getEnvKeyCount() { return serverStatus && serverStatus.ai ? serverStatus.ai.keyCount : 0; }
+  // Number of keys the AI service's providers have (0 when the server can't be reached).
+  function getEnvKeyCount() {
+    const ai = serverStatus && serverStatus.ai;
+    if (!ai) return 0;
+    if (Array.isArray(ai.providers)) return ai.providers.reduce((n, p) => n + (p && Number.isInteger(p.keyCount) ? p.keyCount : 0), 0);
+    return Number(ai.keyCount) || 0;
+  }
 
-  // "Can AI features run?" — the server has a working EMIS setup from .env.
+  // "Can AI features run?" — the server's AI service is answering with at least one provider set up.
   function hasApiKeys() { return !!(serverStatus && serverStatus.ai && serverStatus.ai.ready); }
 
   async function refreshServerKeyInfo() {
@@ -938,6 +1131,8 @@ const App = (() => {
       serverStatus = await res.json();
       updateApiStatus();
       renderEnvStatus();
+      // The model names for notes and the assistant (the Settings page asks for the list itself)
+      if (hasApiKeys() && !modelCache) requestModels().catch(() => {});
     } catch (e) {
       // Server unreachable (e.g. app.html opened directly as a file)
     }
@@ -1049,7 +1244,7 @@ const App = (() => {
     routeHash();
 
     updateApiStatus();
-    refreshServerKeyInfo();   // async; re-runs updateApiStatus once .env key counts arrive
+    refreshServerKeyInfo();   // async; re-runs updateApiStatus once the server says whether AI is ready
 
     // Accounts (account.js): the chip in the top bar, the Account page in the sidebar
     if (window.Account) {
@@ -1072,7 +1267,7 @@ const App = (() => {
     init, navigate: (v) => navigate(v), setViewCleanup, fetchModels, fetchKeyStatus, reloadEnv, modelFor, AI_FEATURES,
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
     getState, setState, save, reloadState,
-    callClaude, callClaudeBatch, tooLargeMessage: TOO_LARGE, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus,
+    callClaude, callClaudeBatch, tooLargeMessage: TOO_LARGE, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus, modelName,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,
     saveProject, saveSettings, downloadBackup, restoreBackup, testApi, clearCodes, resetAll,
