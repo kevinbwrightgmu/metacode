@@ -102,7 +102,7 @@ function createEnvLoader(appDir) {
       keys.push(key);
     });
     lastKeys = keys.slice();
-    if (!keys.length) warnings.push('The file was found but no settings could be read from it. Each line should look like EMIS_API_KEY=your-key.');
+    if (!keys.length) warnings.push('The file was found but no settings could be read from it. Each line should look like OPENCODE_API_KEY=your-key.');
     info = { found: true, file: pick.file, name: pick.name, where: pick.where, encoding, keys, overridden, warnings, loadedAt: new Date().toISOString() };
     return info;
   }

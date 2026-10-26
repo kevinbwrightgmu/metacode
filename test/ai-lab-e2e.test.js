@@ -13,7 +13,7 @@ const os = require('os');
 const path = require('path');
 const { testEnv } = require('./helpers/harness');
 const { mockSupabase, mockStripe } = require('./helpers/account-mocks');
-const { startEmis } = require('./helpers/lab-mocks');
+const { startAiService } = require('./helpers/lab-mocks');
 
 function findChromium() {
   const candidates = [];
@@ -26,8 +26,8 @@ function findChromium() {
 const chromiumPath = findChromium();
 const skip = !chromiumPath && 'no Chromium found (set CHROMIUM_PATH)';
 const KEY = 'sb_publishable_lab_e2e_0123456789';
-const emisState = { requests: [], streamDelayMs: 0, fail: false };
-let sb, stripe, emis, server, baseUrl, browser, tmp;
+const aiState = { requests: [], streamDelayMs: 0, fail: false };
+let sb, stripe, aiService, server, baseUrl, browser, tmp;
 
 test.before(async () => {
   if (skip) return;
@@ -40,7 +40,7 @@ test.before(async () => {
     prod_VQeKXAJtQQLKqm: { id: 'prod_VQeKXAJtQQLKqm', active: true, default_price: 'price_ultra' }
   } });
   await stripe.start();
-  emis = await startEmis(emisState);
+  aiService = await startAiService(aiState);
   stripe.subscribe(sb.addUser('ultra@example.org', 'ultra password 1').id, 'prod_VQeKXAJtQQLKqm');
   stripe.subscribe(sb.addUser('pro@example.org', 'pro password 1').id, 'prod_VQeJh2lPqfmae9');
   Object.assign(process.env, testEnv({
@@ -48,8 +48,8 @@ test.before(async () => {
     STRIPE_SECRET_KEY: 'sk_test_labe2e', STRIPE_API_BASE: stripe.url,
     ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects'),
     AI_LAB_DATA_DIR: path.join(tmp, 'lab'), AI_LAB_PRICING_FILE: path.join(tmp, 'none.json'),
-    EMIS_BASE_URL: 'http://127.0.0.1:' + emis.address().port + '/v1', EMIS_API_KEY: 'emis-test-key-123456', EMIS_TRANSPORT: 'node',
-    EMIS_MODEL: 'lab-model', EMIS_MODELS_FILE: path.join(tmp, 'none.json'), EMIS_MODEL_SWITCH: 'off'
+    OPENCODE_SERVICE_URL: 'http://127.0.0.1:' + aiService.address().port + '/v1', OPENCODE_SERVICE_TOKEN: 'test-service-token-0123456789',
+    OPENCODE_MODEL: 'lab-model', AI_MODEL_SWITCH: 'off'
   }));
   const { start } = require('../server');
   server = await start(0);
@@ -59,7 +59,7 @@ test.before(async () => {
 test.after(async () => {
   if (browser) await browser.close();
   if (server) { server.closeAllConnections(); await new Promise(r => server.close(r)); }
-  if (emis) { emis.closeAllConnections(); await new Promise(r => emis.close(r)); }
+  if (aiService) { aiService.closeAllConnections(); await new Promise(r => aiService.close(r)); }
   if (sb) await sb.close();
   if (stripe) await stripe.close();
   if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
@@ -149,14 +149,14 @@ test('an Ultra user\'s journey: project → knowledge → profile → Workbench 
   await page.waitForSelector('#wb-ctx dd:has-text("v1")');
   assert.match(await page.textContent('#wb-ctx'), /style\.md/, 'the knowledge passage that was sent is listed');
   assert.match(await page.textContent('#wb-title'), /Write an add function/);
-  emisState.streamDelayMs = 60;
+  aiState.streamDelayMs = 60;
   await page.fill('#wb-input', 'slow: explain it in detail');
   await page.click('#wb-send');
   await page.waitForSelector('#wb-stop:not([hidden])');
   await page.waitForSelector('.lab-msg-assistant:last-child .lab-md');
   await page.click('#wb-stop');
   await page.waitForSelector('.lab-msg-assistant .badge:has-text("stopped")', { timeout: 15000 });
-  emisState.streamDelayMs = 0;
+  aiState.streamDelayMs = 0;
   await page.waitForSelector('#wb-send:not([disabled])');
 
   // Dataset with one checked example, committed as version 1

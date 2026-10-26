@@ -83,7 +83,7 @@ const log = logger('ai-lab');
 
 // The policy's version and the standard-library modules a Python coding rule may import (lab-prelude.py
 // receives the list) are defined once, in code-policy.js
-const { POLICY_VERSION, PYTHON_ALLOWED_MODULES } = require('./code-policy');
+const { POLICY_VERSION, PYTHON_ALLOWED_MODULES, parserAvailable } = require('./code-policy');
 /** @type {CodeLanguage[]} */
 const LANGUAGES = ['javascript', 'typescript', 'python'];
 
@@ -452,7 +452,7 @@ function createCodeSandbox(opts) {
     }
     try { paths.sandboxReadablePaths(); } catch (e) { return { ok: false, reason: 'The JavaScript sandbox (QuickJS) isn\'t installed. Run "npm install" and restart MetaCode.' }; }
     if (language === 'typescript' && !paths.typeScriptAvailable()) return { ok: false, reason: 'TypeScript needs Node.js 22.13 or newer on the MetaCode server. Use JavaScript.' };
-    return { ok: true };
+    return parserAvailable();   // (the policy check every JavaScript/TypeScript run needs)
   }
 
   /**

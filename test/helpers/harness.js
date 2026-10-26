@@ -17,6 +17,8 @@ const TEST_REDDITAPIS_KEY_FILE = path.join(os.tmpdir(), 'metacode-test-redditapi
 // Scraper jobs are kept on disk: each test process gets its own folder, so
 // one test never recovers another's jobs.
 const TEST_SCRAPER_DATA_DIR = path.join(os.tmpdir(), 'metacode-test-scraper-' + process.pid + '-' + Date.now().toString(36));
+// …and so is the AI service's token file, never in the repository's opencode-data
+const TEST_OPENCODE_DATA_DIR = path.join(os.tmpdir(), 'metacode-test-opencode-' + process.pid + '-' + Date.now().toString(36));
 
 function testEnv(extra) {
   return Object.assign({
@@ -29,7 +31,12 @@ function testEnv(extra) {
     SCRAPER_PUBLIC_MIN_DELAY_MS: '0',
     SCRAPER_DEFAULT_DELAY_MS: '0',
     SCRAPER_CREDENTIALS_FILE: TEST_CREDENTIALS_FILE,
-    SCRAPER_REDDITAPIS_KEY_FILE: TEST_REDDITAPIS_KEY_FILE
+    SCRAPER_REDDITAPIS_KEY_FILE: TEST_REDDITAPIS_KEY_FILE,
+    // MetaCode's AI is off unless a test points it at a stand-in for its AI service
+    // (OPENCODE_SERVICE_URL: <mock>/v1), and MetaCode never starts the real service itself
+    OPENCODE_SERVICE_URL: 'off',
+    OPENCODE_SERVICE_MANAGED: 'off',
+    OPENCODE_SERVICE_DATA_DIR: TEST_OPENCODE_DATA_DIR
   }, extra || {});
 }
 

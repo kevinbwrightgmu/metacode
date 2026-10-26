@@ -407,8 +407,10 @@ function createExperiments(deps) {
   /** @param {string} hash @param {PolicyFinding[]} findings @returns {PolicyReport} */
   const pythonReport = (hash, findings) => ({ ok: !findings.some(f => f.severity === 'error'), policyVersion: CP.POLICY_VERSION, language: 'python', engine: 'python-ast', codeHash: hash, findings, checkedAt: now() });
 
+  // (a report made while the checker wasn't installed is no verdict: it's checked again)
   /** @param {ExperimentVersion} ver @returns {PolicyReport | null} the stored policy report, if it is for this code */
-  const policyOf = ver => (ver.policy && ver.policy.codeHash === ver.codeHash && ver.policy.policyVersion === CP.POLICY_VERSION ? ver.policy : null);
+  const policyOf = ver => (ver.policy && ver.policy.codeHash === ver.codeHash && ver.policy.policyVersion === CP.POLICY_VERSION
+    && !ver.policy.findings.some(f => f.rule === 'checker_unavailable') ? ver.policy : null);
   /** @param {ExperimentVersion} ver @returns {SecurityReview | null} */
   const reviewOf = ver => (ver.review && ver.review.codeHash === ver.codeHash ? ver.review : null);
 

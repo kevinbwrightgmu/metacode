@@ -1,28 +1,42 @@
 // ── EMIS requests through Python ──────────────────────────────────────────────
 // Starts python/emis_fetch.py once and sends it EMIS requests (see that file).
+// Used by the OpenCode service's EMIS provider (providers/openai-compatible.mjs).
 // Python is tried as EMIS_PYTHON, SCRAPER_PYTHON, then python3 / python / py -3.
-// request() resolves to the same shape server.js's own fetch path returns:
+// request({method, url, key, body, headers, timeoutMs, signal, proxy}) (headers: the provider's
+// own extra headers, from its config) resolves to the same shape a plain fetch gives that provider:
 //   { status, ok, headers (Headers), text } or { failed: 'network'|'timeout', code }.
+// createEmisPython({ env }): env is where EMIS_PYTHON / SCRAPER_PYTHON and the
+// worker's environment come from (default process.env).
 
 const { spawn } = require('child_process');
 const path = require('path');
 const readline = require('readline');
 
-const WORKER = path.join(__dirname, 'python', 'emis_fetch.py');
+const WORKER = path.join(__dirname, '..', 'python', 'emis_fetch.py');
 
-function candidates() {
+function candidates(env) {
   const out = [];
-  const configured = String(process.env.EMIS_PYTHON || process.env.SCRAPER_PYTHON || '').trim();
+  const configured = String(env.EMIS_PYTHON || env.SCRAPER_PYTHON || '').trim();
   if (configured) { const parts = configured.split(/\s+/); out.push({ cmd: parts[0], args: parts.slice(1) }); }
   out.push({ cmd: 'python3', args: [] }, { cmd: 'python', args: [] });
   if (process.platform === 'win32') out.push({ cmd: 'py', args: ['-3'] });
   return out;
 }
 
+// The worker's environment, without the OPENAI_* settings meant for other programs: the openai
+// package would send OPENAI_ORG_ID / OPENAI_PROJECT_ID to the gateway as headers (its key and
+// address always come with the request)
+function workerEnv(env) {
+  const out = Object.assign({}, process.env, env, { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' });
+  for (const k of Object.keys(out)) if (/^OPENAI_/i.test(k)) delete out[k];
+  return out;
+}
+
 // JSON with every non-ASCII character escaped, so the bytes are the same in any encoding
 const asciiJson = v => JSON.stringify(v).replace(/[\u007f-\uffff]/g, ch => '\\u' + ch.charCodeAt(0).toString(16).padStart(4, '0'));
 
-function createEmisPython() {
+function createEmisPython(opts) {
+  const env = (opts && opts.env) || process.env;
   // worker: { proc, pending: Map(id → { resolve, timer }) } — each worker answers only its own requests
   let worker = null, ready = null, info = null, nextId = 1, failedAt = 0, failure = null, generation = 0;
 
@@ -31,7 +45,7 @@ function createEmisPython() {
     const gen = generation;
     const attempt = (async () => {
       let last = null;
-      for (const c of candidates()) {
+      for (const c of candidates(env)) {
         if (gen !== generation) throw new Error('stopped');
         try { return await spawnOne(c, gen); } catch (e) { last = e; }
       }
@@ -46,7 +60,7 @@ function createEmisPython() {
     return new Promise((resolve, reject) => {
       let p;
       try {
-        p = spawn(c.cmd, c.args.concat(['-u', WORKER]), { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: Object.assign({}, process.env, { PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' }) });
+        p = spawn(c.cmd, c.args.concat(['-u', WORKER]), { stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true, env: workerEnv(env) });
       } catch (e) { reject(e); return; }
       const w = { proc: p, pending: new Map() };
       let started = false, stderr = '';
@@ -94,11 +108,18 @@ function createEmisPython() {
     const w = worker;
     if (!w) return null;
     const id = nextId++;
-    return new Promise(resolve => {
+    return new Promise(done => {
+      const signal = opts.signal;
+      const onAbort = () => { if (w.pending.delete(id)) { clearTimeout(timer); resolve({ failed: 'aborted' }); } };
+      // (the abort listener goes with the answer, whichever comes first)
+      const resolve = value => { if (signal) signal.removeEventListener('abort', onAbort); done(value); };
       const timer = setTimeout(() => { w.pending.delete(id); resolve({ failed: 'timeout', code: 'ETIMEDOUT' }); }, (opts.timeoutMs || 120000) + 5000);
       w.pending.set(id, { resolve, timer });
-      if (opts.signal) opts.signal.addEventListener('abort', () => { if (w.pending.delete(id)) { clearTimeout(timer); resolve({ failed: 'aborted' }); } }, { once: true });
-      w.proc.stdin.write(asciiJson({ id, method: opts.method, url: opts.url, key: opts.key, body: opts.body === undefined ? null : opts.body, timeoutMs: opts.timeoutMs, proxy: opts.proxy || '' }) + '\n');
+      if (signal) {
+        if (signal.aborted) { onAbort(); return; }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      w.proc.stdin.write(asciiJson({ id, method: opts.method, url: opts.url, key: opts.key, body: opts.body === undefined ? null : opts.body, headers: opts.headers || {}, timeoutMs: opts.timeoutMs, proxy: opts.proxy || '' }) + '\n');
     });
   }
 

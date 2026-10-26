@@ -14,7 +14,7 @@ const { testEnv } = require(path.join(ROOT, 'test', 'helpers', 'harness'));
 const KEY = 'sb_publishable_test_0123456789abcdef';
 const PROD = { pro: 'prod_VQeJh2lPqfmae9', max: 'prod_VQeK26tKchu1VI', ultra: 'prod_VQeKXAJtQQLKqm' };
 
-/** A mock AI that answers formula, coding and transform requests */
+/** A stand-in for MetaCode's AI service that answers formula, coding and transform requests */
 function mockAi() {
   const calls = [];
   const server = http.createServer((req, res) => {
@@ -23,6 +23,7 @@ function mockAi() {
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'good-model' }] }));
+      if (req.url !== '/v1/chat/completions') { res.statusCode = 404; return res.end('{}'); }      // (GET /v1/status: readiness unknown)
       const j = JSON.parse(body || '{}');
       calls.push(j);
       const sys = (j.messages[0] && j.messages[0].content) || '';
@@ -59,8 +60,8 @@ async function startWorld(o = {}) {
     SUPABASE_URL: sb.url, SUPABASE_PUBLISHABLE_KEY: KEY,
     STRIPE_SECRET_KEY: 'sk_test_mock123', STRIPE_API_BASE: stripe.url, STRIPE_WEBHOOK_SECRET: 'whsec_test_secret',
     ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects'),
-    EMIS_BASE_URL: aiUrl + '/v1', EMIS_API_KEY: 'emis-test-key-123456', EMIS_TRANSPORT: 'node', EMIS_MODEL: 'good-model',
-    EMIS_MODELS_FILE: path.join(tmp, 'none.json'), PUBLIC_URL: '', DESKTOP_OFFLINE_HOURS: '48'
+    OPENCODE_SERVICE_URL: aiUrl + '/v1', OPENCODE_SERVICE_TOKEN: 'test-service-token-0123456789', OPENCODE_MODEL: 'good-model',
+    PUBLIC_URL: '', DESKTOP_OFFLINE_HOURS: '48'
   }, o.env || {})));
   delete process.env.DESKTOP_LEASE_PRIVATE_KEY;
   const mod = require(path.join(ROOT, 'server'));

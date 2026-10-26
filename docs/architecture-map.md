@@ -6,11 +6,16 @@ and the baseline test results. The changes made afterwards are described in
 [scraper-network.md](scraper-network.md), [ai-lab.md](ai-lab.md) and the final
 report ([implementation-report.md](implementation-report.md)).
 
+The AI entries (the *Runtime*, *AI*, *Logging* and *Deployment* rows of §1, and
+§4) were brought up to date in October 2026, when MetaCode's AI moved to its own
+OpenCode service ([opencode-service.md](opencode-service.md)); the rest is as
+found.
+
 ## 1. Technology inventory
 
 | Area | What is actually there | Files | Role |
 |---|---|---|---|
-| Runtime | Node.js 22 (22.22.0 here), npm with `package-lock.json` | `package.json` | One server process |
+| Runtime | Node.js 22 (22.22.0 here), npm with `package-lock.json` | `package.json` | One server process, plus its AI service (a second process) |
 | Backend | Express 4.22 | `server.js` (≈2,300 lines), `scraper/`, `surveys/`, `accounts/`, `projects/` | HTTP API, static files, Wisp WebSocket |
 | Frontend (main app) | Vanilla JS, hash router, no build step | `public/app.html`, `public/js/app.js` (`const App`), one file per view | Research workspace |
 | Frontend (Survey Studio) | Vanilla JS, separate page | `public/studio.html`, `public/js/survey/*` | Survey editor |
@@ -24,13 +29,13 @@ report ([implementation-report.md](implementation-report.md)).
 | Scraper | In-process job manager, Reddit HTTP client (destination allow-list, robots.txt, rate limiter, retries), transports: Python stdlib worker, epoxy-tls over Wisp, RedditAPIs.com client, browser relay | `scraper/**`, `python/reddit_fetch.py` | Data collection |
 | Queue / workers | No queue technology. Jobs live in server memory (`JobManager`), at most `SCRAPER_MAX_CONCURRENT_JOBS` run at once; lost on restart | `scraper/jobs/job-manager.js` | Background work |
 | Code sandbox | QuickJS (WASM) and Pyodide (WASM) in a child process started with Node's permission model, globals stripped, memory and time limits | `scraper/sandbox/*` | Custom scraper code |
-| AI | "EMIS", an OpenAI-compatible gateway: several keys with rotation, quota tracking, model fallback, streaming relay; model list from `emis-models.json` (the service's `/cli/opencode.json`: its models with tool calling) or `GET /v1/models`; optional Python transport | `server.js` (`/api/ai`, `/api/ai/batch`, `/api/models`), `emis-python.js`, `emis-models.json` | AI coding, assistant, AI Scraper |
+| AI | MetaCode's OpenCode service (`opencode/`, built on `@opencode/ai` 2.1.4, on 127.0.0.1:4097 with an access token): model listing and OpenAI-format chat over two providers — OpenCode Zen (free models without a key; catalog from models.dev) and the AI gateway "EMIS" (OpenAI-compatible; key rotation, quota tracking, `emis-models.json`, optional Python transport). MetaCode keeps request checks, the streaming relay, model fallback, resting and batching | `server.js` (`/api/ai`, `/api/ai/batch`, `/api/models`), `opencode/*`, `model-match.js`, `emis-models.json` | AI coding, assistant, AI Scraper |
 | Storage services | Local disk only | — | — |
-| Logging / monitoring | `console.*` with `[area]` prefixes (pm2 logs), secret redaction helpers (`redact`, `sanitize`), status page with health checks | `status-page.js`, `server.js` | Operations |
+| Logging / monitoring | `console.*` with `[area]` prefixes (pm2 logs: `metacode`, `metacode-opencode`), secret redaction helpers (`redact`, `sanitize`), status page with health checks | `status-page.js`, `server.js` | Operations |
 | Tests | `node --test` (unit, integration with mock servers, Playwright end-to-end with Chromium), Vitest for the collector | `test/**`, `collector/test/**` | Verification |
 | CI | None in the repository (no `.github/`) | — | — |
 | Lint / type check | No linter. Type checking only for the collector (`tsc --noEmit`) | `collector/tsconfig*.json` | — |
-| Deployment | One VPS: nginx → pm2 (`fork` mode, 1 instance) → `node server.js`; `.env` next to `server.js`; Python venv in `.venv` | `ecosystem.config.cjs`, `docs/deploy-vps.md` | Hosting |
+| Deployment | One VPS: nginx → pm2 (`fork` mode, 1 instance each) → `node server.js` and its AI service `node opencode/server.mjs`; `.env` next to `server.js`, read by both; Python venv in `.venv` | `ecosystem.config.cjs`, `docs/deploy-vps.md` | Hosting |
 
 ## 2. Existing scraper audit (one job, start to finish)
 
@@ -80,8 +85,8 @@ Decision: the AI Lab uses the same path — `contextOf()` → `needUser()` → `
 
 ## 4. AI integration audit
 
-- One provider: EMIS (OpenAI-compatible; its documented endpoints are `GET /v1/models` and `POST /v1/chat/completions`, streaming or not), several keys, quota headers (a budget of prompts and/or tokens per day, week or month; 429 until it rolls over), per-model rate-limit resting, similar-model fallback, streaming relay, empty-answer retry. No embeddings and no fine-tuning are offered by it; images and videos are made inside a chat completion, and MetaCode uses only the text of answers.
-- Model metadata: id, name, `tool_call`, `reasoning`, `attachment` from `emis-models.json`. No context-window or pricing data.
+- MetaCode talks to one service, its own OpenCode service (`GET /v1/models`, `POST /v1/chat/completions`, `GET /v1/status`), which reaches two providers: OpenCode Zen (free models without a key, paid ones with `OPENCODE_API_KEY`; each model in its own protocol) and the AI gateway EMIS (OpenAI-compatible; several keys, quota headers — a budget of prompts and/or tokens per day, week or month; 429 until it rolls over). MetaCode keeps per-model rate-limit resting, provider resting, similar-model fallback (across providers), the streaming relay and the empty-answer retry. Neither provider offers embeddings or fine-tuning through the service; images and videos the gateway makes inside a chat completion aren't passed on (an answer that is only a picture reads `[image omitted]`), and MetaCode uses only the text of answers.
+- Model metadata: id (`provider/model`), name, `tool_call`, `reasoning`, `attachment`, free or not; context window and output limit from Zen's catalog (not for the gateway's models). No pricing data is used.
 - The AI Scraper gets a narrow interface (`scraperAi.chat()`), which is the pattern the AI Lab follows.
 - Usage limits: AI requests and posts per plan (`accounts/usage.js`, synchronous reservations, so concurrent requests can't overshoot).
 

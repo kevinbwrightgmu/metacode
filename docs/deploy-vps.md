@@ -1,11 +1,13 @@
 # Running MetaCode on a VPS with pm2
 
-This guide sets up MetaCode on a Linux server (Ubuntu 22.04/24.04 or Debian 12): pm2 keeps it running,
-nginx serves it over HTTPS, and both scrapers work through the reverse proxy.
+This guide sets up MetaCode on a Linux server (Ubuntu 22.04/24.04 or Debian 12): pm2 keeps it and its AI
+service running, nginx serves it over HTTPS, and both scrapers work through the reverse proxy.
 
 ```
-Browser ──https──▶ nginx :443 ──http──▶ MetaCode (pm2, port 3000)
+Browser ──https──▶ nginx :443 ──http──▶ MetaCode (pm2 app "metacode", port 3000)
           wss://your-site/wisp/  ──▶  MetaCode's own Wisp server (the Reddit Scraper's in-app browser)
+                                      MetaCode ──▶ its AI service (pm2 app "metacode-opencode", 127.0.0.1:4097)
+                                                     ──▶ OpenCode Zen / the AI gateway
 ```
 
 **Why the proxy matters.** The Reddit Scraper's in-app browser (**Browse Reddit**) and its "This browser"
@@ -23,19 +25,36 @@ need WebSockets: its jobs run on the server.
 
 Throughout this guide, replace `metac0.de` with your domain and `~/metacode` with where you put MetaCode.
 
-**Already running MetaCode under pm2?** Update it, build the AI Scraper, and switch to the included pm2 file:
+**Already running MetaCode under pm2?** MetaCode's AI now goes through its own AI service, an OpenCode
+service that pm2 runs as a second app, `metacode-opencode` ([opencode-service.md](opencode-service.md)).
+Update, build the AI Scraper, and let the included pm2 file reload MetaCode and start the service:
 
 ```bash
 cd ~/metacode
 git pull
-npm install
+npm install                                           # also installs the AI service's packages
 npm run collector:install
 npm run collector:build
-pm2 ls                           # the name your MetaCode process has
-pm2 delete metacode              # that name
-pm2 start ecosystem.config.cjs
-pm2 save
+pm2 ls                                                # MetaCode's app should be called "metacode"
+pm2 startOrReload ecosystem.config.cjs --update-env   # reloads "metacode", starts "metacode-opencode"
+pm2 save                                              # both come back after a reboot
+pm2 status                                            # "metacode" and "metacode-opencode": online
 ```
+
+If `pm2 ls` shows MetaCode under another name, run `pm2 delete <that name> && pm2 start ecosystem.config.cjs &&
+pm2 save` instead of the last three lines. Your `.env` keeps working: the service reads the same file, including
+`EMIS_API_KEY`.
+
+**New: OpenCode Zen's free models.** Unless `.env` sets `OPENCODE_DISABLE_FREE_MODELS=1`, MetaCode now also offers
+OpenCode Zen's free models (no key needed), next to the gateway's. Their providers may use prompts to improve their
+models, so if your users code sensitive posts, add `OPENCODE_DISABLE_FREE_MODELS=1` to `.env` before the
+`startOrReload` line. A free model never stands in for a paid one unless `.env` sets `AI_FALLBACK_TO_FREE_MODELS=on`:
+when the gateway's budget is used up, requests without a Zen key get the quota message until it resets, as before. If you keep an `ai-lab-pricing.json`, its `metacode:<model-id>` keys still price the
+gateway's models ([ai-lab.md](ai-lab.md)).
+
+If you only run `pm2 reload metacode` after updating, AI keeps working: MetaCode then starts the AI service
+itself, because nothing answers at its address (its lines in `pm2 logs metacode` start with `[opencode]`). Run
+the `startOrReload` line above when you can, so pm2 runs the service as its own app.
 
 Then compare your reverse proxy with [step 6](#6-nginx-and-https): its three WebSocket lines fix the error
 above. Run the checks in [step 9](#9-check-that-it-works).
@@ -49,11 +68,16 @@ above. Run the checks in [step 9](#9-check-that-it-works).
   (the [status page](../README.md#status-page)) if you want them.
 - **HTTPS.** The Reddit Scraper's in-app browser only works on `https://` (or `http://localhost`), because
   Scramjet needs a service worker and browsers only allow those on secure pages.
-- **Python 3**, for the AI Scraper (beta)'s agent and Analyze CSV; MetaCode also sends its AI requests from Python when
-  it's there (Node.js otherwise) (step 3).
-- **An AI key** (`emis-…`) for MetaCode's AI service. Keys are issued by hand: message @kawaii_zxs on Discord (user ID
-  1079096114273320971) and say what you need it for. The key's budget (prompts and/or tokens per day, week or month)
-  is shared by everyone who uses the server.
+- **Python 3**, for the AI Scraper (beta)'s agent and Analyze CSV; the AI gateway's requests are also sent from
+  Python when it's there (Node.js otherwise) (step 3).
+- **AI keys (optional).** Without any, MetaCode's AI uses OpenCode Zen's free models. They are rate-limited, and
+  their providers may use prompts to improve their models during the free period, so for sensitive posts use paid
+  models or the gateway, with `OPENCODE_DISABLE_FREE_MODELS=1` (step 4).
+  - **A gateway key** (`emis-…`) for the AI gateway (EMIS). Keys are issued by hand: message @kawaii_zxs on Discord
+    (user ID 1079096114273320971) and say what you need it for. The key's budget (prompts and/or tokens per day,
+    week or month) is shared by everyone who uses the server.
+  - **An OpenCode Zen key** for Zen's paid models, billed to your OpenCode account: sign in at
+    <https://opencode.ai/auth>, add billing details and create an API key.
 
 ## 2. Install Node.js 22, pm2 and git
 
@@ -77,7 +101,7 @@ If you already use `nvm`, `nvm install 22 && nvm alias default 22` works too. Th
 cd ~
 git clone https://github.com/kevinbwrightgmu/metacode.git   # a private repo asks for a GitHub token or SSH key
 cd ~/metacode
-npm install                     # MetaCode's server
+npm install                     # MetaCode's server and its AI service
 npm run collector:install       # the AI Scraper's own dependencies (collector/)
 npm run collector:build         # builds it into collector/dist; MetaCode serves it at /collector/
 ```
@@ -85,8 +109,8 @@ npm run collector:build         # builds it into collector/dist; MetaCode serves
 If you skip the build, the AI Scraper page shows *"The AI Scraper isn't built yet"* and lists these commands.
 
 **Python 3** runs the AI Scraper's agent (`python/ai_scraper.py`, standard library only) and is used for Analyze
-CSV (NetworkX), the AI requests and the Reddit Scraper's server engine. Without it, the AI Scraper can't run and
-the others fall back or stay off. Ubuntu 23.04+ and Debian 12 don't allow `pip install` into the system Python,
+CSV (NetworkX), the AI gateway's requests and the Reddit Scraper's server engine. Without it, the AI Scraper can't
+run and the others fall back or stay off. Ubuntu 23.04+ and Debian 12 don't allow `pip install` into the system Python,
 so use a virtual environment in `.venv`. The pm2 file below puts it first on `PATH`.
 
 ```bash
@@ -105,11 +129,22 @@ nano .env
 Set at least:
 
 ```ini
-EMIS_API_KEY=emis-…                   # the AI key (step 1)
 PORT=3000                             # nginx forwards to this port
 PUBLIC_URL=https://metac0.de          # your site's address (several: comma-separated)
 SCRAPER_USER_AGENT=nodejs:metacode-scraper:1.0 (by /u/your_reddit_name)
 ```
+
+and, if you have them, the AI keys (step 1):
+
+```ini
+EMIS_API_KEY=emis-…                   # the gateway key; several: comma-separated
+OPENCODE_API_KEY=…                    # an OpenCode Zen key (paid models)
+OPENCODE_DISABLE_FREE_MODELS=1        # for sensitive posts: no free Zen models
+```
+
+The AI service reads this same file. Its own settings (port 4097 on 127.0.0.1, an access token kept in
+`opencode-data/token`) need no changes; they're listed in `.env.example` and
+[opencode-service.md](opencode-service.md#4-settings).
 
 `PUBLIC_URL` tells MetaCode which site's pages may open WebSockets to `/wisp/`. It lets the Wisp connection
 work even when a proxy hides the original host name. With the nginx config below it isn't strictly needed,
@@ -156,15 +191,34 @@ Cloudflare, since anyone reaching it directly could send those headers themselve
 
 ## 5. Start it with pm2
 
-The repo includes `ecosystem.config.cjs`, which runs **one** MetaCode process in fork mode. Don't use cluster
-mode or `-i max`: running jobs, their live progress and the Wisp connections live in that one process's memory.
+The repo includes `ecosystem.config.cjs`, which runs two apps, each **one** process in fork mode:
+
+- `metacode`: MetaCode itself (`server.js`). Don't use cluster mode or `-i max`: running jobs, their live progress
+  and the Wisp connections live in that one process's memory.
+- `metacode-opencode`: its AI service (`opencode/server.mjs`), on 127.0.0.1:4097. The file tells MetaCode not to
+  start the service itself (`OPENCODE_SERVICE_MANAGED=off`), since pm2 runs it, and gives the service 3 seconds to
+  stop (`kill_timeout`), so answers still streaming when it restarts end with an error message, not mid-word.
 
 ```bash
 cd ~/metacode
 pm2 start ecosystem.config.cjs
-pm2 status                       # "metacode" should be "online"
-pm2 logs metacode --lines 30     # the startup banner: port, .env, AI status
+pm2 status                               # "metacode" and "metacode-opencode" should be "online"
+pm2 logs metacode --lines 30             # the startup banner: port, .env, AI status
+pm2 logs metacode-opencode --lines 30    # the AI service's own log
 ```
+
+The banner's AI line reads `AI → OpenCode service at 127.0.0.1:4097 (external) — …` with the providers that are
+ready. pm2 starts both apps at once and the service takes a moment to load its models, so MetaCode waits up to 15
+seconds for it before printing that line. If it still isn't answering then, the line says so and MetaCode checks
+again every few seconds; `pm2 logs metacode-opencode` says *"…is listening on http://127.0.0.1:4097"* once it's up,
+and Settings → AI connection shows the current state. When it says *"isn't running"*, `pm2 status` shows whether
+`metacode-opencode` is online and `pm2 logs metacode-opencode --lines 50` says why not.
+
+**A second MetaCode on the same server** (a staging copy in another folder, say) needs its own `PORT` and its own
+`OPENCODE_SERVICE_PORT` in its `.env` (e.g. `4098`), or it finds the first copy's AI service on 4097 and says
+*"Another MetaCode's AI service (from a different folder) is using port 4097"*. Under pm2 it also needs its own
+app names: copy `ecosystem.config.cjs` in that folder (e.g. to `ecosystem.staging.cjs`), change the two `name`s
+(`metacode-staging`, `metacode-staging-opencode`) and start that file.
 
 Start it again automatically after a reboot:
 
@@ -181,7 +235,10 @@ Useful commands:
 | Command | What it does |
 |---|---|
 | `pm2 logs metacode` | Live log. MetaCode writes proxy and Wisp hints here (see Troubleshooting). |
-| `pm2 reload metacode` | Restart with new code or a changed `.env` |
+| `pm2 logs metacode-opencode` | The AI service's log |
+| `pm2 startOrReload ecosystem.config.cjs --update-env` | Restart both with new code (step 10) |
+| `pm2 reload metacode` | Restart MetaCode after changing `.env` (AI settings don't need it: Settings → Reload .env) |
+| `pm2 restart metacode metacode-opencode` | Restart both, e.g. after changing the AI service's `OPENCODE_SERVICE_*` settings |
 | `pm2 stop metacode` / `pm2 start metacode` | Stop / start |
 | `pm2 monit` | CPU and memory |
 | `pm2 install pm2-logrotate` | Keep the log files from growing forever (optional) |
@@ -280,13 +337,15 @@ pages fail from it. Reddit's official API with keys works instead, for both the 
 - At most `SCRAPER_MAX_CONCURRENT_JOBS` jobs run at once on the server (default 2, up to 16), AI Scraper jobs
   included; others wait their turn. With many users bringing their own keys, raise it, e.g.
   `SCRAPER_MAX_CONCURRENT_JOBS=8`.
-- AI Scraper jobs also use MetaCode's AI key: each step is one AI request (a job makes at most its step limit
-  plus a few). The key's budget (prompts and/or tokens per day, week or month) is shared by everyone; when it runs
-  out, the AI service answers 429 until the window rolls over.
+- AI Scraper jobs also use MetaCode's AI: each step is one AI request (a job makes at most its step limit plus a
+  few). The gateway key's budget (prompts and/or tokens per day, week or month) and OpenCode Zen's free limit are
+  shared by everyone; when one runs out, MetaCode uses a similar model from the other provider if it has one (not
+  a free model for a paid one, unless `AI_FALLBACK_TO_FREE_MODELS=on`), or says when the budget resets.
 
 ## 8. Firewall
 
-Only nginx should be reachable from outside. Port 3000 should stay closed:
+Only nginx should be reachable from outside. Port 3000 should stay closed, and so should the AI service's port 4097
+(it listens on 127.0.0.1 by default; don't open it):
 
 ```bash
 sudo ufw allow OpenSSH            # first, so you don't lock yourself out
@@ -335,6 +394,15 @@ never split, though: a post, the codebook, a Network Graph or a network analysis
 it. Surveys with large images, AI Lab imports, big Analyze CSV files and shared projects with large networks need
 the full limit.
 
+On the server, the AI service should answer on its own address (no token needed for this one):
+
+```bash
+curl -s http://127.0.0.1:4097/health     # {"ok":true,"service":"metacode-opencode",…}
+```
+
+In MetaCode, **Settings → AI connection** says whether AI is ready, and **AI providers** shows each provider
+(OpenCode Zen, the AI gateway) with its keys and quotas.
+
 Then open `https://metac0.de/app.html#scraper-beta`, ask the AI Scraper for a few posts, and watch its steps in
 the Monitor. If Reddit blocks the server, the job stops with "blocked by network security": add your own Reddit
 API keys (step 7).
@@ -347,7 +415,8 @@ git pull
 npm install
 npm run collector:install
 npm run collector:build
-pm2 reload metacode
+pm2 startOrReload ecosystem.config.cjs --update-env   # MetaCode and its AI service
+pm2 save
 ```
 
 A reload is safe while standard scraper jobs run: they are saved under `scraper-data/` with checkpoints and
@@ -357,7 +426,8 @@ AI Coding Lab evaluation runs that were going show **Resume** to their owner. Pr
 the AI Scraper already copied are stored in each user's browser, so they survive restarts.
 
 **Back up** `account-data/`, `survey-data/`, `scraper-data/` and `lab-data/` (or wherever the `*_DATA_DIR`
-settings point). Copying them while MetaCode runs is fine.
+settings point). Copying them while MetaCode runs is fine. `opencode-data/` (the AI service's token and catalog
+cache) needs no backup: both are made again when missing.
 
 ## 11. Troubleshooting
 
@@ -383,7 +453,15 @@ review the block with the "File a ticket" link on that page.
 Run `npm run collector:install && npm run collector:build` in `~/metacode`, then `pm2 reload metacode`.
 
 **AI Scraper: "needs Python 3 on the MetaCode server" / "MetaCode's AI isn't set up yet"**
-Install Python 3 (step 3), or point `SCRAPER_PYTHON` at it; set `EMIS_API_KEY` in `.env`. Then `pm2 reload metacode`.
+Install Python 3 (step 3), or point `SCRAPER_PYTHON` at it, then `pm2 reload metacode`. For the AI, see the next
+entry and Settings → AI connection.
+
+**"MetaCode's AI service (OpenCode) isn't running at 127.0.0.1:4097…"**
+`pm2 status` should list `metacode-opencode` as online. If it's missing, `pm2 start ecosystem.config.cjs && pm2 save`.
+If it keeps restarting, `pm2 logs metacode-opencode --lines 50` says why: missing packages (`npm install`, then
+`pm2 restart metacode-opencode`), or *"port 4097 is in use"* — usually a copy MetaCode started itself because its
+pm2 entry predates the two apps: `pm2 startOrReload ecosystem.config.cjs --update-env && pm2 save`. More in
+[opencode-service.md](opencode-service.md#9-troubleshooting).
 
 **The build fails with "Vite requires Node.js version 20.19+ or 22.12+"**
 Update Node.js (step 2). Then check `node -v`. `pm2 reload metacode` keeps using the Node version pm2 started
@@ -401,6 +479,14 @@ receives. Use `proxy_set_header Host $http_host;` (which keeps the port) instead
 MetaCode isn't running: `pm2 status`, then `pm2 logs metacode --lines 50` for the reason (a missing
 `npm install`, a port in use, a Node.js that's too old).
 
+**`Error: Cannot find module '…'`, `ERR_MODULE_NOT_FOUND` or *"…the package … isn't installed"* in `pm2 logs metacode` or `pm2 logs metacode-opencode`**
+The code was updated (`git pull`) but its packages weren't:
+`cd ~/metacode && npm install && pm2 startOrReload ecosystem.config.cjs --update-env`. The AI service says this in
+one line, *"MetaCode's AI service can't start: the package <name> isn't installed. Run "npm install", then restart
+it (pm2 restart metacode-opencode)."*, and pm2 keeps restarting it until the package is there.
+
 **Changed `.env` but nothing changed**
-AI settings can be reloaded from **Settings → AI connection → Reload .env**. Everything else (`PORT`,
-`PUBLIC_URL`, scraper settings) needs `pm2 reload metacode`.
+AI settings (keys, models, providers) can be reloaded from **Settings → AI connection → Reload .env**, which
+reaches the AI service too. Where the service runs (`OPENCODE_SERVICE_*`) needs
+`pm2 restart metacode metacode-opencode`. Everything else (`PORT`, `PUBLIC_URL`, scraper settings) needs
+`pm2 reload metacode`.

@@ -38,7 +38,7 @@ const os = require('os');
 const path = require('path');
 const { testEnv } = require('./helpers/harness');
 const { mockSupabase, mockStripe } = require('./helpers/account-mocks');
-const { startEmis } = require('./helpers/lab-mocks');
+const { startAiService } = require('./helpers/lab-mocks');
 const { createCodeSandbox } = require('../ai-lab/code-sandbox');
 
 function findChromium() {
@@ -55,8 +55,8 @@ const jsSupport = probe.supported('javascript');
 const pySupport = probe.supported('python');
 const skip = (!chromiumPath && 'no Chromium found (set CHROMIUM_PATH)') || (!jsSupport.ok && jsSupport.reason);
 const KEY = 'sb_publishable_xp_e2e_0123456789';
-const emisState = { requests: [], streamDelayMs: 0, fail: false };
-let sb, stripe, emis, server, baseUrl, browser, tmp;
+const aiState = { requests: [], streamDelayMs: 0, fail: false };
+let sb, stripe, aiService, server, baseUrl, browser, tmp;
 const TERMINAL = ['succeeded', 'failed', 'blocked', 'cancelled', 'interrupted'];
 
 // The open MetaCode project: the variable "stance" (pos / neg / neu, labelled
@@ -111,7 +111,7 @@ test.before(async () => {
     prod_VQeKXAJtQQLKqm: { id: 'prod_VQeKXAJtQQLKqm', active: true, default_price: 'price_ultra' }
   } });
   await stripe.start();
-  emis = await startEmis(emisState);
+  aiService = await startAiService(aiState);
   stripe.subscribe(sb.addUser('ultra@example.org', 'ultra password 1').id, 'prod_VQeKXAJtQQLKqm');
   stripe.subscribe(sb.addUser('ultra2@example.org', 'ultra password 2').id, 'prod_VQeKXAJtQQLKqm');
   Object.assign(process.env, testEnv({
@@ -120,8 +120,8 @@ test.before(async () => {
     ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects'), COLLAB_DATA_DIR: path.join(tmp, 'collab'),
     AI_LAB_DATA_DIR: path.join(tmp, 'lab'), AI_LAB_PRICING_FILE: path.join(tmp, 'none.json'),
     AI_LAB_SANDBOX_TIMEOUT_MS: '2000',    // the busy-waiting rule below times out quickly
-    EMIS_BASE_URL: 'http://127.0.0.1:' + emis.address().port + '/v1', EMIS_API_KEY: 'emis-test-key-123456', EMIS_TRANSPORT: 'node',
-    EMIS_MODEL: 'lab-model', EMIS_MODELS_FILE: path.join(tmp, 'none.json'), EMIS_MODEL_SWITCH: 'off'
+    OPENCODE_SERVICE_URL: 'http://127.0.0.1:' + aiService.address().port + '/v1', OPENCODE_SERVICE_TOKEN: 'test-service-token-0123456789',
+    OPENCODE_MODEL: 'lab-model', AI_MODEL_SWITCH: 'off'
   }));
   const { start } = require('../server');
   server = await start(0);
@@ -131,7 +131,7 @@ test.before(async () => {
 test.after(async () => {
   if (browser) await browser.close();
   if (server) { server.closeAllConnections(); await new Promise(r => server.close(r)); }
-  if (emis) { emis.closeAllConnections(); await new Promise(r => emis.close(r)); }
+  if (aiService) { aiService.closeAllConnections(); await new Promise(r => aiService.close(r)); }
   if (sb) await sb.close();
   if (stripe) await stripe.close();
   if (tmp) fs.rmSync(tmp, { recursive: true, force: true });

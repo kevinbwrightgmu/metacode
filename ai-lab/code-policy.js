@@ -16,8 +16,6 @@
 // classify/1 contract; only a run with zero problems has its results stored.
 
 const crypto = require('crypto');
-const acorn = require('acorn');
-const walk = require('acorn-walk');
 const nodeModule = /** @type {{ stripTypeScriptTypes?: (code: string, o: { mode: 'strip' }) => string }} */ (require('module'));
 const { invalid } = require('./errors');
 
@@ -28,6 +26,27 @@ const { invalid } = require('./errors');
 /** @typedef {import('../types/lab-experiments').RecordResult} RecordResult */
 /** @typedef {import('../types/lab-experiments').OutputValidation} OutputValidation */
 /** @typedef {import('../types/lab-experiments').SandboxVariable} SandboxVariable */
+
+// The parser is loaded on first use, not at start-up: a server whose
+// node_modules predates it (a "git pull" without "npm install") keeps
+// running, and only JavaScript/TypeScript coding rules report what to do.
+/** @type {{ acorn: typeof import('acorn'), walk: typeof import('acorn-walk') } | null | undefined} */
+let parser;
+/** @returns {{ acorn: typeof import('acorn'), walk: typeof import('acorn-walk') } | null} */
+function loadParser() {
+  if (parser === undefined) {
+    try { parser = { acorn: require('acorn'), walk: require('acorn-walk') }; } catch (e) { parser = null; }
+  }
+  return parser;
+}
+const PARSER_MISSING = 'The JavaScript checker (acorn) isn\'t installed on the MetaCode server. Run "npm install" and restart MetaCode.';
+/**
+ * Whether JavaScript/TypeScript can be checked here (the parser is installed).
+ * @returns {{ ok: true } | { ok: false, reason: string }}
+ */
+function parserAvailable() {
+  return loadParser() ? { ok: true } : { ok: false, reason: PARSER_MISSING };
+}
 
 /** The version of these rules, recorded on every report and run. */
 const POLICY_VERSION = 'policy-1';
@@ -177,10 +196,14 @@ function analyzeJavaScript(code, language, opts) {
     }
   }
 
+  // No parser, no verdict: the code is blocked, never let through unchecked.
+  const P = loadParser();
+  if (!P) { add('checker_unavailable', 'error', PARSER_MISSING); return report(); }
+
   /** @type {any} */
   let ast;
   try {
-    ast = acorn.parse(js, { ecmaVersion: 'latest', sourceType: 'script', locations: true });
+    ast = P.acorn.parse(js, { ecmaVersion: 'latest', sourceType: 'script', locations: true });
   } catch (e) {
     const err = /** @type {Error & { loc?: { line: number, column: number } }} */ (e);
     const msg = String(err.message || err).replace(/\s*\(\d+:\d+\)$/, '');
@@ -293,7 +316,7 @@ function analyzeJavaScript(code, language, opts) {
       if (node.callee.type === 'Identifier' && node.callee.name === 'Date' && node.arguments.length === 0) add('nondeterministic', 'warning', 'new Date() without arguments is the current time, which changes on every run. Use the record\'s timestamp instead.', at(node));
     }
   });
-  walk.ancestor(ast, visitors);
+  P.walk.ancestor(ast, visitors);
   return report();
 }
 
@@ -489,6 +512,6 @@ function validateOutputs(rawOutputs, records, variable) {
 }
 
 module.exports = {
-  analyzeJavaScript, validateOutputs, codeHash,
+  analyzeJavaScript, parserAvailable, validateOutputs, codeHash,
   POLICY_VERSION, CONTRACT, PYTHON_ALLOWED_MODULES, LIMITS, FORBIDDEN_GLOBALS, FORBIDDEN_PROPERTIES
 };

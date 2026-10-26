@@ -33,11 +33,15 @@ The front page (`index.html`) introduces the four research methods — Reddit da
 ## Quick Start
 
 ### Prerequisites
-- **Node.js** v18 or higher → [nodejs.org](https://nodejs.org) (**v22 or higher** for the Reddit Scraper)
+- **Node.js** v20 or higher → [nodejs.org](https://nodejs.org) (**v22 or higher** for the Reddit Scraper)
 - **Python** 3.9 or higher (only needed for the "Analyze CSV" NetworkX feature) → [python.org](https://python.org)
-- An **AI API key** for MetaCode's AI service (it looks like `emis-…`). Keys are issued by hand: message
-  @kawaii_zxs on Discord (user ID 1079096114273320971) and say what you need it for. Each key comes with a budget — a
-  number of prompts and/or tokens it may spend per day, week or month.
+- **AI keys are optional.** MetaCode's AI service offers OpenCode Zen's free models without any key (read the
+  [privacy note](#ai-provider) before coding sensitive posts with them). For paid models, add one or both:
+  - an **OpenCode Zen key** (`OPENCODE_API_KEY`): sign in at <https://opencode.ai/auth>, add billing details and
+    create an API key; Zen's paid models are billed to it;
+  - a key for the **AI gateway**, EMIS (`EMIS_API_KEY`, it looks like `emis-…`). Keys are issued by hand: message
+    @kawaii_zxs on Discord (user ID 1079096114273320971) and say what you need it for. Each key comes with a
+    budget — a number of prompts and/or tokens it may spend per day, week or month.
 
 ### Setup (4 steps)
 
@@ -51,31 +55,35 @@ npm install
 pip install -r requirements.txt
 ```
 
-**3. Add your AI key**
+**3. Add your settings and AI keys (optional)**
 ```bash
 cp .env.example .env
-# Edit .env and set your key:
-# EMIS_API_KEY=emis-…
+# Edit .env and add the AI keys you have, e.g.:
+# OPENCODE_API_KEY=…        OpenCode Zen's paid models
+# EMIS_API_KEY=emis-…       the AI gateway
 ```
-The key is only read by MetaCode's server — it never reaches the browser. See [AI Provider](#ai-provider)
-for the other settings. **Settings → AI connection** shows which file was read and which settings it contained
-(names only); after editing `.env`, click **Reload .env** — no restart needed for the AI settings. In **Settings →
-AI models** pick a default model and, if you like, a different model for each AI feature.
+Without keys, the AI uses OpenCode Zen's free models. Keys are only read on the server, by MetaCode's AI service —
+they never reach the browser. See [AI Provider](#ai-provider) for the other settings. **Settings → AI connection**
+shows which file was read and which settings it contained (names only); after editing `.env`, click **Reload .env**
+— no restart needed for the AI settings. In **Settings → AI models** pick a default model and, if you like, a
+different model for each AI feature.
 
 **4. Start the server**
 ```bash
 npm start
 ```
 
-Then open **http://localhost:3000** in your browser. The top bar and the "Analyze CSV" page both show a live status indicator so you always know whether the AI and Python/NetworkX are ready.
+Then open **http://localhost:3000** in your browser. MetaCode starts its AI service (`opencode/server.mjs`) by
+itself; the startup banner's `AI →` line says whether it runs and which AI providers are ready. The top bar and the "Analyze CSV" page both show a live status indicator so you always know whether the AI and Python/NetworkX are ready.
 
 **Reddit Scraper** fetches Reddit through **RedditAPIs.com** by default (add a RedditAPIs.com API key on the
 Scraper page; it stays in your browser). You can switch to your open MetaCode tab (Scramjet, no setup) or the
 MetaCode server under **Fetch Reddit through** — see [Reddit Scraper](#reddit-scraper). The **AI Scraper (beta)** needs one build
-step, Python 3 and the AI key — see [AI Scraper (beta)](#ai-scraper-beta) below.
+step, Python 3 and MetaCode's AI — see [AI Scraper (beta)](#ai-scraper-beta) below.
 
 **Running MetaCode on a server** (a VPS with pm2, nginx and HTTPS): follow **[docs/deploy-vps.md](docs/deploy-vps.md)**.
-It includes `ecosystem.config.cjs` for pm2 and an nginx config that forwards the Reddit Scraper browser's WebSocket.
+It includes `ecosystem.config.cjs` for pm2 (MetaCode and its AI service as two apps) and an nginx config that
+forwards the Reddit Scraper browser's WebSocket.
 
 ### Tests
 ```bash
@@ -86,7 +94,7 @@ npm run typecheck # TypeScript checks of the server modules marked // @ts-check
 
 ### AI Scraper (beta)
 The sidebar's **AI Scraper** page is a separate app in `collector/` (TypeScript + React); its AI agent is
-`python/ai_scraper.py`. It needs Python 3 and MetaCode's AI key (`EMIS_API_KEY`) on the server. Build the app once,
+`python/ai_scraper.py`. It needs Python 3 and MetaCode's AI on the server. Build the app once,
 and again after each update:
 ```bash
 npm run collector:install   # its own dependencies, in collector/
@@ -416,8 +424,8 @@ For most research contexts, κ ≥ 0.61 is the acceptable threshold.
 ## AI Coding Tips
 
 - **Provider**: all AI features run through the AI service (see [AI Provider](#ai-provider))
-- **Quota**: Each AI key has a budget — a number of prompts and/or tokens it may spend per day, week or month; when it runs out, the AI service answers 429 until the window rolls over. Coding a large dataset uses one prompt per post (more if a post has to be retried), so check your quota (Settings → AI keys) before a big run
-- **Model selection**: Click **↻ Refresh list** in Settings → AI models to see which models the AI service offers right now — the lineup can change over time (models in `emis-models.json` it doesn't list right now are marked)
+- **Quota**: Each AI gateway key has a budget — a number of prompts and/or tokens it may spend per day, week or month; when it runs out, the gateway answers 429 until the window rolls over. OpenCode Zen's free models have a usage limit, and its paid models are billed to the Zen key. Coding a large dataset uses one prompt per post (more if a post has to be retried), so check your quota (Settings → AI providers) before a big run
+- **Model selection**: Click **↻ Refresh list** in Settings → AI models to see which models the AI service offers right now — the lineup can change over time (the gateway's models it doesn't offer right now are marked). Models are grouped by provider; free ones say so
 - **Codebook quality**: Clear, specific code descriptions dramatically improve AI coding accuracy
 - **Fine-tuning a code**: If the AI keeps misapplying one specific code, open it in the Codebook and add a note in "AI Fine-Tuning Notes" — e.g. "don't count sarcastic praise as Positive." This is read by the AI on every future coding run but never shown to human coders, so it won't bias manual coding or your reliability comparison
 - **Speed (copies at once)**: AI Coding splits the posts between several simultaneous requests to the same model — 4 by default. Change the number in the **at once** box next to **Run AI Coding** or in Settings → AI models (1 = one post at a time; up to `AI_MAX_PARALLEL`, 16 by default). Results appear as each post finishes. If the AI service rate-limits the key, MetaCode halves the number, pauses and retries by itself. Every post still uses one prompt of your quota, so more copies finish sooner but don't cost more
@@ -433,8 +441,8 @@ page, what a statistic means, or why something isn't working — e.g. "Explain m
 "Why is my Network Graph blank?". Suggested questions change with the page you're on. On screens 1440px and
 wider the panel sits beside your work; on smaller screens it opens over the right side (press **Esc** or ✕ to close).
 
-**How it works:** the assistant uses the same AI as AI Coding, with the model chosen in Settings and the
-key in the server's `.env` — through the same local server, with key rotation. Each question sends the AI service:
+**How it works:** the assistant uses the same AI as AI Coding, with the model chosen in Settings — through the
+same server and AI service. Each question sends the AI model:
 - a short reference guide to MetaCode (`public/js/assistant-knowledge.js` — update it when features change);
 - a summary of your project's current state — counts, codebook dimension and code names, reliability and
   network statistics, the page you're on, and how many API keys are configured (never the keys themselves,
@@ -442,73 +450,98 @@ key in the server's `.env` — through the same local server, with key rotation.
 - the last few messages of the conversation.
 
 The conversation lives in memory only: it's cleared when you reload the page or click the clear button.
-Each question uses one prompt and roughly 3,000 tokens of the AI key's budget.
+Each question uses one prompt and roughly 3,000 tokens of the provider's budget.
 
 ---
 
 ## AI Provider
 
-Every AI feature — AI Coding, the assistant, column detection in Import Data and Analyze CSV, and Test
-Connection — goes through MetaCode's own server to the **AI service**, an OpenAI-compatible AI gateway:
+Every AI feature — AI Coding, the assistant, column detection in Import Data and Analyze CSV, the AI Scraper, the
+AI Coding Lab and Test Connection — goes through MetaCode's own server to its **AI service**: an OpenCode service
+(`opencode/`, built on OpenCode's `@opencode/ai` package) that runs beside MetaCode on the same computer and
+reaches two AI providers:
 
 ```
-browser → POST /api/ai (MetaCode server) → POST https://emis.zxs-is-very.cool/v1/chat/completions
+browser → POST /api/ai (MetaCode server) → POST http://127.0.0.1:4097/v1/chat/completions (MetaCode's AI service)
+            → OpenCode Zen (https://opencode.ai/inference/…) or the AI gateway (https://emis.zxs-is-very.cool/v1)
 ```
 
-Configuration lives only in the server's `.env` file:
+- **OpenCode Zen** — models offered by the OpenCode team. Without a key only its free models are offered;
+  `OPENCODE_API_KEY` adds the paid ones, billed to that key's account.
+- **The AI gateway** (EMIS) — an OpenAI-compatible gateway with keys issued by hand (`EMIS_API_KEY`, see
+  [Prerequisites](#prerequisites)), each with a budget.
+
+> **Privacy.** Free Zen models are rate-limited, and their providers may use prompts to improve their models during
+> the free period. AI Coding sends the text of the posts it codes. If you work with sensitive posts, use paid models
+> or the gateway, and set `OPENCODE_DISABLE_FREE_MODELS=1`. Without a gateway key, the default model is OpenCode
+> Zen's first model, which is a free one unless a Zen key is set (and can be one even then): set `OPENCODE_MODEL`
+> to choose it yourself. When MetaCode switches to a similar model, a free model never answers for a paid one
+> unless `AI_FALLBACK_TO_FREE_MODELS=on`.
+
+`npm start` starts the AI service by itself (its log lines start with `[opencode]`); on a server pm2 runs it as a
+second app ([docs/deploy-vps.md](docs/deploy-vps.md)). How it runs, all its settings, its config file, its model
+catalog and its HTTP API: **[docs/opencode-service.md](docs/opencode-service.md)**.
+
+Configuration lives only in the server's `.env` file, which MetaCode and the AI service both read:
 
 | Variable | Required | What it does |
 |---|---|---|
-| `EMIS_API_KEY` | yes | Your AI key. Several keys can be listed, comma-separated — MetaCode rotates between them |
-| `EMIS_BASE_URL` | no | AI service address, default `https://emis.zxs-is-very.cool/v1` |
-| `EMIS_MODEL` | no | Default model. If empty: Claude Opus 5.5 (`claude-opus-5.5`) when `emis-models.json` lists it, else the file's first model (without that file: `gpt-oss-120b` if the AI service lists it, otherwise the first model the AI service lists). An older spelling of an id (`claude-opus-5-5`) is read as the new one |
-| `EMIS_MODELS_FILE` | no | Model list file, default `emis-models.json` in the MetaCode folder |
-| `EMIS_TRANSPORT` | no | What sends AI requests: `auto` (default — Python, with the `openai` package when installed, else Node.js), `python` or `node`. Any of them works: the AI service's browser check doesn't apply to API requests made with a key |
-| `EMIS_PROXY` | no | Proxy for AI requests (`HTTPS_PROXY` / `NO_PROXY` are used too) |
-| `EMIS_MODEL_SWITCH` | no | `off` stops MetaCode from answering with the closest similar model when the AI service rate-limits a model, or can't run a model picked in Settings (on by default). The server's own default model still falls back to a similar model when the AI service can't run it |
+| `OPENCODE_API_KEY` | no | OpenCode Zen key: adds Zen's paid models. Without it only Zen's free models are offered |
+| `OPENCODE_DISABLE_FREE_MODELS` | no | `1`: don't offer Zen's free models (for sensitive data). Without it they're offered, also when the gateway is set up |
+| `EMIS_API_KEY` | no | The AI gateway's key. Several keys can be listed, comma-separated — the service rotates between them. Without one the gateway isn't used |
+| `EMIS_BASE_URL` | no | The gateway's address, default `https://emis.zxs-is-very.cool/v1` |
+| `EMIS_MODELS_FILE` | no | The gateway's model list file, default `emis-models.json` in the MetaCode folder |
+| `EMIS_TRANSPORT` | no | What sends the gateway's non-streamed requests: `auto` (default — Python when it's found, else Node.js), `python` or `node`. Streamed requests always go from Node.js |
+| `HTTPS_PROXY` / `EMIS_PROXY` | no | Proxy for AI requests (`NO_PROXY` is honoured; `EMIS_PROXY` replaces it for the gateway only) |
+| `OPENCODE_MODEL` | no | Default model, as `provider/model` (`emis/claude-opus-5.5`, `opencode/big-pickle`). If empty: Claude Opus 5.5 on the gateway when it's set up, otherwise OpenCode Zen's first model — Big Pickle without a Zen key, with one the newest release, which can be a free model too. `EMIS_MODEL=<id>` from earlier versions still works (it means `emis/<id>`), and an older spelling of an id (`claude-opus-5-5`) is read as the new one |
+| `AI_MODEL_SWITCH` | no | `off` stops MetaCode from answering with the closest similar model when a model is rate-limited or its provider's budget is used up, or a model picked in Settings can't run (on by default). The server's own default model still falls back to a similar model when it can't run. Older name: `EMIS_MODEL_SWITCH` |
+| `AI_FALLBACK_TO_FREE_MODELS` | no | `on` lets a free model answer for one that isn't free when switching. Off by default: a paid model (for example the gateway's, when its budget is used up) is never answered by a free one |
 | `AI_MAX_PARALLEL` | no | The most copies of the model AI Coding may run at once (default 16, max 64); users choose up to this |
 | `AI_BATCH_PAUSE_SECONDS` | no | How long AI Coding first pauses when the AI service answers with a server error (default 5; doubles with each pause, up to 60) |
-| `EMIS_TIMEOUT_MS` | no | How long to wait for the AI service (default 120000 ms) |
+| `AI_TIMEOUT_MS` | no | How long to wait for an AI answer (default 120000 ms). Older name: `EMIS_TIMEOUT_MS` |
+| `OPENCODE_SERVICE_URL`, `OPENCODE_SERVICE_PORT`, `OPENCODE_SERVICE_MANAGED`, … | no | Where the AI service runs and who starts it (default: `127.0.0.1:4097`, started by MetaCode unless pm2 runs it). `OPENCODE_SERVICE_URL=off` switches MetaCode's AI off. See [docs/opencode-service.md](docs/opencode-service.md#4-settings) |
 
-After changing `.env`, click **Settings → Reload .env** (AI settings apply at once; scraper and port settings
-need a restart). MetaCode looks for `.env` next to `server.js`, then in the folder the server was started from,
+After changing `.env`, click **Settings → Reload .env** (AI settings apply at once, in the AI service too; scraper,
+port and `OPENCODE_SERVICE_*` settings need a restart). MetaCode looks for `.env` next to `server.js`, then in the folder the server was started from,
 then in the folder above; `.env.txt` (Windows often adds `.txt`) is accepted, and files saved by Notepad as
 "Unicode" (UTF-16) are read correctly. Values in `.env` replace variables of the same name already set in your
 system environment (an old system variable is a common reason a new key seems not to load) — Settings and the
 startup banner say when that happens.
 
-- **Models.** The model list comes from `emis-models.json` — the AI service's OpenCode config
-  (`https://emis.zxs-is-very.cool/cli/opencode.json`; `provider.emis.models`: id → name, `tool_call`, `reasoning`,
-  `attachment`). The AI service generates that file live from its catalog and lists only models with tool calling, so
-  `GET /v1/models` can list more. To update it, download that file again and save it as `emis-models.json` (or edit
-  it); changes are picked up without a restart. The catalog sometimes respells ids (on 2026-10-22 `claude-opus-5-5`
-  became `claude-opus-5.5`, `gpt-6-1-sol` `gpt-6.1-sol` …): a model picked under an old spelling is still that model
-  (Settings, the AI Coding Lab, `EMIS_MODEL`). Only the model
-  ids, names and capability flags are read from it — the AI service address and key always come from `.env`. If the
-  file is missing, MetaCode asks the AI service for its live list (`GET /v1/models`) instead. When the file is used, the
-  service's live list is checked too, and models it doesn't offer right now are marked in Settings (and the AI Coding
-  Lab) rather than shown as plainly usable — inventory and details: [docs/ai-models.md](docs/ai-models.md). The model picked in Settings
-  is used when it's listed; otherwise the default above is used (the server log says so). A request that needs
-  something a model's flags say it lacks (tool calling, images) is refused with a clear message.
-- **Quota.** Each key has a budget — a number of prompts and/or tokens it may spend per day, week or month. Every chat
-  answer carries the key's standing (`X-RateLimit-Window`, `X-RateLimit-Limit-Prompts` / `-Tokens`,
-  `X-RateLimit-Remaining-Prompts` / `-Tokens`, `X-RateLimit-Reset` in Unix seconds), and once the budget runs out the
-  key gets HTTP 429 until the window rolls over. MetaCode then rests that key until the reset
-  time the AI service gave (another key is used if you listed several) and shows a message saying when the quota
-  resets. Restarting the server clears this memory.
-- **Rate-limited models switch to the closest one.** The AI service documents 429 for a used-up budget; a 429 while
-  the quota headers still show budget left (and its message doesn't say the budget is spent) is treated as the AI
-  service throttling that one model. MetaCode then rests just that model (1 minute, doubling while it keeps
-  happening, up to 15 — or what `Retry-After` says) and answers with the **closest similar model**: same
-  family and line first (Claude Opus → Claude Opus, Qwen Max Thinking → Qwen Max Thinking), then the nearest
-  version and size, the same speed tier and capabilities (`model-match.js`); the same model under another spelling
-  of its id comes last, as it's most likely limited too. Requests for the resting model go
-  straight to the substitute without calling the AI service, and the app says which model answered (AI Coding's summary
-  counts the posts coded by a substitute). Up to four similar models are tried per request. If one key gets
-  429s on three different models within 20 seconds without quota headers, it's the key being paused, so the
-  key rests instead. Turn switching off per browser in Settings → AI models (*If a model is rate-limited or
-  failing, use the closest similar model*) or for the whole server with `EMIS_MODEL_SWITCH=off`. A used-up budget applies
-  to every model, so switching doesn't help there.
+- **Models.** The model list comes from the AI service: OpenCode Zen's models from OpenCode's catalog (bundled in
+  `opencode/zen-models.json` and refreshed every hour when the server can reach `models.opencode.ai`), and the
+  gateway's from `emis-models.json` — the gateway's OpenCode config (`https://emis.zxs-is-very.cool/cli/opencode.json`;
+  `provider.emis.models`: id → name, `tool_call`, `reasoning`, `attachment`), which lists only models with tool
+  calling. Ids name their provider (`opencode/big-pickle`, `emis/claude-opus-5.5`); Settings groups the models by
+  provider and marks the free ones. To update the gateway's list, download that file again and save it as
+  `emis-models.json` (or edit it); changes are picked up without a restart. Its catalog sometimes respells ids (on
+  2026-10-22 `claude-opus-5-5` became `claude-opus-5.5`, `gpt-6-1-sol` `gpt-6.1-sol` …): a model picked under an
+  old spelling, or without its provider (saved by an earlier version), is still that model (Settings, the AI Coding
+  Lab, `OPENCODE_MODEL`, `EMIS_MODEL`). If the file is missing, the service asks the gateway for its live list
+  instead; when the file is used, the gateway's live list is checked too, and models it doesn't offer right now are
+  marked in Settings (and the AI Coding Lab) rather than shown as plainly usable — inventory and details:
+  [docs/ai-models.md](docs/ai-models.md). The model picked in Settings is used when it's listed; otherwise the
+  default above is used (the server log says so). A request that needs something a model's flags say it lacks
+  (tool calling, images) is refused with a clear message.
+- **Quota.** Each gateway key has a budget — a number of prompts and/or tokens it may spend per day, week or month.
+  Every answer carries the key's standing (`X-RateLimit-Window`, `X-RateLimit-Limit-Prompts` / `-Tokens`,
+  `X-RateLimit-Remaining-Prompts` / `-Tokens`, `X-RateLimit-Reset` in Unix seconds), and once the budget runs out
+  the key gets HTTP 429 until the window rolls over. The AI service then rests that key until the reset time the
+  gateway gave (another key is used if you listed several). OpenCode Zen's free models have a usage limit, and its
+  paid models use the Zen account's budget. When a provider's budget is used up, MetaCode answers with the closest
+  similar model from the other provider (if switching is on, and never with a free model for a paid one unless
+  `AI_FALLBACK_TO_FREE_MODELS=on`), otherwise with a message saying when the quota resets. Settings → AI providers
+  shows each key's standing. Restarting the AI service clears its memory of resting keys.
+- **Rate-limited models switch to the closest one.** A 429 for one model (while the provider's budget lasts) is
+  treated as the provider throttling that one model. MetaCode then rests just that model (1 minute, doubling while
+  it keeps happening, up to 15 — or what `Retry-After` says) and answers with the **closest similar model**: the
+  same model from the other provider first, then the same family and line (Claude Opus → Claude Opus, Qwen Max
+  Thinking → Qwen Max Thinking), the nearest version and size, the same speed tier and capabilities
+  (`model-match.js`); a free model only stands in for a free one (unless `AI_FALLBACK_TO_FREE_MODELS=on`).
+  Requests for the resting model go straight to the substitute without calling the AI service,
+  and the app says which model answered (AI Coding's summary counts the posts coded by a substitute). Up to four
+  similar models are tried per request. Turn switching off per browser in Settings → AI models (*If a model is
+  rate-limited or failing, use the closest similar model*) or for the whole server with `AI_MODEL_SWITCH=off`.
 - **Server errors (HTTP 5xx) from the AI service.** Each request is retried twice first. A model that still
   fails rests briefly (30 seconds, doubling while it keeps failing, up to 5 minutes), and requests for it are
   answered by the closest similar model meanwhile — also a model you picked, while switching is on (Ask MetaCode,
@@ -520,23 +553,29 @@ startup banner say when that happens.
   so — then speeds back up as answers arrive. Posts that still fail are tried again after 15 and 30 seconds. If
   the AI service keeps failing for about 2 minutes, the run stops instead of sending the rest; click
   **Run AI Coding** again later (coded posts are kept).
-- **Security.** The key is sent only to the AI service address in `.env`: never to the browser, never logged,
-  never returned by an endpoint or included in an error. The browser can't choose the AI service address or key.
-  Other websites open in your browser can't use MetaCode's AI endpoints (they're same-origin only).
+- **Security.** AI keys are read only by the AI service, from `.env`, and sent only to their provider: never to
+  the browser, never logged, never returned by an endpoint or included in an error. The service listens on
+  `127.0.0.1` (by default) and answers only requests with its access token, which MetaCode sends
+  (`opencode-data/token`); on a computer other people also log in to, read
+  [docs/security.md](docs/security.md#ai-keys-stay-in-the-ai-service) first. The browser
+  can't choose the AI service, a provider's address or a key. Other websites open in your browser can't use
+  MetaCode's AI endpoints (they're same-origin only).
 - **Settings page.** *AI connection* shows the `.env` file that was read (name, location, encoding), the names
-  of the settings in it, warnings, whether AI is ready, and **Reload .env** / **Test connection**. *AI models*
-  has a default model plus one per feature — AI Coding, Ask MetaCode, Import Data (column detection), Analyze CSV
-  (edge detection) and AI Scraper (beta); "Same as default" follows the default. *AI Coding: copies of the model working
-  at once* sets how many posts are coded side by side; *If a model is rate-limited or failing, use the closest similar
-  model* (on by default) and a list of the models the AI service is rate-limiting right now. *AI keys* lists each key
-  masked, with its status (resting until when) and the prompts and/or tokens it has left this day, week or month.
+  of the settings in it, warnings, whether AI is ready (and whether MetaCode started the AI service), or resting
+  until a usage limit resets when every provider is, whether free models may answer for paid ones, and
+  **Reload .env** / **Test connection**. *AI models* has a default model plus one per feature — AI Coding, Ask
+  MetaCode, Import Data (column detection), Analyze CSV (edge detection) and AI Scraper (beta); "Same as default"
+  follows the default. *AI Coding: copies of the model working at once* sets how many posts are coded side by side;
+  *If a model is rate-limited or failing, use the closest similar model* (on by default) and a list of the models
+  that are rate-limited right now. *AI providers* lists each provider (OpenCode Zen, the AI gateway): whether it's
+  ready, and each of its keys masked, with its status (resting until when) and the prompts and/or tokens it has
+  left this day, week or month.
 - **Streaming.** `POST /api/ai` also accepts `"stream": true` (OpenAI request format) and then relays the AI service's
   server-sent events (`chat.completion.chunk` …, then `data: [DONE]`); a failure mid-stream arrives as a
   final `data: {"error": {...}}` event. The AI Coding Lab's conversations stream; the other features don't.
-- **Images, videos and the website check.** The AI service makes images and videos inside a chat completion when asked
-  (a model that can make one answers with it); MetaCode's features use the text of an answer, and a picture in it
-  shows as `[image omitted]`. Its website runs a one-time invisible check the first time you open it in a browser;
-  API requests made with a key, like MetaCode's, aren't affected by it.
+- **Images and videos.** The gateway makes images and videos inside a chat completion when asked (a model that can
+  make one answers with it); MetaCode's features use the text of an answer, and an answer that is only a picture
+  reads `[image omitted]`.
 
 ---
 
@@ -588,9 +627,11 @@ hold belong to that browser only. **Settings → Your data** downloads a backup 
 it in another browser or on another computer. Keep backup files private: they include the identity that
 manages your published surveys.
 
-Nothing is sent to any server except AI requests to the AI service (for coding, structure detection and assistant questions — they include the
-post text being coded) and your own machine's Python process (for NetworkX analysis — this never leaves your
-computer). The AI key stays in the server's `.env` file and is only sent to the AI service.
+Nothing is sent to any server except AI requests (for coding, structure detection and assistant questions — they
+include the post text being coded), which MetaCode's AI service passes to the provider of the chosen model (OpenCode
+Zen or the AI gateway; mind the [privacy note on free models](#ai-provider)), and your own machine's Python process
+(for NetworkX analysis — this never leaves your computer). The AI keys stay in the server's `.env` file and are
+only sent to their provider.
 
 MetaCode's own pages (the landing page, the app, Survey Studio and the status page) load the Google tag
 (Google Analytics, `G-VYEQCY48SX`), which tells Google about page visits. Your posts, codes, projects and
@@ -630,9 +671,14 @@ responses keep working. Other computers aren't offered them.
 metacode/
 ├── server.js                  Express server: AI requests to the AI service + Python/NetworkX bridge + scraper wiring
 ├── package.json
-├── requirements.txt            Python dependency (networkx) for the NetworkX feature
-├── .env.example                Copy to .env and add your AI key
-├── emis-models.json            The AI models offered in Settings (the AI service's /cli/opencode.json: its models with tool calling)
+├── requirements.txt            Python dependencies: networkx for the NetworkX feature, openai for the AI gateway
+├── .env.example                Copy to .env and add your settings (AI keys are optional)
+├── opencode/                   MetaCode's AI service (OpenCode service: OpenCode Zen + the AI gateway) — see docs/opencode-service.md
+│   ├── server.mjs              The service (node opencode/server.mjs); opencode.json is its config
+│   ├── providers/              OpenCode Zen and OpenAI-compatible providers (the AI gateway)
+│   ├── zen-models.json         OpenCode Zen's model catalog, bundled (scripts/update-zen-models.mjs regenerates it)
+│   └── supervisor.js           MetaCode starting the service itself when pm2 doesn't run it
+├── emis-models.json            The AI gateway's models (its /cli/opencode.json: its models with tool calling)
 ├── collector/                  AI Scraper (beta) app (React + Vite + TypeScript) — see collector/README.md
 │   ├── src/                    lib/ (AI jobs, records, settings), store/ (IndexedDB), export/, ui/
 │   ├── test/                   Vitest unit tests
@@ -654,7 +700,7 @@ metacode/
 │   └── sandbox/                Custom code: Pyodide (Python) and QuickJS (JS/TS) sandbox processes, SDKs, runner
 ├── env-file.js                 Reads .env (encodings, .env.txt, other folders, reload) — see AI Provider
 ├── status-page.js              Status page (status.metac0.de, /status): checks, history, host routing
-├── model-match.js              "Closest model" ranking, used when the AI service rate-limits a model
+├── model-match.js              "Closest model" ranking, used when a model is rate-limited or failing
 ├── owner.js                    Whose request it is: the signed-in account, else the browser (mc_owner cookie)
 ├── accounts/                   Accounts, plans and limits: Supabase sign-in checks, Stripe plans, usage counters, guards
 ├── collab/                     Shared projects: roles, invitations, changes and conflicts, live events, chat — see docs/collaboration.md
@@ -663,14 +709,16 @@ metacode/
 ├── surveys/                    Survey Studio server side: API routes, publishing, responses, JSON-file store
 ├── docs/reddit-scraper.md      Reddit Scraper guide (also the AI jobs API)
 ├── docs/deploy-vps.md         Running MetaCode on a server: pm2, nginx, HTTPS, troubleshooting
-├── ecosystem.config.cjs        pm2 process file (one process, fork mode)
+├── ecosystem.config.cjs        pm2 process file (MetaCode and its AI service: two apps, fork mode)
+├── docs/opencode-service.md    MetaCode's AI service: running it, providers, settings, API, troubleshooting
 ├── docs/survey-studio.md       Survey Studio guide
 ├── docs/accounts.md            Accounts, plans and limits: setup and how it works
 ├── test/                       node:test suites (+ Playwright browser tests) and a mock Reddit
 ├── python/
 │   ├── network_analysis.py     Reads edges JSON on stdin, runs NetworkX, writes stats JSON on stdout
 │   ├── check_env.py            Reports whether NetworkX is installed
-│   └── reddit_fetch.py         Scraper's Python HTTPS engine (standard library only)
+│   ├── reddit_fetch.py         Scraper's Python HTTPS engine (standard library only)
+│   └── emis_fetch.py           The AI gateway's Python transport (used by the AI service)
 ├── public/
 │   ├── index.html                Landing page — explains MetaCode, links to app.html
 │   ├── scramjet-sw.js            Service worker for the Scraper's in-app Reddit browser (Scramjet)
@@ -726,14 +774,23 @@ If you use MetaCode in your research, please acknowledge:
 ## Troubleshooting
 
 **"AI not set up" in the top bar / the key in `.env` doesn't load**
-→ Open **Settings**: *AI connection* says which `.env` file was read and which setting names it found. Put
-`EMIS_API_KEY=emis-…` (your key) in it (one setting per line), save, and click **Reload .env**. If it says no file was
-found, the file must be called `.env` (not `.env.example`) next to `server.js`.
+→ Open **Settings**: *AI connection* says whether the AI service runs and why AI isn't ready, which `.env` file was
+read and which setting names it found; *AI providers* says what each provider is missing. Without any key, OpenCode
+Zen's free models should work (unless `OPENCODE_DISABLE_FREE_MODELS` is set). To add a key, put
+`OPENCODE_API_KEY=…` or `EMIS_API_KEY=emis-…` (your key) in the file (one setting per line), save, and click
+**Reload .env**. If it says no file was found, the file must be called `.env` (not `.env.example`) next to
+`server.js`.
 
-**HTTP 502 / "Couldn't reach the AI service" / "The AI service couldn't run the model … (HTTP 502)" / "The AI service is having server problems right now"**
-→ An HTTP 502 *from the AI service* (the message says "server error (HTTP 502)") is a problem on the AI
-service's side: MetaCode retries, pauses AI Coding and slows it down, and uses a similar model when the
-server's default model is the one failing (see *Server errors* above). When several models fail, wait a few
+**"MetaCode's AI service (OpenCode) isn't running at 127.0.0.1:4097…"**
+→ `npm start` starts the AI service by itself; if it can't, the message and the startup banner say why — most often
+its packages are missing: run `npm install` and restart MetaCode. On a server with pm2, `pm2 status` should show
+`metacode-opencode` online (see [docs/deploy-vps.md](docs/deploy-vps.md#11-troubleshooting)). More in
+[docs/opencode-service.md](docs/opencode-service.md#9-troubleshooting).
+
+**HTTP 502 / "Couldn't reach …" / a server error (HTTP 502) from an AI provider / "The AI service is having server problems right now"**
+→ A server error *from an AI provider* (the message says "server error") is a problem on the provider's side:
+MetaCode retries, pauses AI Coding and slows it down, and uses a similar model when the server's default model is
+the one failing (see *Server errors* above). When several models fail, wait a few
 minutes and click **Run AI Coding** again — coded posts are kept; the status page (`/status`) shows when the
 AI service is answering again. If a model you picked keeps failing on its own, choose another one in
 Settings → AI models. For other 502s: open **Settings → AI connection → Test connection**
@@ -745,40 +802,47 @@ the system proxy by itself. If a model you picked keeps failing, choose another 
 → The MetaCode server is still running the version from before the update. Restart it (stop it, then
 `npm start`).
 
-**HTTP 403 / "A web page answered (HTTP 403) instead of the AI service's API"**
-→ The AI service's website runs a one-time invisible check the first time you open it in a browser, but API requests
-made with a key — like MetaCode's — aren't affected by it. A web page here means the request didn't reach the API
-with your key: check that `EMIS_BASE_URL` is `https://emis.zxs-is-very.cool/v1` (or leave it out) and that
-`EMIS_API_KEY` holds your key (`emis-…`), then click **Reload .env**. If both are right, a proxy or firewall on your
-network may be answering instead (see `EMIS_PROXY` / `HTTPS_PROXY` above). A 403 that names a model means your key
-can't use that model: pick another in Settings → AI models.
+**HTTP 403 / "A web page answered (HTTP 403) instead of … API"**
+→ The AI gateway's website runs a one-time invisible check the first time you open it in a browser, but API
+requests made with a key — like the AI service's — aren't affected by it. A web page here means the request didn't
+reach the API with your key: check that `EMIS_BASE_URL` is `https://emis.zxs-is-very.cool/v1` (or leave it out)
+and that `EMIS_API_KEY` holds your key (`emis-…`), then click **Reload .env**. If both are right (or the message
+names OpenCode Zen), a proxy or firewall on your network may be answering instead (see `EMIS_PROXY` /
+`HTTPS_PROXY` above). A 403 that names a model means your key can't use that model: pick another in Settings → AI
+models.
 
 **"413 (Request Entity Too Large)" in the browser's console / "The request is larger than the web server in front of MetaCode accepts"**
 → The web server in front of MetaCode (nginx) refused the request body; its default limit is 1 MB. Set
 `client_max_body_size 30m;` in the `server` block for port 443 and reload nginx — see
 [docs/deploy-vps.md](docs/deploy-vps.md#9-check-that-it-works). (MetaCode's own limit reads "Payload Too Large".)
 
-**"Your AI usage quota … is used up"**
-→ The key's budget (prompts and/or tokens) for the current day, week or month is spent, and the AI service answers
-429 until the window rolls over; the message says when that is. Wait until then, or add another AI key to
-`EMIS_API_KEY` (comma-separated; keys are issued by hand — message @kawaii_zxs on Discord).
+**"…AI usage quota … is used up" / OpenCode Zen's free limit is reached**
+→ The gateway key's budget (prompts and/or tokens) for the current day, week or month is spent, and the gateway
+answers 429 until the window rolls over — or OpenCode Zen's free usage limit (or the Zen account's budget) is
+reached. The message says when it resets. Meanwhile MetaCode answers with a similar model from the other provider
+when it has one (switching on; a free model answers for a paid one only with `AI_FALLBACK_TO_FREE_MODELS=on`).
+Wait until then, add another key to `EMIS_API_KEY` (comma-separated; keys are issued by hand — message @kawaii_zxs
+on Discord), or add an `OPENCODE_API_KEY`.
 
-**"The AI service doesn't offer the model …"**
-→ In Settings → AI models, pick another model and click "Save model settings" (or set `EMIS_MODEL` in `.env`).
-If the model is listed in `emis-models.json` but the AI service no longer serves it, download
-`https://emis.zxs-is-very.cool/cli/opencode.json` again and save it as `emis-models.json`.
+**"The AI service doesn't offer the model …" / a model "— not offered now"**
+→ In Settings → AI models, pick another model and click "Save model settings" (or set `OPENCODE_MODEL` in `.env`).
+If a gateway model is listed in `emis-models.json` but the gateway no longer serves it, download
+`https://emis.zxs-is-very.cool/cli/opencode.json` again and save it as `emis-models.json`. A paid OpenCode Zen model
+needs `OPENCODE_API_KEY`.
 
 **Settings shows a model "(not in the list)"**
 → The model list changed and no longer has that model under that id. Models whose id was only respelled (on
 2026-10-22 many ids got dots: `claude-opus-5-5` → `claude-opus-5.5`, `gpt-5-5` → `gpt-5.5`, `glm-5-3` → `glm-5.3`)
-are picked up by themselves; for any other, pick a model again in Settings → AI models and click "Save model
-settings" (and change `EMIS_MODEL` in `.env` if it names it).
+are picked up by themselves, and so are ids saved without their provider (`claude-opus-5.5` →
+`emis/claude-opus-5.5`, once the providers ahead of it have listed their models); for any other, pick a model
+again in Settings → AI models and click "Save model settings" (and change `OPENCODE_MODEL` or `EMIS_MODEL` in
+`.env` if it names it).
 
 **"NetworkX not available" on the Analyze CSV page**
 → Run `pip install -r requirements.txt` (or `pip3 install -r requirements.txt`) in the project folder, then refresh the page
 
 **CSV not importing correctly / posts show blank text**
-→ Ensure your file is UTF-8 encoded. If no text-like column is detected and no AI key is set, posts import with blank text by design — set `EMIS_API_KEY` in `.env` to enable AI-assisted column detection
+→ Ensure your file is UTF-8 encoded. If no text-like column is detected and MetaCode's AI isn't ready, posts import with blank text by design — check Settings → AI connection to enable AI-assisted column detection
 
 **Network graph not rendering**
 → Check that your nodes CSV has an `id` column and edges CSV has `source` and `target` columns matching node IDs — or use "Analyze CSV" instead, which detects this automatically
@@ -792,8 +856,8 @@ settings" (and change `EMIS_MODEL` in `.env` if it names it).
 your own Reddit API keys (Scraper → Reddit API access), which works for both the Reddit Scraper and the AI Scraper.
 
 **AI Scraper page: "The AI Scraper isn't built yet" / "needs Python 3" / "MetaCode's AI isn't set up"**
-→ Run `npm run collector:install && npm run collector:build`; install Python 3 (or set `SCRAPER_PYTHON`); set
-`EMIS_API_KEY`. Then restart MetaCode (`pm2 reload metacode` on a server). More in [collector/README.md](collector/README.md#troubleshooting).
+→ Run `npm run collector:install && npm run collector:build`; install Python 3 (or set `SCRAPER_PYTHON`); check
+Settings → AI connection for the AI. Then restart MetaCode (`pm2 reload metacode` on a server). More in [collector/README.md](collector/README.md#troubleshooting).
 
 **Reddit Scraper errors** ("robots.txt doesn't allow…", TLS certificate, 403, 429, sandbox limits)
 → See the troubleshooting table in [docs/reddit-scraper.md](docs/reddit-scraper.md#10-troubleshooting)

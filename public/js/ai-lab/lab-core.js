@@ -157,7 +157,7 @@ const Lab = (() => {
     const def = defaultModel();
     const chip = $('lab-model-chip');
     chip.hidden = !def;
-    if (def) chip.textContent = def.provider + ' · ' + def.model;
+    if (def) { chip.textContent = modelName(def.provider, def.model); chip.title = 'The model new conversations start with: ' + modelLabel(def.provider, def.model); }
     return state.models;
   }
   function defaultModel() {
@@ -167,12 +167,33 @@ const Lab = (() => {
     for (const pr of provs) { const m = pr.models.find(x => x.isDefault) || pr.models[0]; if (m) return { provider: pr.provider, model: m.id }; }
     return null;
   }
+  // A model's name from the model list ("Claude Opus 5.5"). One the list
+  // doesn't have shows its id — for MetaCode's AI service, whose ids are
+  // "provider/model", without the provider part.
+  function modelName(provider, id) {
+    const provs = (state.models && state.models.providers) || [];
+    for (const p of provs.filter(x => x.provider === provider).concat(provs.filter(x => x.provider !== provider))) {
+      const m = p.models.find(x => x.id === id);
+      if (m && m.name && m.name !== id) return m.name;
+    }
+    return modelId(provider, id);
+  }
+  // A model's id as pages show it (MetaCode's AI service's without the provider part)
+  function modelId(provider, id) {
+    const s = String(id || ''), i = s.indexOf('/');
+    return (!provider || provider === 'metacode') && i > 0 ? s.slice(i + 1) : s;
+  }
+  // "MetaCode AI service · Claude Opus 5.5"
+  function modelLabel(provider, id) {
+    const p = ((state.models && state.models.providers) || []).find(x => x.provider === provider);
+    return (p && p.label ? p.label : provider) + ' · ' + modelName(provider, id);
+  }
   // <option>s for every available model, "provider|model"
   function modelOptions(selected) {
     const provs = (state.models && state.models.providers) || [];
     return provs.filter(p => p.models.length).map(p => '<optgroup label="' + esc(p.label) + '">' + p.models.map(m => {
       const v = p.provider + '|' + m.id;
-      return '<option value="' + esc(v) + '"' + (v === selected ? ' selected' : '') + '>' + esc(m.name) + (m.isDefault ? ' (default)' : '') + '</option>';
+      return '<option value="' + esc(v) + '"' + (v === selected ? ' selected' : '') + '>' + esc(modelName(p.provider, m.id)) + (m.isDefault ? ' (default)' : '') + '</option>';
     }).join('') + '</optgroup>').join('') || '<option value="">No models available</option>';
   }
 
@@ -242,6 +263,6 @@ const Lab = (() => {
 
   return {
     start, view, go, route, onLeave, background, api, get, post, put, patch, del, download, notify, openModal, closeModal, confirmDanger, act,
-    esc, fmt, pct, when, ms, money, formValues, readText, $, state, project, setProject, loadProjects, loadModels, modelOptions, defaultModel, ApiError
+    esc, fmt, pct, when, ms, money, formValues, readText, $, state, project, setProject, loadProjects, loadModels, modelOptions, modelName, modelId, modelLabel, defaultModel, ApiError
   };
 })();

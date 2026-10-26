@@ -222,7 +222,7 @@ test('npm run billing:check: a correct Stripe setup passes; the usual mistakes a
 
 /* ── The server, enforcing plans ────────────── */
 
-let sb, stripe, emis, reddit, server, base, tmp, accounts;
+let sb, stripe, aiService, reddit, server, base, tmp, accounts;
 const OLD_BROWSER = 'c'.repeat(40);
 const draft = (id, extra) => Object.assign({ id, title: 'Survey ' + id, pages: [{ id: 'p1', name: 'Page 1', elements: ['q1'] }], elements: { q1: { id: 'q1', type: 'shorttext', props: { title: 'Q?' } } } }, extra || {});
 const KEY = 'sb_publishable_test_0123456789abcdef';
@@ -239,18 +239,19 @@ test.before(async () => {
     prod_VQeKXAJtQQLKqm: { id: 'prod_VQeKXAJtQQLKqm', object: 'product', active: true, default_price: { id: 'price_ultra' } }
   } });
   await stripe.start();
-  emis = http.createServer((req, res) => {
+  aiService = http.createServer((req, res) => {
     let body = '';
     req.on('data', c => { body += c; });
     req.on('end', () => {
       res.setHeader('Content-Type', 'application/json');
       if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'good-model' }, { id: 'broken-model' }] }));
+      if (req.url !== '/v1/chat/completions') { res.statusCode = 404; return res.end('{}'); }
       const j = JSON.parse(body || '{}');
       if (j.model === 'broken-model') { res.statusCode = 400; return res.end('{"error":{"message":"bad request"}}'); }
       res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: '{"codings":{}}' }, finish_reason: 'stop' }] }));
     });
   });
-  await new Promise(r => emis.listen(0, '127.0.0.1', r));
+  await new Promise(r => aiService.listen(0, '127.0.0.1', r));
   reddit = createMockReddit();
   const redditBase = await reddit.listen();
   for (const p of ['free', 'pro', 'max', 'ultra']) {
@@ -268,8 +269,8 @@ test.before(async () => {
     STRIPE_SECRET_KEY: 'sk_test_mock123', STRIPE_API_BASE: stripe.url, STRIPE_WEBHOOK_SECRET: 'whsec_test_secret',
     ACCOUNT_PLAN_OVERRIDES: 'staff@example.org=max',
     ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects'),
-    EMIS_BASE_URL: 'http://127.0.0.1:' + emis.address().port + '/v1', EMIS_API_KEY: 'emis-test-key-123456', EMIS_TRANSPORT: 'node',
-    EMIS_MODEL: 'good-model', EMIS_MODELS_FILE: path.join(tmp, 'none.json'),
+    OPENCODE_SERVICE_URL: 'http://127.0.0.1:' + aiService.address().port + '/v1', OPENCODE_SERVICE_TOKEN: 'test-service-token-0123456789',
+    OPENCODE_MODEL: 'good-model',
     REDDIT_BASE_URL: redditBase, SCRAPER_RESPECT_ROBOTS_TXT: 'false', SCRAPER_TRANSPORT: 'epoxy'
   }));
   // A survey this browser published before accounts existed (owned by the browser, not an account)
@@ -286,7 +287,7 @@ test.before(async () => {
 test.after(async () => {
   if (server) { server.closeAllConnections(); await new Promise(r => server.close(r)); }
   for (const s of [sb, stripe, reddit]) if (s) await s.close();
-  if (emis) { emis.closeAllConnections(); await new Promise(r => emis.close(r)); }
+  if (aiService) { aiService.closeAllConnections(); await new Promise(r => aiService.close(r)); }
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 

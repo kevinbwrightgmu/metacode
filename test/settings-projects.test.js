@@ -1,6 +1,7 @@
 // Settings and Projects: the .env loader (encodings, file names, overrides,
 // reload), the settings status / reload API, per-feature AI models (against a
-// mock EMIS), the saved-projects API, and both pages in a real browser.
+// stand-in for MetaCode's AI service), the saved-projects API, and both pages
+// in a real browser.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
@@ -15,7 +16,7 @@ const envFile = path.join(tmp, 'settings.env');
 
 /* ── .env loader (unit) ───────────────────── */
 test('decode reads UTF-8, UTF-8 with BOM and UTF-16 (with and without BOM)', () => {
-  const text = 'EMIS_API_KEY=abc\nPORT=1\n';
+  const text = 'OPENCODE_API_KEY=abc\nPORT=1\n';
   assert.equal(decode(Buffer.from(text)).text, text);
   assert.equal(decode(Buffer.concat([Buffer.from([0xEF, 0xBB, 0xBF]), Buffer.from(text)])).text, text);
   const le = decode(Buffer.concat([Buffer.from([0xFF, 0xFE]), Buffer.from(text, 'utf16le')]));
@@ -55,19 +56,24 @@ test('the loader finds .env.txt, wins over stale system values, reports names on
 });
 
 /* ── Server: settings status, reload, models, projects ─── */
-let emis, emisBase, server, base, browser;
+let aiService, serviceBase, server, base, browser;
 const seenModels = [];
-const emisFaults = { broken: new Set(), flaky: 0 };   // models that always fail; number of next requests that fail with 503
-let proxied = 0;
-let lastUserAgent = '';
-let emptyHits = 0;
-// Parallel AI Coding: how many slow requests EMIS is working on at once
+const faults = { broken: new Set(), flaky: 0 };   // models that always fail; number of next requests that fail with 503
+// Parallel AI Coding: how many slow requests the AI service is working on at once
 const load = { now: 0, max: 0, total: 0, garbled: new Set() };
-// Rate limits: how often each model was called, and the budget the mock reports
+// Rate limits: how often each model was called
 const hits = {};
-const budget = { remaining: 100 };
 // Server errors (HTTP 502): flop-* models always fail; wobbly-coder fails while wobble.left > 0
 const wobble = { left: 0 };
+// What the AI service saw and says: whether a provider is set up (it reads the same .env as MetaCode,
+// see /v1/reload), Reload .env calls, requests without the right token, MetaCode's timeout header
+const SERVICE_TOKEN = 'test-service-token-0123456789';
+const GATEWAY_KEY = 'emis-test-key-123456';
+const SERVICE_STARTED = new Date().toISOString();
+const service = { ready: false, reloads: 0, wrongToken: 0, timeoutHeader: null };
+// .env lines pointing MetaCode at the AI service (and the key the service reads from the same file)
+const serviceEnv = (url, token) => 'OPENCODE_SERVICE_URL=' + (url || serviceBase) + '\nOPENCODE_SERVICE_TOKEN=' + (token || SERVICE_TOKEN) + '\n';
+const keyLine = 'EMIS_API_KEY=' + GATEWAY_KEY + '\n';
 
 function findChromium() {
   const candidates = [];
@@ -80,89 +86,124 @@ function findChromium() {
 const chromiumPath = findChromium();
 const noBrowser = !chromiumPath && 'no Chromium found (set CHROMIUM_PATH)';
 
+// The models the stand-in lists: plain ids (as an older service, or a provider, would list them) and a
+// few "provider/model" ids of two providers with names, as the service lists them
+const PLAIN_MODELS = ['model-a', 'model-b', 'model-c', 'sse-model', 'responses-model', 'responses-sse-model', 'streams-unless-told', 'wrapped-model', 'picture-model',
+  'error200-model', 'think-model', 'forbidden-model', 'unicode-model', 'slow-model', 'coder-model', 'acme-opus-4-8', 'acme-opus-4-7', 'acme-opus-3-0', 'acme-mini-2',
+  'acme-opus-4-9', 'strm-pro-2-0', 'strm-pro-1-9', 'flop-pro-3-0', 'flop-pro-2-9', 'flop-pro-2-8', 'wobbly-coder'];
+const PROVIDERS = [{ id: 'gw', name: 'Test gateway' }, { id: 'zen', name: 'Zen test' }];
+const NAMED_MODELS = [['zen/pickle-pro-1', 'Pickle Pro 1'], ['gw/pickle-pro-1', 'Pickle Pro 1'], ['gw/pickle-pro-2', 'Pickle Pro 2'], ['gw/pickle-mini', 'Pickle Mini'], ['gw/quota-all', 'Quota All']];
+function modelList() {
+  if (!service.ready) return { object: 'list', default: null, providers: PROVIDERS.map(p => Object.assign({ ready: false }, p)), data: [] };
+  const named = NAMED_MODELS.map(([id, name]) => {
+    const [provider, model] = id.split('/');
+    return { id, object: 'model', provider, provider_name: PROVIDERS.find(p => p.id === provider).name, model, name, available: true };
+  });
+  return { object: 'list', providers: PROVIDERS.map(p => Object.assign({ ready: true }, p)), data: PLAIN_MODELS.map(id => ({ id })).concat(named) };
+}
+// GET /v1/status. The gateway's entry has fields MetaCode must not pass on (its key): only the known ones reach the browser
+function serviceStatus() {
+  return {
+    service: { name: 'metacode-opencode', version: 'test', opencode: '2.1.4', startedAt: SERVICE_STARTED, pid: process.pid, host: '127.0.0.1', port: aiService.address().port },
+    ready: service.ready, default: null, warnings: [],
+    providers: [
+      { id: 'gw', name: 'Test gateway', kind: 'openai-compatible', ready: service.ready, problem: service.ready ? null : 'Add the gateway key in .env, then Reload .env.', warnings: [],
+        keyCount: service.ready ? 1 : 0, baseHost: 'gateway.example', proxy: null, transport: 'Node.js', models: { listed: service.ready ? 30 : 0, available: service.ready ? 30 : 0 }, resting: null,
+        apiKey: process.env.EMIS_API_KEY, keys: service.ready ? [{ masked: '…' + GATEWAY_KEY.slice(-4), status: 'available', cooldownSecondsLeft: 0, requestCount: 0, key: GATEWAY_KEY }] : [] },
+      { id: 'zen', name: 'Zen test', kind: 'zen', ready: service.ready, problem: null, warnings: [], keyCount: 0, free: true, note: 'Free models only.',
+        models: { listed: 1, available: 1 }, catalog: { source: 'bundled', updatedAt: SERVICE_STARTED, models: 1 }, resting: null, keys: [] }
+    ]
+  };
+}
+const send = (res, status, body, headers) => { res.writeHead(status, Object.assign({ 'Content-Type': 'application/json' }, headers || {})); res.end(JSON.stringify(body)); };
+const sse = (res, text) => { res.writeHead(200, { 'Content-Type': 'text/event-stream' }); res.end(text); };
+
 test.before(async () => {
-  // A mock EMIS: lists three models and echoes back the model each chat used
-  emis = http.createServer((req, res) => {
+  // A stand-in for MetaCode's AI service. It answers like the service where a test needs it (its
+  // token, /v1/status, /v1/reload, its own error types) and otherwise like a provider would (plain
+  // model ids, errors judged by their HTTP status, other reply shapes): MetaCode reads both.
+  aiService = http.createServer((req, res) => {
     let body = '';
     req.on('data', c => { body += c; });
     req.on('end', () => {
-      res.setHeader('Content-Type', 'application/json');
-      if (!req.url.startsWith('/v1/')) { res.setHeader('Content-Type', 'text/html'); return res.end('<!doctype html><html><body>EMIS website</body></html>'); }
-      if (req.url === '/v1/models') return res.end(JSON.stringify({ data: [{ id: 'model-a' }, { id: 'model-b' }, { id: 'model-c' }, { id: 'sse-model' }, { id: 'responses-model' }, { id: 'wrapped-model' }, { id: 'error200-model' }, { id: 'think-model' }, { id: 'forbidden-model' }, { id: 'unicode-model' }, { id: 'streams-unless-told' }, { id: 'stream-only-model' }, { id: 'responses-sse-model' }, { id: 'empty-unless-stream' }, { id: 'slow-model' }, { id: 'coder-model' }, { id: 'acme-opus-4-8' }, { id: 'acme-opus-4-7' }, { id: 'acme-opus-3-0' }, { id: 'acme-mini-2' }, { id: 'acme-opus-4-9' }, { id: 'busy-a' }, { id: 'busy-b' }, { id: 'busy-c' }, { id: 'budget-model' }, { id: 'strm-pro-2-0' }, { id: 'strm-pro-1-9' }, { id: 'flop-pro-3-0' }, { id: 'flop-pro-2-9' }, { id: 'flop-pro-2-8' }, { id: 'wobbly-coder' }] }));
-      if (req.url === '/v1/chat/completions') {
-        const j = JSON.parse(body || '{}');
-        lastUserAgent = String(req.headers['user-agent'] || '');
-        // like EMIS's example: answers as a stream
-        if (j.model === 'streams-unless-told' && j.stream !== false) { res.setHeader('Content-Type', 'text/event-stream'); return res.end('data: {"choices":[{"delta":{"content":"streamed by default"}}]}\n\ndata: [DONE]\n\n'); }
-        if (j.model === 'stream-only-model') {
-          if (j.stream !== true) { res.setHeader('Content-Type', 'text/plain'); return res.end('not supported, use stream'); }
-          res.setHeader('Content-Type', 'text/event-stream');
-          return res.end('data: {"choices":[{"delta":{"content":"ok "}}]}\n\ndata: {"choices":[{"delta":{"content":"via stream"}}]}\n\ndata: [DONE]\n\n');
-        }
-        if (j.model === 'responses-sse-model') { res.setHeader('Content-Type', 'text/event-stream'); return res.end('event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"ok from "}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"responses sse"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"output_text":"ok from responses sse"}}\n\n'); }
-        // Like the user's EMIS: 200 with an empty body unless the reply is streamed
-        if (j.model === 'empty-unless-stream') {
-          emptyHits++;
-          if (j.stream !== true || !/event-stream/.test(String(req.headers.accept || ''))) { res.statusCode = 200; return res.end(); }
-          res.setHeader('Content-Type', 'text/event-stream');
-          return res.end('data: {"choices":[{"delta":{"content":"ok streamed"}}]}\n\ndata: [DONE]\n\n');
-        }
-        if (j.model === 'unicode-model') return res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok → café … 你好 — ' + j.messages.map(m => m.content).join('|') }, finish_reason: 'stop' }] }));
-        if (j.model === 'forbidden-model') { res.statusCode = 403; return res.end('{"error":{"message":"this key may not use forbidden-model"}}'); }
-        if (/^flop-/.test(j.model) || (j.model === 'wobbly-coder' && wobble.left > 0)) {
-          if (j.model === 'wobbly-coder') wobble.left--;
-          res.statusCode = 502; return res.end('{"error":{"message":"bad gateway"}}');
-        }
-        if (j.model === 'wobbly-coder') {
-          const user = String((j.messages.find(m => m.role === 'user') || {}).content || '');
-          return res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: '{"codings":{"d1":{"code":"' + (/happy/.test(user) ? 'pos' : 'neg') + '","confidence":0.9,"reasoning":"ok"}}}' }, finish_reason: 'stop' }] }));
-        }
-        hits[j.model] = (hits[j.model] || 0) + 1;
-        const quotaHeaders = { 'X-RateLimit-Window': 'day', 'X-RateLimit-Limit-Prompts': '100', 'X-RateLimit-Remaining-Prompts': String(budget.remaining), 'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + 3600) };
-        // EMIS throttles these models although the key has budget left
-        if (j.model === 'strm-pro-1-9') { res.setHeader('Content-Type', 'text/event-stream'); return res.end('data: {"model":"strm-pro-1-9","choices":[{"delta":{"content":"streamed by 1-9"}}]}\n\ndata: [DONE]\n\n'); }
-        if (j.model === 'acme-opus-4-8' || j.model === 'acme-opus-4-9' || j.model === 'strm-pro-2-0') { res.writeHead(429, Object.assign({ 'Content-Type': 'application/json' }, quotaHeaders)); return res.end('{"error":{"message":"model busy"}}'); }
-        // 429s without quota headers: the key is being paused (Retry-After 1 s)
-        if (/^busy-/.test(j.model)) { res.writeHead(429, { 'Content-Type': 'application/json', 'Retry-After': '1' }); return res.end('{"error":{"message":"slow down"}}'); }
-        // The key's budget is used up: every model would fail
-        if (j.model === 'budget-model') { res.writeHead(429, Object.assign({ 'Content-Type': 'application/json' }, quotaHeaders, { 'X-RateLimit-Remaining-Prompts': '0', 'X-RateLimit-Reset': String(Math.floor(Date.now() / 1000) + 2) })); return res.end('{"error":{"message":"budget used up"}}'); }
-        // Takes a while, like a real model; answers AI Coding prompts with codings JSON
-        if (j.model === 'slow-model' || j.model === 'coder-model') {
-          load.now++; load.total++; load.max = Math.max(load.max, load.now);
-          const user = String((j.messages.find(m => m.role === 'user') || {}).content || '');
-          setTimeout(() => {
-            load.now--;
-            let content = 'ok from ' + j.model + ': ' + user;
-            if (j.model === 'coder-model') {
-              // a post marked GARBLE gets an unreadable answer the first time
-              if (/GARBLE/.test(user) && !load.garbled.has(user)) { load.garbled.add(user); content = 'Sorry, I cannot do JSON today.'; }
-              else content = 'Here you go: {"codings":{"d1":{"code":"' + (/happy/.test(user) ? 'pos' : 'neg') + '","confidence":0.8,"reasoning":"Because."}}}';
-            }
-            if (!res.writableEnded && !res.destroyed) res.end(JSON.stringify({ id: 'x', object: 'chat.completion', model: j.model, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }] }));
-          }, 250);
-          return;
-        }
-        seenModels.push(j.model);
-        if (emisFaults.flaky > 0) { emisFaults.flaky--; res.statusCode = 503; return res.end('{"error":{"message":"busy"}}'); }
-        if (emisFaults.broken.has(j.model)) { res.statusCode = 500; return res.end('{"error":{"message":"model crashed"}}'); }
-        // Other reply shapes some gateways use
-        if (j.model === 'sse-model') { res.setHeader('Content-Type', 'text/event-stream'); return res.end('data: {"id":"s1","model":"sse-model","choices":[{"delta":{"content":"ok "}}]}\n\ndata: {"choices":[{"delta":{"content":"from sse"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n'); }
-        if (j.model === 'responses-model') return res.end(JSON.stringify({ id: 'r1', model: j.model, output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok from responses' }] }] }));
-        if (j.model === 'wrapped-model') return res.end(JSON.stringify({ data: { choices: [{ message: { role: 'assistant', content: 'ok from wrapped' } }] } }));
-        if (j.model === 'error200-model') return res.end(JSON.stringify({ error: { message: 'quota for this model is disabled' } }));
-        if (j.model === 'think-model' && !(j.max_tokens >= 1024)) return res.end(JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: null, reasoning_content: 'thinking…' }, finish_reason: 'length' }] }));
-        return res.end(JSON.stringify({ id: 'x', object: 'chat.completion', model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok from ' + j.model }, finish_reason: 'stop' }] }));
+      if (!req.url.startsWith('/v1/')) { res.setHeader('Content-Type', 'text/html'); return res.end('<!doctype html><html><body>Some website</body></html>'); }
+      if (req.headers.authorization !== 'Bearer ' + SERVICE_TOKEN) {
+        service.wrongToken++;
+        return send(res, 401, { error: { type: 'authentication_error', message: 'MetaCode\'s OpenCode service needs its access token.' } });
       }
-      res.statusCode = 404; res.end('{}');
+      if (req.url === '/v1/status') return send(res, 200, serviceStatus());
+      // (the service reads the same .env as MetaCode: a provider is set up once its key is there)
+      if (req.url === '/v1/reload' && req.method === 'POST') { service.reloads++; service.ready = !!process.env.EMIS_API_KEY; return send(res, 200, serviceStatus()); }
+      if (req.url === '/v1/models') return send(res, 200, modelList());
+      if (req.url !== '/v1/chat/completions') return send(res, 404, { error: { type: 'not_found', message: 'Not found.' } });
+      const j = JSON.parse(body || '{}');
+      service.timeoutHeader = req.headers['x-request-timeout-ms'];
+      if (!service.ready) return send(res, 503, { error: { type: 'not_configured', provider: 'gw', message: 'Test gateway isn\'t set up.' } });
+      const answer = (content, extra) => send(res, 200, Object.assign({ id: 'x', object: 'chat.completion', model: j.model, choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }] }, extra || {}));
+      // Some gateways answer as a stream unless told not to (MetaCode says stream: false)
+      if (j.model === 'streams-unless-told' && j.stream !== false) return sse(res, 'data: {"choices":[{"delta":{"content":"streamed by default"}}]}\n\ndata: [DONE]\n\n');
+      if (j.model === 'responses-sse-model') return sse(res, 'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"ok from "}\n\nevent: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"responses sse"}\n\nevent: response.completed\ndata: {"type":"response.completed","response":{"output_text":"ok from responses sse"}}\n\n');
+      if (j.model === 'unicode-model') return answer('ok → café … 你好 — ' + j.messages.map(m => m.content).join('|'));
+      if (j.model === 'forbidden-model') return send(res, 403, { error: { message: 'this key may not use forbidden-model' } });
+      if (/^flop-/.test(j.model) || (j.model === 'wobbly-coder' && wobble.left > 0)) {
+        if (j.model === 'wobbly-coder') wobble.left--;
+        return send(res, 502, { error: { message: 'bad gateway' } });
+      }
+      if (j.model === 'wobbly-coder') {
+        const user = String((j.messages.find(m => m.role === 'user') || {}).content || '');
+        return answer('{"codings":{"d1":{"code":"' + (/happy/.test(user) ? 'pos' : 'neg') + '","confidence":0.9,"reasoning":"ok"}}}');
+      }
+      hits[j.model] = (hits[j.model] || 0) + 1;
+      // Throttled models (a 429 without the service's error type: the model only)
+      if (j.model === 'strm-pro-1-9') return sse(res, 'data: {"model":"strm-pro-1-9","choices":[{"delta":{"content":"streamed by 1-9"}}]}\n\ndata: [DONE]\n\n');
+      if (j.model === 'acme-opus-4-8' || j.model === 'acme-opus-4-9' || j.model === 'strm-pro-2-0') return send(res, 429, { error: { message: 'model busy' } });
+      // The service's own 429s: a provider's usage quota used up (scope provider), one model throttled (scope model)
+      if (j.model === 'zen/pickle-pro-1' || j.model === 'gw/quota-all') {
+        const provider = j.model.split('/')[0];
+        const seconds = provider === 'zen' ? 3600 : 8;
+        return send(res, 429, { error: { type: 'quota_exceeded', scope: 'provider', provider, window: 'day', retry_after_seconds: seconds, reset_at: new Date(Date.now() + seconds * 1000).toISOString(),
+          message: PROVIDERS.find(p => p.id === provider).name + '\'s usage quota for this day is used up. It resets in ' + seconds + ' seconds.' } }, { 'Retry-After': String(seconds) });
+      }
+      if (j.model === 'gw/pickle-mini') {
+        return send(res, 429, { error: { type: 'rate_limited', scope: 'model', provider: 'gw', model: j.model, retry_after_seconds: 30, message: 'Test gateway is rate-limiting "Pickle Mini". Try again in 30 seconds.' } }, { 'Retry-After': '30' });
+      }
+      if (j.stream && /^gw\//.test(j.model)) return sse(res, 'data: ' + JSON.stringify({ model: j.model, choices: [{ index: 0, delta: { content: 'ok from ' + j.model } }] }) + '\n\ndata: ' + JSON.stringify({ model: j.model, choices: [{ index: 0, delta: {}, finish_reason: 'stop' }] }) + '\n\ndata: [DONE]\n\n');
+      // Takes a while, like a real model; answers AI Coding prompts with codings JSON
+      if (j.model === 'slow-model' || j.model === 'coder-model') {
+        load.now++; load.total++; load.max = Math.max(load.max, load.now);
+        const user = String((j.messages.find(m => m.role === 'user') || {}).content || '');
+        setTimeout(() => {
+          load.now--;
+          let content = 'ok from ' + j.model + ': ' + user;
+          if (j.model === 'coder-model') {
+            // a post marked GARBLE gets an unreadable answer the first time
+            if (/GARBLE/.test(user) && !load.garbled.has(user)) { load.garbled.add(user); content = 'Sorry, I cannot do JSON today.'; }
+            else content = 'Here you go: {"codings":{"d1":{"code":"' + (/happy/.test(user) ? 'pos' : 'neg') + '","confidence":0.8,"reasoning":"Because."}}}';
+          }
+          if (!res.writableEnded && !res.destroyed) answer(content);
+        }, 250);
+        return;
+      }
+      seenModels.push(j.model);
+      if (faults.flaky > 0) { faults.flaky--; return send(res, 503, { error: { message: 'busy' } }); }
+      if (faults.broken.has(j.model)) return send(res, 500, { error: { message: 'model crashed' } });
+      // Other reply shapes some gateways use
+      if (j.model === 'sse-model') return sse(res, 'data: {"id":"s1","model":"sse-model","choices":[{"delta":{"content":"ok "}}]}\n\ndata: {"choices":[{"delta":{"content":"from sse"},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n');
+      if (j.model === 'responses-model') return send(res, 200, { id: 'r1', model: j.model, output: [{ type: 'message', content: [{ type: 'output_text', text: 'ok from responses' }] }] });
+      if (j.model === 'wrapped-model') return send(res, 200, { data: { choices: [{ message: { role: 'assistant', content: 'ok from wrapped' } }] } });
+      if (j.model === 'picture-model') return answer([{ type: 'text', text: 'Here is your cat: ' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,AAAA' } }]);
+      if (j.model === 'error200-model') return send(res, 200, { error: { message: 'quota for this model is disabled' } });
+      if (j.model === 'think-model' && !(j.max_tokens >= 1024)) return send(res, 200, { model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: null, reasoning_content: 'thinking…' }, finish_reason: 'length' }] });
+      return answer('ok from ' + j.model);
     });
   });
-  await new Promise(r => emis.listen(0, '127.0.0.1', r));
-  emisBase = 'http://127.0.0.1:' + emis.address().port + '/v1';
-  fs.writeFileSync(envFile, 'EMIS_BASE_URL=' + emisBase + '\n');           // no key yet
+  await new Promise(r => aiService.listen(0, '127.0.0.1', r));
+  serviceBase = 'http://127.0.0.1:' + aiService.address().port + '/v1';
+  fs.writeFileSync(envFile, serviceEnv());                // the AI service has no provider set up yet
   Object.assign(process.env, testEnv({
-    METACODE_ENV_FILE: envFile, EMIS_MODELS_FILE: path.join(tmp, 'no-such-models.json'),
-    SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects')
+    METACODE_ENV_FILE: envFile, SURVEY_DATA_DIR: path.join(tmp, 'surveys'), PROJECT_DATA_DIR: path.join(tmp, 'projects')
   }));
+  delete process.env.EMIS_API_KEY;
   const { start } = require('../server');
   server = await start(0);
   base = 'http://localhost:' + server.address().port;
@@ -171,7 +212,7 @@ test.before(async () => {
 test.after(async () => {
   if (browser) await browser.close();
   if (server) { server.closeAllConnections(); await new Promise(r => server.close(r)); }
-  if (emis) { emis.closeAllConnections(); await new Promise(r => emis.close(r)); }
+  if (aiService) { aiService.closeAllConnections(); await new Promise(r => aiService.close(r)); }
   fs.rmSync(tmp, { recursive: true, force: true });
 });
 
@@ -179,27 +220,98 @@ const json = async (method, url, body, headers) => {
   const res = await fetch(base + url, { method, headers: Object.assign({ 'Content-Type': 'application/json' }, headers || {}), body: body === undefined ? undefined : JSON.stringify(body) });
   return { status: res.status, json: await res.json().catch(() => null) };
 };
+const hi = { messages: [{ role: 'user', content: 'hi' }] };
+const aiComponent = async () => (await json('GET', '/api/status')).json.components.find(c => c.id === 'ai');
+// The status page checks again at most every 5 s: its AI part once it is `status` (and its note matches `note`)
+async function aiStatusBecomes(status, note) {
+  let ai;
+  for (let end = Date.now() + 8000; Date.now() < end; await new Promise(r => setTimeout(r, 500))) {
+    ai = await aiComponent();
+    if (ai.status === status && (!note || note.test(ai.note))) break;
+  }
+  return ai;
+}
 
-test('settings status shows what .env set (names only); Reload .env picks up a new key without a restart', async () => {
+test('settings status shows what .env set (names only) and the AI service\'s providers; Reload .env reaches the service, which picks up a new key without a restart', async () => {
   let st = (await json('GET', '/api/settings/status')).json;
   assert.equal(st.env.found, true);
-  assert.deepEqual(st.env.keys, ['EMIS_BASE_URL']);
+  assert.deepEqual(st.env.keys, ['OPENCODE_SERVICE_URL', 'OPENCODE_SERVICE_TOKEN']);
+  assert.equal(st.ai.provider, 'opencode');
   assert.equal(st.ai.ready, false);
-  assert.match(st.ai.problem, /EMIS_API_KEY/);
-  const ai = await json('POST', '/api/ai', { messages: [{ role: 'user', content: 'hi' }] });
-  assert.equal(ai.status, 401);
-  assert.match(ai.json.error.message, /Reload \.env/);
+  assert.match(st.ai.problem, /no AI provider is set up yet/);
+  assert.deepEqual(st.ai.service, { host: '127.0.0.1:' + aiService.address().port, mode: 'off', managed: false, running: true, version: 'test', opencode: '2.1.4', startedAt: SERVICE_STARTED, problem: null });
+  assert.deepEqual(st.ai.providers.map(p => [p.id, p.name, p.ready, p.problem, p.keyCount]), [['gw', 'Test gateway', false, 'Add the gateway key in .env, then Reload .env.', 0], ['zen', 'Zen test', false, null, 0]]);
+  const ai = await json('POST', '/api/ai', hi);
+  assert.equal(ai.status, 503);
+  assert.equal(ai.json.error.type, 'not_configured');
+  assert.match(ai.json.error.message, /Settings → AI providers/);
+  const status = await aiComponent();
+  assert.deepEqual([status.status, status.note], ['off', 'AI isn\'t set up on this server.']);
 
-  fs.writeFileSync(envFile, 'EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=emis-test-key-123456\n');
+  // The key goes into the same .env; Reload .env has the service read it again
+  fs.writeFileSync(envFile, serviceEnv() + keyLine);
   const reloaded = await json('POST', '/api/settings/reload', {});
   assert.equal(reloaded.status, 200);
+  assert.equal(service.reloads, 1, 'POST /v1/reload');
   assert.equal(reloaded.json.ai.ready, true);
-  assert.equal(reloaded.json.ai.keyCount, 1);
-  assert.ok(!JSON.stringify(reloaded.json).includes('emis-test-key-123456'), 'the key itself is never sent');
-  const health = (await json('GET', '/api/health')).json;
-  assert.equal(health.emisConfigured, true);
+  assert.equal(reloaded.json.ai.problem, null);
+  assert.deepEqual(reloaded.json.ai.providers.map(p => [p.id, p.ready, p.keyCount, p.free, p.note]), [['gw', true, 1, null, null], ['zen', true, 0, true, 'Free models only.']]);
+  const keys = (await json('GET', '/api/keys/status')).json;
+  assert.equal(keys.provider, 'opencode');
+  assert.deepEqual(keys.providers.map(p => [p.id, p.name, p.kind, p.ready, p.keyCount, p.baseHost, p.transport]),
+    [['gw', 'Test gateway', 'openai-compatible', true, 1, 'gateway.example', 'Node.js'], ['zen', 'Zen test', 'zen', true, 0, null, null]]);
+  assert.deepEqual(keys.providers[1].catalog, { source: 'bundled', updatedAt: SERVICE_STARTED, models: 1 });
+  assert.deepEqual(keys.keys, [{ provider: 'gw', source: 'env', masked: '…3456', status: 'available', cooldownSecondsLeft: 0, requestCount: 0 }], 'the keys, flattened for older pages');
+  const settings = (await json('GET', '/api/settings/status')).json;
+  for (const text of [JSON.stringify(reloaded.json), JSON.stringify(keys), JSON.stringify(settings)]) {
+    assert.ok(!text.includes(GATEWAY_KEY) && !text.includes(SERVICE_TOKEN) && !/apiKey/.test(text), 'neither the key nor the service\'s token is ever sent');
+  }
+  const answered = await json('POST', '/api/ai', Object.assign({ model: 'model-b' }, hi));
+  assert.equal(answered.status, 200);
+  assert.equal(service.timeoutHeader, '120000', 'MetaCode tells the service how long it waits');
+  assert.equal(service.wrongToken, 0, 'every request carried the service\'s token');
+  assert.deepEqual((await json('GET', '/api/health')).json, { status: 'ok', provider: 'opencode', aiConfigured: true, aiReady: true, node: process.version });
   // Reload is refused from other sites
   assert.equal((await json('POST', '/api/settings/reload', {}, { Origin: 'https://evil.example' })).status, 403);
+});
+
+test('the AI service not answering, or refusing MetaCode\'s token: AI isn\'t ready, says what to do, and requests fail after a moment', async () => {
+  const closed = http.createServer();
+  await new Promise(r => closed.listen(0, '127.0.0.1', r));
+  const deadPort = closed.address().port;
+  await new Promise(r => closed.close(r));
+  try {
+    fs.writeFileSync(envFile, serviceEnv('http://127.0.0.1:' + deadPort + '/v1') + keyLine);
+    let st = (await json('POST', '/api/settings/reload', {})).json.ai;
+    assert.equal(st.ready, false);
+    assert.match(st.problem, new RegExp('isn\'t running at 127\\.0\\.0\\.1:' + deadPort + '\\..*pm2'));
+    assert.equal(st.service.running, false);
+    const t0 = Date.now();
+    let r = await json('POST', '/api/ai', Object.assign({ model: 'model-b' }, hi));
+    assert.deepEqual([r.status, r.json.error.type], [502, 'network']);
+    assert.match(r.json.error.message, /AI service \(OpenCode\) isn't running/);
+    assert.ok(Date.now() - t0 < 4000, 'tried again for a moment only (time for a restarting service to be back)');
+    const keys = (await json('GET', '/api/keys/status')).json;
+    assert.deepEqual([keys.providers, keys.keys], [[], []]);
+    assert.match(keys.problem, /isn't running/);
+    const health = (await json('GET', '/api/health')).json;
+    assert.deepEqual([health.aiConfigured, health.aiReady], [true, false]);
+    const status = await aiStatusBecomes('outage');
+    assert.deepEqual([status.status, status.note], ['outage', 'The AI service isn\'t answering.']);
+
+    // Another token than the service's
+    fs.writeFileSync(envFile, serviceEnv(serviceBase, 'another-service-token-000000') + keyLine);
+    st = (await json('POST', '/api/settings/reload', {})).json.ai;
+    assert.equal(st.ready, false);
+    assert.match(st.problem, /didn't accept MetaCode's access token.*OPENCODE_SERVICE_TOKEN/);
+    r = await json('POST', '/api/ai', Object.assign({ model: 'model-b' }, hi));
+    assert.deepEqual([r.status, r.json.error.type], [401, 'authentication_error']);
+    assert.match(r.json.error.message, /access token/);
+    assert.ok(service.wrongToken > 0);
+  } finally {
+    fs.writeFileSync(envFile, serviceEnv() + keyLine);
+    assert.equal((await json('POST', '/api/settings/reload', {})).json.ai.ready, true);
+  }
 });
 
 test('each request uses the model it asks for', async () => {
@@ -214,15 +326,15 @@ test('each request uses the model it asks for', async () => {
   assert.ok(['model-a', 'model-b', 'model-c'].every(m => models.includes(m)));
 });
 
-test('a temporary EMIS failure is retried; a failing model falls back (a picked one too, unless switching is off)', async () => {
+test('a temporary failure at the AI service is retried; a failing model falls back (a picked one too, unless switching is off)', async () => {
   const ask = model => json('POST', '/api/ai', Object.assign({ messages: [{ role: 'user', content: 'hi' }] }, model ? { model } : {}), { 'x-provider': 'openai' });
-  emisFaults.flaky = 1;
+  faults.flaky = 1;
   let r = await ask('model-b');
   assert.equal(r.status, 200, 'a 503 is retried');
   assert.equal(r.json.choices[0].message.content, 'ok from model-b');
 
   const def = (await json('GET', '/api/models')).json.models[0].id;     // the server default
-  emisFaults.broken = new Set([def]);
+  faults.broken = new Set([def]);
   seenModels.length = 0;
   const res = await fetch(base + '/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ messages: [{ role: 'user', content: 'hi' }] }) });
   const body = await res.json();
@@ -236,7 +348,7 @@ test('a temporary EMIS failure is retried; a failing model falls back (a picked 
   assert.equal(next.headers.get('x-metacode-model-fallback'), body.model);
   assert.ok(!seenModels.includes(def), 'the failing model wasn\'t asked again');
 
-  // A model the user picked that EMIS can't run right now is answered by the closest model too, and says so
+  // A model the user picked that the AI service can't run right now is answered by the closest model too, and says so
   const picked = await fetch(base + '/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-provider': 'openai' }, body: JSON.stringify({ model: def, messages: [{ role: 'user', content: 'hi' }] }) });
   assert.equal(picked.status, 200, 'a picked model that fails is swapped');
   assert.equal(picked.headers.get('x-metacode-model-fallback'), body.model);
@@ -246,15 +358,18 @@ test('a temporary EMIS failure is retried; a failing model falls back (a picked 
   const off = await fetch(base + '/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-provider': 'openai', 'X-MetaCode-Model-Switch': 'off' }, body: JSON.stringify({ model: def, messages: [{ role: 'user', content: 'hi' }] }) });
   assert.equal(off.status, 502, 'switching off: not swapped');
   assert.match((await off.json()).error.message, /Settings → AI models/);
-  // A picked model the key may not use isn't swapped (another model would hide that)
+  // A picked model the key may not use isn't swapped (another model would hide that); the reason is shown
   r = await ask('forbidden-model');
   assert.equal(r.status, 403);
-  emisFaults.broken = new Set();
+  assert.equal(r.json.error.type, 'permission_error');
+  assert.match(r.json.error.message, /this key may not use forbidden-model/);
+  faults.broken = new Set();
 });
 
-test('replies in other shapes are read; an unreadable one says what EMIS sent', async () => {
+test('replies in other shapes are read; an unreadable one says what the AI service sent', async () => {
   const ask = model => json('POST', '/api/ai', { model, max_tokens: 10, messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
-  for (const [model, text] of [['sse-model', 'ok from sse'], ['responses-model', 'ok from responses'], ['wrapped-model', 'ok from wrapped'], ['think-model', 'ok from think-model']]) {
+  for (const [model, text] of [['sse-model', 'ok from sse'], ['responses-model', 'ok from responses'], ['responses-sse-model', 'ok from responses sse'], ['wrapped-model', 'ok from wrapped'],
+    ['think-model', 'ok from think-model'], ['streams-unless-told', 'ok from streams-unless-told'], ['picture-model', 'Here is your cat: [image omitted]']]) {
     const r = await ask(model);
     assert.equal(r.status, 200, model);
     assert.equal(r.json.choices[0].message.content, text, model);
@@ -264,37 +379,22 @@ test('replies in other shapes are read; an unreadable one says what EMIS sent', 
   assert.match(bad.json.error.message, /quota for this model is disabled/);
 });
 
-test('an EMIS_BASE_URL without /v1 (the website answers) is corrected automatically', async () => {
-  fs.writeFileSync(envFile, 'EMIS_BASE_URL=' + emisBase.replace(/\/v1$/, '') + '\nEMIS_API_KEY=emis-test-key-123456\n');
+test('an OPENCODE_SERVICE_URL that isn\'t the service\'s API address (a website answers there) is named in the warning and in the errors', async () => {
+  fs.writeFileSync(envFile, serviceEnv(serviceBase.replace(/\/v1$/, '')) + keyLine);
   try {
-    await json('POST', '/api/settings/reload', {});
-    const r = await json('POST', '/api/ai', { model: 'model-b', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
-    assert.equal(r.status, 200);
-    assert.equal(r.json.choices[0].message.content, 'ok from model-b');
-    assert.ok((await json('GET', '/api/settings/status')).json.ai.warnings.some(w => /\/v1/.test(w)));
+    const st = (await json('POST', '/api/settings/reload', {})).json.ai;
+    assert.ok(st.warnings.some(w => /OPENCODE_SERVICE_URL normally ends in \/v1/.test(w)), JSON.stringify(st.warnings));
+    assert.equal(st.ready, false);
+    const r = await json('POST', '/api/ai', Object.assign({ model: 'model-b' }, hi), { 'x-provider': 'openai' });
+    assert.deepEqual([r.status, r.json.error.type], [502, 'malformed_response']);
+    assert.match(r.json.error.message, /web page.*OPENCODE_SERVICE_URL.*\/v1/);
+    const models = (await json('GET', '/api/models')).json;
+    assert.deepEqual(models.models, []);
+    assert.match(models.note, /web page.*OPENCODE_SERVICE_URL/);
   } finally {
-    fs.writeFileSync(envFile, 'EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=emis-test-key-123456\n');
+    fs.writeFileSync(envFile, serviceEnv() + keyLine);
     await json('POST', '/api/settings/reload', {});
   }
-});
-
-test('requests go through Python when it is available; a 403 shows EMIS\'s reason and keeps the key', async () => {
-  const st = (await json('GET', '/api/settings/status')).json;
-  const python = /^Python/.test(st.ai.transport);
-  if (python) {
-    const r = await json('POST', '/api/ai', { model: 'model-b', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
-    assert.equal(r.status, 200);
-    let usingSdk = false;
-    try { require('child_process').execSync('python3 -c "import openai"', { stdio: 'ignore' }); usingSdk = true; } catch (e) { /* no SDK */ }
-    assert.match(lastUserAgent, usingSdk ? /^OpenAI\/Python/ : /Python/, 'sent from Python');
-  }
-  const bad = await json('POST', '/api/ai', { model: 'forbidden-model', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
-  assert.equal(bad.status, 403);
-  assert.match(bad.json.error.message, /this key may not use forbidden-model/);
-  const keys = (await json('GET', '/api/keys/status')).json.keys;
-  assert.equal(keys[0].status, 'available', 'a model-specific 403 doesn\'t disable the key');
-  const ok = await json('POST', '/api/ai', { model: 'model-b', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
-  assert.equal(ok.status, 200);
 });
 
 test('non-ASCII text in prompts and answers survives the trip (Windows console encodings)', async () => {
@@ -303,54 +403,23 @@ test('non-ASCII text in prompts and answers survives the trip (Windows console e
   assert.equal(r.json.choices[0].message.content, 'ok → café … 你好 — Grüße → “quotes” …');
 });
 
-test('streamed answers: asked for non-streamed explicitly, read when streamed anyway, re-asked with stream: true when needed', async () => {
-  for (const [model, text] of [['streams-unless-told', 'ok from streams-unless-told'], ['stream-only-model', 'ok via stream'], ['responses-sse-model', 'ok from responses sse']]) {
-    const r = await json('POST', '/api/ai', { model, messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
-    assert.equal(r.status, 200, model + ': ' + JSON.stringify(r.json));
-    assert.equal(r.json.choices[0].message.content, text, model);
-  }
-});
-
-test('an empty 200 reply switches to streaming at once (no retry delays) and is remembered', async () => {
-  emptyHits = 0;
-  const t0 = Date.now();
-  let r = await json('POST', '/api/ai', { model: 'empty-unless-stream', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
-  assert.equal(r.status, 200, JSON.stringify(r.json));
-  assert.equal(r.json.choices[0].message.content, 'ok streamed');
-  assert.ok(emptyHits <= 2, 'at most one plain try, then streamed (fewer once streaming is known to work)');
-  const first = emptyHits;
-  assert.ok(Date.now() - t0 < 500, 'no retry delays');
-  r = await json('POST', '/api/ai', { model: 'empty-unless-stream', messages: [{ role: 'user', content: 'again' }] }, { 'x-provider': 'openai' });
-  assert.equal(r.status, 200);
-  assert.equal(emptyHits, first + 1, 'the next request goes straight to streaming');
-});
-
-test('EMIS requests go through EMIS_PROXY when set (Node ignores HTTPS_PROXY by itself)', async () => {
-  const net = require('net');
-  // Handles both CONNECT tunnels and plain forwarded requests (absolute URLs)
-  const proxy = http.createServer((req, res) => {
-    proxied++;
-    const target = new URL(req.url);
-    const up = http.request({ hostname: target.hostname, port: target.port, path: target.pathname + target.search, method: req.method, headers: req.headers }, ur => { res.writeHead(ur.statusCode, ur.headers); ur.pipe(res); });
-    up.on('error', () => { res.statusCode = 502; res.end(); });
-    req.pipe(up);
-  });
-  proxy.on('connect', (req, socket, head) => {
-    proxied++;
-    const [host, port] = req.url.split(':');
-    const up = net.connect(Number(port), host, () => { socket.write('HTTP/1.1 200 Connection Established\r\n\r\n'); if (head && head.length) up.write(head); up.pipe(socket); socket.pipe(up); });
-    up.on('error', () => socket.destroy()); socket.on('error', () => up.destroy());
-  });
+test('MetaCode reaches its AI service directly, never through HTTP(S)_PROXY (a proxy would see the service\'s token)', async () => {
+  let proxied = 0;
+  const proxy = http.createServer((req, res) => { proxied++; res.statusCode = 502; res.end(); });
+  proxy.on('connect', (req, socket) => { proxied++; socket.destroy(); });
   await new Promise(r => proxy.listen(0, '127.0.0.1', r));
-  fs.writeFileSync(envFile, 'EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=emis-test-key-123456\nEMIS_PROXY=http://127.0.0.1:' + proxy.address().port + '\n');
+  const names = ['HTTP_PROXY', 'HTTPS_PROXY', 'http_proxy', 'https_proxy', 'NO_PROXY', 'no_proxy'];
+  const saved = Object.fromEntries(names.map(n => [n, process.env[n]]));
+  const url = 'http://127.0.0.1:' + proxy.address().port;
+  Object.assign(process.env, { HTTP_PROXY: url, HTTPS_PROXY: url, http_proxy: url, https_proxy: url });
+  delete process.env.NO_PROXY; delete process.env.no_proxy;
   try {
-    await json('POST', '/api/settings/reload', {});
-    const r = await json('POST', '/api/ai', { model: 'model-b', messages: [{ role: 'user', content: 'hi' }] }, { 'x-provider': 'openai' });
+    const r = await json('POST', '/api/ai', Object.assign({ model: 'model-b' }, hi), { 'x-provider': 'openai' });
     assert.equal(r.status, 200);
-    assert.ok(proxied >= 1, 'the request went through the proxy');
+    assert.equal(r.json.choices[0].message.content, 'ok from model-b');
+    assert.equal(proxied, 0, 'nothing went through the proxy');
   } finally {
-    fs.writeFileSync(envFile, 'EMIS_BASE_URL=' + emisBase + '\nEMIS_API_KEY=emis-test-key-123456\n');
-    await json('POST', '/api/settings/reload', {});
+    names.forEach(n => { if (saved[n] === undefined) delete process.env[n]; else process.env[n] = saved[n]; });
     proxy.closeAllConnections(); await new Promise(r => proxy.close(r));
   }
 });
@@ -438,9 +507,8 @@ test('a rate-limited model is answered by the closest similar model, and isn\'t 
   assert.equal(res.headers.get('x-metacode-model-fallback-reason'), 'rate_limited');
   assert.equal(res.headers.get('x-metacode-model-requested'), 'acme-opus-4-8');
   assert.equal(hits['acme-opus-4-8'], 1);
-  // The key still has budget: it isn't resting, and other models are unaffected
-  const keys = (await json('GET', '/api/keys/status')).json;
-  assert.ok(JSON.stringify(keys).includes('available'), JSON.stringify(keys));
+  // A 429 that doesn't say its scope is about the model: its provider isn't resting
+  assert.deepEqual((await json('GET', '/api/settings/status')).json.ai.restingProviders, []);
   // While it rests, requests go straight to the substitute
   res = await ask('acme-opus-4-8');
   assert.equal((await res.json()).model, 'acme-opus-4-7');
@@ -468,12 +536,11 @@ test('a rate-limited model is answered by the closest similar model, and isn\'t 
 
 test('the status page shows the AI service as degraded while models are rate-limited (without spending prompts)', async () => {
   const before = Object.assign({}, hits);
-  const j = (await json('GET', '/api/status')).json;
-  const ai = j.components.find(c => c.id === 'ai');
+  const ai = await aiStatusBecomes('degraded', /rate-limited/);
   assert.equal(ai.status, 'degraded');
   assert.match(ai.note, /rate-limited; requests for (it|them) use the closest similar model\./);
   assert.deepEqual(hits, before, 'no chat requests were made');
-  assert.ok(!/emis/i.test(JSON.stringify(j)));
+  assert.ok(!/emis|Test gateway|Zen test|\.env/i.test(JSON.stringify((await json('GET', '/api/status')).json)), 'no provider names or settings');
 });
 
 test('streamed requests switch to the closest model too, before anything is sent', async () => {
@@ -484,25 +551,55 @@ test('streamed requests switch to the closest model too, before anything is sent
   assert.match(await res.text(), /streamed by 1-9/);
 });
 
-test('a used-up key budget isn\'t "solved" by switching models; 429s on several models without quota headers pause the key', async () => {
-  let res = await ask('budget-model');
+test('a provider whose usage quota is used up rests: its models are answered by the same model from another provider, without asking it again', async () => {
+  let res = await ask('zen/pickle-pro-1');
   let body = await res.json();
-  assert.equal(res.status, 429);
-  assert.equal(body.error.type, 'quota_exceeded');
-  assert.equal(res.headers.get('x-metacode-model-fallback'), null, 'no other model was tried');
-  assert.ok(!(await json('GET', '/api/settings/status')).json.ai.rateLimitedModels.some(x => x.model === 'budget-model'), 'the key rests, not the model');
-  await new Promise(r => setTimeout(r, 2300));            // the budget window resets
-  // busy-a → busy-b → busy-c all refused without quota headers: it's the key being paused
-  res = await ask('busy-a');
+  assert.equal(res.status, 200, JSON.stringify(body));
+  assert.equal(body.model, 'gw/pickle-pro-1', 'the same model, from the provider that can answer');
+  assert.deepEqual([res.headers.get('x-metacode-model-fallback'), res.headers.get('x-metacode-model-fallback-reason'), res.headers.get('x-metacode-model-requested')],
+    ['gw/pickle-pro-1', 'rate_limited', 'zen/pickle-pro-1']);
+  let st = (await json('GET', '/api/settings/status')).json.ai;
+  assert.deepEqual(st.restingProviders.map(p => [p.provider, p.reason]), [['zen', 'quota']]);
+  assert.ok(Date.parse(st.restingProviders[0].until) > Date.now() + 3500 * 1000, 'until the reset time the service gave');
+  assert.ok(!st.rateLimitedModels.some(x => x.model === 'zen/pickle-pro-1'), 'the provider rests, not the model');
+  // While it rests, its models aren't sent to it: the other provider answers at once, streamed too
+  res = await ask('zen/pickle-pro-1');
+  assert.equal((await res.json()).model, 'gw/pickle-pro-1');
+  const streamed = await fetch(base + '/api/ai', { method: 'POST', headers: { 'Content-Type': 'application/json', 'x-provider': 'openai' }, body: JSON.stringify({ model: 'zen/pickle-pro-1', stream: true, max_tokens: 20, messages: [{ role: 'user', content: 'hi' }] }) });
+  assert.equal(streamed.status, 200);
+  assert.equal(streamed.headers.get('x-metacode-model-fallback'), 'gw/pickle-pro-1');
+  assert.match(await streamed.text(), /ok from gw\/pickle-pro-1[\s\S]*data: \[DONE\]/);
+  assert.equal(hits['zen/pickle-pro-1'], 1, 'asked once');
+  // Switching turned off: the service's message, when it resets, and nothing is sent
+  res = await ask('zen/pickle-pro-1', { 'X-MetaCode-Model-Switch': 'off' });
   body = await res.json();
   assert.equal(res.status, 429);
-  assert.equal(body.error.type, 'rate_limited');
-  assert.match(body.error.message, /pause/);
-  assert.deepEqual([hits['busy-a'], hits['busy-b'], hits['busy-c']], [1, 1, 1]);
-  assert.ok(!(await json('GET', '/api/settings/status')).json.ai.rateLimitedModels.some(x => /^busy-/.test(x.model)), 'the models aren\'t blamed for the key\'s pause');
-  await new Promise(r => setTimeout(r, 1300));            // Retry-After: 1
-  res = await ask('model-b');
-  assert.equal(res.status, 200, 'the key is back');
+  assert.deepEqual([body.error.type, body.error.scope, body.error.window], ['quota_exceeded', 'provider', 'day']);
+  assert.match(body.error.message, /Zen test's usage quota for this day is used up/);
+  assert.ok(Number(res.headers.get('retry-after')) > 3500 && body.error.retryAfterSeconds > 3500);
+  assert.equal(hits['zen/pickle-pro-1'], 1);
+  // A 429 for one model of the other provider (scope model): that model rests and a similar one answers — not
+  // one of the resting provider's
+  res = await ask('gw/pickle-mini');
+  body = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(body));
+  assert.equal(res.headers.get('x-metacode-model-fallback-reason'), 'rate_limited');
+  assert.ok(!/^zen\//.test(body.model), body.model);
+  st = (await json('GET', '/api/settings/status')).json.ai;
+  assert.ok(st.rateLimitedModels.some(x => x.model === 'gw/pickle-mini'));
+  assert.deepEqual(st.restingProviders.map(p => p.provider), ['zen']);
+});
+
+test('the status page says when every provider is resting (usage quota used up), and is back to normal after', { timeout: 30000 }, async () => {
+  const res = await ask('gw/quota-all', { 'X-MetaCode-Model-Switch': 'off' });      // the gateway's quota too, for 8 seconds
+  assert.equal(res.status, 429);
+  const ai = await aiStatusBecomes('degraded', /quota/);
+  assert.equal(ai.status, 'degraded');
+  assert.match(ai.note, /^The usage quota is used up; AI features resume in \d+ seconds?\.$/);
+  for (let end = Date.now() + 10000; Date.now() < end; await new Promise(r => setTimeout(r, 300))) {
+    if (!(await json('GET', '/api/settings/status')).json.ai.restingProviders.some(p => p.provider === 'gw')) break;
+  }
+  assert.deepEqual((await json('GET', '/api/settings/status')).json.ai.restingProviders.map(p => p.provider), ['zen']);
 });
 
 test('projects saved on the server by older versions: listed and readable from this computer only; nothing new is stored there', async () => {
@@ -533,7 +630,7 @@ async function openApp(hash) {
 test('Settings page: .env status, AI ready in the top bar, a model per feature used by that feature', { skip: noBrowser, timeout: 90000 }, async () => {
   const { page, context, errors } = await openApp('#settings');
   await page.waitForFunction(() => /AI is ready/.test((document.getElementById('s-env-status') || {}).textContent || ''));
-  assert.match(await page.textContent('#s-env-status'), /settings\.env.*EMIS_API_KEY/s);
+  assert.match(await page.textContent('#s-env-status'), /settings\.env.*OPENCODE_SERVICE_URL/s);
   assert.equal(await page.textContent('#status-label'), 'AI ready');
   await page.waitForSelector('#s-feature-models select[data-feature="assistant"] option[value="model-c"]', { state: 'attached' });
   await page.selectOption('#s-model', 'model-b');

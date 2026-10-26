@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "emis": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "AI gateway",
+      "options": { "baseURL": "{env:EMIS_BASE_URL}", "apiKey": "{env:EMIS_API_KEY}" }
+    },
+    "opencode": {
+      "name": "OpenCode Zen",
+      "options": { "apiKey": "{env:OPENCODE_API_KEY}" }
+    }
+  }
+}

@@ -3,9 +3,9 @@
    questions about using MetaCode.
 
    Reuses the app's existing AI path (App.callClaude → /api/ai → the
-   server, which calls EMIS with the key from its .env file), so it has no
-   endpoint of its own. Its model is Settings → AI models → Ask MetaCode.
-   No key is stored in this file or put into the prompt.
+   server → its AI service), so it has no endpoint of its own. Its model is
+   Settings → AI models → Ask MetaCode. No key is stored in this file or put
+   into the prompt.
 
    Each request sends: the instructions below + the MetaCode reference
    (assistant-knowledge.js) + a snapshot of the app's state (counts,
@@ -121,7 +121,7 @@ const Assistant = (() => {
   // Provider line, key notice and suggestions can change while the panel is
   // closed (Settings edits, navigation), so they're refreshed on every open.
   function refreshPanel() {
-    els.sub.textContent = 'Using ' + (App.modelFor('assistant') || 'the default model');
+    els.sub.textContent = 'Using ' + (App.modelName(App.modelFor('assistant')) || 'the default model');
     els.notice.hidden = App.hasApiKeys();
     renderSuggestions();
     updateEmptyState();
@@ -161,6 +161,9 @@ const Assistant = (() => {
       chatHistory.push({ role: 'user', content: text }, { role: 'assistant', content: answer });
       appendMessage('assistant', answer);
     } catch (err) {
+      if (myGeneration !== generation) return;
+      // (a used-up limit: which providers rest now decides the advice)
+      if (err && err.status === 429) await App.refreshServerStatus();
       if (myGeneration !== generation) return;
       const info = describeError(err);
       appendError(info.text, info.settings, text);
@@ -312,6 +315,13 @@ const Assistant = (() => {
   /* ── Errors ──────────────────────────────────*/
   function providerLabel() { return 'The AI service'; }
 
+  // A provider that is ready and not resting until a usage limit resets (the server's own list of resting providers)
+  function otherProviderCanAnswer() {
+    const ai = (App.getServerStatus() || {}).ai || {};
+    const resting = new Set((Array.isArray(ai.restingProviders) ? ai.restingProviders : []).filter(r => r && Date.parse(r.until) > Date.now()).map(r => r.provider));
+    return (Array.isArray(ai.providers) ? ai.providers : []).some(p => p && p.ready && !resting.has(p.id));
+  }
+
   // Turns the error App.callClaude threw into a message the user can act on.
   function describeError(err) {
     const msg = String((err && err.message) || err || '');
@@ -321,22 +331,31 @@ const Assistant = (() => {
     if (err instanceof SyntaxError) {
       return { settings: false, text: 'The server sent an unexpected response. Make sure MetaCode is running with `npm start` and open at http://localhost:3000.' };
     }
-    if (/no api key|isn.t set up|not_configured/i.test(msg)) {
-      return { settings: true, text: 'MetaCode’s AI isn’t set up: add `EMIS_API_KEY=…` to the server’s `.env` file, then click **Reload .env** in **Settings**.' };
+    // AI switched off, the AI service not running, or the model's provider not set up: the message says which
+    if ((err && err.type === 'not_configured') || /no api key|isn.t set up|isn.t running|not_configured/i.test(msg)) {
+      return { settings: true, text: 'MetaCode’s AI can’t answer this yet: ' + clean(msg, 300) + ' **Settings → AI connection** and **AI providers** show what’s missing.' };
     }
-    // A used-up budget (prompts and/or tokens per day, week or month): the message says when it resets
-    if (/quota|used up|budget/i.test(msg) && (err && (err.status === 429 || err.type === 'quota_exceeded'))) {
-      return { settings: true, text: clean(msg, 300) + ' Until then, another AI key can be added to `EMIS_API_KEY` in the server’s `.env` file (comma-separated).' };
+    // A provider's usage limit is used up (a free-model limit, or a budget of prompts and/or tokens per day, week or month): the message says when it resets.
+    // Another provider is offered only when one is ready and not resting too
+    if (/quota|used up|budget|usage limit/i.test(msg) && (err && (err.status === 429 || err.type === 'quota_exceeded'))) {
+      return { settings: true, text: clean(msg, 300) + (otherProviderCanAnswer()
+        ? ' Until then, a model from another AI provider can answer: pick one in **Settings → AI models** (**AI providers** shows which are set up).'
+        : ' AI features work again then; **Settings → AI providers** shows what each provider needs.') };
     }
     // One model is throttled: the message says when it can be used again
     if (err && err.type === 'model_rate_limited') {
       return { settings: true, text: clean(msg, 300) + ' With **If a model is rate-limited or failing, use the closest similar model** on (**Settings → AI models**), a similar model answers meanwhile.' };
     }
     if (/rate.?limit|too many requests|\b429\b/i.test(msg)) {
-      return { settings: true, text: providerLabel() + ' is rate-limiting requests right now. Wait a few seconds and try again — or add another AI key to `.env` (comma-separated).' };
+      return { settings: true, text: providerLabel() + ' is rate-limiting requests right now. Wait a few seconds and try again — or pick a model from another AI provider in **Settings → AI models**.' };
     }
-    if (/invalid.{0,12}(api.?key|x-api-key)|unauthori[sz]ed|authentication|\b401\b|\b403\b/i.test(msg)) {
-      return { settings: true, text: 'The AI service rejected the key. Check `EMIS_API_KEY` in the server’s `.env` file, then click **Reload .env** in **Settings**.' };
+    // MetaCode and its AI service don't share the access token (or the port is another copy's), or a web page
+    // answered instead of the service or a provider: no provider's key is at fault, and the message names the setting
+    if (err && (err.type === 'blocked' || (err.type === 'authentication_error' && /access token|OPENCODE_SERVICE_(TOKEN|PORT)/i.test(msg)))) {
+      return { settings: true, text: clean(msg, 600) + ' (**Settings → AI connection** shows the details.)' };
+    }
+    if ((err && ['authentication_error', 'permission_error'].includes(err.type)) || /invalid.{0,12}(api.?key|x-api-key)|unauthori[sz]ed|authentication|\b401\b|\b403\b/i.test(msg)) {
+      return { settings: true, text: 'The AI provider didn’t accept the key it was given for this model. Whoever runs the MetaCode server can check that provider in **Settings → AI providers** and its key in the server’s `.env` file, then click **Reload .env** — or pick a model from another provider in **Settings → AI models**.' };
     }
     return { settings: false, text: 'The assistant couldn’t get an answer: ' + clean(msg, 300) };
   }
@@ -352,7 +371,8 @@ const Assistant = (() => {
 
   // A compact summary of what's in the user's project, so answers can be
   // specific. Only counts, labels and computed results — never post text,
-  // never API keys (only how many are configured).
+  // never API keys (only how many there are). Models by name, as the
+  // pickers show them.
   function buildAppContext() {
     const lines = [];
     try {
@@ -361,8 +381,8 @@ const Assistant = (() => {
       lines.push('- Page open: ' + (App.getCurrentView().title || 'Dashboard'));
       lines.push('- Project: "' + clean(s.project && s.project.name, 80) + '"');
       const per = settings.models || {};
-      lines.push('- AI: the AI key in the server .env (' + (App.hasApiKeys() ? 'ready, ' + App.getEnvKeyCount() + ' key(s)' : 'NOT set up') + '); default model ' + (clean(settings.model, 60) || 'server default') +
-        (Object.keys(per).length ? '; per-feature models: ' + Object.keys(per).map(k => k + '=' + clean(per[k], 60)).join(', ') : '') +
+      lines.push('- AI: MetaCode\'s AI service (' + (App.hasApiKeys() ? 'ready' + describeProviders() : 'NOT set up') + '); default model ' + (clean(App.modelName(settings.model), 60) || 'server default') +
+        (Object.keys(per).length ? '; per-feature models: ' + Object.keys(per).map(k => k + '=' + clean(App.modelName(per[k]), 60)).join(', ') : '') +
         '; delay between calls ' + (Number(settings.delay) || 500) + ' ms');
       lines.push(describePosts(s.posts));
       lines.push(describeCodebook(s.codebook));
@@ -373,6 +393,22 @@ const Assistant = (() => {
       lines.push('- (Part of the app state could not be read.)');
     }
     return lines.filter(Boolean).join('\n');
+  }
+
+  // "; providers: OpenCode Zen (free models only), AI gateway (2 keys, resting until 14:05)"
+  function describeProviders() {
+    const ai = (App.getServerStatus() || {}).ai || {};
+    const providers = Array.isArray(ai.providers) ? ai.providers.filter(p => p && typeof p === 'object') : [];
+    if (!providers.length) return '';
+    return '; providers: ' + providers.map(p => {
+      const bits = [];
+      if (!p.ready) bits.push('not set up');
+      else if (p.keyCount) bits.push(p.keyCount + ' key' + (p.keyCount === 1 ? '' : 's'));
+      else if (p.free === true) bits.push('free models only');
+      const until = p.resting ? Date.parse(p.resting.until) : NaN;
+      if (until > Date.now()) bits.push('resting until ' + new Date(until).toLocaleString());
+      return clean(p.name, 40) + (bits.length ? ' (' + bits.join(', ') + ')' : '');
+    }).join(', ');
   }
 
   function hasEntries(o) { return !!o && Object.keys(o).length > 0; }

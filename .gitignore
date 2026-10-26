@@ -19,6 +19,8 @@ account-data/
 scraper-data/
 lab-data/
 collab-data/
+# MetaCode's OpenCode service: its access token and model catalog cache
+opencode-data/
 # VPN gateway kit: the generated secrets and gluetun's state
 deploy/vpn-gateway/vpn.env
 deploy/vpn-gateway/gluetun/*

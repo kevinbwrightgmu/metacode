@@ -867,7 +867,7 @@
       box.innerHTML = t.length ? t.map(m => {
         if (m.role === 'user') return '<div class="xp-msg xp-msg-user"><div class="xp-msg-text">' + esc(m.text) + '</div><div class="xp-msg-meta">' + esc(m.kind === 'ask' ? 'Question' : 'Request') + ' · ' + when(m.createdAt) + '</div></div>';
         return '<div class="xp-msg xp-msg-assistant">' + (m.kind === 'note' ? '<p class="lab-muted">' + esc(m.text) + '</p>' : '<div class="xp-md">' + md(m.text) + '</div>') +
-          '<div class="xp-msg-meta">' + (m.version ? '<button type="button" class="xp-link" data-goto="' + m.version + '">Created v' + m.version + '</button>' : '') + (m.model ? '<span>' + esc(m.model) + '</span>' : '') + '<span>' + when(m.createdAt) + '</span>' +
+          '<div class="xp-msg-meta">' + (m.version ? '<button type="button" class="xp-link" data-goto="' + m.version + '">Created v' + m.version + '</button>' : '') + (m.model ? '<span>' + esc(Lab.modelName(m.provider, m.model)) + '</span>' : '') + '<span>' + when(m.createdAt) + '</span>' +
           (m.kind === 'ask' ? '<span>AI answer — not run; check it against the measured numbers</span>' : '') + '</div></div>';
       }).join('') : '<p class="lab-muted">Describe the rule you want — the codes, what counts as each, the edge cases — and click <b>Generate code</b>. Every answer becomes a new version you can read, edit and run.</p>';
       LabMarkdown.enhance(box, null);
@@ -900,7 +900,7 @@
           (r ? (r.summary ? '<div class="xp-md">' + md(r.summary) + '</div>' : '') + (r.error ? '<p class="lab-warn">The review couldn\'t be made: ' + esc(r.error) + '</p>' : '') +
             (r.risks && r.risks.length ? '<ul class="xp-findings">' + r.risks.map(x => '<li class="xp-find xp-find-' + (x.severity === 'critical' || x.severity === 'high' ? 'error' : 'warning') + '"><span class="badge badge-gray">' + esc(x.severity) + '</span> ' + (x.line ? '<button type="button" class="xp-link" data-line="' + x.line + '">line ' + x.line + '</button> ' : '') + '<b>' + esc(x.category) + '</b>: ' + esc(x.explanation) + (x.excerpt ? '<code class="xp-excerpt">' + esc(x.excerpt) + '</code>' : '') + '</li>').join('') + '</ul>' : '') +
             (r.saferAlternative ? '<details class="lab-more"><summary>Safer alternative</summary><div class="xp-md">' + md(r.saferAlternative) + '</div></details>' : '') +
-            '<p class="lab-muted">' + (r.model ? 'Reviewed by ' + esc(r.model) + ' · ' + when(r.reviewedAt) + '. ' : '') + 'The review is advisory: the policy checks and the sandbox enforce the limits.</p>' +
+            '<p class="lab-muted">' + (r.model ? 'Reviewed by ' + esc(Lab.modelName(r.provider, r.model)) + ' · ' + when(r.reviewedAt) + '. ' : '') + 'The review is advisory: the policy checks and the sandbox enforce the limits.</p>' +
             ((r.decision === 'needs_review' || r.decision === 'unavailable') && !acked ? '<button class="btn btn-secondary btn-sm mt-2" id="xp-ack">I\'ve read this — allow running</button>' : '')
           : '<p class="lab-muted">Not reviewed yet: the review runs before the first run, or click Check.</p>') + '</div>';
       LabMarkdown.enhance(box, null);
@@ -1420,7 +1420,7 @@
     function evaluationHTML(ev) {
       const sec = (title, text) => '<h4 class="xp-h4">' + esc(title) + '</h4><div class="xp-md">' + (text ? md(text) : '<p class="lab-muted">—</p>') + '</div>';
       const ag = ev.against || {};
-      return '<div class="xp-eval-head">' + recBadge(ev.recommendation) + ' <span class="lab-muted">against ' + esc(ag.kind === 'baseline' ? 'current AI coding' : ag.kind === 'version' ? 'v' + ag.version : 'nothing') + ' · ' + esc(ev.model || '') + ' · ' + when(ev.createdAt) + '</span></div>' +
+      return '<div class="xp-eval-head">' + recBadge(ev.recommendation) + ' <span class="lab-muted">against ' + esc(ag.kind === 'baseline' ? 'current AI coding' : ag.kind === 'version' ? 'v' + ag.version : 'nothing') + ' · ' + esc(ev.model ? Lab.modelName(ev.provider, ev.model) : '') + ' · ' + when(ev.createdAt) + '</span></div>' +
         '<div class="lab-note mt-2">AI interpretation — check it against the measured numbers.</div>' +
         (ev.unverifiedNumbers && ev.unverifiedNumbers.length ? '<div class="lab-warn mt-2" role="alert"><b>Numbers that don\'t match a measured value:</b> ' + ev.unverifiedNumbers.map(esc).join(', ') + '. Trust the Metrics tab, not these.</div>' : '') +
         sec('Proposed improvement', ev.proposedImprovement) + sec('Reasoning', ev.reasoning) + sec('Observed results', ev.observedResults) + sec('Comparison', ev.comparison) +
@@ -1861,7 +1861,7 @@
   }
   function compareEvalHTML(ev) {
     const sec = (title, text) => '<h4 class="xp-h4">' + esc(title) + '</h4><div class="xp-md">' + (text ? md(text) : '<p class="lab-muted">—</p>') + '</div>';
-    return '<div class="xp-eval-head">' + recBadge(ev.recommendation) + ' <span class="lab-muted">' + esc(ev.model || '') + ' · ' + when(ev.createdAt) + '</span></div>' +
+    return '<div class="xp-eval-head">' + recBadge(ev.recommendation) + ' <span class="lab-muted">' + esc(ev.model ? Lab.modelName(ev.provider, ev.model) : '') + ' · ' + when(ev.createdAt) + '</span></div>' +
       '<div class="lab-note mt-2">AI interpretation — check it against the measured numbers.</div>' +
       (ev.unverifiedNumbers && ev.unverifiedNumbers.length ? '<div class="lab-warn mt-2" role="alert"><b>Numbers that don\'t match a measured value:</b> ' + ev.unverifiedNumbers.map(esc).join(', ') + '.</div>' : '') +
       sec('Proposed improvement', ev.proposedImprovement) + sec('Reasoning', ev.reasoning) + sec('Observed results', ev.observedResults) + sec('Comparison', ev.comparison) + sec('Trade-offs', ev.tradeoffs) + sec('Limitations', ev.limitations) +

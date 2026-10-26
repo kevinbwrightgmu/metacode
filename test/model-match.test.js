@@ -1,11 +1,13 @@
-// "Closest model" ranking (model-match.js), used when EMIS rate-limits a model
-// or can't run it, and the mapping of ids the catalog has respelled. The
-// ranking is checked against the catalog of 2026-10-22 (a copy in
-// test/fixtures, so a catalog update doesn't change these expectations);
-// the current emis-models.json is checked for what must hold for any list.
+// "Closest model" ranking (model-match.js), used when the AI service
+// rate-limits a model or can't run it (or its provider rests), and the mapping
+// of ids the catalog has respelled or saved without their provider. The
+// ranking is checked against the gateway's catalog of 2026-10-22 (a copy in
+// test/fixtures, so a catalog update doesn't change these expectations), with
+// bare ids as saved before providers and as "provider/model" ids; the current
+// emis-models.json is checked for what must hold for any list.
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { rankSimilar, parse, canonicalId, renamedModel, sameModel } = require('../model-match');
+const { rankSimilar, parse, splitModel, canonicalId, renamedModel, sameModel } = require('../model-match');
 
 const infoOf = file => new Map(Object.keys(file).map(id => [id, { id, name: file[id].name, reasoning: file[id].reasoning, attachment: file[id].attachment }]));
 const file = require('./fixtures/emis-models-2026-10-22.json').provider.emis.models;
@@ -93,4 +95,63 @@ test('the current emis-models.json: every id is usable, and old spellings still 
   }
   assert.equal(rankSimilar(liveIds[0], liveIds, infoOf(live)).length, liveIds.length - 1);
   for (const [from, to] of Object.entries(RENAMED)) if (!liveIds.includes(from) && liveIds.includes(to)) assert.equal(renamedModel(from, liveIds), to, from);
+});
+
+// ── Provider ids ("provider/model") ────────────────────────────────────────────
+const pre = id => 'emis/' + id;
+const prefixedIds = ids.map(pre);
+const prefixedInfo = new Map(Array.from(info.entries()).map(([id, i]) => [pre(id), Object.assign({}, i, { id: pre(id) })]));
+
+test('splitModel and parse: the provider is the part before the first "/"; the model part is what is judged', () => {
+  assert.deepEqual(splitModel('emis/claude-opus-5.5'), { provider: 'emis', model: 'claude-opus-5.5' });
+  assert.deepEqual(splitModel('opencode/big-pickle#high'), { provider: 'opencode', model: 'big-pickle#high' });
+  assert.deepEqual(splitModel('claude-opus-5.5'), { provider: null, model: 'claude-opus-5.5' });
+  assert.deepEqual(splitModel(''), { provider: null, model: '' });
+  const p = parse('emis/claude-opus-4.8', 'Claude Opus 4.8');
+  assert.deepEqual([p.family, [...p.line], p.version], ['claude', ['opus'], 4.8], 'not family "emis"');
+  assert.equal(parse('opencode/big-pickle').family, 'big');
+  assert.equal(canonicalId('EMIS/Claude-Opus-5-5'), 'emis/claude-opus-5.5', 'the provider is kept');
+  assert.equal(canonicalId('claude-opus-5-5'), 'claude-opus-5.5');
+});
+
+test('the closest model is the same with "provider/model" ids', () => {
+  for (const m of ['claude-opus-4.6', 'qwen-3.7-max-thinking', 'gpt-4o-mini', 'llama-3.1-70b-instruct', 'kimi-k3']) {
+    assert.equal(rankSimilar(pre(m), prefixedIds, prefixedInfo)[0], pre(closest(m)), m);
+  }
+});
+
+test('the same model from another provider is the best substitute', () => {
+  const list = ['emis/claude-opus-5', 'emis/gpt-5.5', 'opencode/claude-opus-5.5', 'opencode/big-pickle'];
+  assert.deepEqual(rankSimilar('emis/claude-opus-5.5', list, null).slice(0, 2), ['opencode/claude-opus-5.5', 'emis/claude-opus-5']);
+  assert.equal(rankSimilar('emis/claude-opus-5-5', list, null)[0], 'opencode/claude-opus-5.5', 'also under another spelling');
+  assert.equal(rankSimilar('emis/gpt-5-6', ['emis/gpt-5.5', 'opencode/gpt-5.6-sol'], null)[0], 'opencode/gpt-5.6-sol', 'and after a rename');
+  assert.equal(rankSimilar('claude-opus-5.5', ['emis/claude-opus-5', 'opencode/claude-opus-5.5'], null)[0], 'opencode/claude-opus-5.5', 'a bare id ranks by its model part');
+});
+
+test('renamedModel: a bare id finds its model on any provider (the first provider in list order that has it); a provider id only on that provider', () => {
+  const list = ['emis/claude-opus-5.5', 'emis/gpt-5.6-sol', 'opencode/big-pickle', 'opencode/claude-opus-5.5'];
+  // the provider listed first wins even when a later one has the old id's exact spelling
+  assert.equal(renamedModel('claude-opus-5-5', ['emis/claude-opus-5.5', 'opencode/claude-opus-5-5']), 'emis/claude-opus-5.5');
+  assert.equal(renamedModel('claude-opus-5-5', ['opencode/claude-opus-5-5', 'emis/claude-opus-5.5']), 'opencode/claude-opus-5-5');
+  assert.equal(renamedModel('claude-opus-5-5', ['emis/claude-opus-5-5', 'emis/claude-opus-5.5']), 'emis/claude-opus-5-5', 'one provider: its exact spelling first');
+  assert.equal(renamedModel('claude-opus-5.5', list), 'emis/claude-opus-5.5', 'saved before providers');
+  assert.equal(renamedModel('claude-opus-5-5', list), 'emis/claude-opus-5.5', '…and under an old spelling');
+  assert.equal(renamedModel('gpt-5-6', list), 'emis/gpt-5.6-sol', '…and renamed');
+  assert.equal(renamedModel('big-pickle', list), 'opencode/big-pickle');
+  assert.equal(renamedModel('opencode/claude-opus-5-5', list), 'opencode/claude-opus-5.5');
+  assert.equal(renamedModel('emis/big-pickle', list), null, 'never another provider\'s model for a provider id');
+  assert.equal(renamedModel('zen/claude-opus-5.5', list), null);
+  assert.equal(renamedModel('claude-opus-5.4', list), null, 'only the same model, never a similar one');
+  assert.equal(renamedModel('emis/claude-opus-5.5', list), null, 'listed as it is: nothing to rename');
+  for (const [from, to] of Object.entries(RENAMED)) assert.equal(renamedModel(from, prefixedIds), pre(to), from);
+});
+
+test('sameModel: one provider (or a bare id), and one model', () => {
+  assert.ok(sameModel('emis/claude-opus-4-8', 'emis/claude-opus-4.8', null));
+  assert.ok(sameModel('claude-opus-4-8', 'emis/claude-opus-4.8', null), 'a bare id is the same model on any provider');
+  assert.ok(sameModel('emis/gpt-5-6', 'emis/gpt-5.6-sol', null));
+  assert.ok(!sameModel('emis/claude-opus-5.5', 'opencode/claude-opus-5.5', null), 'another provider: a different model to try');
+  const named = new Map([['emis/a-1', { name: 'Acme One' }], ['emis/b-1', { name: 'Acme One' }], ['opencode/c-1', { name: 'Acme One' }]]);
+  assert.ok(sameModel('emis/a-1', 'emis/b-1', named), 'same display name, same provider');
+  assert.ok(!sameModel('emis/a-1', 'opencode/c-1', named));
 });

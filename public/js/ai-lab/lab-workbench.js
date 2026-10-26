@@ -116,7 +116,7 @@
 
   function usageLine(m) {
     const bits = [];
-    if (m.model) bits.push(esc(m.model));
+    if (m.model) bits.push(esc(Lab.modelName(m.provider, m.model)));
     if (m.usage) bits.push(fmt(m.usage.promptTokens) + ' + ' + fmt(m.usage.completionTokens) + ' tokens' + (m.usage.measured ? '' : ' (estimated)'));
     if (m.latencyMs) bits.push(Lab.ms(m.latencyMs));
     if (m.cost) bits.push('cost ' + esc(Lab.money(m.cost)));

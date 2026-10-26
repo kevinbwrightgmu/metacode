@@ -144,12 +144,14 @@ function answerFor(sys, user) {
 }
 
 // state: { requests: [], streamDelayMs: 0, fail: false } — read and changed by the tests
-function startEmis(state) {
+function startAiService(state) {
   const s = http.createServer((req, res) => {
     let body = '';
     req.on('data', c => { body += c; });
     req.on('end', async () => {
       if (req.url === '/v1/models') { res.setHeader('content-type', 'application/json'); return res.end(JSON.stringify({ data: [{ id: 'lab-model' }, { id: 'judge-model' }] })); }
+      // (GET /v1/status and the like: not a chat, and not counted as one)
+      if (req.url !== '/v1/chat/completions') { res.statusCode = 404; res.setHeader('content-type', 'application/json'); return res.end('{}'); }
       const j = JSON.parse(body || '{}');
       state.requests.push(j);
       if (state.fail) { res.statusCode = 503; res.setHeader('content-type', 'application/json'); return res.end('{"error":{"message":"down"}}'); }
@@ -175,4 +177,4 @@ function startEmis(state) {
   return new Promise(r => s.listen(0, '127.0.0.1', () => r(s)));
 }
 
-module.exports = { startEmis, answerFor, PLAIN, MODULE };
+module.exports = { startAiService, answerFor, PLAIN, MODULE };

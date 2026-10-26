@@ -64,8 +64,8 @@ test.before(async () => {
   reddit = createMockReddit();
   const redditBase = await reddit.listen();
   await new Promise(r => aiService.listen(0, '127.0.0.1', r));
-  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: redditBase, EMIS_API_KEY: 'emis-test-key-123456', EMIS_TRANSPORT: 'node',
-    EMIS_BASE_URL: 'http://127.0.0.1:' + aiService.address().port + '/v1', EMIS_MODELS_FILE: 'none' }));
+  Object.assign(process.env, testEnv({ REDDIT_BASE_URL: redditBase,
+    OPENCODE_SERVICE_URL: 'http://127.0.0.1:' + aiService.address().port + '/v1', OPENCODE_SERVICE_TOKEN: 'test-service-token-0123456789' }));
   const { start } = require('../server');
   server = await start(0);
   base = 'http://localhost:' + server.address().port;
@@ -125,10 +125,10 @@ test('the AI Scraper on its own: describe the goal, watch the AI\'s steps, find 
     assert.match(steps[0], /^1 Search "post" · r\/test · relevance all Look in r\/test first\. → search_posts "post" in r\/test \(relevance, all\) → 4 posts$/);
     assert.match(steps[1], /^2 Keep posts 3 posts These three fit\. → keep → 3 new$/);
     assert.match(steps[2], /^3 Finish/);
-    // The AI service got the goal; MetaCode's AI key never reached the page
+    // The AI service got the goal; MetaCode's access token for it never reached the page
     const first = ai.requests[before];
     assert.match(first.messages[1].content, /^Goal: Posts about testing in r\/test/);
-    assert.ok(!(await page.content()).includes('emis-test-key'));
+    assert.ok(!(await page.content()).includes('test-service-token'));
 
     await page.click('nav a[href="#data"]');
     await page.waitForFunction(() => /^3 posts/.test(document.querySelector('#explorer-count').textContent));

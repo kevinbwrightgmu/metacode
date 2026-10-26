@@ -30,7 +30,7 @@ let server, baseUrl, browser, dataDir;
 test.before(async () => {
   if (skip) return;
   dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-logic-sb-'));
-  Object.assign(process.env, testEnv({ SURVEY_DATA_DIR: dataDir, EMIS_API_KEY: '', SUPABASE_URL: '', DESKTOP_RELEASES_REPO: 'off' }));
+  Object.assign(process.env, testEnv({ SURVEY_DATA_DIR: dataDir, SUPABASE_URL: '', DESKTOP_RELEASES_REPO: 'off' }));
   server = await require('../server').start(0);
   baseUrl = 'http://localhost:' + server.address().port;
   browser = await require('playwright-core').chromium.launch({ executablePath: chromiumPath, ignoreDefaultArgs: ['--hide-scrollbars'] });

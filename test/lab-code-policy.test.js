@@ -7,6 +7,8 @@
 
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const path = require('path');
+const { spawnSync } = require('child_process');
 const P = require('../ai-lab/code-policy');
 const D = require('../ai-lab/experiment-data');
 const M = require('../ai-lab/experiment-metrics');
@@ -76,6 +78,32 @@ test('policy: every forbidden construct is blocked with the right rule and line'
   blocked('function classify(r) {\n  setTimeout(() => {}, 1);\n  return null;\n}', 'forbidden_global', 2);
   blocked('function classify(r) {\n  return new Proxy({}, {});\n}', 'forbidden_global', 2);
   blocked('function classify(r) {\n  return (;\n}', 'syntax', 2);
+});
+
+test('policy: without the parser installed, the server still loads and JavaScript/TypeScript are blocked with what to do', () => {
+  // (a "git pull" without "npm install": the rest of MetaCode must keep running)
+  const script = `
+    const srv = require('./server');
+    const CP = require('./ai-lab/code-policy');
+    const { createCodeSandbox } = require('./ai-lab/code-sandbox');
+    const sandbox = createCodeSandbox({ getConfig: () => ({}) });
+    console.log(JSON.stringify({ start: typeof srv.start, report: CP.analyzeJavaScript('function classify(r) { return null; }', 'typescript'),
+      parser: CP.parserAvailable(), js: sandbox.supported('javascript'), ts: sandbox.supported('typescript') }));
+    process.exit(0);`;
+  const r = spawnSync(process.execPath, ['--require', path.join(__dirname, 'helpers', 'hide-modules.js'), '-e', script], {
+    cwd: path.join(__dirname, '..'), encoding: 'utf8', timeout: 30000,
+    env: Object.assign({}, process.env, { HIDE_MODULES: 'acorn,acorn-walk', METACODE_ENV_FILE: 'none', METACODE_LOG: 'off' })
+  });
+  assert.equal(r.status, 0, r.stderr);
+  const out = JSON.parse(r.stdout.trim().split('\n').pop());
+  assert.equal(out.start, 'function');
+  assert.equal(out.report.ok, false);
+  assert.deepEqual(out.report.findings.map(f => [f.rule, f.severity]), [['checker_unavailable', 'error']]);
+  assert.match(out.report.findings[0].message, /npm install/);
+  assert.equal(out.parser.ok, false);
+  for (const s of [out.js, out.ts]) { assert.equal(s.ok, false); assert.match(s.reason, /acorn.*npm install/); }
+  // and with it installed (this process), nothing of that shows
+  assert.deepEqual(P.parserAvailable(), { ok: true });
 });
 
 test('policy: size limits', () => {

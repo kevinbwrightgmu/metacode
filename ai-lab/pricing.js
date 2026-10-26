@@ -5,7 +5,7 @@
 //
 //   { "asOf": "2026-10-01", "currency": "USD",
 //     "models": { "openai:gpt-4o-mini": { "inputPerMTok": 0.15, "outputPerMTok": 0.60 },
-//                 "metacode:gpt-5.5":    { "inputPerMTok": 1.25, "outputPerMTok": 10 } } }
+//                 "metacode:emis/gpt-5.5": { "inputPerMTok": 1.25, "outputPerMTok": 10 } } }
 //
 // A cost is then *estimated* as tokens × price (labelled with the list's
 // date). A model without a price has an *unknown* cost. No provider used here
@@ -55,7 +55,9 @@ function createPricing(file) {
   function priceOf(provider, model) {
     const c = load();
     if (!c.data) return null;
-    const p = c.data.models[provider + ':' + model] || c.data.models[model];
+    const p = c.data.models[provider + ':' + model] || c.data.models[model]
+      // price lists from before model ids named their provider: "metacode:<id>" priced the gateway's model
+      || (provider === 'metacode' && model.startsWith('emis/') ? c.data.models['metacode:' + model.slice(5)] : undefined);
     return p ? { input: p.input, output: p.output, currency: c.data.currency, asOf: c.data.asOf } : null;
   }
 

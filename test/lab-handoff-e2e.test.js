@@ -29,7 +29,7 @@ test.before(async () => {
   if (skip) return;
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-lab-handoff-e2e-'));
   Object.assign(process.env, testEnv({
-    EMIS_API_KEY: '', ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'),
+    ACCOUNT_DATA_DIR: path.join(tmp, 'accounts'), SURVEY_DATA_DIR: path.join(tmp, 'surveys'),
     PROJECT_DATA_DIR: path.join(tmp, 'projects'), AI_LAB_DATA_DIR: path.join(tmp, 'lab'), COLLAB_DATA_DIR: path.join(tmp, 'collab')
   }));
   const { start } = require('../server');
