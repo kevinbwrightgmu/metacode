@@ -397,6 +397,10 @@ const OUTPUT_KEYS = new Set(['code', 'confidence', 'reason']);
 
 /** @param {unknown} v */
 const describe = v => (v === null ? 'null' : Array.isArray(v) ? 'a list' : typeof v === 'object' ? 'an object' : typeof v === 'string' ? 'a string' : typeof v === 'number' ? 'a number' : typeof v === 'boolean' ? 'true/false' : typeof v);
+/** A non-finite number carried across the JSON bridge as {$nonfinite:"NaN"|…}: returns the label, or null. @param {unknown} v */
+const nonfiniteLabel = v => (isPlainObject(v) && typeof /** @type {any} */ (v).$nonfinite === 'string' && Object.keys(/** @type {object} */ (v)).length === 1 ? /** @type {any} */ (v).$nonfinite : null);
+/** An oversized single result carried as {$oversized:<size>}: returns the size, or null. @param {unknown} v */
+const oversizedSize = v => (isPlainObject(v) && typeof /** @type {any} */ (v).$oversized === 'number' && Object.keys(/** @type {object} */ (v)).length === 1 ? /** @type {any} */ (v).$oversized : null);
 /** A short, quoted rendering of a value the code returned (never record text). @param {unknown} v */
 const quote = v => { let s; try { s = JSON.stringify(v); } catch (e) { s = String(v); } return (s === undefined ? String(v) : s).slice(0, 80); };
 
@@ -436,7 +440,11 @@ function validateOutputs(rawOutputs, records, variable) {
     const out = raw.out;
     /** @type {RecordResult} */
     const r = { id, code: null, confidence: null, reason: '', error: null, ms };
-    if (out === null || out === undefined) { /* no code */ }
+    const big = oversizedSize(out);
+    const outNonfinite = nonfiniteLabel(out);
+    if (big !== null) { problem(id, 'The result is too large (' + big + ' characters): a reason can be at most ' + LIMITS.reasonChars + ' characters.'); }
+    else if (outNonfinite) { problem(id, 'classify returned a non-finite number (' + outNonfinite + '): it must return a code id, null, or {code, confidence, reason}.'); }
+    else if (out === null || out === undefined) { /* no code */ }
     else if (typeof out === 'string') {
       if (codes.has(out)) r.code = out; else problem(id, 'Unknown code ' + quote(out) + ': it isn\'t one of the variable\'s codes.');
     } else if (isPlainObject(out)) {
@@ -449,8 +457,10 @@ function validateOutputs(rawOutputs, records, variable) {
       else if (!codes.has(o.code)) problem(id, 'Unknown code ' + quote(o.code) + ': it isn\'t one of the variable\'s codes.');
       else r.code = o.code;
       if (o.confidence !== undefined && o.confidence !== null) {
-        if (typeof o.confidence !== 'number') problem(id, 'Wrong type: confidence is ' + describe(o.confidence) + '; it must be a number from 0 to 1.');
-        else if (!Number.isFinite(o.confidence) || o.confidence < 0 || o.confidence > 1) problem(id, 'Confidence ' + quote(o.confidence) + ' is out of range: it must be a number from 0 to 1.');
+        const confNonfinite = nonfiniteLabel(o.confidence);
+        if (confNonfinite) problem(id, 'Confidence ' + confNonfinite + ' is out of range: confidence must be a finite number between 0 and 1.');
+        else if (typeof o.confidence !== 'number') problem(id, 'Wrong type: confidence is ' + describe(o.confidence) + '; it must be a number from 0 to 1.');
+        else if (!Number.isFinite(o.confidence) || o.confidence < 0 || o.confidence > 1) problem(id, 'Confidence ' + quote(o.confidence) + ' is out of range: confidence must be a finite number between 0 and 1.');
         else r.confidence = o.confidence;
       }
       if (o.reason !== undefined && o.reason !== null) {

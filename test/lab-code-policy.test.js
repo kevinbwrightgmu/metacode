@@ -518,6 +518,55 @@ test('metrics: verifyNumbers flags numbers that match nothing measured', () => {
   assert.deepEqual(M.verifyNumbers([''], m), []);
 });
 
+// Measured values with no ratio of exactly 0 or 1 (but counts of 0 and 1 in the confusion matrix)
+const M9 = {
+  records: 10, processed: 10, errors: 1, errorRate: 0.1, coverage: 0.9, distribution: { pos: 5, neg: 4, '(none)': 1 },
+  reference: {
+    test: { n: 7, accuracy: 0.43, macroF1: 0.41, kappa: 0.17, kappaReason: null,
+      perCode: { pos: { precision: 0.6, recall: 0.75, f1: 0.67, support: 4 }, neg: { precision: 0.25, recall: 0.33, f1: 0.29, support: 3 } },
+      confusion: { categories: ['pos', 'neg', '(none)'], matrix: [[3, 1, 0], [2, 1, 0], [0, 0, 0]] } },
+    dev: null, all: null
+  },
+  baseline: { n: 9, agreement: 0.56, kappa: 0.12, changed: 4 },
+  consistency: { groups: 0, inconsistent: 0, score: null },
+  runtime: { durationMs: 1200, perRecordMeanMs: 0.4 }
+};
+
+test('metrics: verifyNumbers reads leading-dot decimals and number words', () => {
+  // APA style (no leading zero) is how κ and F1 are usually written
+  assert.deepEqual(M.verifyNumbers(['Held-out kappa was .97 and macro-F1 .96.'], M9), ['.97', '.96']);
+  assert.deepEqual(M.verifyNumbers(['Kappa rose from .41 to .97.'], M9), ['.41', '.97']);
+  assert.deepEqual(M.verifyNumbers(['A drop of -.5 and only .5% of records.'], M9), ['.5%', '-.5']);
+  assert.deepEqual(M.verifyNumbers(['Held-out κ = .17, macro-F1 .41 and accuracy .43 (n=7).'], M9), [], 'measured values written without a leading zero');
+  assert.deepEqual(M.verifyNumbers(['See version 2.0.1, v1.2 and file.97 — and 1.2.3.'], M9), [], 'version numbers and names are not numbers');
+  // Number words, where they say a percentage or a count
+  assert.deepEqual(M.verifyNumbers(['Accuracy was ninety-eight percent.'], M9), ['ninety-eight percent']);
+  assert.deepEqual(M.verifyNumbers(['Accuracy was one hundred per cent on seven hundred records.'], M9), ['one hundred per cent', 'seven hundred records']);
+  assert.deepEqual(M.verifyNumbers(['Forty-three percent accuracy on ten records; nine records had a current AI label; ninety percent coverage.'], M9), []);
+  assert.deepEqual(M.verifyNumbers(['Someone often tensions none of the codes.'], M9), [], 'no numbers inside other words');
+});
+
+test('metrics: verifyNumbers keeps ratios, counts and κ apart (invented 100% / 0% / κ 1.00 are flagged)', () => {
+  // Counts of 0 and 1 (confusion cells, consistency) used to "verify" these
+  assert.deepEqual(M.verifyNumbers(['Held-out accuracy is 100%.'], M9), ['100%']);
+  assert.deepEqual(M.verifyNumbers(['The rule makes 0% errors.'], M9), ['0%']);
+  assert.deepEqual(M.verifyNumbers(['Error rate 0.0%.'], M9), ['0.0%']);
+  assert.deepEqual(M.verifyNumbers(['Kappa is 1.00, perfect agreement.'], M9), ['1.00']);
+  assert.deepEqual(M.verifyNumbers(['On average 2.0 per record.'], M9), ['2.0'], 'a decimal is not a count');
+  // κ only matches a measured κ (0.43 is the accuracy, 0.56 the agreement)
+  assert.deepEqual(M.verifyNumbers(['Cohen\'s κ = 0.43.'], M9), ['0.43']);
+  assert.deepEqual(M.verifyNumbers(['The kappa was .56 against the current AI coding.'], M9), ['.56']);
+  assert.deepEqual(M.verifyNumbers(['κ (held-out) = 0.17; agreement with the current AI coding κ 0.12.'], M9), []);
+  assert.deepEqual(M.verifyNumbers(['κ rose from 0.12 to 0.17.'], M9), [], 'both ends of a range are κ');
+  assert.deepEqual(M.verifyNumbers(['κ 0.17, and accuracy 0.43.'], M9), [], 'a later number after another metric is not a κ');
+  // A real ratio of 0 or 1 still verifies 0% / 100%; legitimate forms stay accepted
+  assert.deepEqual(M.verifyNumbers(['Coverage was 100%.'], Object.assign({}, M9, { coverage: 1 })), []);
+  assert.deepEqual(M.verifyNumbers(['Accuracy 43% (n=7), error rate 10%, coverage 90.0%, agreement 56% (n=9); 4 records changed, 2 records were wrong; it took 1.2 s (0.4 ms per record).'], M9), []);
+  assert.deepEqual(M.verifyNumbers(['Accuracy 43.4%, κ 0.18.'], M9), ['43.4%', '0.18'], 'rounding has limits');
+  // Comparison counts and another run's metrics count as measured
+  assert.deepEqual(M.verifyNumbers(['3 records were fixed; the other version\'s accuracy was 71%.'], M9, { against: { coverage: 0.8, reference: { test: { accuracy: 0.71 } } }, counts: { changed: 5, fixed: 3, broken: 1 } }), []);
+});
+
 /* ── AI prompts and parsers ─────────────────────────────────────────────── */
 
 const devRecords = Array.from({ length: 30 }, (_, i) => ({ id: 'd' + i, split: 'dev', reference: i % 2 ? 'pos' : null, baseline: null, text: 'dev text ' + i + ' ' + 'z'.repeat(500), author: '', timestamp: '', meta: {}, referenceSource: null }));

@@ -29,9 +29,40 @@
   var freeze = Object.freeze;
   var isFrozen = Object.isFrozen;
   var ownNames = Object.getOwnPropertyNames;
+  var defineProperty = Object.defineProperty;
+  var getPrototypeOf = Object.getPrototypeOf;
+  var isFinite = globalThis.isFinite;
   var now = Date.now;
   var toString = String;
   var LabError = Error;
+
+  // "No code built from strings", enforced at run time (the static policy can
+  // be dodged by computed member access, e.g. fn["con"+"structor"]). The child
+  // compiles the prelude and the user's code through QuickJS's own evalCode,
+  // never the global eval/Function, so removing these does not stop honest
+  // code — it only closes the Function-from-a-string route.
+  (function hardenCodeFromStrings() {
+    var fail = function () { throw new LabError('Building functions from strings isn\'t allowed in the sandbox.'); };
+    var throwingCtor = function (obj) {
+      if (!obj) return;
+      try { defineProperty(obj, 'constructor', { configurable: false, enumerable: false, get: fail, set: function () {} }); } catch (e) {}
+    };
+    try { delete globalThis.eval; } catch (e) {}
+    try { delete globalThis.Function; } catch (e) {}
+    var protos = [];
+    try { protos.push(getPrototypeOf(function () {})); } catch (e) {}          // Function.prototype
+    try { protos.push(getPrototypeOf(async function () {})); } catch (e) {}     // AsyncFunction.prototype
+    try { protos.push(getPrototypeOf(function * () {})); } catch (e) {}         // GeneratorFunction.prototype
+    try { protos.push(getPrototypeOf(async function * () {})); } catch (e) {}   // AsyncGeneratorFunction.prototype
+    for (var i = 0; i < protos.length; i++) {
+      var proto = protos[i];
+      if (!proto) continue;
+      var ctor = null;
+      try { ctor = proto.constructor; } catch (e) {}
+      throwingCtor(proto);   // fn.constructor → throws
+      throwingCtor(ctor);    // AsyncFunction.constructor, etc. → throws
+    }
+  })();
 
   var BATCH_CHARS = 256 * 1024;       // flush results at about this size
   var MAX_RESULT_CHARS = 64 * 1024;   // one record's result (a code, a confidence and a short reason)
@@ -112,6 +143,17 @@
     }
   }
 
+  // Keep non-finite numbers visible across the JSON bridge instead of letting
+  // JSON.stringify quietly turn NaN/±Infinity into null: the parent's output
+  // check then sees them and fails the run (spec §4.3), rather than silently
+  // storing "no confidence".
+  function finiteReplacer(key, value) {
+    if (typeof value === 'number' && !isFinite(value)) {
+      return { $nonfinite: value !== value ? 'NaN' : (value > 0 ? 'Infinity' : '-Infinity') };
+    }
+    return value;
+  }
+
   // One record → the JSON text of { id, out, ms } or { id, error, ms }.
   function classifyOne(classify, record, variable) {
     var id = stringify(toString(record.id));
@@ -132,9 +174,11 @@
       } else if (typeof out === 'function' || typeof out === 'symbol' || typeof out === 'bigint') {
         problem = 'classify returned a value that isn\'t JSON (a ' + typeof out + ')';
       } else {
-        json = out === undefined ? undefined : stringify(out);
+        json = out === undefined ? undefined : stringify(out, finiteReplacer);
         if (json !== undefined && json.length > MAX_RESULT_CHARS) {
-          problem = 'classify returned ' + Math.round(json.length / 1024) + ' KB for one record (at most ' + (MAX_RESULT_CHARS / 1024) + ' KB)';
+          // Too big to carry back: send a marker so the parent reports it as an
+          // output problem (and fails the run) rather than a per-record error.
+          json = '{"$oversized":' + json.length + '}';
         }
       }
     } catch (e) {

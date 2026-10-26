@@ -10,14 +10,24 @@
 //      final version → Send to Codebook → the app tab opens, the account's
 //      "Add this browser's work…?" question comes first (once), then the
 //      confirmation → saved on the dimension (and synced to the account);
-//      sending again is the same submission; another final version sent while
-//      the app tab is open goes over the BroadcastChannel and replaces it.
+//      Send again delivers the same submission to the app again (which says it
+//      has it); removed in the Codebook and sent again, the app asks again and
+//      the Lab waits for that answer; selected again, it is a new send (its own
+//      key) with the new rationale; another final version sent while the app
+//      tab is open goes over the BroadcastChannel and replaces it.
 //   2. What goes wrong: a network-flooding rule is blocked (nothing executes);
 //      a syntax error and an endless loop are blocked by the policy with their
 //      lines; a cancelled run; a timeout fails the run and the workspace keeps
 //      working; output with an unknown code fails at output validation; unsaved
 //      edits turn Run into Save & run, and switching versions asks first; one
-//      short Python run (when this Node can run Python).
+//      short Python run (when this Node can run Python); a run blocked until
+//      the review is read is "Ready to run" once allowed; new success criteria
+//      give a matching objective score; a run that ends while another version
+//      (or another run in the terminal) is shown still ends in the workspace.
+//   3. What runs here: the Models page shows the server's code-execution report;
+//      a language the server can't run (a /models answer changed in the page)
+//      is disabled with its reason in the new-experiment form and the editor,
+//      and Run says why; "switched off" is said plainly.
 // Every page error fails the test; requests leave only for this machine.
 // Skipped when no Chromium is available (set CHROMIUM_PATH to point at one)
 // or when this Node can't run the sandbox.
@@ -204,6 +214,8 @@ async function setCode(page, code) {
   await page.keyboard.insertText(code);
   await page.keyboard.press('Escape');   // (closes an autocompletion popup, if any)
 }
+// The shown run is in the sandbox (past the review and the policy): the pill says "Running…" until it ends
+const inExecution = page => page.waitForFunction(() => document.getElementById('xp-term-status').textContent === 'Running · execution', null, { timeout: 15000 });
 const editorText = page => page.evaluate(() => Array.from(document.querySelectorAll('#xp-editor .cm-line')).map(l => l.textContent).join('\n'));
 // A new experiment from the open project's "stance" variable, through the form
 async function createExperiment(page) {
@@ -369,6 +381,8 @@ test('Code Experiments: project → AI rule → edit → Save & run → refine �
   x = await experiment(page);
   assert.deepEqual([x.experiment.selected.version, x.experiment.selected.runId, x.experiment.selected.rationale], [3, run3.id, 'Best held-out score, no errors']);
   const codeHash = x.experiment.selected.codeHash;
+  // A send is one send of this selection: its key names the version, the code, the run and when it was selected
+  const key3 = [id, 3, codeHash, run3.id, x.experiment.selected.selectedAt].join(':');
 
   // Send to Codebook: the app opens in a new tab of this browser (same storage). The signed-in
   // account hasn't seen this browser's work yet, so it asks first — once — and only then does the
@@ -410,6 +424,7 @@ test('Code Experiments: project → AI rule → edit → Save & run → refine �
   const sub = x.experiment.submissions[0];
   assert.equal(sub.status, 'applied');
   assert.equal(sub.dimensionId, 'stance');
+  assert.equal(sub.idempotencyKey, key3);
   assert.equal(rule.submissionId, sub.id);
   // "Add to my account" was kept too: the open project, with the rule, reaches the account
   const t0 = Date.now();
@@ -422,12 +437,15 @@ test('Code Experiments: project → AI rule → edit → Save & run → refine �
   }
   assert.ok(synced, 'the open project with the coding rule was saved to the account');
 
-  // Sending again: the same submission (same idempotency key), nothing added anywhere
+  // Sending again: the same submission (same key) is delivered to the app again — it already has it and says so,
+  // without asking — and nothing is added anywhere
   await page.click('#xp-send');
   await waitPill(page, 'Saved to Codebook');
-  const again = await api(page, '/experiments/' + id + '/codebook', 'POST', { idempotencyKey: id + ':3:' + codeHash });
+  const again = await api(page, '/experiments/' + id + '/codebook', 'POST', { idempotencyKey: key3 });
   assert.equal(again.status, 200);
   assert.equal(again.body.submission.id, sub.id);
+  assert.equal(again.body.submission.status, 'applied');
+  assert.ok(again.body.submission.resentAt, 'the click sent it to the app again');
   x = await experiment(page);
   assert.equal(x.experiment.submissions.length, 1);
   // …and the app applying it again changes nothing (no history entry)
@@ -437,6 +455,43 @@ test('Code Experiments: project → AI rule → edit → Save & run → refine �
   assert.equal(dim.codingRule.submissionId, sub.id);
   assert.equal((dim.codingRuleHistory || []).length, 0);
   assert.equal(await app.$$eval('.acct-overlay', l => l.length), 0);
+
+  // Removed in the Codebook ("…so you can send it to the Codebook again"), then sent again: the app asks again,
+  // and the Lab waits for that answer (an earlier "applied" doesn't count)
+  await app.click('#dim-stance .cr-remove');
+  await app.click('#cr-remove-confirm');
+  await app.waitForFunction(() => !App.getState().codebook.find(d => d.id === 'stance').codingRule);
+  await page.click('#xp-send');
+  await app.waitForSelector('#lh-save', { timeout: 15000 });
+  assert.match(await app.textContent('#lh-change'), /^New rule/);
+  await page.waitForTimeout(2500);   // (longer than the Lab's 2 s look at the submission)
+  assert.equal(await pill(page), 'Sending to Codebook…');
+  assert.match(await page.textContent('#xp-send-status'), /Switch to your MetaCode tab to confirm/);
+  await app.click('#lh-save');
+  await waitPill(page, 'Saved to Codebook');
+  assert.equal((await app.evaluate(() => App.getState().codebook.find(d => d.id === 'stance').codingRule)).submissionId, sub.id);
+  x = await experiment(page);
+  assert.deepEqual(x.experiment.submissions.map(s => [s.id, s.status]), [[sub.id, 'applied']]);
+
+  // Selected again with another reason: a new send (its own key) with the new selection, asked in the app
+  await page.click('#xp-unselect');
+  await page.click('#lab-c-yes');
+  await page.fill('#xp-rationale', 'Best held-out score, checked twice');
+  await page.click('#xp-select');
+  await waitPill(page, 'Final version selected');
+  await page.click('#xp-send');
+  await app.waitForSelector('#lh-save', { timeout: 15000 });
+  assert.equal(await app.textContent('#lh-rationale'), 'Best held-out score, checked twice');
+  await app.click('#lh-save');
+  await waitPill(page, 'Saved to Codebook');
+  x = await experiment(page);
+  assert.equal(x.experiment.submissions.length, 2);
+  const sub2 = x.experiment.submissions[1];
+  assert.notEqual(sub2.id, sub.id);
+  assert.equal(sub2.idempotencyKey, [id, 3, codeHash, run3.id, x.experiment.selected.selectedAt].join(':'));
+  assert.equal(sub2.status, 'applied');
+  const rule2 = await app.evaluate(() => App.getState().codebook.find(d => d.id === 'stance').codingRule);
+  assert.deepEqual([rule2.submissionId, rule2.rationale], [sub2.id, 'Best held-out score, checked twice']);
 
   // Another final version, sent while the app tab is open: it answers on the channel and asks there
   await page.selectOption('#xp-version', '2');
@@ -454,9 +509,9 @@ test('Code Experiments: project → AI rule → edit → Save & run → refine �
   const dim2 = await app.evaluate(() => App.getState().codebook.find(d => d.id === 'stance'));
   assert.equal(dim2.codingRule.version, 2);
   assert.equal(dim2.codingRule.code, edited);
-  assert.deepEqual(dim2.codingRuleHistory.map(h => [h.version, h.submissionId]), [[3, sub.id]]);
+  assert.deepEqual(dim2.codingRuleHistory.map(h => [h.version, h.submissionId]), [[3, sub2.id], [3, sub.id]]);
   x = await experiment(page);
-  assert.deepEqual(x.experiment.submissions.map(s => [s.version, s.status]), [[3, 'applied'], [2, 'applied']]);
+  assert.deepEqual(x.experiment.submissions.map(s => [s.version, s.status]), [[3, 'applied'], [3, 'applied'], [2, 'applied']]);
   assert.equal(context.pages().length, 2, 'no further app tab was opened');
 
   assert.deepEqual(errors, []);
@@ -545,6 +600,7 @@ test('Code Experiments: blocked, syntax error, endless loop, timeout, invalid ou
   await page.waitForSelector('#xp-cancel:not([hidden])');
   await page.click('#xp-cancel');
   await page.waitForFunction(() => document.getElementById('xp-term-status').textContent === 'Cancelled', null, { timeout: 15000 });
+  await waitPill(page, 'Run cancelled', 10000);
   r = await latestRun(page);
   assert.equal(r.version, 5);
   assert.equal(r.status, 'cancelled');
@@ -615,6 +671,160 @@ test('Code Experiments: blocked, syntax error, endless loop, timeout, invalid ou
     assert.match(py, /passed inside the sandbox before your code ran/);
     assert.match(py, /> checking p1/);
   }
+
+  // A rule the AI review wants a person to read (it uses randomness): Save & run is blocked at the review.
+  // Once allowed, the pill says it is ready to run, like the Run button
+  await page.selectOption('#xp-lang', 'javascript');
+  await setCode(page, 'function classify(record, variable) {\n  const jitter = Math.random() * 0;\n  return /support/i.test(record.text) ? "pos" : null;\n}\n');
+  await page.click('#xp-run');
+  await waitPill(page, 'Blocked — see the review', 20000);
+  r = await latestRun(page);
+  assert.deepEqual([r.status, r.failure.type], ['blocked', 'review_required']);
+  assert.equal(await page.isDisabled('#xp-run'), true);
+  await page.click('#xp-ack');
+  await waitPill(page, 'Ready to run');
+  assert.equal(await page.isDisabled('#xp-run'), false);
+  await page.waitForSelector('#xp-validation .badge:has-text("you allowed running")');
+  await page.click('#xp-run');
+  await waitPill(page, 'Results ready', 30000);
+  r = await latestRun(page);
+  assert.deepEqual([r.status, r.security.acknowledged], ['succeeded', true]);
+  const rndVersion = await page.inputValue('#xp-version');
+  const rndRun = r.id;
+
+  // New success criteria: the objective score is recomputed with them and agrees with its parts
+  await page.click('#xp-tab-metrics');
+  await page.waitForSelector('#xp-metrics .xp-score b');
+  const scoreBefore = await page.textContent('#xp-metrics .xp-score b');
+  assert.notEqual(scoreBefore, '1.00');
+  await page.click('#xp-context > summary');
+  await page.click('#xp-criteria .xp-crit-row:nth-child(3) [data-cdel]');
+  await page.click('#xp-criteria .xp-crit-row:nth-child(2) [data-cdel]');
+  await page.selectOption('#xp-criteria .xp-crit-row [data-cm]', 'errorRate');
+  await page.fill('#xp-criteria .xp-crit-row [data-cw]', '1');
+  await page.click('#xp-criteria-save');
+  await page.waitForFunction(() => { const rows = document.querySelectorAll('#xp-metrics .xp-score + .table-wrap tbody tr'); return rows.length === 1 && /^Error rate/.test(rows[0].textContent); });
+  const parts = await page.$$eval('#xp-metrics .xp-score + .table-wrap tbody tr', rows => rows.map(row => Array.from(row.children).map(c => c.textContent)));
+  assert.deepEqual(parts, [['Error rate', '1', '1.00', 'used']]);
+  assert.equal(await page.textContent('#xp-metrics .xp-score b'), '1.00');
+  assert.equal((await experiment(page)).runs.find(x => x.id === rndRun).score, 1, 'the server scores it the same way');
+
+  // A run that ends while another version is shown: the workspace follows it (pill, buttons, version list)
+  const slow = 'function classify(record, variable) {\n  const end = Date.now() + 30000;\n  while (Date.now() < end) { /* wait */ }\n  return "pos";\n}\n';
+  await setCode(page, slow);
+  await page.click('#xp-run');
+  await inExecution(page);
+  const slowVersion = await page.inputValue('#xp-version');
+  const slowRun = (await experiment(page)).runs[0];
+  assert.deepEqual([String(slowRun.version), TERMINAL.includes(slowRun.status)], [slowVersion, false]);
+  await page.selectOption('#xp-version', rndVersion);
+  await page.waitForFunction(id => document.getElementById('xp-run-pick').value === id, rndRun);
+  assert.equal(await pill(page), 'Running…');
+  assert.equal((await runOf(page, slowRun.id)).status, 'failed');   // (the 2 s limit)
+  await waitPill(page, 'Results ready', 8000);
+  assert.equal(await page.isDisabled('#xp-run'), false);
+  assert.equal(await page.isDisabled('#xp-generate'), false);
+  assert.equal(await page.isHidden('#xp-cancel'), true);
+  assert.match(await page.$eval('#xp-version option[value="' + slowVersion + '"]', o => o.textContent), /✗ failed/);
+  // …and while another run is picked in the terminal
+  await page.selectOption('#xp-run-pick', slowRun.id);
+  await page.click('#xp-rerun');
+  await inExecution(page);
+  const rerun = (await experiment(page)).runs[0];
+  assert.notEqual(rerun.id, slowRun.id);
+  await page.selectOption('#xp-run-pick', rndRun);
+  assert.equal(await pill(page), 'Running…');
+  assert.equal((await runOf(page, rerun.id)).status, 'failed');
+  await waitPill(page, 'Results ready', 8000);
+  assert.equal(await page.isDisabled('#xp-run'), false);
+  assert.equal(await page.isHidden('#xp-cancel'), true);
+
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('Code Experiments: the Models page shows what runs here; a language the server can\'t run is disabled with its reason', { skip, timeout: 90000 }, async () => {
+  const { context, page, errors } = await newContext();
+  await signIn(page, 'ultra2@example.org', 'ultra password 2');
+  const LABEL = { javascript: 'JavaScript', typescript: 'TypeScript', python: 'Python' };
+
+  // The server's own report
+  const real = (await api(page, '/models')).body.execution;
+  await page.click('#lab-nav [data-view=models]');
+  await page.waitForSelector('#md-exec');
+  assert.equal(await page.textContent('#md-exec-mode'), real.mode === 'sandbox' ? 'On: in the isolated sandbox, only when you click Run' : 'Off');
+  assert.equal(await page.textContent('#md-exec-langs'), real.languages.map(l => LABEL[l]).join(', ') || 'none');
+  if (real.isolation) {
+    const iso = await page.textContent('#md-exec-isolation');
+    assert.ok(iso.includes(real.isolation.network) && iso.includes(real.isolation.limits), iso);
+    assert.match(iso, new RegExp('Network namespace: ' + (real.isolation.networkNamespace ? 'yes' : 'no')));
+  }
+  assert.match(await page.textContent('#md-exec-limits'), new RegExp('per run · ' + real.limits.memoryMb + ' MB memory \\(Python ' + real.limits.pythonMemoryMb + ' MB\\)'));
+  assert.equal(await page.$('#md-exec-unavailable'), null);
+
+  // As on Node 22.13–22.14 (Python can't run) with a mistyped setting: the page shows what /models says
+  const reason = 'Python coding rules need Node.js 22.15 or newer (this server runs Node.js 22.13.0).';
+  const warning = 'AI_LAB_SANDBOX_ISOLATION="nmespace" isn\'t auto, namespace or process: using namespace.';
+  let off = false;
+  await page.route('**/api/lab/models', async route => {
+    const res = await route.fetch();
+    const body = await res.json();
+    Object.assign(body.execution, { languages: body.execution.languages.filter(l => l !== 'python'), unavailable: [{ language: 'python', reason }], warnings: [warning] });
+    if (off) { body.codeExecution = 'off'; Object.assign(body.execution, { mode: 'off', isolation: null }); }
+    await route.fulfill({ response: res, json: body });
+  });
+  await page.click('#md-refresh');
+  await page.waitForSelector('#md-exec-unavailable');
+  assert.equal(await page.textContent('#md-exec-unavailable li'), 'Python: ' + reason);
+  assert.equal(await page.textContent('#md-exec-warnings li'), warning);
+  assert.doesNotMatch(await page.textContent('#md-exec-langs'), /Python/);
+
+  // The new-experiment form: Python is there but disabled, with the reason; a Codebook rule in Python still picks it, and says why it can't run
+  await page.evaluate(() => {
+    const s = JSON.parse(localStorage.getItem('strata_v1'));
+    s.codebook.find(d => d.id === 'stance').codingRule = { code: 'def classify(record, variable):\n    return None\n', language: 'python', version: 2 };
+    localStorage.setItem('strata_v1', JSON.stringify(s));
+  });
+  await page.click('#lab-nav [data-view=experiments]');
+  await page.click('#xp-new');
+  await page.waitForSelector('#xp-f-lang');
+  assert.deepEqual(await page.$$eval('#xp-f-lang option', os => os.map(o => [o.value, o.disabled, o.title])), [['javascript', false, ''], ['python', true, reason], ['typescript', false, '']]);
+  assert.match(await page.textContent('#xp-f-lang option[value=python]'), /can't run here/);
+  assert.equal(await page.inputValue('#xp-f-lang'), 'javascript');
+  assert.equal(await page.textContent('#xp-f-lang-why'), 'Can\'t run here: Python — ' + reason);
+  await page.check('#xp-new-form label.xp-var:has-text("Stance") input');
+  assert.equal(await page.isChecked('#xp-f-fromrule'), true);
+  assert.equal(await page.inputValue('#xp-f-lang'), 'python');
+  assert.match(await page.textContent('#xp-f-lang-na'), new RegExp('^Python can\'t run on this server: ' + reason.replace(/[.()]/g, '\\$&')));
+  await page.click('#xp-create');
+  await page.waitForSelector('#xp-editor .cm-editor', { timeout: 8000 });
+  // The workspace: the notice, the editor's language select, and Run says why
+  assert.match(await page.textContent('#xp-lang-na'), /^Python can't run on this server: /);
+  assert.equal(await page.$eval('#xp-lang option[value=python]', o => o.disabled), true);
+  assert.equal(await page.isDisabled('#xp-run'), true);
+  assert.equal(await page.getAttribute('#xp-run', 'title'), reason);
+
+  // Running code switched off: said plainly, without claiming how the server is configured
+  await page.route(/\/api\/lab\/experiments\/[^/?]+$/, async route => {
+    if (route.request().method() !== 'GET') return route.continue();
+    const res = await route.fetch();
+    const body = await res.json();
+    body.execution = { mode: 'off' };
+    await route.fulfill({ response: res, json: body });
+  });
+  await page.evaluate(() => Lab.route());
+  await page.waitForSelector('#xp-off');
+  const notice = await page.textContent('#xp-off');
+  assert.match(notice, /^Running code is switched off on this server\. You can still write/);
+  assert.doesNotMatch(notice, /AI_LAB_CODE_EXECUTION|=off/);
+  assert.equal(await page.isDisabled('#xp-run'), true);
+  off = true;
+  await page.click('#lab-nav [data-view=models]');
+  await page.waitForSelector('#md-exec-off');
+  assert.equal(await page.textContent('#md-exec-mode'), 'Off');
+  await page.click('#lab-nav [data-view=experiments]');
+  await page.click('#xp-new');
+  await page.waitForSelector('#xp-f-off');
 
   assert.deepEqual(errors, []);
   await context.close();

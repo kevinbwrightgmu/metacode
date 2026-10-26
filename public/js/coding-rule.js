@@ -69,19 +69,57 @@
     try { const t = JSON.stringify(v); return t === undefined ? null : { value: JSON.parse(t), bytes: utf8Bytes(t) }; } catch (e) { return null; }
   }
 
+  /* ── Codes ──────────────────────────────────── */
+
+  const codeIds = list => (Array.isArray(list) ? list.map(c => (isObj(c) ? c.id : c)).filter(id => typeof id === 'string') : []);
+  /**
+   * The code ids a rule can return: its contract's output codes (or, without
+   * them, the input variable's codes, as the Lab sends both). Accepts anything.
+   * @returns {string[]|null} null when the rule lists no codes
+   */
+  function ruleCodes(rule) {
+    const c = isObj(rule) && isObj(rule.contract) ? rule.contract : {};
+    const out = codeIds(isObj(c.output) ? c.output.codes : null);
+    if (out.length) return out;
+    const inp = codeIds(isObj(c.input) && isObj(c.input.variable) ? c.input.variable.codes : null);
+    return inp.length ? inp : null;
+  }
+  /**
+   * A rule's codes against a dimension's codes.
+   * @returns {{ rule: string[], dimension: string[], notInDimension: string[], notInRule: string[] }|null}
+   *   notInDimension: codes the rule can return that the variable doesn't have;
+   *   notInRule: the variable's codes the rule never returns. null when the rule lists no codes.
+   */
+  function compareCodes(rule, dimension) {
+    const r = ruleCodes(rule);
+    if (!r) return null;
+    const d = codeIds(isObj(dimension) ? dimension.codes : null);
+    return { rule: r, dimension: d, notInDimension: r.filter(id => !d.includes(id)), notInRule: d.filter(id => !r.includes(id)) };
+  }
+  /** A dimension's stored rule against its current codes (null: no rule, or it lists no codes). */
+  const codeDrift = dim => (isObj(dim) && isObj(dim.codingRule) ? compareCodes(dim.codingRule, dim) : null);
+  /** "a, b, c" (at most 12, then "and 3 more") */
+  function codeList(ids) {
+    const l = Array.isArray(ids) ? ids.map(String) : [];
+    return l.length ? l.slice(0, 12).join(', ') + (l.length > 12 ? ' and ' + (l.length - 12) + ' more' : '') : 'none';
+  }
+
   /* ── Validation ─────────────────────────────── */
 
   /**
    * Checks a CodingRule payload sent by the AI Coding Lab against the open
    * project's codebook.
-   * @returns {{ ok: boolean, problems: string[], dimension: object|null, rule: object|null, missingDimension: boolean }}
+   * @returns {{ ok: boolean, problems: string[], dimension: object|null, rule: object|null, missingDimension: boolean, codesMismatch: boolean, codes: object|null }}
    *   rule: a cleaned copy holding only the known fields (free text capped), when ok.
    *   missingDimension: the payload is otherwise fine but the codebook has no dimension with its dimensionId.
+   *   codes: compareCodes(payload, dimension) when the dimension is there (null otherwise, or when the rule lists no codes).
+   *   codesMismatch: the payload is otherwise fine but the rule can return codes the dimension doesn't have.
+   *   (Codes the dimension has and the rule never returns are fine: codes.notInRule, for a warning.)
    */
   function validateCodingRule(payload, codebook) {
     const problems = [];
     const bad = msg => { problems.push(msg); };
-    if (!isObj(payload)) return { ok: false, problems: ['The coding rule is missing or isn\'t an object.'], dimension: null, rule: null, missingDimension: false };
+    if (!isObj(payload)) return { ok: false, problems: ['The coding rule is missing or isn\'t an object.'], dimension: null, rule: null, missingDimension: false, codesMismatch: false, codes: null };
     const p = payload;
 
     if (p.schema !== SCHEMA) bad('Unknown format "' + cap(String(p.schema), 60) + '" (expected ' + SCHEMA + ').');
@@ -161,11 +199,16 @@
     if (!isDate(p.selectedAt)) bad('The selection time isn\'t a date.');
     if (!isDate(p.sentAt)) bad('The time it was sent isn\'t a date.');
 
-    // The variable must be in the open project's codebook
-    let dimension = null, missingDimension = false;
+    // The variable must be in the open project's codebook, with every code the rule can return
+    let dimension = null, missingDimension = false, codes = null, codesMismatch = false;
     if (typeof p.dimensionId === 'string' && ID_RE.test(p.dimensionId)) {
       dimension = (Array.isArray(codebook) ? codebook : []).find(d => isObj(d) && d.id === p.dimensionId) || null;
       if (!dimension) { missingDimension = true; bad('The open project\'s codebook has no variable with the id "' + p.dimensionId + '".'); }
+      else if ((codes = compareCodes(p, dimension)) && codes.notInDimension.length) {
+        codesMismatch = true;
+        bad('The rule can return codes that the variable “' + cap(str(dimension.name) || p.dimensionId, 80) + '” (' + p.dimensionId + ') in the open project doesn\'t have: ' + codeList(codes.notInDimension) +
+          '. The rule\'s codes: ' + codeList(codes.rule) + '; the variable\'s codes: ' + codeList(codes.dimension) + '.');
+      }
     }
 
     const ok = problems.length === 0;
@@ -202,7 +245,7 @@
       selectedAt: p.selectedAt,
       sentAt: p.sentAt
     } : null;
-    return { ok, problems, dimension, rule, missingDimension: missingDimension && problems.length === 1 };
+    return { ok, problems, dimension, rule, missingDimension: missingDimension && problems.length === 1, codesMismatch: codesMismatch && problems.length === 1, codes };
   }
 
   /* ── Changes to the codebook (new arrays; the input is never modified) ── */
@@ -219,22 +262,25 @@
   /**
    * Puts a coding rule on its dimension (after the user confirmed).
    * The current rule (if any) moves to the front of the history.
-   * Applying the submission that is already the dimension's rule changes nothing.
+   * Applying the submission that is already the dimension's rule changes nothing
+   * (also when the dimension's codes changed since: the Codebook marks that).
    * @returns {{ codebook: object[], changed: boolean, replaced: object|null }}
-   * @throws Error (with .problems) when the payload isn't valid for this codebook
+   * @throws Error (with .problems, .missingDimension, .codesMismatch) when the payload isn't valid for this codebook
    */
   function applyCodingRule(codebook, payload, now) {
     const v = validateCodingRule(payload, codebook);
+    const same = !!v.dimension && isObj(v.dimension.codingRule) && v.dimension.codingRule.submissionId === payload.submissionId;
+    if (same && (v.ok || v.codesMismatch)) return { codebook, changed: false, replaced: null };
     if (!v.ok) {
       const err = new Error('This coding rule can\'t be saved: ' + v.problems.join(' '));
       err.problems = v.problems;
       err.missingDimension = v.missingDimension;
+      err.codesMismatch = v.codesMismatch;
       throw err;
     }
     const idx = codebook.findIndex(d => isObj(d) && d.id === v.rule.dimensionId);
     const dim = codebook[idx];
     const current = isObj(dim.codingRule) ? dim.codingRule : null;
-    if (current && current.submissionId === v.rule.submissionId) return { codebook, changed: false, replaced: null };
 
     const at = toIso(now);
     const earlier = Array.isArray(dim.codingRuleHistory) ? dim.codingRuleHistory.filter(isObj) : [];
@@ -365,7 +411,7 @@
 
   return {
     SCHEMA, ID_RE, SAFE_ID_RE, SUBMISSION_ID_RE, LAB_ID_RE, MAX_CODE_BYTES, HISTORY_MAX, HISTORY_CODE_KEEP, LANGUAGES, LANGUAGE_LABELS,
-    validateCodingRule, applyCodingRule, removeCodingRule,
+    validateCodingRule, applyCodingRule, removeCodingRule, ruleCodes, compareCodes, codeDrift, codeList,
     isSafeId: id => typeof id === 'string' && SAFE_ID_RE.test(id),
     isVariableId: id => typeof id === 'string' && ID_RE.test(id),
     isSubmissionId: id => typeof id === 'string' && SUBMISSION_ID_RE.test(id),

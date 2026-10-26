@@ -443,7 +443,8 @@ function createCodeSandbox(opts) {
    */
   function supported(language) {
     if (!LANGUAGES.includes(/** @type {CodeLanguage} */ (language))) return { ok: false, reason: 'Coding rules can be written in JavaScript, TypeScript or Python.' };
-    if (!paths.permissionModelAvailable()) return { ok: false, reason: 'Running coding rules needs Node.js 22 or newer on the MetaCode server (Node\'s --permission model).' };
+    // (the stable --permission flag the children start with arrived in Node 22.13; 22.0–22.12 only have --experimental-permission)
+    if (!paths.permissionModelAvailable()) return { ok: false, reason: 'Running coding rules needs Node.js 22.13 or newer on the MetaCode server (for Node\'s --permission flag). Update Node.js.' };
     if (language === 'python') {
       if (!paths.moduleHooksAvailable()) return { ok: false, reason: 'Python coding rules need Node.js 22.15 or newer on the MetaCode server. Use JavaScript, or update Node.js.' };
       try { paths.pythonEnginePaths(); } catch (e) { return { ok: false, reason: 'The Python sandbox (Pyodide) isn\'t installed. Run "npm install" and restart MetaCode.' }; }
@@ -494,7 +495,7 @@ function createCodeSandbox(opts) {
   async function run(request, hooks) {
     const h = hooks || {};
     const s = settings();
-    if (s.mode !== 'sandbox') throw new LabError('execution_disabled', 'Running code is switched off on this server (AI_LAB_CODE_EXECUTION=off).', { status: 503 });
+    if (s.mode !== 'sandbox') throw new LabError('execution_disabled', 'Running code is switched off on this server (AI_LAB_CODE_EXECUTION isn\'t "sandbox").', { status: 503 });
     const req = checkRequest(request);
     const support = supported(req.language);
     if (!support.ok) throw new LabError('not_available', support.reason, { status: 503 });

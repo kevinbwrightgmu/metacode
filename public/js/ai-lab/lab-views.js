@@ -282,9 +282,40 @@
             '<td>' + (x.available === true ? 'yes' : x.available === false ? '<span class="badge badge-amber" title="Listed in this server\'s catalog, but not in the provider\'s own model list right now">not listed by the provider</span>' : 'unknown') + '</td>' +
             '<td>' + cap(x.capabilities.toolCalling) + '</td><td>' + (x.contextWindow ? fmt(x.contextWindow) : 'unknown') + '</td>' +
             '<td>' + (x.pricing ? esc(x.pricing.currency) + ' ' + x.pricing.input + ' in / ' + x.pricing.output + ' out <span class="lab-muted">(as of ' + esc(x.pricing.asOf || '?') + ')</span>' : '<span class="lab-muted">unknown</span>') + '</td></tr>').join('') + '</tbody></table></div>' : '') + '</div>').join('') +
+      executionCard(m.execution) +
       '<div class="lab-note">' + esc(m.notes.contextWindow || '') + ' Prices come from this server\'s price list' + (m.pricing.configured ? ' (as of ' + esc(m.pricing.asOf || '?') + ')' : ' — none is configured, so costs show as unknown') + '. Workbench and evaluation answers are never run. Only Code Experiments run code: in an isolated sandbox, when you click Run' + (m.codeExecution === 'sandbox' ? '' : ' (turned off on this server)') + '.</div>';
     $('md-refresh').onclick = () => Lab.route();
   });
+  // What this server can run for Code Experiments (/models → execution): as the server reports it
+  const LANG_LABEL = { javascript: 'JavaScript', typescript: 'TypeScript', python: 'Python' };
+  const ISOLATION_SETTING = { auto: 'the network namespace and process limits when this host has them', namespace: 'runs need the network namespace', process: 'process isolation only, no network namespace' };
+  function executionCard(ex) {
+    if (!ex || typeof ex !== 'object') return '';
+    const lang = l => esc(LANG_LABEL[l] || String(l));
+    const on = ex.mode === 'sandbox';
+    const langs = Array.isArray(ex.languages) ? ex.languages : [];
+    const unavailable = Array.isArray(ex.unavailable) ? ex.unavailable.filter(u => u && u.language) : [];
+    const warnings = Array.isArray(ex.warnings) ? ex.warnings : [];
+    const iso = ex.isolation && typeof ex.isolation === 'object' ? ex.isolation : null;
+    const lim = ex.limits || {};
+    const limits = [lim.timeoutMs ? Lab.ms(lim.timeoutMs) + ' per run' : '', lim.memoryMb ? fmt(lim.memoryMb) + ' MB memory' + (lim.pythonMemoryMb ? ' (Python ' + fmt(lim.pythonMemoryMb) + ' MB)' : '') : '',
+      lim.maxOutputKb ? (lim.maxOutputKb >= 1024 ? fmt(Math.round(lim.maxOutputKb / 102.4) / 10) + ' MB' : fmt(lim.maxOutputKb) + ' KB') + ' output' : '', lim.maxRunning ? plural(lim.maxRunning, 'run') + ' at once on this server' : ''].filter(Boolean);
+    return '<div class="card lab-section" id="md-exec"><div class="card-title">Code execution</div>' +
+      (ex.note ? '<p class="lab-second">' + esc(ex.note) + '</p>' : '') +
+      (on ? '' : '<div class="lab-warn mt-3" id="md-exec-off" role="status">Running code is switched off on this server. Code experiments can still be written, checked and compared, but not run.</div>') +
+      '<dl class="lab-kv mt-3 md-exec-kv">' +
+        '<dt>Running code</dt><dd id="md-exec-mode">' + (on ? 'On: in the isolated sandbox, only when you click Run' : 'Off') + '</dd>' +
+        '<dt>Languages that run here</dt><dd id="md-exec-langs">' + (langs.length ? langs.map(lang).join(', ') : 'none') + '</dd>' +
+        '<dt>Isolation setting</dt><dd>' + esc(String(ex.isolationSetting || '—')) + (ISOLATION_SETTING[ex.isolationSetting] ? ' <span class="lab-muted">(' + esc(ISOLATION_SETTING[ex.isolationSetting]) + ')</span>' : '') + '</dd>' +
+        (iso ? '<dt>Isolation on this host</dt><dd id="md-exec-isolation">' + ['engine', 'process', 'network', 'filesystem', 'environment', 'limits'].filter(k => iso[k]).map(k => esc(iso[k])).join('<br>') +
+          '<br><span class="lab-muted">Network namespace: ' + (iso.networkNamespace ? 'yes' : 'no') + '</span></dd>' : '<dt>Isolation on this host</dt><dd class="lab-muted">' + (on ? 'not reported' : 'not checked: running code is off') + '</dd>') +
+        (limits.length ? '<dt>Limits</dt><dd id="md-exec-limits">' + esc(limits.join(' · ')) + '</dd>' : '') +
+      '</dl>' +
+      (unavailable.length ? '<div class="lab-warn mt-3" id="md-exec-unavailable"><b>Can\'t run here</b><ul class="md-exec-list">' + unavailable.map(u => '<li><b>' + lang(u.language) + '</b>: ' + esc(String(u.reason || '')) + '</li>').join('') + '</ul></div>' : '') +
+      (warnings.length ? '<div class="lab-warn mt-3" id="md-exec-warnings"><b>Setting warnings</b><ul class="md-exec-list">' + warnings.map(w => '<li>' + esc(String(w)) + '</li>').join('') + '</ul></div>' : '') +
+      '</div>';
+  }
+  const plural = (n, one) => fmt(n) + ' ' + (n === 1 ? one : one + 's');
 
   /* ── Usage ────────────────────────────────── */
   Lab.view('usage', async main => {

@@ -23,6 +23,7 @@ import builtins as _builtins
 import inspect as _inspect
 import json as _json
 import linecache as _linecache
+import re as _re
 import sys as _sys
 import time as _time
 import traceback as _traceback
@@ -53,6 +54,81 @@ for _name in ("system", "popen", "fork", "forkpty", "execv", "execve", "execl", 
     if hasattr(_os, _name):
         setattr(_os, _name, _no_processes)
 del _name
+
+
+# ── Runtime audit hook (defence in depth; can't be removed) ───────────────────
+# Installed after the prelude's own imports and armed just before user code.
+# Even code that reaches Python's internals past the static policy (e.g. via a
+# str.format field or a reached real __import__) is refused the dangerous
+# *operations* themselves: opening files, running programs, sockets, ctypes,
+# and building/running code at run time. The events fire from the C
+# implementations, so reaching a module another way (e.g. raw `_socket`) is
+# caught all the same. We do NOT block `import` by module name here: CPython's
+# own standard library imports "system" modules internally (e.g. _strptime
+# imports _thread, time and locale), so a run-time import allow-list breaks
+# legitimate allowed-module calls. The module allow-list is enforced instead by
+# the static policy and the guarded importer (direct user imports), while the
+# operation events above neutralise what a reached module could actually do.
+_AUDIT_ENFORCE = False       # armed in __metacode_run, before the user's code runs
+_AUDIT_PROCESS_EVENTS = frozenset((
+    "os.system", "os.exec", "os.posix_spawn", "os.spawn", "os.fork", "os.forkpty", "subprocess.Popen",
+))
+
+
+def _audit_in_import():
+    """True when the current operation is the import machinery reading a
+    module's own source, so legitimately importing an allowed module at call
+    time isn't mistaken for the user opening a file."""
+    try:
+        frame = _sys._getframe(2)
+    except BaseException:
+        return False
+    while frame is not None:
+        name = frame.f_code.co_filename
+        if "importlib" in name or name.startswith("<frozen "):
+            return True
+        frame = frame.f_back
+    return False
+
+
+def _audit_user_on_stack():
+    """True when a frame of the user's own file is executing right now. Used to
+    block exec/compile only for the user's code: the harness compiles the
+    user's code and renders tracebacks (which parse source lines) itself, and
+    those must not be mistaken for the user building code at run time."""
+    try:
+        frame = _sys._getframe(2)
+    except BaseException:
+        return False
+    while frame is not None:
+        if frame.f_code.co_filename == _USER_FILE:
+            return True
+        frame = frame.f_back
+    return False
+
+
+def _audit_hook(event, args):
+    if not _AUDIT_ENFORCE:
+        return
+    if event == "open":
+        if _audit_in_import():
+            return
+        raise PermissionError("Opening files isn't available in the MetaCode sandbox")
+    if event in _AUDIT_PROCESS_EVENTS:
+        raise PermissionError("Running programs isn't available in the MetaCode sandbox")
+    if event.startswith("socket."):
+        raise PermissionError("Network access isn't available in the MetaCode sandbox")
+    if event.startswith("ctypes."):
+        raise PermissionError("Calling native code (ctypes) isn't available in the MetaCode sandbox")
+    if event in ("exec", "compile") and _audit_user_on_stack():
+        raise PermissionError("Building or running code at run time isn't available in the MetaCode sandbox")
+
+
+try:
+    _sys.addaudithook(_audit_hook)
+    _AUDIT_AVAILABLE = True
+except BaseException:   # Pyodide builds without audit-hook support: the static policy and reduced builtins still apply.
+    _AUDIT_AVAILABLE = False
 
 
 # ── Static policy (rule names match ai-lab/code-policy.js where they apply) ──
@@ -86,6 +162,11 @@ _FORBIDDEN_CALLS = {
 }
 _ATTR_FUNCTIONS = ("getattr", "setattr", "delattr")
 _ATTR_FACTORIES = ("attrgetter", "methodcaller")
+# str.format field specs ("{0.__class__}") and string.Formatter do attribute/
+# item traversal at run time from a plain string the AST can't see; forbid the
+# APIs that read a format/field string other than the checked str.format.
+_FORBIDDEN_FORMAT_ATTRS = frozenset(("format_map", "vformat", "get_field", "Formatter"))
+_DUNDER_TOKEN = _re.compile(r"__[A-Za-z0-9]+__")
 _ALLOWED_DUNDER_ATTRS = frozenset(("__name__", "__doc__", "__init__"))
 _ALLOWED_DUNDER_STRINGS = frozenset(("__name__", "__doc__", "__init__", "__main__"))
 _FORBIDDEN_NAMES = frozenset(("__builtins__", "__loader__", "__spec__", "__import__", "__file__"))
@@ -98,10 +179,6 @@ _MODULE_LEAKS = frozenset((
 _HIDDEN_WORDS = ("__import__", "importlib", "subprocess", "os.system", "os.popen", "socket", "builtins",
                  "__subclasses__", "__globals__", "__builtins__", "__class__", "__bases__", "__mro__", "__code__")
 _NOW_ATTRS = frozenset(("now", "utcnow", "today"))
-
-
-def _is_dunder(name):
-    return len(name) > 4 and name.startswith("__") and name.endswith("__")
 
 
 def _module_advice(top, allowed):
@@ -228,12 +305,31 @@ class _Policy:
                 self.add("forbidden_call", "error", "%s() needs constant names without double underscores." % name, node)
         if name == "fromhex":
             self.add("obfuscation", "warning", "bytes.fromhex() hides text in hex, which makes the code hard to check.", node)
+        if name in _FORBIDDEN_FORMAT_ATTRS:
+            self.add("forbidden_call", "error",
+                     "%s isn't available: it reads attribute or item access from a string at run time, which the policy can't inspect (plain str.format with a checked field string is fine)." % name, node)
 
-    def _check_string(self, node):
-        value = node.value
-        if _is_dunder(value) and value not in _ALLOWED_DUNDER_STRINGS:
+    # A string literal, or a '+' chain of only string literals folded into one
+    # ('{0.' + '__cla' + 'ss__}'): otherwise the dunder check below is evaded by
+    # splitting the name across concatenation.
+    def _fold_str(self, node):
+        if isinstance(node, _ast.Constant) and isinstance(node.value, str):
+            return node.value
+        if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
+            left = self._fold_str(node.left)
+            if left is None:
+                return None
+            right = self._fold_str(node.right)
+            if right is None:
+                return None
+            return left + right
+        return None
+
+    def _check_string(self, value, node):
+        bad = [t for t in _DUNDER_TOKEN.findall(value) if t not in _ALLOWED_DUNDER_STRINGS]
+        if bad:
             self.add("forbidden_attribute", "error",
-                     "The string '%s' names one of Python's internals; reaching internals by name isn't allowed." % value[:40], node)
+                     "The string '%s' names one of Python's internals ('%s'); reaching internals by name isn't allowed." % (value[:40], bad[0]), node)
             return
         for word in _HIDDEN_WORDS:
             if word in value:
@@ -260,10 +356,15 @@ class _Policy:
         bound = self._bound_names(tree)
         refused = self._refused_names(tree)
         called = set()
+        inner_binops = set()   # '+' chains that are part of a larger folded chain (checked once, at the top)
         chr_calls = 0
         for node in _ast.walk(tree):
             if isinstance(node, _ast.Call):
                 called.add(id(node.func))
+            elif isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
+                for side in (node.left, node.right):
+                    if isinstance(side, _ast.BinOp) and isinstance(side.op, _ast.Add) and self._fold_str(side) is not None:
+                        inner_binops.add(id(side))
 
         for node in _ast.walk(tree):
             if isinstance(node, (_ast.Import, _ast.ImportFrom)):
@@ -281,6 +382,9 @@ class _Policy:
                     elif node.id in _ATTR_FUNCTIONS + _ATTR_FACTORIES and node.id not in bound:
                         self.add("forbidden_call", "error",
                                  "%s may only be called directly with a constant name (passing it around hides what it reaches)." % node.id, node)
+                    elif node.id == "Formatter" and node.id not in bound:
+                        self.add("forbidden_call", "error",
+                                 "Formatter isn't available: it reads attribute or item access from a string at run time, which the policy can't inspect.", node)
                     elif node.id == "chr":
                         chr_calls += 4   # map(chr, …) and the like
             elif isinstance(node, _ast.Attribute):
@@ -288,6 +392,9 @@ class _Policy:
                 if attr.startswith("__") and attr not in _ALLOWED_DUNDER_ATTRS:
                     self.add("forbidden_attribute", "error",
                              "Attribute '%s' is off limits: double-underscore attributes reach Python's internals." % attr, node)
+                elif attr in _FORBIDDEN_FORMAT_ATTRS and id(node) not in called:
+                    self.add("forbidden_call", "error",
+                             "%s isn't available: it reads attribute or item access from a string at run time, which the policy can't inspect." % attr, node)
                 elif attr in _MODULE_LEAKS and not (isinstance(node.value, _ast.Name) and node.value.id in refused):
                     self.add("forbidden_attribute", "error",
                              "'.%s' reaches a system module through another module; the sandbox has no files, programs or network." % attr, node)
@@ -302,7 +409,11 @@ class _Policy:
                         self.add("forbidden_attribute", "error",
                                  "Attribute '%s' is off limits: double-underscore attributes reach Python's internals." % attr, node)
             elif isinstance(node, _ast.Constant) and isinstance(node.value, str):
-                self._check_string(node)
+                self._check_string(node.value, node)
+            elif isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add) and id(node) not in inner_binops:
+                folded = self._fold_str(node)
+                if folded is not None:
+                    self._check_string(folded, node)
             elif isinstance(node, _ast.While):
                 test = node.test
                 if isinstance(test, _ast.Constant) and test.value and not self._exits(node.body):
@@ -343,13 +454,22 @@ _REMOVED_BUILTINS = ("open", "eval", "exec", "compile", "input", "breakpoint", "
                      "locals", "vars", "memoryview", "__loader__", "__spec__")
 
 
+# Private helpers that allowed modules import from C code through the *calling* frame's
+# builtins — e.g. datetime.strptime imports _strptime while the rule's frame is on top. The
+# static policy still refuses `import _strptime` written in a rule; this only lets the
+# allowed modules work.
+_INTERNAL_HELPERS = frozenset(("_strptime", "_datetime", "_pydatetime", "_decimal", "_pydecimal", "_json",
+                               "_heapq", "_bisect", "_random", "_statistics", "_string", "_sre",
+                               "_functools", "_operator", "_collections", "_collections_abc", "_abc"))
+
+
 def _safe_builtins(allowed):
     allowed = frozenset(allowed)
     real_import = _builtins.__import__
 
     def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
         top = str(name).split(".")[0]
-        if level or top not in allowed:
+        if level or (top not in allowed and top not in _INTERNAL_HELPERS):
             raise ImportError("Module '%s' isn't available in the MetaCode sandbox" % name)
         return real_import(name, globals, locals, fromlist, level)
 
@@ -378,6 +498,29 @@ def _record_error(exc):
 
 def _dumps(value):
     return _json.dumps(value, ensure_ascii=False, allow_nan=False)
+
+
+_INF = float("inf")
+
+
+def _finite(value):
+    """Carry non-finite floats across the JSON bridge as {"$nonfinite": "NaN"|
+    "Infinity"|"-Infinity"} instead of letting json raise (which would turn a
+    NaN confidence into a per-record error); the parent then reports it as an
+    output problem and fails the run, like the JavaScript harness."""
+    if isinstance(value, float):
+        if value != value:
+            return {"$nonfinite": "NaN"}
+        if value == _INF:
+            return {"$nonfinite": "Infinity"}
+        if value == -_INF:
+            return {"$nonfinite": "-Infinity"}
+        return value
+    if isinstance(value, dict):
+        return {k: _finite(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_finite(v) for v in value]
+    return value
 
 
 def _fail(kind, message):
@@ -419,9 +562,11 @@ def _one(classify, record, variable_json):
             if hasattr(out, "close"):
                 out.close()
         else:
-            out_json = _dumps(out)
+            out_json = _dumps(_finite(out))
             if len(out_json) > _MAX_RESULT_CHARS:
-                problem = "classify returned %d KB for one record (at most %d KB)" % (len(out_json) // 1024, _MAX_RESULT_CHARS // 1024)
+                # Too big to carry back: send a marker so the parent reports it
+                # as an output problem (and fails the run), not a record error.
+                out_json = '{"$oversized": %d}' % len(out_json)
     except BaseException:  # noqa: BLE001 — not serialisable (or too deep)
         problem = "classify returned a value that isn't JSON"
     if problem:
@@ -430,6 +575,7 @@ def _one(classify, record, variable_json):
 
 
 async def __metacode_run(code, init_json):
+    global _AUDIT_ENFORCE
     try:
         init = _json.loads(init_json)
         allowed = list(init.get("allowedModules") or [])
@@ -442,6 +588,16 @@ async def __metacode_run(code, init_json):
             first = blocking[0]
             where = " (line %s)" % first["line"] if first["line"] else ""
             return _fail("policy_blocked", first["message"] + where)
+
+        # Preload the allowed modules while the audit hook is still off, so a
+        # rule that uses them hits cached imports; then arm the hook before the
+        # user's code runs.
+        for _m in list(allowed) + ["_strptime"]:
+            try:
+                _builtins.__import__(_m)
+            except BaseException:
+                pass
+        _AUDIT_ENFORCE = _AUDIT_AVAILABLE
 
         _linecache.cache[_USER_FILE] = (len(code), None, code.splitlines(True), _USER_FILE)
         g = {"__name__": "metacode_rule", "__builtins__": _safe_builtins(allowed)}

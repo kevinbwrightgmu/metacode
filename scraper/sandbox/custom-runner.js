@@ -29,7 +29,7 @@ const PASS_HEADERS = ['content-type', 'content-length', 'etag', 'last-modified',
 // the AI Coding Lab's runner); the wording here is the scraper's.
 function sandboxSupported(language) {
   if (!permissionModelAvailable()) {
-    return { ok: false, reason: 'The custom-code sandbox needs Node.js 22 or newer (Node\'s --permission model).' };
+    return { ok: false, reason: 'The custom-code sandbox needs Node.js 22.13 or newer (Node\'s --permission flag).' };
   }
   if (language === 'python') return pythonSupported();
   try { sandboxReadablePaths(); } catch (e) {

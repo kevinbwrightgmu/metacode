@@ -169,7 +169,30 @@ test('JavaScript escape attempts (static check bypassed, runner called directly)
   assert.deepEqual(JSON.parse(out.outputs[0].out.reason), {
     process: 'undefined', require: 'undefined', module: 'undefined', hostCall: 'undefined', hostSend: 'undefined',
     fetch: 'undefined', setTimeout: 'undefined', WebSocket: 'undefined',
-    constructorChain: 'undefined', viaRecord: 'undefined', globalThisProcess: 'undefined', hostGlobals: ''
+    // The prelude removes eval/Function and makes every route to the Function
+    // constructor throw, so "code from strings" can't be reached at run time.
+    constructorChain: 'error', viaRecord: 'error', globalThisProcess: 'error', hostGlobals: ''
+  });
+});
+
+test('JavaScript: no code built from strings at run time (eval/Function removed, constructor routes throw, honest code unaffected)', { skip: skipJs }, async () => {
+  const out = await sandbox().run({ language: 'javascript', records: records(1), variable: VARIABLE, code: `
+    function classify(record) {
+      const p = {};
+      p.evalType = typeof eval;
+      p.functionType = typeof Function;
+      // The computed-member bypass the static policy can't see: fn["con"+"structor"].
+      p.computedCtor = (function () { try { var k = 'con' + 'structor'; return typeof (function () {})[k]('return 1'); } catch (e) { return 'error'; } })();
+      p.asyncCtor = (function () { try { return typeof (async function () {}).constructor('return 1'); } catch (e) { return 'error'; } })();
+      p.genCtor = (function () { try { return typeof (function * () {}).constructor('return 1'); } catch (e) { return 'error'; } })();
+      // Honest code — arithmetic, arrays, JSON, regex — keeps working.
+      p.honest = (1 + 2) + '|' + [3, 1, 2].sort().join(',') + '|' + JSON.parse('[4]')[0] + '|' + (/\\d+/.test(record.id));
+      return { code: null, reason: JSON.stringify(p) };
+    }` });
+  assert.equal(out.ok, true, JSON.stringify(out.failure));
+  assert.deepEqual(JSON.parse(out.outputs[0].out.reason), {
+    evalType: 'undefined', functionType: 'undefined', computedCtor: 'error', asyncCtor: 'error', genCtor: 'error',
+    honest: '3|1,2,3|4|true'
   });
 });
 
@@ -443,6 +466,50 @@ test('Python runtime guards hold without the static policy (test-only prelude ed
   assert.match(reasons.subclasses_os, /^PermissionError: Running programs isn't available/);
 });
 
+test('Python policy: str.format field specs reaching internals by name are blocked (split dunder literals, Formatter.get_field/vformat, format_map); honest format strings still pass', { skip: skipPy }, async () => {
+  const analyze = async code => (await sandbox({ timeoutMs: 10000 }).run({ language: 'python', mode: 'analyze', variable: VARIABLE, code })).policy;
+  const errs = findings => findings.filter(f => f.severity === 'error');
+  // Split a dunder across '+' to dodge the string check, then traverse with str.format → now a folded forbidden_attribute error.
+  let f = await analyze("def classify(record, variable):\n    return ('{0.' + '__cla' + 'ss__}').format(record)\n");
+  assert.ok(errs(f).some(x => x.rule === 'forbidden_attribute' && x.line === 2), JSON.stringify(f));
+  f = await analyze("def classify(record, variable):\n    return ('{0.' + '__globa' + 'ls__}').format(classify)\n");
+  assert.ok(errs(f).some(x => x.rule === 'forbidden_attribute' && x.line === 2), JSON.stringify(f));
+  // string.Formatter().get_field / vformat / str.format_map read a field string the AST can't inspect → forbidden_call.
+  f = await analyze("import string\ndef classify(record, variable):\n    return string.Formatter().get_field('0.' + '__globa' + 'ls__', (classify,), {})\n");
+  assert.ok(errs(f).some(x => x.rule === 'forbidden_call' && x.line === 3), JSON.stringify(f));
+  f = await analyze("def classify(record, variable):\n    return '{x}'.format_map({'x': 1})\n");
+  assert.ok(errs(f).some(x => x.rule === 'forbidden_call' && x.line === 2), JSON.stringify(f));
+  f = await analyze("from string import Formatter\ndef classify(record, variable):\n    return Formatter()\n");
+  assert.ok(errs(f).some(x => x.rule === 'forbidden_call'), JSON.stringify(f));
+  // Legit format strings and plain concatenation are untouched.
+  f = await analyze("def classify(record, variable):\n    return '{0.name}: {1:.2f}'.format(record, 3.0) + '{}'.format(record['id']) + ('a' + 'b')\n");
+  assert.deepEqual(errs(f), [], JSON.stringify(f));
+});
+
+test('Python audit hook: files, programs, sockets and run-time code are refused even past the static policy (test-only prelude edit)', { skip: skipPy }, async () => {
+  const t = tap(start => Object.assign({}, start, { preludeSource: start.preludeSource.replace('_ENFORCE_POLICY = True', '_ENFORCE_POLICY = False') }));
+  // Each probe reaches a real module past the reduced builtins, then performs a
+  // high-risk operation the sys.addaudithook guard refuses. Before this guard,
+  // os.open/os.read read host-engine files and exec ran code from a string.
+  const probes = {
+    os_open: 'imp = [c for c in ().__class__.__base__.__subclasses__() if c.__name__ == "BuiltinImporter"][0]\n        o = imp.load_module("os")\n        fd = o.open("/lib", 0)\n        o.close(fd)',
+    socket_connect: 'imp = [c for c in ().__class__.__base__.__subclasses__() if c.__name__ == "BuiltinImporter"][0]\n        s = imp.load_module("_socket").socket()\n        s.connect(("1.1.1.1", 80))',
+    exec_after_load: 'b = [c for c in ().__class__.__base__.__subclasses__() if c.__name__ == "catch_warnings"][0].__init__.__globals__["__builtins__"]\n        b["exec"]("x = 1")'
+  };
+  const code = ['PROBES = {}'];
+  for (const [name, body] of Object.entries(probes)) code.push('def probe_' + name + '():', '        ' + body, 'PROBES["' + name + '"] = probe_' + name);
+  code.push('def classify(record, variable):', '    try:', '        PROBES[record["id"]]()', '        return {"code": None, "reason": "OPEN"}',
+    '    except BaseException as e:', '        return {"code": None, "reason": type(e).__name__ + ": " + str(e)[:200]}', '');
+  const input = Object.keys(probes).map(id => ({ id, text: '', author: '', timestamp: '', meta: {} }));
+  const out = await sandbox({ timeoutMs: 15000 }, { spawnChild: t.spawnChild }).run({ language: 'python', variable: VARIABLE, records: input, code: code.join('\n') });
+  assert.equal(out.ok, true, JSON.stringify(out.failure));
+  const reasons = Object.fromEntries(out.outputs.map(o => [o.id, o.out ? o.out.reason : o.error]));
+  for (const name of Object.keys(probes)) assert.ok(!/^OPEN/.test(reasons[name]), name + ' was not refused: ' + reasons[name]);
+  assert.match(reasons.os_open, /^PermissionError: Opening files isn't available/);
+  assert.match(reasons.socket_connect, /^PermissionError: Network access isn't available/);
+  assert.match(reasons.exec_after_load, /^PermissionError: Building or running code at run time isn't available/);
+});
+
 test('Python: a busy loop the policy can\'t see is stopped at the time limit (counted after start-up)', { skip: skipPy }, async () => {
   const c = collector();
   const t0 = Date.now();
@@ -452,6 +519,46 @@ test('Python: a busy loop the policy can\'t see is stopped at the time limit (co
   assert.ok(out.bootMs > 0 && out.durationMs >= 900 && out.durationMs < 4000, out.bootMs + ' / ' + out.durationMs);
   assert.ok(Date.now() - t0 < 30000);
   assert.ok(c.pid && gone(c.pid));
+});
+
+test('non-finite confidence and oversized results become output problems (stage 5), not silent nulls or per-record errors', { skip: skipJs }, async t => {
+  let policy;
+  try { policy = require('../ai-lab/code-policy'); } catch (e) { return t.skip('ai-lab/code-policy.js is not in this checkout yet'); }
+  const check = async (language, code, n) => {
+    const input = records(n);
+    const out = await sandbox({ timeoutMs: 15000 }).run({ language, variable: VARIABLE, records: input, code });
+    assert.equal(out.ok, true, language + ': ' + JSON.stringify(out.failure));
+    const v = policy.validateOutputs(out.outputs, input, VARIABLE);
+    return { out, v };
+  };
+
+  // JavaScript: NaN/Infinity confidence used to be serialised to null (no problem at all);
+  // now it is carried across the bridge and fails the run as "out of range".
+  let { out, v } = await check('javascript', 'function classify(r) {\n' +
+    '  if (r.id === "r0") return { code: "pos", confidence: 0 / 0 };\n' +
+    '  if (r.id === "r1") return { code: "pos", confidence: 1 / 0 };\n' +
+    '  if (r.id === "r2") return { code: "pos", confidence: -1 / 0 };\n' +
+    '  if (r.id === "r3") return { code: "pos", reason: "x".repeat(70000) };\n' +
+    '  return "neg";\n}', 5);
+  assert.equal(v.validation.valid, false);
+  const jsProblems = v.validation.problems;
+  assert.equal(jsProblems.filter(p => /confidence must be a finite number between 0 and 1/.test(p.problem)).length, 3, JSON.stringify(jsProblems));
+  assert.ok(jsProblems.some(p => p.id === 'r3' && /too large/.test(p.problem)), JSON.stringify(jsProblems));
+  // The assigned code is dropped for the bad records; they are output problems, not record errors.
+  assert.ok(out.outputs.every(o => o.error === undefined), 'no per-record errors');
+
+  // Python: NaN confidence used to be a per-record "isn't JSON" error; an oversized reason used to
+  // succeed as a per-record error. Both now become output problems that fail the run.
+  ({ out, v } = await check('python', 'def classify(record, variable):\n' +
+    '    if record["id"] == "r0":\n        return {"code": "pos", "confidence": float("nan")}\n' +
+    '    if record["id"] == "r1":\n        return {"code": "pos", "confidence": float("inf")}\n' +
+    '    if record["id"] == "r2":\n        return {"code": "pos", "reason": "x" * 70000}\n' +
+    '    return "neg"\n', 5));
+  assert.equal(v.validation.valid, false);
+  const pyProblems = v.validation.problems;
+  assert.ok(pyProblems.filter(p => /confidence must be a finite number between 0 and 1/.test(p.problem)).length >= 2, JSON.stringify(pyProblems));
+  assert.ok(pyProblems.some(p => p.id === 'r2' && /too large/.test(p.problem)), JSON.stringify(pyProblems));
+  assert.ok(out.outputs.filter(o => o.id === 'r0' || o.id === 'r1' || o.id === 'r2').every(o => o.error === undefined), 'NaN/oversized are not per-record errors');
 });
 
 /* ── The parent's own caps, against a child that misbehaves ─────── */
@@ -590,4 +697,20 @@ test('server-wide cap: runs beyond maxRunning wait for a free slot', { skip: ski
   assert.equal(most, 1);
   assert.equal(children.length, 3);
   assert.deepEqual(sb.stats(), { running: 0, waiting: 0 });
+});
+
+test('Python: allowed modules that import private helpers from C code work (datetime.strptime → _strptime); a rule still can\'t import a helper itself', { skip: skipPy }, async () => {
+  const c = collector();
+  const out = await sandbox({ timeoutMs: 10000 }).run({ language: 'python', variable: VARIABLE, records: records(2), code: [
+    'import datetime, statistics, difflib',
+    'def classify(record, variable):',
+    '    d = datetime.datetime.strptime(record["timestamp"], "%Y-%m-%d")',
+    '    print("year", d.year, statistics.mean([1, 2, 3]), round(difflib.SequenceMatcher(None, "ab", "ac").ratio(), 2))',
+    '    return "pos" if d.day % 2 else "neg"',
+    ''].join('\n') }, c.hooks);
+  assert.equal(out.ok, true, JSON.stringify(out.failure));
+  assert.deepEqual(out.outputs.map(o => o.error || null), [null, null], JSON.stringify(out.outputs));
+  assert.ok(c.logs.some(l => /year 2024 2 0\.5/.test(l.text)), JSON.stringify(c.logs));
+  const policy = (await sandbox({ timeoutMs: 10000 }).run({ language: 'python', mode: 'analyze', variable: VARIABLE, code: 'import _strptime\ndef classify(record, variable):\n    return None\n' })).policy;
+  assert.ok(policy.some(f => f.severity === 'error' && f.rule === 'forbidden_import' && f.line === 1), JSON.stringify(policy));
 });

@@ -18,6 +18,9 @@ const { mockSupabase, mockStripe } = require('./helpers/account-mocks');
 const { testEnv } = require('./helpers/harness');
 const { startEmis } = require('./helpers/lab-mocks');
 const { createCodeSandbox } = require('../ai-lab/code-sandbox');
+const { LabStore } = require('../ai-lab/store');
+const CP = require('../ai-lab/code-policy');
+const C = require('../ai-lab/checks');
 const CodingRule = require('../public/js/coding-rule.js');
 
 const KEY = 'sb_publishable_LabExperiments_0123456789';
@@ -152,6 +155,9 @@ test('access and models report code execution; plans without the Lab get 402', a
   assert.equal(models.json.execution.limits.timeoutMs, 15000);
   if (!skipJs) assert.ok(models.json.execution.languages.includes('javascript'));
   assert.ok(models.json.execution.isolation && typeof models.json.execution.isolation.networkNamespace === 'boolean');
+  assert.ok(Array.isArray(models.json.execution.unavailable), 'unavailable: [{language, reason}]');
+  models.json.execution.unavailable.forEach(x => { assert.equal(typeof x.language, 'string'); assert.match(x.reason, /\S/); });
+  assert.deepEqual(models.json.execution.warnings, []);
   for (const [m, p] of [['GET', '/api/lab/experiments'], ['GET', '/api/lab/sandboxes'], ['POST', '/api/lab/sandboxes/import'], ['GET', '/api/lab/codebook-submissions/cbs_AAAAAAAAAAAAAAAA']]) {
     const r = await api(m, p, 'free', m === 'POST' ? {} : undefined);
     assert.equal(r.status, 402, m + ' ' + p);
@@ -394,7 +400,7 @@ test('full flow: generate → policy and review stored → run → metrics → r
   assert.equal(sel.json.experiment.selected.codeHash, v2.codeHash);
   assert.equal((await me.del(xp(e.id) + '/select')).json.experiment.selected, null);
   assert.equal((await me.post(xp(e.id) + '/codebook', { idempotencyKey: 'k1' })).status, 409, 'nothing selected');
-  await me.post(xp(e.id) + '/select', { version: 2, rationale: 'Covers every post.' });
+  const selected = (await me.post(xp(e.id) + '/select', { version: 2, rationale: 'Covers every post.' })).json.experiment.selected;
   const list = await me.get('/api/lab/experiments');
   const summary = list.json.experiments.find(x => x.id === e.id);
   assert.equal(summary.versionCount, 3);
@@ -403,9 +409,10 @@ test('full flow: generate → policy and review stored → run → metrics → r
   assert.equal(summary.bestScore, 1);
   assert.deepEqual(summary.variable, { id: 'stance', name: 'Stance' });
 
-  // Send to Codebook: idempotent by key; a failed submission can still be applied; applied stays applied
-  const key = e.id + ':2:' + v2.codeHash;
-  assert.ok(key.length > 80, 'the Lab\'s key format is longer than 80 characters');
+  // Send to Codebook: idempotent by key; a failed submission is offered again when sent again; applied stays applied
+  const key = [e.id, 2, v2.codeHash, run2.id, selected.selectedAt].join(':');
+  assert.ok(key.length > 80 && key.length <= 160, 'the Lab\'s key format (experiment:version:hash:run:selectedAt) fits the limit: ' + key.length);
+  ctx.submissionKey = key;
   const sub = await me.post(xp(e.id) + '/codebook', { idempotencyKey: key });
   assert.equal(sub.status, 201, sub.text);
   const submission = sub.json.submission;
@@ -435,10 +442,15 @@ test('full flow: generate → policy and review stored → run → metrics → r
   let rr = await me.post('/api/lab/codebook-submissions/' + submission.id + '/result', { status: 'failed', error: 'Cancelled in MetaCode' });
   assert.equal(rr.json.submission.status, 'failed');
   assert.equal(rr.json.submission.error, 'Cancelled in MetaCode');
-  const retry = await me.post(xp(e.id) + '/codebook', { idempotencyKey: key });
+  const plain = await me.post(xp(e.id) + '/codebook', { idempotencyKey: key });
+  assert.equal(plain.status, 200);
+  assert.equal(plain.json.submission.status, 'failed', 'without resend the submission comes back as it is');
+  const retry = await me.post(xp(e.id) + '/codebook', { idempotencyKey: key, resend: true });
   assert.equal(retry.status, 200);
   assert.equal(retry.json.submission.id, submission.id);
-  assert.equal(retry.json.submission.status, 'pending', 'a retry offers the failed submission again');
+  assert.equal(retry.json.submission.status, 'pending', 'sending again offers the failed submission again');
+  assert.equal(retry.json.submission.error, null);
+  assert.equal(typeof retry.json.submission.resentAt, 'string');
   assert.equal((await me.post('/api/lab/codebook-submissions/' + submission.id + '/result', { status: 'applied', dimensionId: 'other' })).status, 400);
   rr = await me.post('/api/lab/codebook-submissions/' + submission.id + '/result', { status: 'applied', dimensionId: 'stance' });
   assert.equal(rr.json.submission.status, 'applied');
@@ -712,6 +724,333 @@ test('administrators see run counts (no content)', async () => {
   assert.equal((await as('ultra').get('/api/lab/admin/metrics')).status, 403);
 });
 
+const userKey = who => require('crypto').createHash('sha256').update('metacode-lab:' + U[who].id).digest('hex').slice(0, 40);
+
+test('Send to Codebook: a key is one send of one selection; the selection is checked first; resend offers it again', { skip: skipJs }, async () => {
+  const me = as('ultra');
+  const e = ctx.exp;
+  const k1 = ctx.submissionKey;
+  // The same selection: the same submission, unchanged without resend
+  let r = await me.post(xp(e.id) + '/codebook', { idempotencyKey: k1 });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.submission.id, ctx.submission.id);
+  assert.equal(r.json.submission.status, 'applied');
+  // Resend (a click on Send): offered to the app again even though it was applied (the rule may have been removed there)
+  r = await me.post(xp(e.id) + '/codebook', { idempotencyKey: k1, resend: true });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.submission.id, ctx.submission.id);
+  assert.equal(r.json.submission.status, 'pending');
+  assert.equal(r.json.submission.resolvedAt, null);
+  assert.equal(typeof r.json.submission.resentAt, 'string');
+  assert.equal((await me.post('/api/lab/codebook-submissions/' + ctx.submission.id + '/result', { status: 'applied', dimensionId: 'stance' })).json.submission.status, 'applied');
+  // No selection: refused, also for a key that was used before (and nothing is re-offered)
+  assert.equal((await me.del(xp(e.id) + '/select')).status, 200);
+  for (const body of [{ idempotencyKey: k1 }, { idempotencyKey: k1, resend: true }]) {
+    r = await me.post(xp(e.id) + '/codebook', body);
+    assert.equal(r.status, 409, r.text);
+    assert.equal(r.json.error.type, 'no_selection');
+  }
+  // v2 runs again on held-out records and is selected again with another rationale: the old key is an earlier selection's
+  const run3 = await runVersion('ultra', e.id, ctx.v2, 'test');
+  assert.equal(run3.status, 'succeeded', JSON.stringify(run3.failure));
+  const sel = (await me.post(xp(e.id) + '/select', { version: 2, rationale: 'SECOND' })).json.experiment.selected;
+  assert.equal(sel.runId, run3.id);
+  for (const body of [{ idempotencyKey: k1 }, { idempotencyKey: k1, resend: true }]) {
+    r = await me.post(xp(e.id) + '/codebook', body);
+    assert.equal(r.status, 409, r.text);
+    assert.equal(r.json.error.type, 'key_mismatch');
+    assert.match(r.json.error.message, /earlier selection; send again/);
+  }
+  // This selection's key: a new submission with this run's measurements and rationale
+  const k2 = [e.id, 2, ctx.v2.codeHash, run3.id, sel.selectedAt].join(':');
+  r = await me.post(xp(e.id) + '/codebook', { idempotencyKey: k2 });
+  assert.equal(r.status, 201, r.text);
+  assert.notEqual(r.json.submission.id, ctx.submission.id);
+  assert.equal(r.json.submission.payload.evaluation.runId, run3.id);
+  assert.equal(r.json.submission.payload.evaluation.split, 'test');
+  assert.equal(r.json.submission.payload.rationale, 'SECOND');
+  const again = await me.post(xp(e.id) + '/codebook', { idempotencyKey: k2 });
+  assert.equal(again.status, 200);
+  assert.equal(again.json.submission.id, r.json.submission.id);
+  // The earlier submission is untouched
+  assert.equal((await me.get('/api/lab/codebook-submissions/' + ctx.submission.id)).json.submission.status, 'applied');
+});
+
+test('a run cancelled while it waits for a sandbox slot isn\'t charged (the sandbox never started)', { skip: skipJs }, async () => {
+  const me = as('ultra');
+  const meter = srv.accounts.usage;
+  const sb = srv.aiLab.codeSandbox;
+  process.env.AI_LAB_MAX_RUNNING_EXECUTIONS = '1';
+  // Another sandbox run holds the only slot (as another user's Python check can)
+  const holder = new AbortController();
+  const held = sb.run({ language: 'javascript', code: SLOW, records: [{ id: 'h1', text: 'x' }], variable: VARIABLE }, { signal: holder.signal });
+  try {
+    await until(async () => sb.stats().running === 1);
+    const before = meter.used(U.ultra.id, 'labExecutions');
+    const started = await me.post(xp(ctx.exp.id) + '/runs', { version: 1, codeHash: ctx.v1.codeHash });
+    assert.equal(started.status, 202, started.text);
+    const id = started.json.run.id;
+    await until(async () => sb.stats().waiting === 1);
+    assert.equal(meter.used(U.ultra.id, 'labExecutions'), before + 1, 'the unit is taken when the execution stage starts');
+    const c = await me.post('/api/lab/xruns/' + id + '/cancel');
+    assert.equal(c.status, 200, c.text);
+    assert.equal(c.json.run.status, 'cancelled');
+    assert.equal(c.json.run.failure.stage, 'execution');
+    assert.equal(meter.used(U.ultra.id, 'labExecutions'), before, 'given back: no sandbox process was started');
+    const r = await me.get('/api/lab/xruns/' + id);
+    assert.equal(r.json.run.log[r.json.run.log.length - 1].text, 'Cancelled before the sandbox started.');
+  } finally {
+    holder.abort();
+    await held.catch(() => null);
+    delete process.env.AI_LAB_MAX_RUNNING_EXECUTIONS;
+  }
+  // A run that did start is charged as before
+  const used = meter.used(U.ultra.id, 'labExecutions');
+  assert.equal((await runVersion('ultra', ctx.exp.id, ctx.v1)).status, 'succeeded');
+  assert.equal(meter.used(U.ultra.id, 'labExecutions'), used + 1);
+});
+
+test('compare and evaluate measure the current AI coding on the records of the run they set it against', { skip: skipJs }, async () => {
+  const me = as('ultra');
+  const e = ctx.exp;
+  const dev = await runVersion('ultra', e.id, ctx.v1, 'dev');
+  assert.equal(dev.status, 'succeeded');
+  assert.ok(dev.sandbox.recordCount < 30);
+  for (const [q, side] of [['a=baseline&b=1', 'a'], ['a=1&b=baseline', 'b']]) {
+    const cmp = await me.get(xp(e.id) + '/compare?' + q);
+    assert.equal(cmp.status, 200, cmp.text);
+    const version = side === 'a' ? cmp.json.b : cmp.json.a, base = cmp.json[side];
+    assert.equal(version.run.id, dev.id);
+    assert.equal(base.metrics.processed, dev.sandbox.recordCount, 'the baseline side covers the dev records only (' + q + ')');
+    assert.equal(base.metrics.reference.test, null, 'no held-out records on the baseline side either');
+    assert.equal(base.metrics.reference.all.n, dev.metrics.reference.all.n);
+  }
+  // Against a held-out run: the same held-out records on both sides
+  const cmpTest = await me.get(xp(e.id) + '/compare?a=baseline&b=2');
+  assert.equal(cmpTest.json.b.run.sandbox.split, 'test');
+  assert.equal(cmpTest.json.a.metrics.processed, cmpTest.json.b.run.sandbox.recordCount);
+  assert.equal(cmpTest.json.a.metrics.reference.dev, null);
+  assert.equal(cmpTest.json.comparison.sameSplit, true);
+  // The evaluation's comparison target: the same records, without the current AI coding's agreement with itself
+  const ev = await me.post(xp(e.id) + '/versions/1/evaluate', { against: 'baseline' });
+  assert.equal(ev.status, 200, ev.text);
+  assert.equal(ev.json.evaluation.runId, dev.id);
+  const user = emisState.requests[emisState.requests.length - 1].messages.find(m => m.role === 'user').content;
+  const block = /<comparison_target>\n([\s\S]*?)\n<\/comparison_target>/.exec(user)[1];
+  const target = JSON.parse(block.slice(block.indexOf('{'))).metricsOfCurrentAiCoding;
+  assert.equal(target.records, dev.sandbox.recordCount);
+  assert.equal(target.baseline, null);
+  // (the objective asks the mock to fabricate a number; everything else it quotes is measured)
+  assert.deepEqual(ev.json.evaluation.unverifiedNumbers.filter(n => !/12\.3%|7777/.test(n)), []);
+});
+
+test('code is stored with \\n line endings: CR and CRLF become \\n before the code is hashed', async () => {
+  const me = as('ultra');
+  const s = await importSandbox('ultra');
+  const lf = 'function classify(record, variable) {\n  return null;\n}\n';
+  const crlf = lf.replace(/\n/g, '\r\n');
+  const e = await newExperiment('ultra', s.id, { name: 'Line endings', initialCode: { code: lf.replace(/\n/g, '\r'), language: 'javascript', label: 'From the Codebook' } });
+  assert.equal(e.versions[0].code, lf, 'initialCode (lone CR)');
+  assert.equal(e.versions[0].codeHash, CP.codeHash(lf));
+  const same = await me.post(xp(e.id) + '/versions', { code: crlf, parent: 1, origin: 'edited' });
+  assert.equal(same.status, 409, 'the same code with other line endings is no change');
+  assert.equal(same.json.error.type, 'unchanged');
+  const v2 = await me.post(xp(e.id) + '/versions', { code: crlf.replace('null', '"support"'), parent: 1, origin: 'edited' });
+  assert.equal(v2.status, 201, v2.text);
+  assert.equal(v2.json.version.code, lf.replace('null', '"support"'));
+  assert.equal(v2.json.version.codeHash, CP.codeHash(lf.replace('null', '"support"')));
+  assert.equal((await me.del(xp(e.id))).status, 200);
+  assert.equal((await me.del('/api/lab/sandboxes/' + s.id)).status, 200);
+});
+
+test('terminal lines live in xruns/<id>/log.json; the run keeps the last 20; old runs with every line inline still work', { skip: skipJs }, async () => {
+  const me = as('ultra');
+  const e = ctx.exp;
+  const loud = (await me.post(xp(e.id) + '/versions', { code: 'function classify(record, variable) {\n  console.log(\'record \' + record.id);\n  return null;\n}\n', origin: 'edited' })).json.version;
+  await me.post(xp(e.id) + '/versions/' + loud.version + '/check', {});
+  const run = await runVersion('ultra', e.id, loud);
+  assert.equal(run.status, 'succeeded', JSON.stringify(run.failure));
+  assert.ok(run.log.length > 40, 'every line comes back (' + run.log.length + ')');
+  assert.equal(run.logTotal, run.log.length);
+  assert.ok(run.log.every((l, i) => l.seq === i + 1));
+  const dir = path.join(tmp, 'lab', 'users', userKey('ultra'), 'xruns');
+  const stored = JSON.parse(fs.readFileSync(path.join(dir, run.id + '.json'), 'utf8'));
+  const sidecar = JSON.parse(fs.readFileSync(path.join(dir, run.id, 'log.json'), 'utf8'));
+  assert.deepEqual(sidecar, run.log);
+  assert.equal(stored.log.length, 20, 'the run object keeps the last 20 lines');
+  assert.deepEqual(stored.log, sidecar.slice(-20));
+  assert.equal(stored.logTotal, sidecar.length);
+  const since = await me.get('/api/lab/xruns/' + run.id + '?since=' + (sidecar.length - 3));
+  assert.deepEqual(since.json.run.log.map(l => l.seq), [sidecar.length - 2, sidecar.length - 1, sidecar.length]);
+  assert.equal(since.json.logTotal, sidecar.length);
+  const detail = await me.get(xp(e.id));
+  const summary = detail.json.runs.find(r => r.id === run.id);
+  assert.equal(summary.log, undefined);
+  assert.equal(summary.logTotal, sidecar.length);
+  // A run stored before log.json: every line inline, no logTotal
+  const u = srv.aiLab.store.forUser(userKey('ultra'));
+  const old = Object.assign({}, stored, { id: 'xrn_OldInlineLog0001', log: sidecar });
+  delete old.logTotal;
+  u.put('xruns', old);
+  try {
+    const got = await me.get('/api/lab/xruns/' + old.id);
+    assert.equal(got.status, 200, got.text);
+    assert.deepEqual(got.json.run.log, sidecar);
+    assert.equal(got.json.logTotal, sidecar.length);
+    assert.equal((await me.get('/api/lab/xruns/' + old.id + '?since=40')).json.run.log.length, sidecar.length - 40);
+  } finally { u.remove('xruns', old.id); }
+  // The export has every line
+  const ex = await me.get('/api/lab/export');
+  assert.deepEqual(ex.json.xruns.find(r => r.id === run.id).log, sidecar);
+  // Nothing above loaded all of the user's runs into memory
+  assert.equal(u.cache.has('xruns'), false);
+});
+
+test('store: runs are read one at a time — read, has and scan never fill the cache, put doesn\'t load the kind', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-labstore-'));
+  try {
+    const u = new LabStore(dir).forUser('a'.repeat(40));
+    const big = 'x'.repeat(10000);
+    u.put('xruns', { id: 'xrn_AAAAAAAAAAAAAAA1', experimentId: 'exp_A', status: 'running', log: [big] });
+    u.put('xruns', { id: 'xrn_AAAAAAAAAAAAAAA2', experimentId: 'exp_B', status: 'succeeded', log: [big] });
+    assert.equal(u.cache.has('xruns'), false);
+    assert.equal(u.read('xruns', 'xrn_AAAAAAAAAAAAAAA1').status, 'running');
+    assert.equal(u.read('xruns', 'xrn_AAAAAAAAAAAAAAA9'), null);
+    assert.equal(u.read('xruns', '../etc'), null);
+    assert.equal(u.has('xruns', 'xrn_AAAAAAAAAAAAAAA2'), true);
+    assert.equal(u.has('xruns', 'xrn_AAAAAAAAAAAAAAA9'), false);
+    assert.deepEqual(u.scan('xruns', r => r.status === 'running').map(r => r.id), ['xrn_AAAAAAAAAAAAAAA1']);
+    // With a quick look at the start of each file, the others aren't read in full
+    const parsed = [];
+    const hits = u.scan('xruns', r => { parsed.push(r.id); return true; }, head => head.includes('"exp_A"'));
+    assert.deepEqual(hits.map(r => r.id), ['xrn_AAAAAAAAAAAAAAA1']);
+    assert.deepEqual(parsed, ['xrn_AAAAAAAAAAAAAAA1']);
+    assert.equal(u.cache.has('xruns'), false, 'still nothing cached');
+    assert.equal(u.remove('xruns', 'xrn_AAAAAAAAAAAAAAA2'), true);
+    assert.equal(u.has('xruns', 'xrn_AAAAAAAAAAAAAAA2'), false);
+    // Other kinds are cached as before (and a loaded kind is used by read/scan)
+    u.put('projects', { id: 'prj_AAAAAAAAAAAAAAA1', name: 'p' });
+    assert.equal(u.cache.has('projects'), true);
+    assert.equal(u.read('projects', 'prj_AAAAAAAAAAAAAAA1'), u.get('projects', 'prj_AAAAAAAAAAAAAAA1'));
+    // Sidecars are counted in the storage total without re-measuring the folder
+    const before = u.bytes();
+    u.writeSidecar('xruns', 'xrn_AAAAAAAAAAAAAAA1', 'log.json', 'y'.repeat(5000));
+    assert.equal(u.usedBytes, before + 5000);
+    u.writeSidecar('xruns', 'xrn_AAAAAAAAAAAAAAA1', 'log.json', 'y'.repeat(2000));
+    assert.equal(u.usedBytes, before + 2000);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a cancel still waiting when all Lab data is deleted writes nothing back (not even the audit line)', { skip: skipJs }, async () => {
+  const me = as('ultra3');
+  const s = await importSandbox('ultra3');
+  const e = await newExperiment('ultra3', s.id, { name: 'Cancel race' });
+  const v = await generate('ultra3', e.id, 'Code by keyword');
+  const sb = srv.aiLab.codeSandbox;
+  const real = sb.run;
+  let entered = () => {};
+  const inSandbox = new Promise(r => { entered = r; });
+  // A sandbox that takes a while to stop once cancelled (a slow kill)
+  sb.run = async (request, hooks) => {
+    const isolation = await sb.isolation(request.language);
+    return new Promise(resolve => {
+      hooks.signal.addEventListener('abort', () => setTimeout(() => resolve({ ok: false, outputs: [], failure: { type: 'cancelled', message: 'The run was cancelled.' }, policy: null, durationMs: 0, bootMs: 0,
+        resources: { rssBytes: null, engineMemoryBytes: null, outputBytes: 0, logBytes: 0 }, isolation, engine: { name: 'test', version: '0' } }), 800), { once: true });
+      entered();
+    });
+  };
+  try {
+    const r = await me.post(xp(e.id) + '/runs', { version: v.version, codeHash: v.codeHash });
+    assert.equal(r.status, 202, r.text);
+    await inSandbox;
+    const cancelling = me.post('/api/lab/xruns/' + r.json.run.id + '/cancel');
+    await sleep(150);
+    assert.equal((await me.del('/api/lab/data', { confirm: 'DELETE' })).status, 200);
+    const c = await cancelling;
+    assert.equal(c.status, 200, c.text);
+    assert.equal(fs.existsSync(path.join(tmp, 'lab', 'users', userKey('ultra3'))), false, 'the user\'s Lab folder isn\'t created again');
+    assert.deepEqual((await me.get('/api/lab/audit')).json.events, []);
+  } finally { sb.run = real; }
+});
+
+test('models: unavailable languages with their reasons and the execution settings\' warnings; config warnings are logged once per change', async () => {
+  const mod = require('node:module');
+  const hooks = mod.registerHooks;
+  const warn = console.warn;
+  const logged = [];
+  const saved = process.env.METACODE_LOG;
+  process.env.AI_LAB_SANDBOX_ISOLATION = 'namespce';
+  process.env.METACODE_LOG = 'on';
+  console.warn = (...a) => { logged.push(a.join(' ')); };
+  mod.registerHooks = undefined;   // as on Node.js 22.13 / 22.14
+  const isoLines = () => logged.filter(l => /config\.warning/.test(l) && /AI_LAB_SANDBOX_ISOLATION/.test(l)).length;
+  try {
+    let r = await as('ultra').get('/api/lab/models');
+    assert.equal(r.status, 200, r.text);
+    const ex = r.json.execution;
+    if (!skipJs) {
+      assert.ok(!ex.languages.includes('python'));
+      const py = ex.unavailable.find(x => x.language === 'python');
+      assert.ok(py, JSON.stringify(ex.unavailable));
+      assert.match(py.reason, /Node\.js 22\.15 or newer/);
+    }
+    // a typo is read as the strictest setting, never a weaker one
+    assert.deepEqual(ex.warnings, ['AI_LAB_SANDBOX_ISOLATION must be auto, namespace or process; using namespace.']);
+    assert.equal(ex.isolationSetting, 'namespace');
+    assert.ok(r.json.warnings.includes(ex.warnings[0]));
+    assert.equal(isoLines(), 1, 'logged when it appeared: ' + JSON.stringify(logged));
+    await as('ultra').get('/api/lab/models');
+    await as('ultra').get('/api/lab/experiments');
+    assert.equal(isoLines(), 1, 'not again while nothing changed');
+    // Fixed, then mistyped again: logged again
+    delete process.env.AI_LAB_SANDBOX_ISOLATION;
+    r = await as('ultra').get('/api/lab/models');
+    assert.deepEqual(r.json.execution.warnings, []);
+    process.env.AI_LAB_SANDBOX_ISOLATION = 'nmespace';
+    await as('ultra').get('/api/lab/models');
+    assert.equal(isoLines(), 2);
+    // Other settings' warnings aren't execution warnings
+    process.env.AI_LAB_FINE_TUNING = 'maybe';
+    r = await as('ultra').get('/api/lab/models');
+    assert.equal(r.json.execution.warnings.length, 1);
+    assert.ok(r.json.warnings.some(w => /^AI_LAB_FINE_TUNING/.test(w)));
+  } finally {
+    mod.registerHooks = hooks;
+    console.warn = warn;
+    process.env.METACODE_LOG = saved;
+    delete process.env.AI_LAB_SANDBOX_ISOLATION;
+    delete process.env.AI_LAB_FINE_TUNING;
+    await as('ultra').get('/api/lab/models');
+  }
+});
+
+test('sandbox: without the stable --permission flag (Node.js 22.0–22.12) the reason names Node.js 22.13', () => {
+  const desc = Object.getOwnPropertyDescriptor(process, 'allowedNodeEnvironmentFlags');
+  const fake = new Set(Array.from(process.allowedNodeEnvironmentFlags).filter(f => f !== '--permission'));
+  Object.defineProperty(process, 'allowedNodeEnvironmentFlags', { value: fake, configurable: true });
+  try {
+    const sb = createCodeSandbox({ getConfig: () => ({}) });
+    for (const l of ['javascript', 'typescript', 'python']) {
+      const r = sb.supported(l);
+      assert.equal(r.ok, false);
+      assert.match(r.reason, /Node\.js 22\.13 or newer/, l);
+    }
+  } finally {
+    if (desc) Object.defineProperty(process, 'allowedNodeEnvironmentFlags', desc);
+    else delete process.allowedNodeEnvironmentFlags;
+  }
+});
+
+test('evaluation unit_tests checks are skipped and say why: answers are never run (only Code Experiments run code)', async () => {
+  const c = C.cleanCheck({ type: 'unit_tests', language: 'python', tests: 'assert add(1, 2) == 3' });
+  const [r] = await C.runChecks('```python\ndef add(a, b):\n    return a + b\n```', [c], {});
+  assert.equal(r.status, 'skipped');
+  assert.equal(r.method, 'not_run');
+  assert.match(r.detail, /evaluation answers are never executed/);
+  assert.match(r.detail, /only Code Experiments run code, in their sandbox/);
+  assert.doesNotMatch(r.detail, /never executes generated code/);
+});
+
 test('after a restart, runs that were queued or running are marked interrupted', async () => {
   const key = require('crypto').createHash('sha256').update('metacode-lab:' + U.ultra2.id).digest('hex').slice(0, 40);
   const u = srv.aiLab.store.forUser(key);
@@ -729,5 +1068,9 @@ test('after a restart, runs that were queued or running are marked interrupted',
     assert.equal(r.json.run.failure.type, 'interrupted');
     assert.ok(r.json.run.timing.finishedAt);
     assert.match(r.json.run.log[0].text, /server restarted/);
+    assert.equal(r.json.run.logTotal, 1);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(tmp, 'lab', 'users', key, 'xruns', id, 'log.json'), 'utf8')).length, 1);
   }
+  // Recovery read the runs without keeping any of them (or anyone's) in memory
+  for (const k of srv.aiLab.store.userKeys()) assert.equal(srv.aiLab.store.forUser(k).cache.has('xruns'), false, k);
 });

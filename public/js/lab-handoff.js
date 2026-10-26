@@ -204,18 +204,49 @@ const LabHandoff = (() => {
     if (card) { card.classList.add('cr-flash'); try { card.scrollIntoView({ block: 'nearest' }); } catch (e) { /* old browser */ } }
   }
   function fileName(lang) { return 'rule.' + (lang === 'python' ? 'py' : lang === 'typescript' ? 'ts' : 'js'); }
+  const openProjectName = () => App.getState().project.name || 'Untitled Project';
 
-  function confirmBody(rule, dim, viewer) {
+  // Where the rule was measured: the Lab's variable, its sandbox, and the project the sandbox's
+  // records came from when the Lab says so (sandbox.source.projectName, in the payload or the answer)
+  function sourceOf(data, payload) {
+    const t = (v, n) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, n) : '');
+    const inVar = payload.contract && payload.contract.input && payload.contract.input.variable;
+    let project = '';
+    for (const sb of [payload.sandbox, data && data.sandbox]) {
+      const src = sb && typeof sb === 'object' && sb.source && typeof sb.source === 'object' ? sb.source : null;
+      if (!project && src && src.kind !== 'dataset') project = t(src.projectName, 200);
+    }
+    return {
+      variable: variableName(data, payload.dimensionId) || t(inVar && typeof inVar === 'object' ? inVar.name : '', 120),
+      sandbox: t(payload.sandbox && payload.sandbox.name, 200),
+      project
+    };
+  }
+  /** "the variable “Policy Stance” from the project “A” (sandbox “A · Policy Stance”)" */
+  function sourceText(src) {
+    const where = src.project ? 'the project “' + src.project + '”' + (src.sandbox ? ' (sandbox “' + src.sandbox + '”)' : '') : src.sandbox ? 'the sandbox “' + src.sandbox + '”' : 'the AI Coding Lab';
+    return (src.variable ? 'the variable “' + src.variable + '” from ' : '') + where;
+  }
+  const upperFirst = s => s.charAt(0).toUpperCase() + s.slice(1);
+
+  function confirmBody(rule, dim, viewer, src) {
     const change = CodingRule.changeSummary(dim, rule);
     const ev = rule.evaluation;
     const review = { approved: 'approved', needs_review: 'asked for a human check — you allowed the run after reading it', unavailable: 'unavailable — you allowed the run after reading the warning' }[rule.security.review] || '';
     const ran = ev.split === 'test' ? ev.records + ' held-out records' : ev.split === 'dev' ? ev.records + ' dev records' : 'all ' + ev.records + ' records';
     const dimName = dim.name || dim.id;
+    const project = openProjectName();
+    const codes = CodingRule.compareCodes(rule, dim);
     return '' +
       '<p class="cr-lead">The AI Coding Lab sent a coding rule for the variable <b>' + esc(dimName) + '</b>. Check it, then save it to the Codebook.</p>' +
       (viewer ? '<div class="cr-warn" id="lh-viewer">You can view this shared project but not edit it, so the rule is saved in this browser only — it won\'t reach the shared project.</div>' : '') +
+      (src.project && src.project !== project ? '<div class="cr-warn" id="lh-other-project">This rule was measured on posts from the project “' + esc(src.project) + '”, not the open project “' + esc(project) + '”. Its results are for those posts.</div>' : '') +
+      (codes && codes.notInRule.length ? '<div class="cr-warn" id="lh-codes">“' + esc(dimName) + '” has codes this rule never returns: ' + esc(CodingRule.codeList(codes.notInRule)) +
+        '. The rule was measured with the codes ' + esc(CodingRule.codeList(codes.rule)) + ', so its results say nothing about ' + esc(CodingRule.codeList(codes.notInRule)) + '. You can still save it.</div>' : '') +
       '<dl class="cr-facts">' +
-        '<dt>Variable</dt><dd>' + esc(dimName) + ' <code>' + esc(dim.id) + '</code></dd>' +
+        '<dt>Saving into</dt><dd id="lh-target">' + esc(dimName) + ' <code>' + esc(dim.id) + '</code> in “' + esc(project) + '” (the open project)</dd>' +
+        '<dt>Measured on</dt><dd id="lh-source">' + esc(upperFirst(sourceText(src))) + '</dd>' +
+        (codes ? '<dt>Codes</dt><dd id="lh-rule-codes">' + esc(CodingRule.codeList(codes.rule)) + '</dd>' : '') +
         '<dt>Version</dt><dd id="lh-version">v' + esc(String(rule.version)) + ' of “' + esc(rule.experiment.name) + '”</dd>' +
         '<dt>Language</dt><dd id="lh-language">' + esc(CodingRule.languageLabel(rule.language)) + '</dd>' +
         '<dt>Sandbox</dt><dd>' + esc(rule.sandbox.name || 'Sandbox') + ' · data v' + esc(String(rule.sandbox.version)) + ' · run on ' + esc(ran) + '</dd>' +
@@ -266,6 +297,17 @@ const LabHandoff = (() => {
       }
 
       const v = CodingRule.validateCodingRule(payload, App.getState().codebook);
+      const src = sourceOf(data, payload);
+      const dimId = payload.dimensionId;
+      // Already there (the Lab sending it again): nothing to change — also when the variable's codes
+      // changed since it was saved (its panel marks that)
+      if (v.dimension && v.dimension.codingRule && v.dimension.codingRule.submissionId === id && (v.ok || v.codesMismatch)) {
+        closeOurs();
+        rerender(dimId);
+        App.notify('This coding rule is already in the Codebook (“' + (v.dimension.name || dimId) + '”).', 'info', 5000);
+        await report(id, true, { dimensionId: dimId });
+        return true;
+      }
       if (v.missingDimension) {
         const name = variableName(data, payload.dimensionId);
         const exp = payload.experiment && typeof payload.experiment.name === 'string' ? payload.experiment.name : '';
@@ -277,6 +319,17 @@ const LabHandoff = (() => {
         await report(id, false, { error: 'The open MetaCode project has no variable with the id “' + payload.dimensionId + '”. Open the project that has it, then send again.' });
         return false;
       }
+      // The variable has the id but not every code the rule can return (another project's variable
+      // with the same name, or codes renamed since): saving would attach results for other codes
+      if (v.codesMismatch) {
+        const c = v.codes;
+        showMessage('The variable\'s codes don\'t match this rule',
+          'This rule can return ' + CodingRule.codeList(c.notInDimension) + ', which the variable “' + (v.dimension.name || dimId) + '” (' + dimId + ') in the open project “' + openProjectName() + '” doesn\'t have. ' +
+          'The rule\'s codes: ' + CodingRule.codeList(c.rule) + '; the variable\'s codes: ' + CodingRule.codeList(c.dimension) + '.',
+          'Measured on ' + sourceText(src) + '. Add the missing codes to the variable, or open the project the rule was made for, then send again.');
+        await report(id, false, { error: v.problems[0] + ' Add the missing codes or open the project the rule was made for, then send again.' });
+        return false;
+      }
       if (!v.ok) {
         showMessage('This coding rule can\'t be saved', 'MetaCode checked the rule the AI Coding Lab sent and found problems:', '',
           '<ul class="cr-problems" id="lh-problems">' + v.problems.slice(0, 12).map(p => '<li>' + esc(p) + '</li>').join('') + '</ul>');
@@ -284,18 +337,9 @@ const LabHandoff = (() => {
         return false;
       }
 
-      const dimId = v.rule.dimensionId;
-      // Already there: nothing to change
-      if (v.dimension.codingRule && v.dimension.codingRule.submissionId === id) {
-        closeOurs();
-        rerender(dimId);
-        App.notify('This coding rule is already in the Codebook (“' + (v.dimension.name || dimId) + '”).', 'info', 5000);
-        await report(id, true, { dimensionId: dimId });
-        return true;
-      }
       if (codebookConflict()) { await showConflict(id); return false; }
 
-      show('Save coding rule to the Codebook', confirmBody(v.rule, v.dimension, viewerOnly()),
+      show('Save coding rule to the Codebook', confirmBody(v.rule, v.dimension, viewerOnly(), src),
         '<button class="btn btn-secondary" id="lh-cancel">Cancel</button>' +
         '<button class="btn btn-primary" id="lh-save">Save to Codebook</button>');
       focusTab();
@@ -312,8 +356,8 @@ const LabHandoff = (() => {
       let r;
       try { r = CodingRule.applyCodingRule(App.getState().codebook, payload, new Date()); }
       catch (err) {
-        showMessage('This coding rule can\'t be saved', err.missingDimension ? 'The variable was deleted while this dialog was open.' : err.message);
-        await report(id, false, { error: err.missingDimension ? 'The variable was deleted in MetaCode before saving.' : err.message });
+        showMessage('This coding rule can\'t be saved', err.missingDimension ? 'The variable was deleted while this dialog was open.' : err.codesMismatch ? 'The variable\'s codes changed while this dialog was open. ' + err.problems[0] : err.message);
+        await report(id, false, { error: err.missingDimension ? 'The variable was deleted in MetaCode before saving.' : err.codesMismatch ? 'The variable\'s codes changed in MetaCode before saving. ' + err.problems[0] : err.message });
         return false;
       }
       if (r.changed) App.setState({ codebook: r.codebook });

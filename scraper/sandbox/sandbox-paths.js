@@ -58,14 +58,17 @@ function pythonEnginePaths() {
   return pyEngine;
 }
 
-// Node's permission model (--permission) is the process wall around both engines.
+// Node's permission model is the process wall around both engines. The children
+// start with the stable --permission flag, which needs Node.js 22.13 or newer
+// (22.0–22.12 only have --experimental-permission): say "22.13 or newer".
+// Python additionally needs 22.15 or newer (moduleHooksAvailable).
 /** @returns {boolean} */
 function permissionModelAvailable() {
   const flags = process.allowedNodeEnvironmentFlags;
   return !!flags && flags.has('--permission');
 }
 
-// The Python child's network lock-down uses synchronous module hooks.
+// The Python child's network lock-down uses synchronous module hooks (Node.js 22.15 or newer).
 /** @returns {boolean} */
 function moduleHooksAvailable() {
   return typeof require('node:module').registerHooks === 'function';

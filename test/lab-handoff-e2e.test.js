@@ -243,6 +243,172 @@ test('send to Codebook from the link: confirm, saved on the dimension, server an
   assert.equal('codingRuleHistory' in cb[0], false);
   assert.equal(cb[0].name, 'Sentiment');
 
+  // Sending the removed rule again (the Lab's Send to Codebook): asked again, saved again, reported applied
+  await page.evaluate(id => { location.hash = '#codebook/lab/' + id; }, two);
+  await page.waitForSelector('#lh-save');
+  assert.match(await page.textContent('#lh-change'), /^New rule/);
+  await page.click('#lh-save');
+  await page.waitForSelector('#dim-sentiment .cr-panel');
+  cb = await codebookOf(page);
+  assert.equal(cb[0].codingRule.submissionId, two);
+  assert.deepEqual(cb[0].codingRuleHistory, []);
+  await until(() => lab.results.length === 4, 'the result POST after removing');
+  assert.deepEqual(lab.results[3].body, { status: 'applied', dimensionId: 'sentiment' });
+  await listener.waitForFunction(id => window.msgs.filter(m => m.type === 'coding-rule-result' && m.submissionId === id && m.ok).length === 2, two);
+
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+// The payload as the Lab builds it (ai-lab/experiments.js codingRule): the contract lists the variable's codes
+const contractFor = (variable, codes) => ({ name: 'classify/1', input: { record: 'id, text, author, timestamp, meta', variable: { id: variable.id, name: variable.name, codes } }, output: { returns: 'a code id or null', codes } });
+
+test('codes: a rule that can return codes the open variable lacks is refused; codes the rule never returns are a warning; where it comes from is shown', { skip, timeout: 90000 }, async () => {
+  const other = sid('otherproj'), fewer = sid('fewer'), known = sid('known'), drift = sid('drift');
+  const stance = { id: 'stance', name: 'Policy Stance' };
+  const subs = {
+    // Measured on project A's "stance" (support/oppose/neutral); the open project's "stance" has only support
+    [other]: Object.assign(submission(other, { dimensionId: 'stance', contract: contractFor(stance, ['support', 'oppose', 'neutral']), sandbox: { id: 'sbx_0123456789abcdef', name: 'Project A · Policy Stance', version: 1, sha256: 'd'.repeat(64) } }),
+      { responseExtra: { variable: stance } }),
+    // The open "sentiment" has pos and neg; this rule only ever returns pos
+    [fewer]: Object.assign(submission(fewer, { contract: contractFor({ id: 'sentiment', name: 'Sentiment' }, ['pos']) }), { responseExtra: { variable: { id: 'sentiment', name: 'Sentiment' } } }),
+    // When the Lab names the sandbox's project, the confirmation does too (and warns when it isn't the open one)
+    [known]: Object.assign(submission(known, { contract: contractFor({ id: 'sentiment', name: 'Sentiment' }, ['pos', 'neg']) }),
+      { responseExtra: { variable: { id: 'sentiment', name: 'Sentiment' }, sandbox: { id: 'sbx_0123456789abcdef', name: 'Project A · Sentiment', source: { kind: 'project', projectName: 'Project A' } } } }),
+    [drift]: submission(drift, { contract: contractFor({ id: 'sentiment', name: 'Sentiment' }, ['pos', 'neg']) })
+  };
+  const { context, page, errors, lab, listener } = await setup(subs);
+  await page.goto(baseUrl + '/app.html#codebook');
+  await page.waitForSelector('.dim-card');
+
+  // Refused: the codes are listed, nothing saved, the Lab told why
+  await page.evaluate(id => { location.hash = '#codebook/lab/' + id; }, other);
+  await page.waitForSelector('#lh-message');
+  assert.equal(await page.textContent('#modal-title'), 'The variable\'s codes don\'t match this rule');
+  const msg = await page.textContent('#lh-message');
+  assert.match(msg, /This rule can return oppose, neutral, which the variable “Stance” \(stance\) in the open project “Climate threads” doesn't have\./);
+  assert.match(msg, /The rule's codes: support, oppose, neutral; the variable's codes: support\./);
+  assert.match(await page.textContent('#lh-detail'), /Measured on the variable “Policy Stance” from the sandbox “Project A · Policy Stance”\. Add the missing codes to the variable, or open the project the rule was made for, then send again\./);
+  await until(() => lab.results.length === 1, 'the failed result');
+  assert.equal(lab.results[0].body.status, 'failed');
+  assert.match(lab.results[0].body.error, /can return codes that the variable “Stance” \(stance\) in the open project doesn't have: oppose, neutral\./);
+  const r1 = await resultOn(listener, other);
+  assert.equal(r1.ok, false);
+  assert.match(r1.error, /oppose, neutral/);
+  assert.equal('codingRule' in (await codebookOf(page))[1], false);
+  await page.click('#lh-close');
+
+  // A warning (save allowed): the variable has codes the rule never returns; the target and the source are named
+  await page.evaluate(id => { location.hash = '#codebook/lab/' + id; }, fewer);
+  await page.waitForSelector('#lh-save');
+  assert.equal(await page.textContent('#lh-target'), 'Sentiment sentiment in “Climate threads” (the open project)');
+  assert.equal(await page.textContent('#lh-source'), 'The variable “Sentiment” from the sandbox “Climate threads · Sentiment”');
+  assert.equal(await page.textContent('#lh-rule-codes'), 'pos');
+  assert.match(await page.textContent('#lh-codes'), /“Sentiment” has codes this rule never returns: neg\. The rule was measured with the codes pos, so its results say nothing about neg\. You can still save it\./);
+  assert.equal(await page.locator('#lh-other-project').count(), 0);
+  await page.click('#lh-save');
+  await page.waitForSelector('#dim-sentiment .cr-panel');
+  await until(() => lab.results.length === 2, 'the applied result');
+  assert.deepEqual(lab.results[1].body, { status: 'applied', dimensionId: 'sentiment' });
+  assert.equal((await codebookOf(page))[0].codingRule.submissionId, fewer);
+  // The panel says what the rule never returns
+  assert.match(await page.textContent('#dim-sentiment .cr-drift'), /never returns neg/);
+
+  // The sandbox's project is known and isn't the open one: named, with a warning
+  await page.evaluate(id => { location.hash = '#codebook/lab/' + id; }, known);
+  await page.waitForSelector('#lh-save');
+  assert.equal(await page.textContent('#lh-source'), 'The variable “Sentiment” from the project “Project A” (sandbox “Climate threads · Sentiment”)');
+  assert.match(await page.textContent('#lh-other-project'), /This rule was measured on posts from the project “Project A”, not the open project “Climate threads”\./);
+  assert.equal(await page.locator('#lh-codes').count(), 0, 'same codes: no codes warning');
+  await page.click('#lh-cancel');
+  await until(() => lab.results.length === 3, 'the cancelled result');
+
+  // Codes deleted while the dialog is open: Save refuses, with the codes
+  await page.evaluate(id => { location.hash = '#codebook/lab/' + id; }, drift);
+  await page.waitForSelector('#lh-save');
+  await page.evaluate(() => { const s = App.getState(); App.setState({ codebook: s.codebook.map(d => (d.id === 'sentiment' ? Object.assign({}, d, { codes: d.codes.filter(c => c.id !== 'neg') }) : d)) }); });
+  await page.click('#lh-save');
+  await page.waitForSelector('#lh-message');
+  assert.match(await page.textContent('#lh-message'), /doesn't have: neg\./);
+  await until(() => lab.results.length === 4, 'the refused save');
+  assert.equal(lab.results[3].body.status, 'failed');
+  assert.match(lab.results[3].body.error, /neg/);
+  assert.equal((await codebookOf(page))[0].codingRule.submissionId, fewer, 'the rule already there stays');
+  await page.click('#lh-close');
+
+  // The rule already on the variable, sent again after its codes changed: a no-op, reported applied
+  await page.evaluate(id => { location.hash = '#codebook/lab/' + id; }, fewer);
+  await until(() => lab.results.length === 5, 'the no-op result');
+  assert.deepEqual(lab.results[4].body, { status: 'applied', dimensionId: 'sentiment' });
+  assert.equal(await page.locator('#lh-save').count(), 0);
+
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
+test('Codebook CSV import keeps a variable\'s coding rule and history, and marks codes the rule returns that the CSV dropped; the example codebook asks first', { skip, timeout: 90000 }, async () => {
+  const state = JSON.parse(JSON.stringify(STATE));
+  const rulePayload = payload(sid('csvrule'), { contract: contractFor({ id: 'sentiment', name: 'Sentiment' }, ['pos', 'neg']) });
+  state.codebook[0].codes[0].extraField = 'kept';
+  state.codebook[0].custom = 'kept too';
+  state.codebook[0].codingRule = Object.assign({}, rulePayload, { appliedAt: '2026-10-24T11:00:00.000Z' });
+  state.codebook[0].codingRuleHistory = [Object.assign({}, payload(sid('older'), { version: 2 }), { replacedAt: '2026-10-24T11:00:00.000Z' })];
+  const { context, page, errors } = await setup({}, state);
+  await page.goto(baseUrl + '/app.html#codebook');
+  await page.waitForSelector('#dim-sentiment .cr-panel');
+  assert.equal(await page.locator('#dim-sentiment .cr-drift').count(), 0, 'codes match: no mark');
+  // Papa Parse comes from a CDN (blocked here): a small stand-in for header + comma rows
+  await page.evaluate(() => {
+    window.Papa = { parse(file, o) { file.text().then(t => { const [h, ...rows] = t.trim().split(/\r?\n/).map(l => l.split(',')); o.complete({ data: rows.map(r => Object.fromEntries(h.map((k, i) => [k, r[i] || '']))) }); }); } };
+  });
+  const importCsv = async text => {
+    await page.click('.view-actions .btn-secondary');
+    await page.waitForSelector('#cb-file', { state: 'attached' });
+    assert.match(await page.textContent('#cb-import-rules'), /Coding rules from the AI Coding Lab aren't in codebook CSVs/);
+    await page.setInputFiles('#cb-file', { name: 'codebook.csv', mimeType: 'text/csv', buffer: Buffer.from(text) });
+    await page.waitForFunction(() => !document.getElementById('modal-backdrop').classList.contains('is-open'));
+  };
+
+  // Same codes, new descriptions: the rule, its history and other fields stay
+  await importCsv('dimension_name,dimension_description,code_id,code_label,code_description\nSentiment,Tone,pos,Positive,Upbeat\nSentiment,Tone,neg,Negative,Downbeat\nTopic,,econ,Economy,\n');
+  let cb = await codebookOf(page);
+  const s = cb.find(d => d.id === 'sentiment');
+  assert.equal(s.description, 'Tone');
+  assert.deepEqual(s.codes, [{ id: 'pos', label: 'Positive', description: 'Upbeat', aiNotes: '', extraField: 'kept' }, { id: 'neg', label: 'Negative', description: 'Downbeat', aiNotes: '' }]);
+  assert.equal(s.custom, 'kept too');
+  assert.equal(s.codingRule.submissionId, sid('csvrule'));
+  assert.deepEqual(s.codingRuleHistory.map(h => h.submissionId), [sid('older')]);
+  assert.deepEqual(cb.map(d => d.id), ['sentiment', 'stance', 'topic']);
+  await page.waitForSelector('#dim-sentiment .cr-panel');
+  assert.equal(await page.locator('#dim-sentiment .cr-drift').count(), 0);
+  assert.equal((await stored(page))[0].codingRule.submissionId, sid('csvrule'), 'saved');
+
+  // The CSV drops "neg", which the rule can return: the rule stays, marked in the panel, and the import says so
+  await importCsv('dimension_name,code_id,code_label\nSentiment,pos,Positive\nSentiment,mixed,Mixed\n');
+  cb = await codebookOf(page);
+  assert.equal(cb[0].codingRule.submissionId, sid('csvrule'));
+  assert.equal(cb[0].codingRuleHistory.length, 1);
+  assert.deepEqual(cb[0].codes.map(c => c.id), ['pos', 'mixed']);
+  const mark = await page.textContent('#dim-sentiment .cr-drift.cr-warn');
+  assert.match(mark, /Codes changed since this rule was tested: it can return neg, which “Sentiment” no longer has\. It never returns mixed\./);
+  await page.waitForSelector('.notif:has-text("codes changed since")');
+  // View code says so too
+  await page.click('#dim-sentiment .cr-view');
+  await page.waitForSelector('#cr-view .cr-drift');
+  await page.click('#modal-foot .btn-primary');
+
+  // The example codebook replaces everything: it asks first when a variable has a coding rule
+  const dialogs = [];
+  page.once('dialog', d => { dialogs.push(d.message()); d.dismiss(); });
+  await page.evaluate(() => Codebook.loadExample());
+  assert.equal(dialogs.length, 1);
+  assert.match(dialogs[0], /coding rule/);
+  assert.equal((await codebookOf(page))[0].codingRule.submissionId, sid('csvrule'), 'cancelled: nothing changed');
+  page.once('dialog', d => { dialogs.push(d.message()); d.accept(); });
+  await page.evaluate(() => Codebook.loadExample());
+  assert.deepEqual((await codebookOf(page)).map(d => d.id), ['sentiment', 'stance', 'incivility', 'topic']);
+  assert.equal('codingRule' in (await codebookOf(page))[0], false);
+
   assert.deepEqual(errors, []);
   await context.close();
 });

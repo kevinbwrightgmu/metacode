@@ -36,6 +36,8 @@ const { logger, redact, userRef } = require('../lib/log');
 const log = logger('ai-lab');
 const PAGE = path.join(__dirname, '..', 'public', 'ai-lab.html');
 const MAX_MESSAGES = 400;
+/** The settings that decide whether and how code experiments run (their warnings also go to /models execution.warnings). */
+const EXECUTION_SETTING_RE = /^AI_LAB_(?:CODE_EXECUTION|SANDBOX_[A-Z_]+|MAX_RUNNING_EXECUTIONS)\b/;
 
 /** @param {unknown} v @param {number} max */
 const str = (v, max) => (typeof v === 'string' ? v.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '').slice(0, max) : '');
@@ -50,7 +52,20 @@ const now = () => new Date().toISOString();
  * @param {() => ReturnType<typeof labConfig>} [opts.getConfig]
  */
 function createAiLab(opts) {
-  const getConfig = opts.getConfig || (() => labConfig(process.env));
+  const readConfig = opts.getConfig || (() => labConfig(process.env));
+  // Bad settings are warned about in the server log: at start, and again whenever they change
+  // (Settings → Reload .env); each distinct warning once, not on every request
+  let warned = '';
+  const getConfig = () => {
+    const c = readConfig();
+    const current = c.warnings.join('\n');
+    if (current !== warned) {
+      const before = new Set(warned ? warned.split('\n') : []);
+      c.warnings.filter(w => !before.has(w)).forEach(w => log.warn('config.warning', { detail: w }));
+      warned = current;
+    }
+    return c;
+  };
   let cfg = getConfig();
   const store = new LabStore(cfg.dataDir);
   const policy = createLabPolicy({ accounts: opts.accounts, getConfig });
@@ -73,17 +88,22 @@ function createAiLab(opts) {
   const codeSandbox = createCodeSandbox({ getConfig });
   const experiments = createExperiments({ store, registry, usage, getConfig, sandbox: codeSandbox, metric });
 
-  /** What /models says about running code: the setting, how runs are isolated here, which languages work. */
+  /**
+   * What /models says about running code: the setting, how runs are isolated here, which languages
+   * work (and why the others don't), and the warnings about the execution settings.
+   */
   async function executionInfo() {
-    const ex = getConfig().execution;
-    /** @type {Record<string, string>} */
-    const unavailable = {};
-    const languages = CODE_LANGUAGES.filter(l => { const s = codeSandbox.supported(l); if (!s.ok) unavailable[l] = s.reason; return s.ok; });
+    const c = getConfig();
+    const ex = c.execution;
+    /** @type {{ language: string, reason: string }[]} */
+    const unavailable = [];
+    const languages = CODE_LANGUAGES.filter(l => { const s = codeSandbox.supported(l); if (!s.ok) unavailable.push({ language: l, reason: s.reason }); return s.ok; });
     let isolation = null;
     if (ex.mode === 'sandbox') { try { isolation = await codeSandbox.isolation('javascript'); } catch (e) { isolation = null; } }
     return { mode: ex.mode, isolationSetting: ex.isolation, isolation, languages, unavailable,
       limits: { timeoutMs: ex.timeoutMs, memoryMb: ex.memoryMb, pythonMemoryMb: ex.pythonMemoryMb, maxOutputKb: ex.maxOutputKb, maxRunning: ex.maxRunning },
-      note: 'Only code experiments run, only in the sandbox, only when you click Run. Workbench and evaluation answers are never run.' };
+      note: 'Only code experiments run, only in the sandbox, only when you click Run. Workbench and evaluation answers are never run.',
+      warnings: c.warnings.filter(w => EXECUTION_SETTING_RE.test(w)) };
   }
 
   /** @param {any} req @returns {UserStore} */
@@ -224,7 +244,8 @@ function createAiLab(opts) {
     const u = us(req);
     /** @type {Record<string, unknown>} */
     const out = { format: 'metacode-ai-lab-export', exportedAt: now() };
-    ['projects', 'profiles', 'conversations', 'documents', 'datasets', 'suites', 'runs', 'finetunes', 'sandboxes', 'experiments', 'xruns'].forEach(k => { out[k] = u.list(k); });
+    ['projects', 'profiles', 'conversations', 'documents', 'datasets', 'suites', 'runs', 'finetunes', 'sandboxes', 'experiments'].forEach(k => { out[k] = u.list(k); });
+    out.xruns = experiments.exportRuns(u);   // code runs with all their terminal lines (read, not kept in memory)
     res.set('Content-Disposition', 'attachment; filename="metacode-ai-lab-export.json"');
     res.json(out);
   }));

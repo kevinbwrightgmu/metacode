@@ -11,11 +11,16 @@
 //   runs/<id>/results.ndjson       an evaluation run's task results
 //   sandboxes/<id>/v<n>.json       a sandbox data version: records + labels (immutable)
 //   xruns/<id>/results.json        a code run's validated results ({ results })
+//   xruns/<id>/log.json            a code run's terminal lines (the run keeps the last 20)
 //   audit.ndjson                   configuration changes (no content)
 //
 // Some ids only name objects stored inside another one: messages (msg_) and
 // examples (exm_), an experiment's thread messages (thm_) and its Codebook
 // submissions (cbs_).
+//
+// A kind is read and kept in memory whole the first time it is used (list/get).
+// Code runs are many and only needed one at a time, so they are read with
+// read() and scan() instead, which never fill that cache.
 //
 // Isolation is structural: a request only ever opens the folder of the user
 // the server authenticated (policy.js), so another user's ids simply don't
@@ -30,6 +35,8 @@ const crypto = require('crypto');
 const KINDS = ['projects', 'profiles', 'conversations', 'documents', 'datasets', 'suites', 'runs', 'finetunes', 'sandboxes', 'experiments', 'xruns'];
 const PREFIX = { projects: 'prj', profiles: 'prf', conversations: 'cnv', documents: 'doc', datasets: 'dst', suites: 'ste', runs: 'run', finetunes: 'ftj',
   sandboxes: 'sbx', experiments: 'exp', xruns: 'xrn', messages: 'msg', examples: 'exm', thread: 'thm', submissions: 'cbs' };
+/** Kinds that put() doesn't load into the cache (read with read() and scan()). */
+const UNCACHED = ['xruns'];
 const ID_RE = /^[a-z]{3}_[A-Za-z0-9_-]{16}$/;
 const NAME_RE = /^[a-z0-9][a-z0-9._-]{0,60}$/;
 
@@ -116,6 +123,67 @@ class UserStore {
   get(kind, id) { return isId(id) ? this.load(kind).get(/** @type {string} */ (id)) || null : null; }
 
   /**
+   * One object, read from disk without loading (and keeping) the whole kind;
+   * the cached copy when the kind is already loaded.
+   * @param {string} kind
+   * @param {unknown} id
+   * @returns {any | null}
+   */
+  read(kind, id) {
+    if (!isId(id)) return null;
+    const map = this.cache.get(kind);
+    if (map) return map.get(/** @type {string} */ (id)) || null;
+    try { return JSON.parse(fs.readFileSync(this.file(kind, /** @type {string} */ (id)), 'utf8')); } catch (e) { return null; }
+  }
+
+  /** Whether an object exists (without reading it). @param {string} kind @param {unknown} id */
+  has(kind, id) {
+    if (!isId(id)) return false;
+    const map = this.cache.get(kind);
+    if (map) return map.has(/** @type {string} */ (id));
+    try { return fs.statSync(this.file(kind, /** @type {string} */ (id))).isFile(); } catch (e) { return false; }
+  }
+
+  /**
+   * The objects of a kind that pass `keep`, read one file at a time and never
+   * cached (the cached ones when the kind is already loaded). `quick`, when
+   * given, first sees the start of each file (4 KB): false skips the file
+   * without reading the rest — for scans over many large files, such as every
+   * user's code runs at start-up.
+   * @param {string} kind
+   * @param {(obj: any) => boolean} keep
+   * @param {(head: string) => boolean} [quick]
+   * @returns {any[]}
+   */
+  scan(kind, keep, quick) {
+    this.checkKind(kind);
+    const map = this.cache.get(kind);
+    if (map) return Array.from(map.values()).filter(keep);
+    const dir = path.join(this.root, kind);
+    /** @type {string[]} */
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch (e) { names = []; }
+    /** @type {any[]} */
+    const out = [];
+    const head = Buffer.alloc(4096);
+    for (const name of names) {
+      if (!name.endsWith('.json') || !isId(name.slice(0, -5))) continue;
+      const file = path.join(dir, name);
+      try {
+        if (quick) {
+          const fd = fs.openSync(file, 'r');
+          let n = 0;
+          try { n = fs.readSync(fd, head, 0, head.length, 0); } finally { fs.closeSync(fd); }
+          if (!quick(head.toString('utf8', 0, n))) continue;
+        }
+        const obj = JSON.parse(fs.readFileSync(file, 'utf8'));
+        if (keep(obj)) out.push(obj);
+      } catch (e) { /* unreadable: skipped */ }
+    }
+    return out;
+  }
+
+  /**
    * @param {string} kind
    * @param {{ id: string }} obj
    */
@@ -124,7 +192,9 @@ class UserStore {
     const text = JSON.stringify(obj);
     const before = this.usedBytes !== null ? sizeOf(file) : 0;
     writeAtomic(file, text);
-    this.load(kind).set(obj.id, obj);
+    // (code runs aren't loaded just for this: they are read one at a time, see read() and scan())
+    const map = this.cache.get(kind) || (UNCACHED.includes(kind) ? null : this.load(kind));
+    if (map) map.set(obj.id, obj);
     if (this.usedBytes !== null) this.usedBytes += Buffer.byteLength(text) - before;
     return obj;
   }
@@ -132,7 +202,8 @@ class UserStore {
   /** @param {string} kind @param {string} id */
   remove(kind, id) {
     if (!isId(id)) return false;
-    const existed = this.load(kind).delete(id);
+    const map = this.cache.get(kind);
+    const existed = map ? map.delete(id) : this.has(kind, id);
     try { fs.rmSync(this.file(kind, id), { force: true }); } catch (e) { /* gone */ }
     try { fs.rmSync(path.join(this.root, kind, id), { recursive: true, force: true }); } catch (e) { /* none */ }
     this.usedBytes = null;
@@ -149,8 +220,10 @@ class UserStore {
 
   /** @param {string} kind @param {string} id @param {string} name @param {string} text */
   writeSidecar(kind, id, name, text) {
-    writeAtomic(this.sidecar(kind, id, name), text);
-    this.usedBytes = null;
+    const file = this.sidecar(kind, id, name);
+    const before = this.usedBytes !== null ? sizeOf(file) : 0;
+    writeAtomic(file, text);
+    if (this.usedBytes !== null) this.usedBytes += Buffer.byteLength(text) - before;
   }
 
   /** @param {string} kind @param {string} id @param {string} name */

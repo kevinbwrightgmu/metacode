@@ -33,7 +33,8 @@
   const STATE = {
     empty: ['Empty workspace', 'gray'], generating: ['Generating code…', 'violet'], generated: ['Code generated', 'violet'], reviewing: ['Reviewing…', 'violet'],
     blocked: ['Blocked — see the review', 'red'], ready: ['Ready to run', 'blue'], dirty: ['Edited — save to run', 'amber'], running: ['Running…', 'blue'],
-    succeeded: ['Run succeeded', 'green'], failed: ['Run failed', 'red'], results: ['Results ready', 'green'], comparing: ['Comparing versions', 'blue'],
+    succeeded: ['Run succeeded', 'green'], failed: ['Run failed', 'red'], cancelled: ['Run cancelled', 'amber'], interrupted: ['Run interrupted — run it again', 'amber'],
+    results: ['Results ready', 'green'], comparing: ['Comparing versions', 'blue'],
     final: ['Final version selected', 'teal'], sending: ['Sending to Codebook…', 'blue'], saved: ['Saved to Codebook', 'green'], sendFailed: ['Saving to Codebook failed', 'red']
   };
   const ID_RE = /^[a-z0-9_-]{1,64}$/i;               // variable and code ids (as the Codebook handoff checks them)
@@ -82,6 +83,17 @@
   const md = text => LabMarkdown.render(text || '');
   const sortRuns = runs => (Array.isArray(runs) ? runs.slice().sort((a, b) => (a.createdAt < b.createdAt ? 1 : a.createdAt > b.createdAt ? -1 : 0)) : []);
   function slug(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9_-]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 64); }
+  // What this server can run (/models → execution): its mode, and language → reason for the languages it can't run
+  function execution() {
+    const ex = Lab.state.models && Lab.state.models.execution;
+    const unavailable = {};
+    (ex && Array.isArray(ex.unavailable) ? ex.unavailable : []).forEach(u => { if (u && LANGS.includes(u.language)) unavailable[u.language] = str(u.reason) || 'It can\'t run on this server.'; });
+    return { off: !!(ex && ex.mode === 'off'), unavailable };
+  }
+  // <option>s of the languages; the ones this server can't run are disabled, with the reason
+  function langOptions(unavailable, suffix) {
+    return LANGS.map(l => '<option value="' + l + '"' + (unavailable[l] ? ' disabled title="' + esc(unavailable[l]) + '"' : '') + '>' + LANG_LABEL[l] + (unavailable[l] ? ' (can\'t run here)' : suffix ? suffix(l) : '') + '</option>').join('');
+  }
   function storageGet(store, key) { try { return window[store].getItem(key); } catch (e) { return null; } }
   function storageSet(store, key, value) { try { if (value === null) window[store].removeItem(key); else window[store].setItem(key, value); } catch (e) { /* private window */ } }
 
@@ -370,7 +382,7 @@
 
   /* ══ Experiments list and the new-experiment form ══ */
   Lab.view('experiments', async (main, params) => {
-    const [experiments, sandboxes] = await Promise.all([get('/experiments').then(r => r.experiments || []), get('/sandboxes').then(r => r.sandboxes || [])]);
+    const [experiments, sandboxes] = await Promise.all([get('/experiments').then(r => r.experiments || []), get('/sandboxes').then(r => r.sandboxes || []), Lab.loadModels()]);
     if (!main.isConnected) return;
     const isNew = params[0] === 'new';
     const showArchived = storageGet('sessionStorage', 'xp-archived') === '1';
@@ -435,18 +447,30 @@
             '<span><b>' + esc(str(d.name) || String(d.id)) + '</b> <span class="lab-mono lab-muted">' + esc(String(d.id)) + '</span><br><span class="lab-muted">' + (problem ? esc(problem) : plural((d.codes || []).length, 'code') + ' · ' + plural(st.records, 'record') + ' · ' + fmt(st.labelled) + ' labelled by people · ' + fmt(st.ai) + ' AI-coded') + '</span></span></label>';
         }).join('') + '</fieldset>';
     };
+    const ex = execution(), na = ex.unavailable;
     box.innerHTML = '<div class="card-title">New experiment</div>' +
+      (ex.off ? '<div class="lab-warn mb-3" id="xp-f-off" role="status">Running code is switched off on this server. You can create the experiment, write, check and compare versions, but not run them.</div>' : '') +
       '<fieldset class="xp-src"><legend class="form-label">Records</legend><label><input type="radio" name="xp-src" value="project" id="xp-src-project" checked> Open MetaCode project</label><label><input type="radio" name="xp-src" value="dataset" id="xp-src-dataset"> Training Studio dataset</label></fieldset>' +
       '<div id="xp-src-p" class="mt-3">' + projectPanel() + '</div><div id="xp-src-d" class="mt-3" hidden></div>' +
       '<div id="xp-fromrule-wrap" class="mt-3" hidden><label class="xp-check"><input type="checkbox" id="xp-f-fromrule"> <span id="xp-f-fromrule-l">Start from the Codebook\'s current rule</span></label></div>' +
       '<div class="lab-row mt-3">' + field('Experiment name', '<input class="form-input" id="xp-f-name" maxlength="120">') +
-        field('Language', '<select class="form-select" id="xp-f-lang">' + LANGS.map(l => '<option value="' + l + '">' + LANG_LABEL[l] + (l === 'javascript' ? ' (starts instantly)' : '') + '</option>').join('') + '</select>') + '</div>' +
+        field('Language', '<select class="form-select" id="xp-f-lang">' + langOptions(na, l => (l === 'javascript' ? ' (starts instantly)' : '')) + '</select>') + '</div>' +
+      '<div id="xp-f-lang-why" class="mt-2" role="status" aria-live="polite"></div>' +
       field('Objective <span>(what a good rule does — the AI and the evaluation read it)</span>', '<textarea class="form-textarea" id="xp-f-objective" rows="2" maxlength="2000" placeholder="e.g. Match the human coding on held-out posts; prefer “no code” to a wrong code."></textarea>') +
       '<div class="form-group"><span class="form-label">Success criteria <span>(the objective score is their weighted mean)</span></span><div id="xp-f-criteria"></div></div>' +
       '<div class="lab-actions mt-3"><button class="btn btn-primary" id="xp-create">Create experiment</button><a class="btn btn-secondary" href="#experiments">Cancel</a><span id="xp-f-status" class="lab-muted" role="status" aria-live="polite"></span></div>';
     const src = () => (box.querySelector('[name=xp-src]:checked') || {}).value;
     const pickedDim = () => { const r = box.querySelector('[name=xp-var]:checked'); return r ? dims[Number(r.value)] : null; };
     let ruleFor = null;   // the dimension whose rule the checkbox was last set for
+    // Languages this server can't run: disabled, with the reason (and a warning when one is picked anyway, e.g. by a Codebook rule)
+    function syncLang() {
+      const l = $('xp-f-lang').value, why = $('xp-f-lang-why');
+      const others = LANGS.filter(x => na[x] && x !== l);
+      why.innerHTML = (na[l] ? '<div class="lab-warn" id="xp-f-lang-na">' + esc(LANG_LABEL[l]) + ' can\'t run on this server: ' + esc(na[l]) + ' You can still create the experiment and write code, but it can\'t run here.</div>' : '') +
+        (others.length ? '<p class="form-hint">Can\'t run here: ' + others.map(x => esc(LANG_LABEL[x]) + ' — ' + esc(na[x])).join(' · ') + '</p>' : '');
+    }
+    if (na[$('xp-f-lang').value]) { const ok = LANGS.find(l => !na[l]); if (ok) $('xp-f-lang').value = ok; }
+    $('xp-f-lang').addEventListener('change', syncLang);
     function setCriteria(variable) {
       const host = $('xp-f-criteria');
       const keep = host.querySelector('.xp-crit-row') ? readCriteria(host).criteria : DEFAULT_CRITERIA;
@@ -464,10 +488,11 @@
         $('xp-f-fromrule-l').textContent = 'Start from the Codebook\'s current rule' + (rule.version ? ' (v' + rule.version + ', ' + langLabel(rule.language) + ')' : '') + ' as version 1';
         if (ruleFor !== d) { ruleFor = d; $('xp-f-fromrule').checked = true; $('xp-f-lang').value = rule.language; }
       } else { $('xp-f-fromrule').checked = false; ruleFor = null; }
+      syncLang();
       setCriteria(variable);
     }
     $('xp-f-name').addEventListener('input', () => { nameTouched = true; });
-    $('xp-f-fromrule').onchange = () => { const d = pickedDim(), rule = d && codebookRule(d); if ($('xp-f-fromrule').checked && rule) $('xp-f-lang').value = rule.language; };
+    $('xp-f-fromrule').onchange = () => { const d = pickedDim(), rule = d && codebookRule(d); if ($('xp-f-fromrule').checked && rule) $('xp-f-lang').value = rule.language; syncLang(); };
     box.querySelectorAll('[name=xp-src]').forEach(r => { r.onchange = () => { const ds = src() === 'dataset'; $('xp-src-p').hidden = ds; $('xp-src-d').hidden = !ds; if (ds && !datasets) loadDatasets(); else onVariable(); }; });
     box.addEventListener('change', e => { if (e.target.name === 'xp-var') onVariable(); });
 
@@ -620,18 +645,20 @@
     const base = '/experiments/' + encodeURIComponent(exp().id);
     const draftKey = 'xp-draft:' + exp().id;
     // Per render: the editor, timers and what is in progress
-    const W = { editor: null, lang: null, phase: null, asking: false, fresh: null, resultsFor: null, lastSeq: -1, pollTimer: null, pollFails: 0, polling: null, tabSeq: 0,
+    const W = { editor: null, lang: null, phase: null, asking: false, fresh: null, resultsFor: null, lastSeq: -1, pollTimer: null, pollFails: 0, polling: null, activeTimer: null, tabSeq: 0,
       template: '', draftTimer: null, sendTimer: null, channel: null, merge: null, left: false };
     Lab.onLeave(() => {
       W.left = true;
-      clearTimeout(W.pollTimer); clearTimeout(W.draftTimer); clearTimeout(W.sendTimer);
+      clearTimeout(W.pollTimer); clearTimeout(W.activeTimer); clearTimeout(W.draftTimer); clearTimeout(W.sendTimer);
       if (W.editor) { saveDraft(); try { W.editor.destroy(); } catch (e) { /* */ } }
       if (W.channel) { try { W.channel.close(); } catch (e) { /* */ } }
       if (W.merge) { try { W.merge.destroy(); } catch (e) { /* */ } }
     });
     const sbx = X.sandbox;
-    // AI_LAB_CODE_EXECUTION=off on this server: nothing can run (the server answers 503), everything else works
+    // Running code is off on this server: nothing can run (the server answers 503), everything else works
     const execOff = !!(data.execution && data.execution.mode === 'off');
+    // Languages this server can't run (from /models): not offered in the editor, and Run says why
+    const na = execution().unavailable;
     const v0 = exp().variable;
     X.model = X.model || (Lab.defaultModel() ? Lab.defaultModel().provider + '|' + Lab.defaultModel().model : '');
 
@@ -669,7 +696,7 @@
         '<div class="xp-center">' +
           '<details class="xp-panel" open><summary>Code</summary><div class="xp-code">' +
             '<div class="xp-toolbar"><div class="xp-tb-info"><b id="xp-vlabel"></b> <span id="xp-origin"></span> <span class="xp-dirty" id="xp-dirty" hidden>Edited — not saved</span> <span class="xp-changed" id="xp-changed" hidden>Changed since last run</span></div>' +
-              '<div class="xp-tb-actions"><label class="lab-visually-hidden" for="xp-lang">Language</label><select class="form-select" id="xp-lang">' + LANGS.map(l => '<option value="' + l + '">' + LANG_LABEL[l] + '</option>').join('') + '</select>' +
+              '<div class="xp-tb-actions"><label class="lab-visually-hidden" for="xp-lang">Language</label><select class="form-select" id="xp-lang">' + langOptions(na) + '</select>' +
                 '<label class="lab-visually-hidden" for="xp-split">Records to run on</label><select class="form-select" id="xp-split"><option value="all">All records</option><option value="test">Held-out records</option><option value="dev">Dev records</option></select>' +
                 '<button class="btn btn-primary btn-sm" id="xp-run">Run</button><button class="btn btn-danger btn-sm" id="xp-cancel" hidden>Cancel run</button>' +
                 '<button class="btn btn-secondary btn-sm" id="xp-save">Save as new version</button><button class="btn btn-ghost btn-sm" id="xp-reset">Reset</button>' +
@@ -724,8 +751,10 @@
       const r = shownRun();
       if (r && r.version === v.version && r.codeHash === v.codeHash) {
         if (r.status === 'succeeded') return W.resultsFor === r.id ? 'results' : 'succeeded';
-        if (r.status === 'blocked') return 'blocked';
-        if (['failed', 'cancelled', 'interrupted'].includes(r.status)) return 'failed';
+        // (a run blocked only because the review asked for a human check is no longer in the way once this exact code is allowed)
+        if (r.status === 'blocked' && !(r.failure && r.failure.type === 'review_required' && v.reviewAck && v.reviewAck.codeHash === v.codeHash)) return 'blocked';
+        if (r.status === 'cancelled' || r.status === 'interrupted') return r.status;
+        if (r.status === 'failed') return 'failed';
       }
       if (W.fresh === v.version) return 'generated';
       return 'ready';
@@ -752,8 +781,9 @@
       const run = $('xp-run');
       run.textContent = dirty ? 'Save & run' : 'Run';
       const why = !dirty && v ? blocked(v) : null;
-      run.disabled = execOff || !ed || busy || (!dirty && (!v || !!why));
-      run.title = execOff ? 'Running code is switched off on this server' : why === 'ack' ? 'Read the AI review and allow running first' : why ? 'Blocked: see the checks below' : '';
+      const cantRun = na[dirty || !v ? W.lang : v.language];
+      run.disabled = execOff || !!cantRun || !ed || busy || (!dirty && (!v || !!why));
+      run.title = execOff ? 'Running code is switched off on this server' : cantRun ? cantRun : why === 'ack' ? 'Read the AI review and allow running first' : why ? 'Blocked: see the checks below' : '';
       $('xp-cancel').hidden = !ar;
       $('xp-diff-parent').disabled = !ed || (!dirty && !(v && v.parent && ver(v.parent)));
       $('xp-duplicate').disabled = !v || dirty || gen;
@@ -763,7 +793,7 @@
       $('xp-restore').disabled = dirty || gen;
       if (v) $('xp-restore').textContent = 'Restore as v' + (lt.version + 1);
       $('xp-lang').disabled = !ed || gen;
-      $('xp-rerun').disabled = execOff || !shownRun() || !!ar || busy;
+      $('xp-rerun').disabled = execOff || !shownRun() || !!na[shownRun().language] || !!ar || busy;
       $('xp-compare').disabled = !versions().length;
       const sel = exp().selected;
       $('xp-final-badge').innerHTML = sel ? '<span class="badge badge-teal">Final: v' + sel.version + '</span>' : '<span class="badge badge-gray">No final version</span>';
@@ -942,10 +972,33 @@
       renderRunPick();
       termStatus(shownRun());
       refresh();
-      if (!runId) { renderTab(); return; }
+      if (!runId) { renderTab(); watchActive(); return; }
       if (ACTIVE.includes((shownRun() || {}).status)) renderTab();   // "Running…" in the tabs until it ends
       W.polling = runId;
+      watchActive();
       await pollOnce(runId);
+    }
+    // The active run is followed even while the terminal shows another run (another version, or one picked in
+    // the terminal): when it ends, the pill, the buttons and the version list follow it
+    function watchActive() {
+      clearTimeout(W.activeTimer);
+      const a = activeRun();
+      if (W.left || !a || W.polling === a.id) return;
+      W.activeTimer = setTimeout(async () => {
+        const ar = activeRun();
+        if (W.left || !ar || W.polling === ar.id) return;
+        try {
+          const r = (await get('/xruns/' + encodeURIComponent(ar.id) + '?since=' + Number.MAX_SAFE_INTEGER)).run;   // its status, no log lines
+          if (W.left || W.polling === ar.id) return;
+          upsertRun(r);
+          if (!ACTIVE.includes(r.status)) { renderRunPick(); await finished(r); return; }
+          refresh();
+        } catch (e) {
+          if (W.left) return;
+          if (e.status === 404) { X.runs = X.runs.filter(x => x.id !== ar.id); renderRunPick(); refresh(); }
+        }
+        watchActive();
+      }, POLL_MS);
     }
     async function pollOnce(runId) {
       if (W.left || W.polling !== runId) return;
@@ -955,7 +1008,7 @@
         W.pollFails = 0;
       } catch (e) {
         if (W.left || W.polling !== runId) return;
-        if (e.status === 404) { termNote('This run no longer exists.'); W.polling = null; X.runs = X.runs.filter(x => x.id !== runId); renderRunPick(); refresh(); return; }
+        if (e.status === 404) { termNote('This run no longer exists.'); W.polling = null; X.runs = X.runs.filter(x => x.id !== runId); renderRunPick(); refresh(); watchActive(); return; }
         W.pollFails++;
         if (W.pollFails >= 3) termNote('Lost contact with the server (' + e.message + '). Retrying…');
         W.pollTimer = setTimeout(() => pollOnce(runId), Math.min(5000, 600 * W.pollFails));
@@ -965,12 +1018,21 @@
       termNote('');
       const wasActive = ACTIVE.includes((X.runs.find(x => x.id === runId) || {}).status);
       upsertRun(r);
+      // The run's review and policy are shown as soon as their stage is done (the version on the server has them too)
+      const v = cur();
+      if (v && r.version === v.version && r.codeHash === v.codeHash && r.security) {
+        let changed = false;
+        if (!v.review && r.security.review) { v.review = r.security.review; changed = true; }
+        if (!v.policy && r.security.policy) { v.policy = r.security.policy; changed = true; }
+        if (changed) renderValidation();
+      }
       appendLines(r.log);
       termStatus(r);
       renderRunPick();
       refresh();
       if (ACTIVE.includes(r.status)) { W.pollTimer = setTimeout(() => pollOnce(runId), POLL_MS); return; }
       W.polling = null;
+      watchActive();   // (another run may still be active)
       if (wasActive) await finished(r);
       else renderTab();
     }
@@ -1316,8 +1378,8 @@
       const splitName = pick ? (pick.split === 'test' ? 'held-out' : pick.split === 'dev' ? 'dev' : 'all labelled') : '';
       // Each card: the measured value and its n (definitions are below, under "Definitions")
       const card = (value, label, def, n, extra) => '<div class="lab-metric" title="' + esc(def) + '"><b>' + value + '</b><span>' + esc(label) + '</span><small>' + (value === '—' ? 'not measured' + (extra ? ': ' + esc(extra) : '') : esc(n) + ' · measured') + '</small></div>';
+      // The headline and its parts from the same, current criteria (the run's score from the server is from the criteria saved when the runs were loaded)
       const score = scoreRun(m, exp().objective && exp().objective.criteria);
-      if (num(r.score) !== null) score.score = r.score;   // the server's (same formula)
       const cats = s && s.confusion ? s.confusion.categories : null;
       box.innerHTML = runNote(r) +
         (refs ? '' : '<div class="lab-warn mb-3">This sandbox has no reference labels, so accuracy, F1 and κ can\'t be measured. Coverage, errors, consistency and agreement with the current AI coding still can.</div>') +
@@ -1462,7 +1524,7 @@
       box.innerHTML = s.state === 'applied' ? '<div class="lab-note xp-send-ok">Saved to the Codebook' + (s.dimensionId ? ' (variable “' + esc(variable().id === s.dimensionId ? variable().name : s.dimensionId) + '”)' : '') + '. <a href="/app.html#codebook" target="metacode-app" id="xp-open-codebook">Open in Codebook</a></div>'
         : s.state === 'failed' ? '<div class="lab-error" role="alert">Not saved to the Codebook: ' + esc(s.error || 'MetaCode didn\'t save it.') + ' <button class="btn btn-secondary btn-sm" id="xp-send-retry">Retry</button></div>'
         : '<div class="lab-note">' + esc(s.message || 'Sending…') + (s.blocked && open ? ' <a href="' + esc(open) + '" target="metacode-app" id="xp-send-open">Open MetaCode to confirm</a>' : '') + '</div>';
-      if ($('xp-send-retry')) $('xp-send-retry').onclick = () => sendToCodebook(true);
+      if ($('xp-send-retry')) $('xp-send-retry').onclick = () => sendToCodebook();
       refresh();
     }
     function setSend(patchObj) { X.send = Object.assign(X.send || { expId: exp().id }, patchObj); paintSend(); }
@@ -1506,17 +1568,29 @@
         pollSubmission();
       }, SEND_POLL_MS);
     }
-    async function sendToCodebook(retry) {
+    // One send of one selection: the same key for its retries, a new one when the version is selected again
+    const sendKey = sel => exp().id + ':' + sel.version + ':' + sel.codeHash + ':' + sel.runId + ':' + sel.selectedAt;
+    // A click on Send (or Retry) always delivers the rule to the app again and waits for its answer: the server
+    // puts the submission back to pending (resend), so an earlier "applied" — of a rule since removed in the
+    // Codebook — never counts as saved. The app reports a rule it already has as saved, without asking.
+    async function sendToCodebook() {
       const sel = exp().selected;
       if (!sel || W.phase) return;
-      const key = exp().id + ':' + sel.version + ':' + sel.codeHash;   // retries reuse it (spec §10)
+      const key = sendKey(sel);
       setPhase('sending');
       setSend({ state: 'sending', message: 'Sending to the Codebook…', key, submissionId: null, error: null, blocked: false });
       let sub;
-      try { sub = (await post(base + '/codebook', { idempotencyKey: key })).submission; }
-      catch (e) { if (!W.left) { W.phase = null; finishSend(false, e.message); } return; }
+      try { sub = (await post(base + '/codebook', { idempotencyKey: key, resend: true })).submission; }
+      catch (e) {
+        if (W.left) return;
+        W.phase = null;
+        // The selection changed on the server (another tab, or it ran again): show the current one, then send again
+        if (e.status === 409) { try { await reload(true); } catch (err) { /* the message below says what to do */ } if (W.left) return; }
+        finishSend(false, e.message);
+        if (!$('xp-send-status')) notify(e.message, 'error', 8000);   // (no selection any more: no status line to show it in)
+        return;
+      }
       if (W.left) return;
-      if (sub.status === 'applied' && !retry) { W.phase = null; finishSend(true, null, sub.dimensionId); return; }
       setSend({ submissionId: sub.id, prevResolvedAt: sub.status === 'failed' ? sub.resolvedAt : null, message: 'Asking MetaCode to save the rule…' });
       let acked = false, ackDone;
       const ackWait = new Promise(res => { ackDone = res; });
@@ -1533,20 +1607,24 @@
       }
       pollSubmission();
     }
-    // Back in the workspace: pick up the latest submission of the selected version
+    // Back in the workspace (no click): show how the send of the current selection stands — nothing is sent
     function resumeSend() {
       const sel = exp().selected;
       if (!sel) return;
       if (X.send && X.send.expId === exp().id && X.send.state === 'waiting') { if (X.send.submissionId) listenChannel(X.send.submissionId); pollSubmission(); return; }
       if (X.send && X.send.expId === exp().id && X.send.state === 'sending') X.send = null;   // left the page mid-send: ask the server
       if (X.send && X.send.expId === exp().id) return;
-      const subs = (exp().submissions || []).filter(s => s.codeHash === sel.codeHash && s.version === sel.version).sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1));
+      // This selection's send: by its key, or (a send from before keys named the run) the submission made from this very selection
+      const key = sendKey(sel);
+      const sentAt = s => s.resentAt || s.createdAt;
+      const subs = (exp().submissions || []).filter(s => s.idempotencyKey === key || (s.version === sel.version && s.codeHash === sel.codeHash && s.payload && s.payload.selectedAt === sel.selectedAt &&
+        s.payload.evaluation && s.payload.evaluation.runId === sel.runId)).sort((a, b) => (sentAt(a) < sentAt(b) ? 1 : -1));
       const s = subs[0];
       if (!s) return;
       if (s.status === 'applied') X.send = { expId: exp().id, state: 'applied', submissionId: s.id, dimensionId: s.dimensionId };
       else if (s.status === 'failed') X.send = { expId: exp().id, state: 'failed', submissionId: s.id, error: s.error };
-      else if (Date.now() - Date.parse(s.createdAt) < SEND_WAIT_MS) {
-        X.send = { expId: exp().id, state: 'waiting', submissionId: s.id, prevResolvedAt: null, message: 'Waiting for MetaCode to confirm the rule…', deadline: Date.parse(s.createdAt) + SEND_WAIT_MS };
+      else if (Date.now() - Date.parse(sentAt(s)) < SEND_WAIT_MS) {
+        X.send = { expId: exp().id, state: 'waiting', submissionId: s.id, prevResolvedAt: null, message: 'Waiting for MetaCode to confirm the rule…', deadline: Date.parse(sentAt(s)) + SEND_WAIT_MS };
         listenChannel(s.id);
         pollSubmission();
       }
@@ -1607,7 +1685,8 @@
       finally { if (!W.left) $('xp-criteria-save').disabled = false; }
     };
 
-    if (execOff) $('xp-notice').insertAdjacentHTML('beforeend', '<div class="lab-warn xp-notice" role="status">Running code is switched off on this server (AI_LAB_CODE_EXECUTION=off). You can still write, check, compare and evaluate versions, and send one that already ran to the Codebook.</div>');
+    if (execOff) $('xp-notice').insertAdjacentHTML('beforeend', '<div class="lab-warn xp-notice" id="xp-off" role="status">Running code is switched off on this server. You can still write, check, compare and evaluate versions, and send one that already ran to the Codebook.</div>');
+    else if (na[exp().language]) $('xp-notice').insertAdjacentHTML('beforeend', '<div class="lab-warn xp-notice" id="xp-lang-na" role="status">' + esc(LANG_LABEL[exp().language]) + ' can\'t run on this server: ' + esc(na[exp().language]) + ' You can still write, check and compare versions.</div>');
     // An import report from creating this experiment
     const note = IMPORT_NOTES[exp().id];
     if (note) {

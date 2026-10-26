@@ -80,7 +80,8 @@ function labConfig(env) {
   const codeExecution = choice('AI_LAB_CODE_EXECUTION', /** @type {('sandbox' | 'off')[]} */ (['sandbox', 'off']), 'sandbox', 'off');
   const execution = {
     mode: codeExecution,
-    isolation: choice('AI_LAB_SANDBOX_ISOLATION', /** @type {('auto' | 'namespace' | 'process')[]} */ (['auto', 'namespace', 'process']), 'auto', 'auto'),
+    // (a value that isn't one of these is read as the strictest, so a typo never weakens isolation)
+    isolation: choice('AI_LAB_SANDBOX_ISOLATION', /** @type {('auto' | 'namespace' | 'process')[]} */ (['auto', 'namespace', 'process']), 'auto', 'namespace'),
     timeoutMs: int('AI_LAB_SANDBOX_TIMEOUT_MS', 15000, 1000, 120000),
     memoryMb: int('AI_LAB_SANDBOX_MEMORY_MB', 64, 16, 512),
     pythonMemoryMb: int('AI_LAB_SANDBOX_PYTHON_MEMORY_MB', 256, 128, 1024),

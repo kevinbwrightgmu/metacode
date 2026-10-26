@@ -126,6 +126,7 @@ lab-data/users/<key>/
   runs/<id>/results.ndjson        one line per finished task
   sandboxes/<id>/v<n>.json        a sandbox version: the variable and its records
   xruns/<id>/results.json         the validated per-record results of a code run
+  xruns/<id>/log.json             a code run's terminal lines (the run itself keeps the last 20)
   audit.ndjson                    configuration changes (ids and counts, no content)
 ```
 
@@ -547,31 +548,45 @@ allowed user. Errors are `{ error: { type, message } }` with an HTTP status;
 | `GET /experiments/:id/compare?a&b` | Two versions (or `baseline`): code, runs, scores and changed records |
 | `POST /experiments/:id/versions/:v/evaluate` | The AI's evaluation of a run against the baseline or another version, with unverified numbers flagged |
 | `POST/DELETE /experiments/:id/select` | Select the final version (it must have a successful run) or clear the selection |
-| `POST /experiments/:id/codebook` | Create the Codebook submission for the selected version (`idempotencyKey`; a retry returns the same submission) |
+| `POST /experiments/:id/codebook` | Create the Codebook submission for the selected version (`idempotencyKey` for this selection; the same key returns the same submission, `resend: true` offers it to the app again) |
 | `GET /codebook-submissions/:id`, `POST /codebook-submissions/:id/result` | Read by the MetaCode app (`{submission, experiment:{id,name}, variable:{id,name}}`); the app reports `applied` (with the `dimensionId`) or `failed` (with an `error`). An applied submission stays applied |
 
 What the code-experiment routes answer, beyond the table:
 
 - `GET /experiments/:id` → `{experiment, runs, sandbox, execution:{mode}, definitions}`.
-  `runs` are summaries without terminal lines, with `logTotal`, `active` and the
-  objective `score`.
+  `runs` are summaries without terminal lines (the runs the versions list, newest
+  first), with `logTotal`, `active` and the objective `score`.
 - `POST /experiments/:id/runs` answers 202 with the run as created (`queued`, the
   job may already have started): poll `GET /xruns/:id?since=<seq>`, which answers
-  `{run, logTotal}` with only the lines after `seq`.
+  `{run, logTotal}` with only the lines after `seq` — from memory while the run is
+  going, otherwise from `xruns/<id>/log.json` (written with the run as it goes;
+  the stored run object keeps only its last 20 lines and `logTotal`). Runs are read
+  one at a time, never all of a user's runs kept in memory; the export has every
+  run with all its lines.
 - `POST /sandboxes/import` and `/from-dataset` answer 201 `{sandbox, report}`
   (`report`: accepted, rejected, truncated, the first 50 problems);
   `POST /sandboxes/:id/import` answers 200 with the same shape. `split` defaults to `all`.
-- `POST /experiments/:id/codebook` takes `{idempotencyKey}` of 1–160 characters (the
-  Lab sends `<experimentId>:<version>:<codeHash>`, 87–90 characters) and answers
-  201 with a new submission or 200 with the existing one for that key. Retrying a
-  `failed` submission (cancelled or refused in the app) sets it back to `pending`
-  with the same id, so the app can apply it again.
+- `POST /experiments/:id/codebook` takes `{idempotencyKey, resend?}`; the key has
+  1–160 characters and stands for one selection (the Lab sends
+  `<experimentId>:<version>:<codeHash>:<runId>:<selectedAt>`, about 135
+  characters). It first requires a selection that still passes the final checks
+  (409 `no_selection` / `not_selectable` otherwise, also for a key used before).
+  A new key answers 201 with a new submission. A known key answers 200 with its
+  submission only if that submission is exactly the current selection (version,
+  code hash, run and rationale); otherwise 409 `key_mismatch` ("This send belongs
+  to an earlier selection; send again."). Without `resend` the submission comes
+  back unchanged; with `resend: true` (a click on Send or Retry) it is set back to
+  `pending` with the same id — also when it was `applied`, so a rule removed in
+  the app can be sent again — with `resentAt` set.
 - `GET /access` and `GET /models` report `codeExecution` (`sandbox` or `off`).
   `/models` also has `execution: {mode, isolationSetting, isolation, languages,
   unavailable, limits:{timeoutMs, memoryMb, pythonMemoryMb, maxOutputKb,
-  maxRunning}, note}` — `isolation` is the host's isolation report (null when
-  execution is off), `unavailable` maps each language that can't run here to the
-  reason.
+  maxRunning}, note, warnings}` — `isolation` is the host's isolation report (null
+  when execution is off), `languages` the languages that can run here,
+  `unavailable` a list of `{language, reason}` for those that can't, and
+  `warnings` the warnings about the execution settings (`AI_LAB_CODE_EXECUTION`,
+  `AI_LAB_SANDBOX_*`, `AI_LAB_MAX_RUNNING_EXECUTIONS`); `warnings` at the top level
+  has all of the Lab's setting warnings.
 - `GET /admin/metrics` has `experiments: {running, queued, runsByStatus, sandbox:
   {running, waiting}}` (`runsByStatus` counts runs that ended since the server
   started).
@@ -587,6 +602,7 @@ Errors specific to code experiments (with `type` in the error body):
 | 409 | `review_missing`, `review_rejected` | Acknowledging a version with no AI review yet, or one the review rejected |
 | 409 | `not_selectable` | Selecting (or sending) a version whose last run didn't succeed with valid output on the experiment's sandbox data, that hasn't passed the policy, whose review is missing or rejected, or that ran again after it was selected |
 | 409 | `no_selection` | Sending to the Codebook before selecting a version |
+| 409 | `key_mismatch` | Sending to the Codebook with the key of an earlier selection (another version, run or rationale): send again |
 | 409 | `no_results` | Results of a run that has no validated results (the answer has its `status`), or comparing with such a run |
 | 409 | `not_comparable` | Results compared record by record with a run on other sandbox data |
 | 409 | `no_run` | Evaluating a version that has no successful run |
@@ -648,6 +664,12 @@ and 22.15 or newer for Python (the Node permission model and module hooks), and
 network namespace needs `unshare` and unprivileged user namespaces; `prlimit`
 is optional. The Models page and each run's terminal show what is available.
 
+**Setting warnings.** An `AI_LAB_*` value the Lab can't use is ignored with a
+warning in the server log (`[ai-lab] config.warning detail="…"`), once when the
+server starts and again when the settings change (Settings → Reload .env). The
+warnings about the code-execution settings are also on the Models page
+(`/models` → `execution.warnings`).
+
 ## 13. Known limitations
 
 - **Retrieval** is keyword search (BM25). It matches words and identifiers, not
@@ -708,8 +730,11 @@ measured results, and send the version you choose to the Codebook.
 7. **Evaluate**: the AI explains the measured results against your objective —
    proposed improvement, reasoning, observed results, comparison, trade-offs,
    limitations and a recommendation (retain, revise, reject). It's given only the
-   measured numbers; numbers in its text that don't match a measurement are
-   flagged.
+   measured numbers; numbers in its text that don't match a measurement of their
+   kind are flagged: percentages and decimals (also written ".97" or in words)
+   must match a measured share, a κ a measured κ, counts a measured count. The
+   current AI coding is always measured on the same records as the run it is set
+   against (that run's split), in Compare and in the evaluation.
 8. **Select** the final version (it must have run successfully) and **Send to
    Codebook** (below).
 
@@ -786,8 +811,15 @@ The same steps apply to AI-generated code and code you typed.
    `__subclasses__`, `__globals__`, …), `open`, `input`, `getattr` with computed
    names, `with`, loops that can never end (`while (true)` with no `break`,
    `return` or `throw`), a missing or `async` `classify`, and code over 100 KB.
-   Warnings (shown, not blocking): randomness and clock reads (results won't
-   reproduce), and strings that look like hidden code.
+   In Python, names of internals hidden in strings (also split across `+`) and the
+   string-driven attribute lookups `format_map`, `vformat`, `get_field` and
+   `string.Formatter` are errors too. Warnings (shown, not blocking): randomness
+   and clock reads (results won't reproduce), and strings that look like hidden
+   code. **Inside the engine** the same rules hold at run time, whatever the
+   policy missed: JavaScript has no `eval` and no function constructors, and
+   Python runs with an audit hook (which code can't remove) that refuses files,
+   programs, sockets, `ctypes` and dynamic code, and an importer that admits only
+   the modules above (and the private helpers they use themselves).
 4. **Isolated execution** (§8): a new sandbox process per run, records pulled in
    small batches (the only thing the code can ask the host for), no network, no
    files, no programs, no secrets. Limits: time `AI_LAB_SANDBOX_TIMEOUT_MS`
@@ -796,8 +828,11 @@ The same steps apply to AI-generated code and code you typed.
    `AI_LAB_SANDBOX_PYTHON_MEMORY_MB` (256 MB, Python), results and logs
    `AI_LAB_SANDBOX_MAX_OUTPUT_KB` (8 MB), and 2,000 lines or 256 KB of the
    code's own output (later output is dropped with a note; the terminal keeps
-   3,000 lines per run). Over a limit, the process is killed and the run fails
-   with the reason. **Cancel run** stops a run (its process is killed).
+   3,000 lines per run, saved in `xruns/<id>/log.json`). Over a limit, the
+   process is killed and the run fails with the reason. **Cancel run** stops a
+   run (its process is killed); a run cancelled before its sandbox process
+   started — while it waited for a free sandbox — isn't counted against the
+   day's runs.
 5. **Output validation.** Every record must have exactly one result of the shape
    above. A record whose `classify` threw is an error for that record (it counts
    in the error rate). Anything else — an unknown code, an extra field, a
@@ -839,8 +874,11 @@ projects), so the app — not the Lab page — writes it:
    rationale, measured results of its run — `split` says which records the run
    covered and `referenceSplit` which records its accuracy, F1 and κ were
    measured on — review and policy outcome, sandbox provenance, selection time).
-   Retrying reuses it (the idempotency key is the experiment, version and code
-   hash); there are no duplicates.
+   A retry of the same selection reuses it (the idempotency key is the
+   experiment, version, code hash, run and selection time), so there are no
+   duplicates; selecting again — another run or rationale — makes a new one.
+   Every click on Send or Retry offers the submission to the app again, also one
+   it applied before.
 2. The Lab asks an open MetaCode tab to apply it (`BroadcastChannel('metacode-lab')`;
    a tab that answers within 1.2 s takes it), or opens `/app.html#codebook/lab/<id>`.
 3. The app shows what will be saved and **asks you to confirm**. In a tab where
@@ -855,17 +893,33 @@ projects), so the app — not the Lab page — writes it:
    "Saved to Codebook" or the error with Retry.
 
 The dimension must exist in the project open in the app; if it doesn't, nothing
-is saved and the app says which project and variable the rule is for. The Codebook
-shows the rule (version, language, measured results, sent date) with View code,
-Open experiment and Remove rule. **Saving is not deploying**: the app never runs
-the rule, and AI Coding doesn't use it.
+is saved and the app says which project and variable the rule is for. The variable
+is matched by id, so the app also compares the rule's codes (the contract's output
+codes) with the open variable's codes: if the rule can return a code the variable
+doesn't have — another project's variable with the same name, or a code renamed
+since the sandbox was made — nothing is saved, the app lists both sets of codes and
+the Lab shows the failure. Codes the variable has but the rule never returns are
+only a warning in the confirmation. The confirmation names the open project and
+variable the rule is saved into and the Lab variable and sandbox it was measured on.
+Sending a rule that is already the variable's current rule changes nothing and is
+reported as saved; after Remove rule, sending it again asks again and saves it again.
+The Codebook shows the rule (version, language, measured results, sent date) with
+View code, Open experiment and Remove rule. **Saving is not deploying**: the app
+never runs the rule, and AI Coding doesn't use it.
+
+Coding rules aren't part of codebook CSVs: Export Data → Codebook leaves them out,
+and Import CSV keeps the rule (and its history and other fields) of a dimension it
+updates. When the imported codes no longer include a code the rule can return, the
+rule stays and its panel says "Codes changed since this rule was tested". Load
+example codebook replaces the whole codebook, so it asks first when a variable has
+a coding rule.
 
 ### Settings
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `AI_LAB_CODE_EXECUTION` | `sandbox` | `off` stops all code execution (runs answer 503 `execution_disabled`); any other value counts as `off`, with a warning in the log |
-| `AI_LAB_SANDBOX_ISOLATION` | `auto` | `auto`: use the network namespace and process limits when available; `namespace`: refuse runs without the namespace (503 `isolation_unavailable`); `process`: never use them. Any other value counts as `auto`, with a warning |
+| `AI_LAB_SANDBOX_ISOLATION` | `auto` | `auto`: use the network namespace and process limits when available; `namespace`: refuse runs without the namespace (503 `isolation_unavailable`); `process`: never use them. Any other value counts as `namespace` (the strictest), with a warning, so a typo never weakens isolation |
 | `AI_LAB_SANDBOX_TIMEOUT_MS` | `15000` | Time per run (1,000–120,000) |
 | `AI_LAB_SANDBOX_MEMORY_MB` | `64` | JavaScript/TypeScript engine memory (16–512) |
 | `AI_LAB_SANDBOX_PYTHON_MEMORY_MB` | `256` | Python memory (128–1,024) |

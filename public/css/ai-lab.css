@@ -39,6 +39,9 @@
 .lab-error { font-size: 12.5px; color: #991B1B; background: #FEF2F2; border: 1px solid #FECACA; border-radius: var(--r-sm); padding: 8px 12px; }
 .lab-kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 13px; }
 .lab-kv dt { color: var(--tx-second); }
+/* Models page: what this server can run for Code Experiments (/models → execution) */
+.md-exec-kv dd { min-width: 0; overflow-wrap: anywhere; }
+.md-exec-list { margin: 4px 0 0 18px; padding: 0; display: flex; flex-direction: column; gap: 2px; }
 .lab-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); margin-bottom: 14px; flex-wrap: wrap; }
 .lab-tab { padding: 8px 12px; font-size: 13px; font-weight: 500; color: var(--tx-second); border-bottom: 2px solid transparent; }
 .lab-tab[aria-selected="true"] { color: var(--blue); border-bottom-color: var(--blue); }
@@ -356,6 +359,8 @@ details.lab-result h4 { font-size: 12px; text-transform: uppercase; letter-spaci
   /* a long page title gives way (…) so the account chip stays on screen */
   .topbar-left.lab-topbar-left { flex-shrink: 1; min-width: 0; }
   .lab-topbar-left .topbar-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .md-exec-kv { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .md-exec-kv dd { margin-bottom: 6px; }
 }
 @media (max-width: 860px) {
   .view-container:has(> .lab-view > .xp) { padding: 12px; }

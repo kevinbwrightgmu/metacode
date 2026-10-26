@@ -95,6 +95,17 @@ const Codebook = (() => {
       : `<li class="cr-metric cr-muted" data-metric="${App.esc(m.key)}"><span class="cr-metric-l">${App.esc(m.label)}</span> <span class="cr-metric-v">${App.esc(m.text)}</span></li>`).join('')}</ul>`;
   }
 
+  // The variable's codes changed since the rule was tested (a CSV import, a deleted or added code):
+  // a warning when the rule can return codes the variable no longer has, a note when it never returns some
+  function ruleDriftHTML(dim) {
+    const d = CodingRule.codeDrift(dim);
+    if (!d || (!d.notInDimension.length && !d.notInRule.length)) return '';
+    const never = d.notInRule.length ? `It never returns ${CodingRule.codeList(d.notInRule)}.` : '';
+    return d.notInDimension.length
+      ? `<div class="cr-warn cr-drift" role="note">Codes changed since this rule was tested: it can return ${App.esc(CodingRule.codeList(d.notInDimension))}, which “${App.esc(dim.name || dim.id)}” no longer has. ${App.esc(never)} Its measured results are for its own codes.</div>`
+      : `<div class="cr-drift cr-drift-note" role="note">Codes changed since this rule was tested: ${App.esc(never.replace(/^It/, 'it'))}</div>`;
+  }
+
   function rulePanel(dim) {
     const rule = dim.codingRule;
     if (!rule || typeof rule !== 'object' || typeof CodingRule === 'undefined') return '';
@@ -105,6 +116,7 @@ const Codebook = (() => {
     return `
       <div class="cr-panel" data-dim="${App.esc(dim.id)}">
         <div class="cr-head">${App.esc(CodingRule.headline(rule))}</div>
+        ${ruleDriftHTML(dim)}
         ${ruleMetricsHTML(rule, true)}
         <div class="cr-foot">
           <span class="cr-sent">${sent ? 'Sent ' + App.esc(sent) : 'Sent'}${typeof exp.name === 'string' && exp.name ? ' from “' + App.esc(exp.name) + '”' : ''}</span>
@@ -138,8 +150,10 @@ const Codebook = (() => {
       <div class="cr-view-modal" id="cr-view">
         <p class="cr-lead">${App.esc(CodingRule.headline(rule))}</p>
         <p class="cr-note">MetaCode keeps this rule with the variable for reference. It never runs the code, and AI Coding doesn't use it.</p>
+        ${ruleDriftHTML(dim)}
         <dl class="cr-facts">
           ${row('Experiment', str(exp.name))}
+          ${row('Codes', (CodingRule.ruleCodes(rule) || []).join(', '))}
           ${row('Version', Number.isInteger(rule.version) ? 'v' + rule.version : '')}
           ${row('Language', CodingRule.languageLabel(rule.language))}
           ${row('Code hash', short(rule.codeHash))}
@@ -398,6 +412,7 @@ const Codebook = (() => {
         CSV must have columns: <code style="font-family:var(--f-mono)">dimension_name, code_id, code_label</code>
         <br>Optional: <code style="font-family:var(--f-mono)">dimension_description, code_description, code_ai_notes</code>
       </div>
+      <p class="form-hint" id="cb-import-rules" style="margin:-6px 0 14px">Coding rules from the AI Coding Lab aren't in codebook CSVs (Export Data → Codebook leaves them out). Importing a dimension you already have updates its description and codes and keeps its coding rule.</p>
       <div class="upload-zone" onclick="document.getElementById('cb-file').click()">
         <input type="file" id="cb-file" accept=".csv" onchange="Codebook.importCSV(this)">
         <div class="upload-title">Click to choose codebook CSV</div>
@@ -427,16 +442,25 @@ const Codebook = (() => {
         });
         const imported = Object.values(dimMap);
         if (!imported.length) { App.notify('No valid rows found in CSV', 'error'); return; }
-        // Merge with existing
+        // Merge with existing: the CSV's fields win, and what a CSV can't hold stays (a dimension's
+        // coding rule and its history from the AI Coding Lab, other fields of the dimension and of its codes)
         const existing = App.getState().codebook;
         const merged = [...existing];
+        const drifted = [];
         imported.forEach(dim => {
           const idx = merged.findIndex(d=>d.id===dim.id);
-          if (idx>=0) merged[idx] = dim; else merged.push(dim);
+          if (idx < 0) { merged.push(dim); return; }
+          const old = merged[idx];
+          const oldCodes = Array.isArray(old.codes) ? old.codes : [];
+          merged[idx] = { ...old, ...dim, codes: dim.codes.map(c => ({ ...(oldCodes.find(o => o && o.id === c.id) || {}), ...c })) };
+          // The rule stays, marked in its panel, when the CSV dropped codes it can return
+          const drift = typeof CodingRule !== 'undefined' ? CodingRule.codeDrift(merged[idx]) : null;
+          if (drift && drift.notInDimension.length) drifted.push(`“${dim.name}” (${CodingRule.codeList(drift.notInDimension)})`);
         });
         App.setState({ codebook: merged });
         App.closeModal();
-        App.notify(`Imported ${imported.length} dimensions`, 'success');
+        if (drifted.length) App.notify(`Imported ${imported.length} dimensions. The coding rule of ${drifted.join(', ')} can return codes the CSV no longer has — marked “codes changed since this rule was tested”.`, 'warning', 9000);
+        else App.notify(`Imported ${imported.length} dimensions`, 'success');
         render();
       }
     });
@@ -444,6 +468,9 @@ const Codebook = (() => {
 
   /* ── Example codebook ────────────────────────*/
   function loadExample() {
+    // It replaces the whole codebook: a coding rule from the AI Coding Lab (and its history) would go with it
+    const withRule = App.getState().codebook.filter(d => d && d.codingRule && typeof d.codingRule === 'object');
+    if (withRule.length && !confirm(`Replace the codebook with the example? The coding rule${withRule.length === 1 ? '' : 's'} from the AI Coding Lab on ${withRule.map(d => `"${d.name || d.id}"`).join(', ')} and ${withRule.length === 1 ? 'its' : 'their'} history will be removed (the experiments stay in the Lab).`)) return;
     const example = [
       {
         id: 'sentiment', name: 'Sentiment', description: 'The overall emotional valence of the post.',

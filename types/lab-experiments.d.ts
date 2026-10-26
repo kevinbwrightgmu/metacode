@@ -214,6 +214,8 @@ export interface CodebookSubmission {
   status: 'pending' | 'applied' | 'failed';
   createdAt: string;
   resolvedAt: string | null;
+  /** Set when an explicit Send/Retry put the submission back to pending. */
+  resentAt?: string | null;
   dimensionId: string | null;
   error: string | null;
   payload: CodingRule;
@@ -335,7 +337,9 @@ export interface ExecutionRun {
   engine: { name: string; version: string } | null;
   isolation: IsolationReport | null;
   security: { policy: PolicyReport | null; review: SecurityReview | null; acknowledged: boolean };
+  /** The last lines only (≤ 20); the whole log is the sidecar xruns/<id>/log.json, served by GET /xruns/:id?since. */
   log: TerminalLine[];
+  logTotal?: number;
   logTruncated: boolean;
   timing: { queuedAt: string; startedAt: string | null; finishedAt: string | null; durationMs: number | null; bootMs: number | null };
   resources: SandboxOutcome['resources'] | null;
@@ -398,7 +402,7 @@ export interface CodingRule {
     recommendation: AiEvaluation['recommendation'] | null;
   };
   security: { policy: 'passed'; review: ReviewDecision; reviewedAt: string | null };
-  sandbox: { id: Id; name: string; version: number; sha256: string };
+  sandbox: { id: Id; name: string; version: number; sha256: string; source?: { kind: SandboxSource['kind']; projectName: string | null } | null };
   selectedAt: string;
   sentAt: string;
 }

@@ -22,7 +22,9 @@
 //                 kept in xruns/<id>/results.json
 //
 // Terminal lines carry ids and counts only, never record text (the code's own
-// stdout/stderr is printed as it comes). Comparisons, AI evaluations (numbers
+// stdout/stderr is printed as it comes). They are kept in memory while a run
+// is active and saved with it to xruns/<id>/log.json; the run object itself
+// keeps only the last few lines and the count. Comparisons, AI evaluations (numbers
 // in the AI's text checked against the measurements), the final selection and
 // the Codebook submission (applied by the MetaCode app, not here) build on
 // the stored runs. Nothing here runs code: the sandbox does.
@@ -62,6 +64,9 @@ const { logger, redact, userRef } = require('../lib/log');
 /** @typedef {import('./store').UserStore} UserStore */
 /** @typedef {{ key: string, runId: string, principal: LabPrincipal }} Job */
 /** @typedef {{ temperature: number, maxTokens: number, json: boolean }} ChatSettings */
+/** A stored run: `log` holds its last LIMITS.logTail lines, `logTotal` counts them all (runs stored before log.json kept every line in `log`). */
+/** @typedef {ExecutionRun & { logTotal?: number }} StoredRun */
+/** @typedef {CodebookSubmission & { resentAt?: string | null }} Submission */
 
 const log = logger('ai-lab');
 
@@ -83,9 +88,9 @@ const LIMITS = Object.freeze({
   codeBytes: 200 * 1024,
   /** Code the Codebook keeps. */
   codebookBytes: 64 * 1024,
-  /** Lines a run's terminal keeps (the sandbox caps the code's own output first). */
-  logLines: 3000, lineChars: 2000,
-  /** Idempotency keys ("<experiment>:<version>:<code hash>" is 87–90 characters). */
+  /** Lines a run's terminal keeps (the sandbox caps the code's own output first); the run object keeps the last logTail of them. */
+  logLines: 3000, lineChars: 2000, logTail: 20,
+  /** Idempotency keys (the Lab's "<experiment>:<version>:<code hash>:<run>:<selectedAt>" is about 135 characters). */
   idempotencyKey: 160,
   page: 100, changedShown: 1000
 });
@@ -141,6 +146,8 @@ function createExperiments(deps) {
   const runsByStatus = {};
   /** Python policy checks in flight, per user (one at a time). */
   const analyzing = new Set();
+  /** @type {Map<string, TerminalLine[]>} runId → the terminal lines of a run that is going (saved to log.json as it goes) */
+  const liveLogs = new Map();
   let stopping = false;
 
   /** @param {string} runId */
@@ -161,6 +168,7 @@ function createExperiments(deps) {
         .catch(err => log.error('experiment.run_crashed', { run: job.runId, detail: redact(String(err && /** @type {Error} */ (err).stack || err), 600) }))
         .finally(() => {
           running.delete(job.runId);
+          liveLogs.delete(job.runId);
           if (activeByUser.get(job.key) === job.runId) activeByUser.delete(job.key);
           pump();
         });
@@ -195,12 +203,45 @@ function createExperiments(deps) {
     forgetFiles(store.forUser(key).root);
   }
 
-  /** A run that will never be picked up again: marked, saved, and its version updated. @param {UserStore} u @param {any} run @param {ExecutionStatus} status @param {string} type @param {string} message */
+  /* ── Stored runs (read one at a time: never all of a user's runs kept in memory) ───────── */
+
+  /** @param {UserStore} u @param {unknown} id @returns {StoredRun | null} */
+  const runOf = (u, id) => u.read('xruns', id);
+  /** @param {UserStore} u @param {unknown} id @param {string} what @returns {StoredRun} */
+  function ownedRun(u, id, what) {
+    const run = runOf(u, id);
+    if (!run) throw notFound(what);
+    return run;
+  }
+
+  /**
+   * A run's terminal lines: in memory while it is going, otherwise
+   * xruns/<id>/log.json (a run stored before logs moved there has them all inline).
+   * @param {UserStore} u @param {StoredRun} run @returns {TerminalLine[]}
+   */
+  function logOf(u, run) {
+    const live = liveLogs.get(run.id);
+    if (live) return live;
+    const raw = u.readSidecar('xruns', run.id, 'log.json');
+    if (raw) { try { const lines = JSON.parse(raw); if (Array.isArray(lines)) return lines; } catch (e) { /* unreadable: the lines the run kept */ } }
+    return Array.isArray(run.log) ? run.log : [];
+  }
+
+  /** Saves a run's lines to log.json; the run object keeps the last few and the count. @param {UserStore} u @param {StoredRun} run @param {TerminalLine[]} lines */
+  function storeLog(u, run, lines) {
+    u.writeSidecar('xruns', run.id, 'log.json', JSON.stringify(lines));
+    run.log = lines.slice(-LIMITS.logTail);
+    run.logTotal = lines.length;
+  }
+
+  /** A run that will never be picked up again: marked, saved, and its version updated. @param {UserStore} u @param {StoredRun} run @param {ExecutionStatus} status @param {string} type @param {string} message */
   function markEnded(u, run, status, type, message) {
     run.status = status;
     run.failure = { type, message, stage: run.stage };
     run.timing.finishedAt = now();
-    run.log.push({ seq: run.log.length ? run.log[run.log.length - 1].seq + 1 : 1, t: run.timing.startedAt ? Date.now() - Date.parse(run.timing.startedAt) : 0, stream: 'system', level: 'warn', stage: run.stage, text: message });
+    const lines = logOf(u, run).slice();
+    lines.push({ seq: lines.length ? lines[lines.length - 1].seq + 1 : 1, t: run.timing.startedAt ? Date.now() - Date.parse(run.timing.startedAt) : 0, stream: 'system', level: 'warn', stage: run.stage, text: message });
+    storeLog(u, run, lines);
     u.put('xruns', run);
     noteLastRun(u, run);
     runsByStatus[status] = (runsByStatus[status] || 0) + 1;
@@ -217,12 +258,16 @@ function createExperiments(deps) {
   }
 
   // After a restart: runs that were queued or running are marked interrupted (run them again).
+  // Only the start of each run file is read for the others (status comes before the log, the
+  // review and the metrics), and nothing is kept in memory.
   function recover() {
     let n = 0;
+    /** @param {string} head */
+    const maybeActive = head => { const m = /"status":"([a-z]+)"/.exec(head); return !m || ACTIVE.includes(m[1]); };
     for (const key of store.userKeys()) {
       const u = store.forUser(key);
-      for (const run of u.list('xruns')) {
-        if (!ACTIVE.includes(run.status)) continue;
+      const stuck = /** @type {StoredRun[]} */ (u.scan('xruns', r => ACTIVE.includes(r.status) && !isActive(r.id), maybeActive));
+      for (const run of stuck) {
         markEnded(u, run, 'interrupted', 'interrupted', 'The server restarted while this run was ' + (run.status === 'queued' ? 'waiting' : 'going') + '. Run the version again.');
         n++;
       }
@@ -267,17 +312,30 @@ function createExperiments(deps) {
     try { const j = JSON.parse(raw); return Array.isArray(j.results) ? j.results : null; } catch (e) { return null; }
   }
 
-  /** Runs of an experiment's version on the experiment's sandbox data, newest first. @param {UserStore} u @param {Experiment} e @param {number} version */
-  const runsOf = (u, e, version) => /** @type {ExecutionRun[]} */ (u.list('xruns')).filter(r => r.experimentId === e.id && r.version === version &&
-    r.sandbox.id === e.sandboxId && r.sandbox.version === e.sandboxVersion).sort(newestFirst);
-  /** @param {UserStore} u @param {Experiment} e @param {number} version @returns {ExecutionRun | null} */
-  const lastSucceeded = (u, e, version) => runsOf(u, e, version).find(r => r.status === 'succeeded' && !!r.metrics) || null;
+  /**
+   * The newest successful run of an experiment's version on the experiment's
+   * sandbox data (the version's run ids, newest first, read one at a time).
+   * @param {UserStore} u @param {Experiment} e @param {number} version @returns {ExecutionRun | null}
+   */
+  function lastSucceeded(u, e, version) {
+    const ver = e.versions.find(v => v.version === version);
+    const ids = ver ? ver.runIds : [];
+    for (let i = ids.length - 1; i >= 0; i--) {
+      const r = runOf(u, ids[i]);
+      if (r && r.status === 'succeeded' && r.metrics && r.experimentId === e.id && r.version === version && r.sandbox.id === e.sandboxId && r.sandbox.version === e.sandboxVersion) return r;
+    }
+    return null;
+  }
 
-  /** A run without its terminal lines (they come from GET /xruns/:id). @param {ExecutionRun} run @param {Experiment | null} [e] */
+  /** An experiment's runs (those its versions list), newest first. @param {UserStore} u @param {Experiment} e @returns {StoredRun[]} */
+  const experimentRuns = (u, e) => /** @type {StoredRun[]} */ (e.versions.flatMap(v => v.runIds).map(id => runOf(u, id)).filter(r => !!r && r.experimentId === e.id)).sort(newestFirst);
+
+  /** A run without its terminal lines (they come from GET /xruns/:id). @param {StoredRun} run @param {Experiment | null} [e] */
   function runSummary(run, e) {
     const out = /** @type {any} */ (Object.assign({}, run));
     delete out.log;
-    out.logTotal = run.log.length;
+    const live = liveLogs.get(run.id);
+    out.logTotal = live ? live.length : typeof run.logTotal === 'number' ? run.logTotal : (Array.isArray(run.log) ? run.log.length : 0);
     out.active = isActive(run.id);
     if (e) out.score = run.metrics ? M.scoreRun(run.metrics, e.objective.criteria).score : null;
     return out;
@@ -370,11 +428,15 @@ function createExperiments(deps) {
     return /** @type {CodeLanguage} */ (v);
   }
 
+  /** Line endings as the editor keeps them (\r\n and \r become \n), before the code is hashed. @param {string} code */
+  const normaliseCode = code => code.replace(/\r\n?/g, '\n');
+
   /** @param {unknown} v */
   function cleanCode(v) {
     if (typeof v !== 'string' || !v.trim()) throw invalid('There is no code to save.');
-    if (Buffer.byteLength(v, 'utf8') > LIMITS.codeBytes) throw invalid('The code is larger than ' + (LIMITS.codeBytes / 1024) + ' KB. Coding rules should be small (the policy allows 100 KB).');
-    return v;
+    const code = normaliseCode(v);
+    if (Buffer.byteLength(code, 'utf8') > LIMITS.codeBytes) throw invalid('The code is larger than ' + (LIMITS.codeBytes / 1024) + ' KB. Coding rules should be small (the policy allows 100 KB).');
+    return code;
   }
 
   /** @param {unknown} v */
@@ -394,11 +456,12 @@ function createExperiments(deps) {
   function addVersion(e, o) {
     if (e.versions.length >= LIMITS.versions) throw invalid('An experiment keeps ' + LIMITS.versions + ' versions at most. Start a new experiment for further work.');
     const n = e.versions.reduce((m, v) => Math.max(m, v.version), 0) + 1;
+    const code = normaliseCode(o.code);
     /** @type {ExperimentVersion} */
     const ver = {
       version: n, parent: o.parent, origin: o.origin, label: str(o.label, LIMITS.label).trim(), annotation: '', candidate: false,
-      language: o.language, code: o.code, codeHash: CP.codeHash(o.code), createdAt: now(), prompt: o.prompt || null, generation: o.generation || null,
-      policy: o.language === 'python' ? null : CP.analyzeJavaScript(o.code, o.language), review: null, reviewAck: null, runIds: [], lastRun: null, evaluation: null
+      language: o.language, code, codeHash: CP.codeHash(code), createdAt: now(), prompt: o.prompt || null, generation: o.generation || null,
+      policy: o.language === 'python' ? null : CP.analyzeJavaScript(code, o.language), review: null, reviewAck: null, runIds: [], lastRun: null, evaluation: null
     };
     e.versions.push(ver);
     e.updatedAt = now();
@@ -436,15 +499,16 @@ function createExperiments(deps) {
 
   /** Deletes an experiment with its runs (an active run is cancelled first). @param {UserStore} u @param {Experiment} e */
   function deleteExperiment(u, e) {
-    const runs = /** @type {ExecutionRun[]} */ (u.list('xruns')).filter(r => r.experimentId === e.id);
+    // (every run of it, also those no longer listed by a version; other runs' files are only glanced at)
+    const mine = '"experimentId":"' + e.id + '"';
+    const runs = /** @type {ExecutionRun[]} */ (u.scan('xruns', r => r.experimentId === e.id, head => head.includes(mine) || !head.includes('"experimentId":')));
     runs.forEach(r => { cancel(r.id); u.remove('xruns', r.id); });
     u.remove('experiments', e.id);
     return runs.length;
   }
 
-  /** @param {UserStore} u @param {Experiment} e */
-  function experimentSummary(u, e) {
-    const runs = /** @type {ExecutionRun[]} */ (u.list('xruns')).filter(r => r.experimentId === e.id).sort(newestFirst);
+  /** @param {Experiment} e @param {ExecutionRun[]} runs the experiment's runs, newest first */
+  function experimentSummary(e, runs) {
     let best = null;
     for (const r of runs) {
       if (r.status !== 'succeeded' || !r.metrics || r.sandbox.id !== e.sandboxId || r.sandbox.version !== e.sandboxVersion) continue;
@@ -462,18 +526,23 @@ function createExperiments(deps) {
   /** @param {Job} job @param {AbortSignal} signal */
   async function execute(job, signal) {
     const u = store.forUser(job.key);
-    const run = /** @type {ExecutionRun | null} */ (u.get('xruns', job.runId));
+    const run = runOf(u, job.runId);
     if (!run || run.status !== 'queued') return;
     const t0 = Date.now();
     let lastSave = 0;
     /** @type {NodeJS.Timeout | null} */
     let timer = null;
+    // The terminal: in memory while the run is going (GET /xruns/:id reads it here), saved to log.json with the run
+    const lines = logOf(u, run).slice();
+    liveLogs.set(run.id, lines);
+    let linesSaved = -1;
     // Deleted (the experiment, the run, or all of the user's data) → nothing is written again
-    const alive = () => !!u.get('xruns', run.id);
+    const alive = () => u.has('xruns', run.id);
     const saveNow = () => {
       if (timer) { clearTimeout(timer); timer = null; }
       if (!alive()) return;
       lastSave = Date.now();
+      if (lines.length !== linesSaved) { storeLog(u, run, lines); linesSaved = lines.length; }
       u.put('xruns', run);
     };
     const save = () => {
@@ -481,17 +550,17 @@ function createExperiments(deps) {
       if (since >= SAVE_EVERY_MS) return saveNow();
       if (!timer) { timer = setTimeout(saveNow, SAVE_EVERY_MS - since); timer.unref(); }
     };
-    let seq = run.log.reduce((m, l) => Math.max(m, l.seq), 0);
+    let seq = lines.reduce((m, l) => Math.max(m, l.seq), 0);
     /** @param {TerminalLine['stream']} stream @param {TerminalLine['level']} level @param {string} text */
     const line = (stream, level, text) => {
-      if (run.log.length >= LIMITS.logLines) {
+      if (lines.length >= LIMITS.logLines) {
         if (!run.logTruncated) {
           run.logTruncated = true;
-          run.log.push({ seq: ++seq, t: Date.now() - t0, stream: 'system', level: 'warn', stage: run.stage, text: 'The terminal keeps ' + LIMITS.logLines + ' lines per run; later lines were dropped.' });
+          lines.push({ seq: ++seq, t: Date.now() - t0, stream: 'system', level: 'warn', stage: run.stage, text: 'The terminal keeps ' + LIMITS.logLines + ' lines per run; later lines were dropped.' });
         }
         return;
       }
-      run.log.push({ seq: ++seq, t: Date.now() - t0, stream, level, stage: run.stage, text: String(text).slice(0, LIMITS.lineChars) });
+      lines.push({ seq: ++seq, t: Date.now() - t0, stream, level, stage: run.stage, text: String(text).slice(0, LIMITS.lineChars) });
       save();
     };
     /** @param {TerminalLine['level']} level @param {string} text */
@@ -505,9 +574,11 @@ function createExperiments(deps) {
       run.failure = { type, message, stage: at };
       sys(status === 'cancelled' || status === 'interrupted' ? 'warn' : 'error', message);
     };
+    // Whether a sandbox process was started for this run (a run cancelled before that isn't charged)
+    let spawned = false;
     const cancelled = () => (stopping
       ? stop('interrupted', run.stage, 'interrupted', 'The server stopped while this run was going. Run the version again.')
-      : stop('cancelled', run.stage, 'cancelled', 'Cancelled: the sandbox process was stopped.'));
+      : stop('cancelled', run.stage, 'cancelled', spawned ? 'Cancelled: the sandbox process was stopped.' : 'Cancelled before the sandbox started.'));
     /** @param {PolicyFinding[]} findings */
     const printFindings = findings => findings.slice(0, 50).forEach(f => sys(f.severity === 'error' ? 'error' : 'warn',
       (f.line ? 'line ' + f.line + ': ' : '') + f.message + ' [' + f.rule + (f.severity === 'warning' ? ', warning' : '') + ']'));
@@ -623,6 +694,7 @@ function createExperiments(deps) {
       try {
         out = await sandbox.run({ language: run.language, code: ver.code, records: X.sandboxInput(records), variable: file.variable, mode: 'run' }, {
           signal,
+          onSpawn: () => { spawned = true; },
           onLog: l => line(l.stream, l.level, l.text),
           onProgress: p => {
             let next = mark;
@@ -655,7 +727,11 @@ function createExperiments(deps) {
       run.timing.durationMs = out.durationMs;
       run.timing.bootMs = out.bootMs;
       if (out.failure) {
-        if (out.failure.type === 'cancelled' || signal.aborted) return cancelled();
+        if (out.failure.type === 'cancelled' || signal.aborted) {
+          // Cancelled while it waited for a sandbox slot: no process ever started, so the unit isn't charged
+          if (!spawned && unit) { unit.release(); unit = null; }
+          return cancelled();
+        }
         if (out.failure.type === 'policy_blocked') return stop('blocked', 'policy', 'policy_blocked', 'Blocked by the policy (' + CP.POLICY_VERSION + '): ' + out.failure.message);
         return stop('failed', 'execution', out.failure.type, out.failure.message);
       }
@@ -776,7 +852,8 @@ function createExperiments(deps) {
         recommendation: evaluation ? evaluation.recommendation : null
       },
       security: { policy: 'passed', review: review.decision, reviewedAt: review.reviewedAt || null },
-      sandbox: { id: run.sandbox.id, name: sbx ? sbx.name : '', version: run.sandbox.version, sha256: run.sandbox.sha256 },
+      sandbox: { id: run.sandbox.id, name: sbx ? sbx.name : '', version: run.sandbox.version, sha256: run.sandbox.sha256,
+        source: sbx && sbx.source ? { kind: sbx.source.kind, projectName: sbx.source.projectName || null } : null },
       selectedAt: e.selected ? e.selected.selectedAt : now(),
       sentAt: now()
     };
@@ -790,7 +867,7 @@ function createExperiments(deps) {
    * @returns {{ problem: string } | { run: ExecutionRun, review: SecurityReview }}
    */
   function finalCheck(u, e, ver) {
-    const run = /** @type {ExecutionRun | null} */ (ver.lastRun ? u.get('xruns', ver.lastRun.id) : null);
+    const run = ver.lastRun ? runOf(u, ver.lastRun.id) : null;
     if (!run || run.status !== 'succeeded' || !run.output || !run.output.valid || !run.metrics) return { problem: 'v' + ver.version + '\'s last run didn\'t succeed with valid output. Run it, then select it.' };
     if (run.codeHash !== ver.codeHash || run.sandbox.id !== e.sandboxId || run.sandbox.version !== e.sandboxVersion) return { problem: 'v' + ver.version + '\'s last run used other sandbox data. Run it again, then select it.' };
     const policy = policyOf(ver) || (run.security.policy && run.security.policy.codeHash === ver.codeHash ? run.security.policy : null);
@@ -916,7 +993,15 @@ function createExperiments(deps) {
 
     router.get('/experiments', route(req => {
       const u = us(req);
-      return { experiments: /** @type {Experiment[]} */ (u.list('experiments')).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1)).map(e => experimentSummary(u, e)) };
+      // One pass over the user's runs (read, not kept in memory), grouped by experiment
+      /** @type {Map<string, ExecutionRun[]>} */
+      const byExperiment = new Map();
+      for (const r of /** @type {ExecutionRun[]} */ (u.scan('xruns', () => true))) {
+        const list = byExperiment.get(r.experimentId);
+        if (list) list.push(r); else byExperiment.set(r.experimentId, [r]);
+      }
+      return { experiments: /** @type {Experiment[]} */ (u.list('experiments')).sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : -1))
+        .map(e => experimentSummary(e, (byExperiment.get(e.id) || []).sort(newestFirst))) };
     }));
     router.post('/experiments', route((req, res) => {
       const u = us(req);
@@ -953,7 +1038,7 @@ function createExperiments(deps) {
       const e = experiment(req, req.params.id);
       const s = /** @type {Sandbox | null} */ (u.get('sandboxes', e.sandboxId));
       const info = s ? s.versions.find(v => v.version === e.sandboxVersion) : null;
-      const runs = /** @type {ExecutionRun[]} */ (u.list('xruns')).filter(r => r.experimentId === e.id).sort(newestFirst);
+      const runs = experimentRuns(u, e);
       return {
         experiment: e, runs: runs.map(r => runSummary(r, e)),
         sandbox: info ? Object.assign({ id: e.sandboxId, name: s ? s.name : '', source: s ? s.source : null }, info) : null,
@@ -1151,7 +1236,7 @@ function createExperiments(deps) {
       if (b.split !== undefined && !SPLITS.includes(b.split)) throw invalid('split must be all, test or dev.');
       const split = /** @type {'all' | 'test' | 'dev'} */ (b.split || 'all');
       const s = settings();
-      if (s.mode !== 'sandbox') throw new LabError('execution_disabled', 'Running code is switched off on this server (AI_LAB_CODE_EXECUTION=off).', { status: 503 });
+      if (s.mode !== 'sandbox') throw new LabError('execution_disabled', 'Running code is switched off on this server (AI_LAB_CODE_EXECUTION isn\'t "sandbox").', { status: 503 });
       const support = sandbox.supported(ver.language);
       if (!support.ok) throw new LabError('not_available', support.reason, { status: 503 });
       if (s.isolation === 'namespace') {
@@ -1192,15 +1277,18 @@ function createExperiments(deps) {
     }));
 
     router.get('/xruns/:id', route(req => {
-      const run = /** @type {ExecutionRun} */ (owned(us(req), 'xruns', req.params.id, 'That run'));
+      const u = us(req);
+      const run = ownedRun(u, req.params.id, 'That run');
       const since = Math.max(0, Math.floor(Number(req.query.since)) || 0);
+      const lines = logOf(u, run);
       const out = runSummary(run);
-      out.log = run.log.filter(l => l.seq > since);
-      return { run: out, logTotal: run.log.length };
+      out.log = lines.filter(l => l.seq > since);
+      out.logTotal = lines.length;
+      return { run: out, logTotal: lines.length };
     }));
     router.post('/xruns/:id/cancel', route(async req => {
       const u = us(req);
-      const run = /** @type {ExecutionRun} */ (owned(u, 'xruns', req.params.id, 'That run'));
+      const run = ownedRun(u, req.params.id, 'That run');
       if (!ACTIVE.includes(run.status)) throw invalid('Only queued or running runs can be cancelled (this one is ' + run.status + ').');
       const c = cancel(run.id);
       if (!c || c.queued) {
@@ -1210,13 +1298,14 @@ function createExperiments(deps) {
       } else if (c.promise) {
         await Promise.race([c.promise, new Promise(r => setTimeout(r, CANCEL_WAIT_MS).unref())]);
       }
-      u.audit('experiment.run_cancelled', { run: run.id });
-      const fresh = /** @type {ExecutionRun | null} */ (u.get('xruns', run.id));
+      // (the run — or all of the user's data — deleted while this waited: nothing is written back, not even the audit line)
+      const fresh = runOf(u, run.id);
+      if (fresh) u.audit('experiment.run_cancelled', { run: run.id });
       return { run: runSummary(fresh || run) };
     }));
     router.get('/xruns/:id/results', route(req => {
       const u = us(req);
-      const run = /** @type {ExecutionRun} */ (owned(u, 'xruns', req.params.id, 'That run'));
+      const run = ownedRun(u, req.params.id, 'That run');
       const results = resultsOf(u, run);
       if (!results) throw new LabError('no_results', 'This run has no validated results: only a run that succeeded has them.', { status: 409, extra: { status: run.status } });
       const sbx = /** @type {Sandbox} */ (owned(u, 'sandboxes', run.sandbox.id, 'The run\'s sandbox data'));
@@ -1226,7 +1315,7 @@ function createExperiments(deps) {
       /** @type {Map<string, string | null> | null} */
       let other = null;
       if (against !== 'baseline') {
-        const o = /** @type {ExecutionRun} */ (owned(u, 'xruns', against, 'The run to compare with'));
+        const o = ownedRun(u, against, 'The run to compare with');
         if (o.sandbox.id !== run.sandbox.id || o.sandbox.version !== run.sandbox.version || o.sandbox.sha256 !== run.sandbox.sha256) {
           throw new LabError('not_comparable', 'Those runs used different sandbox data, so their results can\'t be compared record by record.', { status: 409 });
         }
@@ -1259,15 +1348,16 @@ function createExperiments(deps) {
       const criteria = e.objective.criteria;
       /** @type {string[]} */
       const warnings = [];
-      /** @param {unknown} q @param {string} name */
-      const side = (q, name) => {
-        if (q === undefined || q === '') throw invalid('Choose ' + name + ': a version number or baseline.');
-        if (q === 'baseline') {
-          const has = file.records.some(r => r.baseline !== null);
-          if (!has) warnings.push('These records have no current AI Coding labels, so there is nothing to compare on the baseline side.');
-          const metrics = has ? M.computeMetrics(M.baselineResults(file.records), file.records, file.variable) : null;
-          return { out: { kind: 'baseline', version: null, code: null, language: null, codeHash: null, origin: null, label: 'Current AI coding', policy: null, review: null, run: null, metrics, score: metrics ? M.scoreRun(metrics, criteria) : null }, run: null, results: null, ok: has };
-        }
+      for (const [q, name] of [[req.query.a, 'version A'], [req.query.b, 'version B']]) if (q === undefined || q === '') throw invalid('Choose ' + name + ': a version number or baseline.');
+      /** The current AI coding, measured on `records` (those of the run it is set against). @param {SandboxRecord[]} records */
+      const baselineSide = records => {
+        const has = records.some(r => r.baseline !== null);
+        if (!has) warnings.push('These records have no current AI Coding labels, so there is nothing to compare on the baseline side.');
+        const metrics = has ? M.computeMetrics(M.baselineResults(records), records, file.variable) : null;
+        return { out: { kind: 'baseline', version: null, code: null, language: null, codeHash: null, origin: null, label: 'Current AI coding', policy: null, review: null, run: null, metrics, score: metrics ? M.scoreRun(metrics, criteria) : null }, run: null, results: null, ok: has };
+      };
+      /** @param {unknown} q */
+      const versionSide = q => {
         const ver = versionOf(e, q);
         const run = lastSucceeded(u, e, ver.version);
         const results = run ? resultsOf(u, run) : null;
@@ -1278,7 +1368,12 @@ function createExperiments(deps) {
           run, results, ok: !!(run && results)
         };
       };
-      const a = side(req.query.a, 'version A'), b = side(req.query.b, 'version B');
+      const va = req.query.a === 'baseline' ? null : versionSide(req.query.a);
+      const vb = req.query.b === 'baseline' ? null : versionSide(req.query.b);
+      // The baseline side covers the same records as the run it is compared with (that run's split), not all of them
+      const against = (vb && vb.run) || (va && va.run) || null;
+      const baseRecords = against ? X.selectRecords(file.records, against.sandbox.split) : file.records;
+      const a = va || baselineSide(baseRecords), b = vb || baselineSide(baseRecords);
       let comparison = null;
       if (a.ok && b.ok && b.run && b.results) {
         const c = M.compareRuns(a.run, a.results, b.run, b.results, file.records);
@@ -1311,7 +1406,10 @@ function createExperiments(deps) {
       let comparison = null;
       if (target === 'baseline') {
         against = { kind: 'baseline', version: null, runId: null };
-        if (file.records.some(r => r.baseline !== null)) targetMetrics = M.computeMetrics(M.baselineResults(file.records), file.records, file.variable);
+        // Measured on the records this run used (its split), so both sides cover the same records; without its
+        // agreement with itself (always 100 %, κ 1), which says nothing and would "verify" invented 100 % / 1.00
+        const recs = X.selectRecords(file.records, run.sandbox.split);
+        if (recs.some(r => r.baseline !== null)) targetMetrics = Object.assign(M.computeMetrics(M.baselineResults(recs), recs, file.variable), { baseline: null });
         comparison = M.compareRuns(null, null, run, results, file.records);
       } else if (target !== 'none') {
         const w = versionOf(e, target);
@@ -1370,13 +1468,28 @@ function createExperiments(deps) {
       const b = req.body || {};
       const key = typeof b.idempotencyKey === 'string' ? b.idempotencyKey.trim() : '';
       if (!key || key.length > LIMITS.idempotencyKey || /[\u0000-\u001F\u007F]/.test(key)) throw invalid('Send an idempotencyKey of 1–' + LIMITS.idempotencyKey + ' characters (retries reuse it).');
-      const existing = e.submissions.find(s => s.idempotencyKey === key);
+      // The current selection and its final checks come first, also for a key that was used before
+      const sel = e.selected;
+      if (!sel) throw new LabError('no_selection', 'Select the final version first.', { status: 409 });
+      const ver = versionOf(e, sel.version);
+      if (ver.codeHash !== sel.codeHash) throw new LabError('not_selectable', 'The selection doesn\'t match v' + ver.version + '\'s code. Select it again.', { status: 409 });
+      const c = finalCheck(u, e, ver);
+      if ('problem' in c) throw new LabError('not_selectable', c.problem + ' Select a version again.', { status: 409 });
+      if (c.run.id !== sel.runId) throw new LabError('not_selectable', 'v' + ver.version + ' ran again after it was selected. Select it again to send its latest results.', { status: 409 });
+      const existing = /** @type {Submission | undefined} */ (e.submissions.find(s => s.idempotencyKey === key));
       if (existing) {
-        // A retry: the same submission. One that failed (or was cancelled in MetaCode) is offered again.
-        if (existing.status === 'failed') {
+        // A key is one send of one selection: it returns that submission only while it is exactly the current selection
+        const p = existing.payload;
+        if (existing.version !== sel.version || existing.codeHash !== sel.codeHash || !p || !p.evaluation || p.evaluation.runId !== sel.runId || p.rationale !== sel.rationale) {
+          throw new LabError('key_mismatch', 'This send belongs to an earlier selection; send again.', { status: 409 });
+        }
+        // Send again (the user clicked Send or Retry): offered to the app again, even if it was applied before
+        if (b.resend === true) {
           existing.status = 'pending';
           existing.error = null;
           existing.resolvedAt = null;
+          existing.dimensionId = null;
+          existing.resentAt = now();
           existing.payload.sentAt = now();
           e.updatedAt = now();
           u.put('experiments', e);
@@ -1385,12 +1498,6 @@ function createExperiments(deps) {
         res.status(200);
         return { submission: existing };
       }
-      if (!e.selected) throw new LabError('no_selection', 'Select the final version first.', { status: 409 });
-      const ver = versionOf(e, e.selected.version);
-      if (ver.codeHash !== e.selected.codeHash) throw new LabError('not_selectable', 'The selection doesn\'t match v' + ver.version + '\'s code. Select it again.', { status: 409 });
-      const c = finalCheck(u, e, ver);
-      if ('problem' in c) throw new LabError('not_selectable', c.problem + ' Select a version again.', { status: 409 });
-      if (c.run.id !== e.selected.runId) throw new LabError('not_selectable', 'v' + ver.version + ' ran again after it was selected. Select it again to send its latest results.', { status: 409 });
       if (Buffer.byteLength(ver.code, 'utf8') > LIMITS.codebookBytes) throw new LabError('too_large', 'The Codebook keeps coding rules up to ' + (LIMITS.codebookBytes / 1024) + ' KB; v' + ver.version + ' is larger.', { status: 413 });
       if (!CODE_ID_RE.test(e.variable.id)) throw invalid('The variable id can\'t be used in the Codebook.');
       const id = newId('submissions');
@@ -1461,6 +1568,8 @@ function createExperiments(deps) {
       activeByUser.clear();
     },
     cancelUser,
+    /** A user's runs for the data export, each with all of its terminal lines. @param {UserStore} u */
+    exportRuns(u) { return /** @type {StoredRun[]} */ (u.scan('xruns', () => true)).map(r => Object.assign({}, r, { log: logOf(u, r) })); },
     stats() {
       return { running: running.size, queued: queue.length, runsByStatus: Object.assign(Object.fromEntries(STATUSES.filter(s => !ACTIVE.includes(s)).map(s => [s, 0])), runsByStatus), sandbox: sandbox.stats() };
     },

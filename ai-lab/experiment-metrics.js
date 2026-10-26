@@ -347,75 +347,148 @@ function compareRuns(runA, resultsA, runB, resultsB, records) {
   return { sameSandbox: true, sameSplit, changed, counts: { changed: changed.length, fixed, broken } };
 }
 
+/** Keys whose values are shares (0–1, κ −1…1): quoted as decimals or percentages. */
+const RATIO_KEYS = new Set(['accuracy', 'macroF1', 'kappa', 'precision', 'recall', 'f1', 'coverage', 'errorRate', 'agreement', 'score']);
+
+/** @typedef {{ ratios: number[], kappas: number[], counts: number[], durations: number[] }} NumberPools */
+
 /**
- * Every finite number in a value (objects and arrays, recursively). Durations
- * in milliseconds (keys ending in "Ms") are also added in seconds.
+ * Every finite number in a value (objects and arrays, recursively), sorted by
+ * what it measures: shares (RATIO_KEYS; κ also on its own), durations (keys
+ * ending in "Ms", also in seconds) and whole-number counts (everything else:
+ * n, supports, confusion cells, the distribution, comparison counts …).
  * @param {unknown} v
- * @param {number[]} out
+ * @param {NumberPools} pools
  * @param {string} [key]
  * @param {number} [depth]
+ * @param {boolean} [counts]   inside a map of counts (the distribution: its keys are code ids)
  */
-function collectNumbers(v, out, key, depth) {
+function collectNumbers(v, pools, key, depth, counts) {
   const d = depth || 0;
-  if (d > 8 || out.length > 50000) return;
+  if (d > 8 || pools.ratios.length + pools.counts.length > 50000) return;
   if (typeof v === 'number' && Number.isFinite(v)) {
-    out.push(v);
-    if (key && /Ms$/.test(key)) out.push(v / 1000);
-  } else if (Array.isArray(v)) v.forEach(x => collectNumbers(x, out, key, d + 1));
-  else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) collectNumbers(x, out, k, d + 1);
+    if (key && /Ms$/.test(key)) pools.durations.push(v, v / 1000);
+    else if (!counts && key && RATIO_KEYS.has(key)) { pools.ratios.push(v); if (key === 'kappa') pools.kappas.push(v); }
+    else if (Number.isInteger(v)) pools.counts.push(v);
+  } else if (Array.isArray(v)) v.forEach(x => collectNumbers(x, pools, key, d + 1, counts));
+  else if (v && typeof v === 'object') for (const [k, x] of Object.entries(v)) collectNumbers(x, pools, k, d + 1, counts || key === 'distribution');
 }
 
 /** How many digits after the decimal point a number was written with. @param {string} s */
 const decimals = s => { const i = s.indexOf('.'); return i < 0 ? 0 : s.length - i - 1; };
 
-const PERCENT_RE = /(?<![\w.])(-?\d+(?:\.\d+)?)\s?(?:%|percent\b|per cent\b|percentage points?\b)/gi;
-const DECIMAL_RE = /(?<![\w.])(-?\d+\.\d+)(?!\.?\d)(?![\w%])/g;
-const COUNT_RE = /(?<![\w.,])(\d{1,3}(?:,\d{3})+|\d+)(?![\w.,]\d)(\s+(?:[A-Za-z-]+\s+)?(?:records?|posts?|errors?|items?|cases?|examples?|labels?|groups?|codes?|units?|texts?)\b)/gi;
+// Numbers as written: digits (a decimal may start with its point, ".97"), or words ("ninety-eight")
+const NUM = '(-?(?:\\d+(?:\\.\\d+)?|\\.\\d+))';
+const WORD = '(?:zero|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred|thousand)';
+const WORDS = '((?:a\\s+(?=hundred|thousand))?' + WORD + '(?:(?:\\s+and\\s+|[\\s-]+)' + WORD + ')*)';
+const PERCENT_TAIL = '\\s?(?:%|percent\\b|per cent\\b|percentage points?\\b)';
+const COUNT_NOUNS = '(?:records?|posts?|errors?|items?|cases?|examples?|labels?|groups?|codes?|units?|texts?)';
+const PERCENT_RE = new RegExp('(?<![\\w.])' + NUM + PERCENT_TAIL, 'gi');
+const PERCENT_WORDS_RE = new RegExp('\\b' + WORDS + PERCENT_TAIL, 'gi');
+const DECIMAL_RE = /(?<![\w.])(-?\d*\.\d+)(?!\.?\d)(?![\w%])/g;
+const COUNT_RE = new RegExp('(?<![\\w.,])(\\d{1,3}(?:,\\d{3})+|\\d+)(?![\\w.,]\\d)(\\s+(?:[A-Za-z-]+\\s+)?' + COUNT_NOUNS + '\\b)', 'gi');
+// (words for counts only with nouns for records, not for the codebook's own codes or labels)
+const COUNT_WORDS_RE = new RegExp('\\b' + WORDS + '(\\s+(?:[A-Za-z-]+\\s+)?(?:records?|posts?|errors?|items?|cases?|examples?|texts?|groups?)\\b)', 'gi');
 const N_EQUALS_RE = /\bn\s?=\s?(\d{1,3}(?:,\d{3})+|\d+)\b/gi;
+const TIME_UNIT_RE = /^\s?(?:ms|s|secs?|seconds?|milliseconds?)\b/i;
+const WORD_VALUES = /** @type {Record<string, number>} */ ({ zero: 0, one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10, eleven: 11, twelve: 12,
+  thirteen: 13, fourteen: 14, fifteen: 15, sixteen: 16, seventeen: 17, eighteen: 18, nineteen: 19, twenty: 20, thirty: 30, forty: 40, fifty: 50, sixty: 60, seventy: 70, eighty: 80, ninety: 90 });
+
+/** The value of a number written in words ("ninety-eight", "a hundred", "two thousand and five"). @param {string} s */
+function wordsValue(s) {
+  let total = 0, cur = 0;
+  for (const w of s.toLowerCase().split(/[\s-]+/)) {
+    if (w === 'and' || w === 'a' || !w) continue;
+    if (w === 'hundred') cur = (cur || 1) * 100;
+    else if (w === 'thousand') { total += (cur || 1) * 1000; cur = 0; }
+    else cur += WORD_VALUES[w] || 0;
+  }
+  return total + cur;
+}
+
+const KAPPA_WORD_RE = /κ|\bkappa\b/gi;
+const OTHER_METRIC_RE = /accura|macro|\bf-?1\b|precision|recall|coverage|error|agreement|consisten|score|percent|%/i;
+const GAP_NUMBER_RE = /-?\d*\.?\d+/;
+const CONNECTOR_RE = /^\s*(?:,|to|and|or|vs\.?|versus|then|→|->|\/)?\s*$/i;
 
 /**
- * Numbers in AI-written text that don't match any measured value: percentages
- * (within ±0.15 points of value·100, or half a unit of the last digit shown),
- * decimals (±0.006, or half a unit of the last digit shown) and counts of
- * records, posts, errors … ≥ 2 (exactly). Returns the numbers as written.
+ * Whether the number at `index` is a κ ("κ = .41", "Cohen's kappa (held-out) was 0.41",
+ * "κ rose from 0.12 to 0.17"): κ or kappa comes shortly before it in the same sentence,
+ * with no other metric named in between.
+ * @param {string} text @param {number} index
+ */
+function isKappa(text, index) {
+  const before = text.slice(Math.max(0, index - 60), index);
+  let end = -1;
+  KAPPA_WORD_RE.lastIndex = 0;
+  for (let m = KAPPA_WORD_RE.exec(before); m; m = KAPPA_WORD_RE.exec(before)) end = m.index + m[0].length;
+  if (end < 0) return false;
+  const gap = before.slice(end);
+  if (/[.;:!?](?:\s|$)|\n/.test(gap.replace(/^\s*:/, ' ')) || OTHER_METRIC_RE.test(gap)) return false;
+  const [first, ...rest] = gap.split(GAP_NUMBER_RE);
+  return first.length <= 40 && rest.every(s => CONNECTOR_RE.test(s));
+}
+
+/**
+ * Numbers in AI-written text that don't match any measured value of their
+ * kind: percentages match a share (within ±0.15 points of value·100, or half a
+ * unit of the last digit shown); decimals match a share (±0.006, or half a
+ * unit of the last digit shown), or a duration when a time unit follows;
+ * counts of records, posts, errors … ≥ 2 (and n = …) match a measured count
+ * exactly. A number written as κ only matches a measured κ. Decimals may start
+ * with their point (".97"); percentages and counts may be written in words
+ * ("ninety-eight percent", "twelve records"). Returns the numbers as written.
  * @param {string[]} texts
  * @param {ExecutionMetrics | null | undefined} metrics
  * @param {unknown} [extra]   other measured values the text may quote (another run's metrics, comparison counts …)
  * @returns {string[]}
  */
 function verifyNumbers(texts, metrics, extra) {
-  /** @type {number[]} */
-  const values = [];
-  collectNumbers(metrics, values);
-  collectNumbers(extra, values);
-  const counts = new Set(values.filter(v => Number.isInteger(v)));
-  /** @param {number} p @param {number} tol */
-  const percentOk = (p, tol) => values.some(v => Math.abs(v * 100 - p) <= tol + 1e-9);
-  /** @param {number} x @param {number} tol */
-  const decimalOk = (x, tol) => values.some(v => Math.abs(v - x) <= tol + 1e-9);
+  /** @type {NumberPools} */
+  const pools = { ratios: [], kappas: [], counts: [], durations: [] };
+  collectNumbers(metrics, pools);
+  collectNumbers(extra, pools);
+  const counts = new Set(pools.counts);
+  /** @param {number[]} pool @param {number} p @param {number} tol */
+  const percentOk = (pool, p, tol) => pool.some(v => Math.abs(v * 100 - p) <= tol + 1e-9);
+  /** @param {number[]} pool @param {number} x @param {number} tol */
+  const decimalOk = (pool, x, tol) => pool.some(v => Math.abs(v - x) <= tol + 1e-9);
   /** @type {string[]} */
   const bad = [];
   /** @param {string} s */
   const flag = s => { const t = s.trim(); if (!bad.includes(t) && bad.length < 50) bad.push(t); };
+  /** Spaces in place of a number that has been checked, so it is read once (positions stay as written). @param {string} m */
+  const blank = m => ' '.repeat(m.length);
   for (const raw of Array.isArray(texts) ? texts : []) {
     if (typeof raw !== 'string' || !raw) continue;
-    // Remove what's been checked so a number is read once.
-    let rest = raw.replace(PERCENT_RE, (m, num) => {
-      const p = Number(num);
-      if (!percentOk(p, Math.max(0.15, 0.5 * Math.pow(10, -decimals(num))))) flag(m);
-      return ' ';
+    let rest = raw.replace(PERCENT_RE, (m, num, at) => {
+      if (!percentOk(isKappa(raw, at) ? pools.kappas : pools.ratios, Number(num), Math.max(0.15, 0.5 * Math.pow(10, -decimals(num))))) flag(m);
+      return blank(m);
     });
-    rest = rest.replace(N_EQUALS_RE, (m, num) => { if (!counts.has(Number(num.replace(/,/g, '')))) flag(m); return ' '; });
+    rest = rest.replace(PERCENT_WORDS_RE, (m, words, at) => {
+      if (!percentOk(isKappa(raw, at) ? pools.kappas : pools.ratios, wordsValue(words), 0.5)) flag(m);
+      return blank(m);
+    });
+    rest = rest.replace(N_EQUALS_RE, m => { if (!counts.has(Number(m.replace(/\D/g, '')))) flag(m); return blank(m); });
     rest = rest.replace(COUNT_RE, (m, num) => {
       const n = Number(num.replace(/,/g, ''));
       if (n >= 2 && !counts.has(n)) flag(m);
-      return ' ';
+      return blank(m);
     });
-    rest.replace(DECIMAL_RE, (m, num) => {
+    rest = rest.replace(COUNT_WORDS_RE, (m, words) => {
+      const n = wordsValue(words);
+      if (n >= 2 && !counts.has(n)) flag(m);
+      return blank(m);
+    });
+    rest.replace(DECIMAL_RE, (m, num, at) => {
       const x = Number(num);
       const tol = Math.max(0.006, 0.5 * Math.pow(10, -decimals(num)));
+      let ok;
+      if (isKappa(raw, at)) ok = decimalOk(pools.kappas, x, tol);
+      else if (TIME_UNIT_RE.test(raw.slice(at + m.length))) ok = decimalOk(pools.durations, x, tol);
       // A decimal may also be a percentage written without the sign ("81.4 on held-out records").
-      if (!decimalOk(x, tol) && !(Math.abs(x) > 1 && percentOk(x, Math.max(0.15, tol)))) flag(m);
+      else ok = decimalOk(pools.ratios, x, tol) || (Math.abs(x) > 1 && percentOk(pools.ratios, x, Math.max(0.15, tol)));
+      if (!ok) flag(m);
       return m;
     });
   }

@@ -271,3 +271,80 @@ test('display helpers: headline, metrics with n, links, change summary, history 
   assert.equal(CR.isSubmissionId(sid('x')), true);
   assert.equal(CR.formatBytes(2048), '2 KB');
 });
+
+/* ── The rule's codes against the open variable's codes (review finding 4; finding 18's panel mark) ── */
+// The payload as the Lab builds it (ai-lab/experiments.js codingRule): both contract sides list the code ids
+const withCodes = (codes, over) => rule(Object.assign({
+  contract: { name: 'classify/1', input: { record: 'id, text, author, timestamp, meta', variable: { id: 'sentiment', name: 'Sentiment', codes } }, output: { returns: 'a code id or null', codes } }
+}, over || {}));
+
+test('codes: a rule that can return a code the variable does not have is refused, the codes listed', () => {
+  // Project B's "stance" has pro/anti; the rule was measured on project A's support/oppose/neutral
+  const cb = [{ id: 'stance', name: 'Stance', codes: [{ id: 'pro', label: 'Pro' }, { id: 'anti', label: 'Anti' }] }];
+  const v = CR.validateCodingRule(withCodes(['support', 'oppose', 'neutral'], { dimensionId: 'stance' }), cb);
+  assert.equal(v.ok, false);
+  assert.equal(v.codesMismatch, true);
+  assert.equal(v.missingDimension, false);
+  assert.equal(v.dimension, cb[0]);
+  assert.deepEqual(v.codes, { rule: ['support', 'oppose', 'neutral'], dimension: ['pro', 'anti'], notInDimension: ['support', 'oppose', 'neutral'], notInRule: ['pro', 'anti'] });
+  assert.equal(v.problems.length, 1);
+  assert.match(v.problems[0], /can return codes that the variable “Stance” \(stance\) in the open project doesn't have: support, oppose, neutral\./);
+  assert.match(v.problems[0], /The rule's codes: support, oppose, neutral; the variable's codes: pro, anti\./);
+  // Only one code missing (renamed in the project after the sandbox was made): still refused
+  const one = CR.validateCodingRule(withCodes(['pos', 'neg', 'mixed']), codebook());
+  assert.equal(one.ok, false);
+  assert.deepEqual(one.codes.notInDimension, ['mixed']);
+  // Saving refuses it too (the codebook may have changed while the dialog was open)
+  assert.throws(() => CR.applyCodingRule(cb, withCodes(['support', 'oppose', 'neutral'], { dimensionId: 'stance' }), 0), e => e.codesMismatch === true && /support, oppose, neutral/.test(e.message));
+  // With other problems as well, it isn't only a code mismatch
+  assert.equal(CR.validateCodingRule(withCodes(['x'], { language: 'ruby' }), codebook()).codesMismatch, false);
+});
+
+test('codes: the variable may have codes the rule never returns (saved, with notInRule for a warning); same codes pass', () => {
+  const cb = codebook();
+  cb[0].codes.push({ id: 'unclear', label: 'Unclear' });
+  const v = CR.validateCodingRule(withCodes(['pos', 'neg']), cb);
+  assert.equal(v.ok, true, v.problems.join(' '));
+  assert.equal(v.codesMismatch, false);
+  assert.deepEqual(v.codes, { rule: ['pos', 'neg'], dimension: ['pos', 'neg', 'unclear'], notInDimension: [], notInRule: ['unclear'] });
+  assert.equal(CR.applyCodingRule(cb, withCodes(['pos', 'neg']), 0).changed, true);
+  const same = CR.validateCodingRule(withCodes(['neg', 'pos']), codebook());
+  assert.equal(same.ok, true);
+  assert.deepEqual([same.codes.notInDimension, same.codes.notInRule], [[], []]);
+  // {id} objects, and only the input side listing them, work too
+  assert.deepEqual(CR.validateCodingRule(rule({ contract: { name: 'classify/1', input: {}, output: { codes: [{ id: 'pos' }, { id: 'zzz' }] } } }), codebook()).codes.notInDimension, ['zzz']);
+  assert.deepEqual(CR.validateCodingRule(rule({ contract: { name: 'classify/1', input: { variable: { codes: ['pos', 'zzz'] } }, output: {} } }), codebook()).codes.notInDimension, ['zzz']);
+  // A rule that lists no codes can't be compared: no mismatch, codes null
+  const none = CR.validateCodingRule(rule(), codebook());
+  assert.equal(none.ok, true);
+  assert.equal(none.codes, null);
+});
+
+test('codes: the same submission already on the variable stays a no-op even after its codes changed', () => {
+  const cb = CR.applyCodingRule(codebook(), withCodes(['pos', 'neg']), '2026-10-25T08:00:00.000Z').codebook;
+  const changed = cb.map(d => (d.id === 'sentiment' ? Object.assign({}, d, { codes: [{ id: 'pos', label: 'Positive' }] }) : d));
+  const again = CR.applyCodingRule(changed, withCodes(['pos', 'neg']), '2026-10-26T08:00:00.000Z');
+  assert.equal(again.changed, false);
+  assert.equal(again.codebook, changed);
+  // Another submission with those codes is refused
+  assert.throws(() => CR.applyCodingRule(changed, withCodes(['pos', 'neg'], { submissionId: sid('two') }), 0), e => e.codesMismatch === true);
+  // After the rule was removed, sending it again saves it again
+  const removed = CR.removeCodingRule(cb, 'sentiment').codebook;
+  const back = CR.applyCodingRule(removed, withCodes(['pos', 'neg']), '2026-10-27T08:00:00.000Z');
+  assert.equal(back.changed, true);
+  assert.equal(back.codebook[0].codingRule.submissionId, sid('one'));
+  assert.equal(back.codebook[0].codingRule.appliedAt, '2026-10-27T08:00:00.000Z');
+});
+
+test('codeDrift: a stored rule against its variable\'s current codes (accepts anything)', () => {
+  const cb = CR.applyCodingRule(codebook(), withCodes(['pos', 'neg']), 0).codebook;
+  assert.deepEqual(CR.codeDrift(cb[0]), { rule: ['pos', 'neg'], dimension: ['pos', 'neg'], notInDimension: [], notInRule: [] });
+  // A CSV import dropped "neg" and added "mixed"
+  const dim = Object.assign({}, cb[0], { codes: [{ id: 'pos', label: 'Positive' }, { id: 'mixed', label: 'Mixed' }] });
+  assert.deepEqual(CR.codeDrift(dim), { rule: ['pos', 'neg'], dimension: ['pos', 'mixed'], notInDimension: ['neg'], notInRule: ['mixed'] });
+  assert.equal(CR.codeDrift(cb[1]), null, 'no rule');
+  assert.equal(CR.codeDrift({ codingRule: { contract: 'junk' }, codes: 'junk' }), null, 'no codes listed');
+  assert.equal(CR.codeDrift(null), null);
+  assert.deepEqual(CR.ruleCodes({ contract: { output: { codes: ['a', { id: 'b' }, 42, null] } } }), ['a', 'b']);
+  assert.equal(CR.ruleCodes('junk'), null);
+});
