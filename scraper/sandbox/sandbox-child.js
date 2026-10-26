@@ -10,6 +10,11 @@
 // network and no timers. Its only way out is the two JSON-string functions
 // installed below, relayed to the parent over the IPC channel; the parent
 // performs (and polices) every Reddit request.
+//
+// The AI Coding Lab (ai-lab/code-sandbox.js) starts the same process for
+// coding rules: its start message names the subject of messages ("Your
+// coding rule"), the user file name and the functions to bind, and has no
+// format library. Without those fields everything is as for scrapers.
 
 'use strict';
 
@@ -27,6 +32,7 @@ let logLines = 0;
 let callSeq = 0;
 const pending = new Map();         // id → { resolve, reject }
 let finished = false;
+let subject = 'Your scraper';      // start.subject: who "ran past the time limit", etc.
 
 function send(msg) {
   if (finished && msg.type !== 'done' && msg.type !== 'error') return;
@@ -71,6 +77,11 @@ function stripTypes(code) {
 }
 
 async function run(start) {
+  if (typeof start.subject === 'string' && start.subject) subject = start.subject.slice(0, 60);
+  const filename = typeof start.filename === 'string' && /^[\w.-]{1,40}$/.test(start.filename) ? start.filename : 'scraper.js';
+  const bindNames = Array.isArray(start.bindNames)
+    ? start.bindNames.filter(n => typeof n === 'string' && /^[A-Za-z_$][\w$]{0,63}$/.test(n))
+    : ['scrape'];
   const { newQuickJSWASMModule, RELEASE_SYNC, shouldInterruptAfterDeadline } = require(QUICKJS_ENTRY);
   const QuickJS = await newQuickJSWASMModule(RELEASE_SYNC);
   const runtime = QuickJS.newRuntime();
@@ -181,13 +192,25 @@ async function run(start) {
     r.value.dispose();
   };
 
+  // QuickJS's own heap in use (a snapshot), or null when it can't be read.
+  const engineMemoryBytes = () => {
+    try {
+      const h = runtime.computeMemoryUsage();
+      try {
+        const usage = vm.dump(h);
+        return usage && typeof usage.memory_used_size === 'number' ? usage.memory_used_size : null;
+      } finally { h.dispose(); }
+    } catch (e) { return null; }
+  };
+
   try {
-    evalOrFail(start.formatSource, 'reddit-format.js', false);
+    if (typeof start.formatSource === 'string' && start.formatSource) evalOrFail(start.formatSource, 'reddit-format.js', false);
     evalOrFail(start.preludeSource, 'sdk.js', false);
     const code = start.language === 'typescript' ? stripTypes(start.code) : start.code;
-    evalOrFail(code, 'scraper.js', true);
+    evalOrFail(code, filename, true);
     // Lexical declarations (const scrape = …) aren't properties of globalThis.
-    evalOrFail('if (typeof scrape === "function") globalThis.scrape = scrape;', 'bind.js', false);
+    const bind = bindNames.map(n => 'if (typeof ' + n + ' === "function") globalThis.' + n + ' = ' + n + ';').join('\n');
+    if (bind) evalOrFail(bind, 'bind.js', false);
   } catch (err) {
     if (err.userFacing) return finish({ type: 'error', error: { type: 'custom_code_error', message: err.message } });
     if (err.guest) {
@@ -216,7 +239,7 @@ async function run(start) {
   outcome.value.dispose();
   let parsed = null;
   try { parsed = JSON.parse(text); } catch (e) { parsed = null; }
-  finish({ type: 'done', result: parsed });
+  finish({ type: 'done', result: parsed, stats: { rssBytes: process.memoryUsage.rss(), engineMemoryBytes: engineMemoryBytes() } });
 }
 
 // Host errors the user's code didn't catch (e.g. robots.txt refusal, rate
@@ -226,13 +249,13 @@ const HOST_TYPES = /^(cancelled|not_available|payment_required|browser_unavailab
 function classifyGuestError(e) {
   if (e.hostType && HOST_TYPES.test(e.hostType)) return { type: e.hostType, message: e.message, fromHost: true };
   if (e.name === 'InternalError' && /interrupted/i.test(e.message)) {
-    return { type: 'custom_code_timeout', message: 'Your scraper ran past the time limit and was stopped.' };
+    return { type: 'custom_code_timeout', message: subject + ' ran past the time limit and was stopped.' };
   }
   if (e.name === 'InternalError' && /out of memory/i.test(e.message)) {
-    return { type: 'custom_code_memory', message: 'Your scraper ran out of memory (sandbox limit) and was stopped.' };
+    return { type: 'custom_code_memory', message: subject + ' ran out of memory (sandbox limit) and was stopped.' };
   }
   if (e.name === 'InternalError' && /stack overflow/i.test(e.message)) {
-    return { type: 'custom_code_error', message: 'Your scraper exceeded the maximum call stack size (infinite recursion?).' };
+    return { type: 'custom_code_error', message: subject + ' exceeded the maximum call stack size (infinite recursion?).' };
   }
-  return { type: 'custom_code_error', message: 'Your scraper threw an error: ' + e.text.slice(0, 1500) };
+  return { type: 'custom_code_error', message: subject + ' threw an error: ' + e.text.slice(0, 1500) };
 }

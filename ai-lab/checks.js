@@ -14,9 +14,9 @@
 //   required_symbols          named functions / classes / identifiers appear
 //   max_length                the answer isn't longer than N characters
 //
-// unit_tests would need to *run* generated code. This server never does that
-// (docs/ai-lab.md: what a safe sandbox would need), so the check is recorded
-// as skipped — it is neither passed nor failed.
+// unit_tests would need to *run* the answer. Evaluation answers are never run
+// (docs/ai-lab.md §8: only Code Experiments run code, in their sandbox), so the
+// check is recorded as skipped — it is neither passed nor failed.
 //
 // ai_rubric asks a model to grade the answer against written criteria. It is
 // recorded as AI-graded, with the grading model and method version, and is not
@@ -293,7 +293,7 @@ async function runChecks(output, checks, ctx) {
           break;
         }
         case 'max_length': r(text.length <= (c.max || 0) ? 'pass' : 'fail', text.length + ' characters.'); break;
-        case 'unit_tests': r('skipped', 'Not run: this server never executes generated code. See the AI Coding Lab documentation for what a safe sandbox needs.'); break;
+        case 'unit_tests': r('skipped', 'Not run: evaluation answers are never executed (only Code Experiments run code, in their sandbox). See §8 of the AI Coding Lab documentation.'); break;
         case 'ai_rubric': {
           if (!ctx.judge) { r('skipped', 'AI grading is off for this run.'); break; }
           const g = await ctx.judge(c.criteria || '');

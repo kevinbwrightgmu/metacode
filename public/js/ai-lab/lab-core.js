@@ -4,8 +4,8 @@
    Access check, API client, hash router, project picker, modal and toasts.
    The server decides everything about access (GET /api/lab/access and every
    API call); this page only shows what it was told. Views live in
-   lab-views.js, lab-workbench.js, lab-training.js and lab-evals.js and
-   register themselves with Lab.view(name, render).
+   lab-views.js, lab-experiments.js, lab-workbench.js, lab-training.js and
+   lab-evals.js and register themselves with Lab.view(name, render).
    ══════════════════════════════════════════════ */
 
 const Lab = (() => {
@@ -14,8 +14,8 @@ const Lab = (() => {
   const VIEWS = {};
   const TITLES = { overview: 'Overview', projects: 'Projects', project: 'Project', workbench: 'AI Workbench', profiles: 'Coding Profiles', profile: 'Coding Profile',
     knowledge: 'Knowledge Base', training: 'Training Studio', dataset: 'Dataset', evaluations: 'Evaluations', suite: 'Evaluation Suite', run: 'Evaluation Run',
-    compare: 'Comparison', models: 'Models', usage: 'Usage', docs: 'Documentation', finetune: 'Fine-tuning' };
-  const NAV_OF = { project: 'projects', profile: 'profiles', dataset: 'training', finetune: 'training', suite: 'evaluations', run: 'evaluations', compare: 'evaluations' };
+    compare: 'Comparison', models: 'Models', usage: 'Usage', docs: 'Documentation', finetune: 'Fine-tuning', experiments: 'Code Experiments', experiment: 'Code Experiment' };
+  const NAV_OF = { project: 'projects', profile: 'profiles', dataset: 'training', finetune: 'training', suite: 'evaluations', run: 'evaluations', compare: 'evaluations', experiment: 'experiments' };
   const state = { access: null, projects: [], projectId: null, models: null, cleanup: [] };
 
   const $ = id => document.getElementById(id);

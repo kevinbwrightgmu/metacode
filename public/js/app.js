@@ -66,7 +66,7 @@ const App = (() => {
     'import':       () => DataManager.render(),
     'scraper':      () => RedditScraper.render(),
     'scraper-beta': () => CollectorView.render(),        // AI Scraper (beta): the collector/ app, an AI agent collects
-    'codebook':     () => Codebook.render(),
+    'codebook':     param => Codebook.render(param),             // #codebook/lab/<submissionId>: a coding rule from the AI Coding Lab
     'ai-coding':    () => AICoder.render(),
     'human-coding': param => HumanCoder.render(param),           // tabs: coder1, coder2, ai, reliability
     'reliability':  () => ReliabilityAnalyzer.render(),           // the Reliability Analysis tab

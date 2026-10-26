@@ -105,7 +105,7 @@
   }
 
   const CHECK_HELP = 'A JSON array of checks, e.g. [{"type":"contains","values":["export function"]}, {"type":"syntax","language":"javascript"}]. ' +
-    'Types: contains, not_contains, regex, exact, code_block, json_schema, syntax (parses only; never runs), required_symbols, max_length, unit_tests (always skipped: code is never run), ai_rubric (AI-graded, not ground truth).';
+    'Types: contains, not_contains, regex, exact, code_block, json_schema, syntax (parses only; never runs), required_symbols, max_length, unit_tests (always skipped: evaluation answers are never run), ai_rubric (AI-graded, not ground truth).';
 
   function exampleEditor(d, e, done, readOnly) {
     const v = e || { task: '', input: '', expected: '', reference: '', language: '', framework: '', category: '', difficulty: '', tags: [], source: '', quality: 'unreviewed', split: null, weight: 1, notes: '', checks: [] };

@@ -130,7 +130,7 @@ const LabDiff = (() => {
   function html(a, b) {
     const d = diff(a, b);
     const adds = d.filter(x => x.op === '+').length, dels = d.filter(x => x.op === '-').length;
-    return '<p class="lab-muted">' + adds + ' line(s) added, ' + dels + ' removed. Review only: MetaCode doesn\'t write to your repository or run this code.</p>' +
+    return '<p class="lab-muted">' + adds + ' line(s) added, ' + dels + ' removed. Review only: comparing runs nothing and doesn\'t write to your repository.</p>' +
       '<div class="lab-diff">' + d.map(x => '<div class="' + (x.op === '+' ? 'add' : x.op === '-' ? 'del' : 'ctx') + '">' + x.op + ' ' + Lab.esc(x.text) + '</div>').join('') + '</div>';
   }
   return { diff, html };

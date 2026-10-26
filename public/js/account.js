@@ -39,6 +39,8 @@
   const app = () => (typeof App !== 'undefined' ? App : root.App) || null;
   function notify(msg, type, ms) {
     if (app() && typeof app().notify === 'function') return app().notify(msg, type || 'info', ms);
+    // the AI Coding Lab's own toasts (lab-core.js), so the two stacks don't overlap
+    if (typeof Lab !== 'undefined' && Lab && typeof Lab.notify === 'function') return Lab.notify(msg, type || 'info', ms);
     let stack = document.getElementById('acct-toasts');
     if (!stack) { stack = document.createElement('div'); stack.id = 'acct-toasts'; stack.className = 'acct-toasts'; stack.setAttribute('role', 'status'); document.body.appendChild(stack); }
     const el = document.createElement('div');

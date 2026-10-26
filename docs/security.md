@@ -11,6 +11,18 @@ certificate files (`*.pem`, `*.key`, `*.p12`, `*.pfx`), the files MetaCode
 writes keys to (`reddit-credentials.json`, `redditapis-key.json`) and the data
 folders out of Git.
 
+## Code that runs on the server never sees secrets
+
+Two features run user-supplied or AI-written code: the Scraper's custom code
+([reddit-scraper.md](reddit-scraper.md) §7) and the AI Coding Lab's Code
+Experiments ([ai-lab.md](ai-lab.md) §8, §14). Both start a separate process
+with an **empty environment** (no `.env` values, no API keys), Node's
+permission model (it can read only its engine's files and can't write files or
+start programs) and a WebAssembly engine with no network or file APIs. The Lab
+also puts that process in its own network namespace when the host allows it.
+Coding rules under test get only the records' text and details, never labels,
+other users' data or credentials.
+
 ## Scanning
 
 [TruffleHog](https://github.com/trufflesecurity/trufflehog) runs on every pull

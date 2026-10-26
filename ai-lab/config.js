@@ -16,8 +16,20 @@
 //   AI_LAB_MAX_RUNNING_EVALS    evaluation runs at once, server-wide (default 2)
 //   AI_LAB_PRICING_FILE         JSON price list for cost estimates (docs/ai-lab.md);
 //                               without one, costs are shown as unknown
-//   AI_LAB_CODE_EXECUTION       off (only value): generated code is never run on
-//                               this server; see docs/ai-lab.md
+//   AI_LAB_CODE_EXECUTION       sandbox (default) | off. sandbox: code experiments
+//                               (coding rules) run, when the user clicks Run, in
+//                               the isolated sandbox (ai-lab/code-sandbox.js);
+//                               off: nothing runs (runs answer 503). Workbench and
+//                               evaluation answers are never run either way.
+//   AI_LAB_SANDBOX_ISOLATION    auto (default) | namespace | process — auto: an OS
+//                               network namespace (unshare) and process limits
+//                               (prlimit) when the host allows them; namespace:
+//                               require them (runs fail 503 without); process: never
+//   AI_LAB_SANDBOX_TIMEOUT_MS   per run, after Python's start-up (default 15000; 1000–120000)
+//   AI_LAB_SANDBOX_MEMORY_MB    QuickJS memory, JavaScript/TypeScript (default 64; 16–512)
+//   AI_LAB_SANDBOX_PYTHON_MEMORY_MB  Pyodide memory cap (default 256; 128–1024)
+//   AI_LAB_SANDBOX_MAX_OUTPUT_KB  results + logs per run (default 8192; 256–65536)
+//   AI_LAB_MAX_RUNNING_EXECUTIONS  sandbox runs at once, server-wide (default 2; 1–16)
 //
 //   OpenAI-compatible provider (optional, operator-configured; SECRET key):
 //   AI_LAB_OPENAI_API_KEY       sk-…
@@ -54,8 +66,28 @@ function labConfig(env) {
     return dflt;
   };
 
-  const execution = String(e.AI_LAB_CODE_EXECUTION || 'off').trim().toLowerCase();
-  if (execution !== 'off') warnings.push('AI_LAB_CODE_EXECUTION=' + execution + ' isn\'t supported: this server never runs generated code (checks that need it are recorded as skipped). See docs/ai-lab.md.');
+  /** @type {<T extends string>(name: string, values: T[], dflt: T, otherwise: T) => T} */
+  const choice = (name, values, dflt, otherwise) => {
+    const raw = String(e[name] || '').trim().toLowerCase();
+    if (!raw) return dflt;
+    const hit = values.find(v => v === raw);
+    if (hit) return hit;
+    warnings.push(name + ' must be ' + values.slice(0, -1).join(', ') + ' or ' + values[values.length - 1] + '; using ' + otherwise + '.');
+    return otherwise;
+  };
+
+  // Code experiments: coding rules run only in the isolated sandbox, only when the user clicks Run
+  const codeExecution = choice('AI_LAB_CODE_EXECUTION', /** @type {('sandbox' | 'off')[]} */ (['sandbox', 'off']), 'sandbox', 'off');
+  const execution = {
+    mode: codeExecution,
+    // (a value that isn't one of these is read as the strictest, so a typo never weakens isolation)
+    isolation: choice('AI_LAB_SANDBOX_ISOLATION', /** @type {('auto' | 'namespace' | 'process')[]} */ (['auto', 'namespace', 'process']), 'auto', 'namespace'),
+    timeoutMs: int('AI_LAB_SANDBOX_TIMEOUT_MS', 15000, 1000, 120000),
+    memoryMb: int('AI_LAB_SANDBOX_MEMORY_MB', 64, 16, 512),
+    pythonMemoryMb: int('AI_LAB_SANDBOX_PYTHON_MEMORY_MB', 256, 128, 1024),
+    maxOutputKb: int('AI_LAB_SANDBOX_MAX_OUTPUT_KB', 8192, 256, 65536),
+    maxRunning: int('AI_LAB_MAX_RUNNING_EXECUTIONS', 2, 1, 16)
+  };
 
   // Optional OpenAI-compatible provider
   const key = String(e.AI_LAB_OPENAI_API_KEY || '').trim();
@@ -82,7 +114,8 @@ function labConfig(env) {
     maxDocsPerProject: int('AI_LAB_MAX_DOCS_PER_PROJECT', 200, 1, 5000),
     maxRunningEvals: int('AI_LAB_MAX_RUNNING_EVALS', 2, 1, 32),
     pricingFile: String(e.AI_LAB_PRICING_FILE || '').trim() ? path.resolve(String(e.AI_LAB_PRICING_FILE).trim()) : path.join(__dirname, '..', 'ai-lab-pricing.json'),
-    codeExecution: /** @type {'off'} */ ('off'),
+    codeExecution,
+    execution,
     openai: {
       configured: !!key && /^[\x21-\x7E]{8,512}$/.test(key),
       key: key && /^[\x21-\x7E]{8,512}$/.test(key) ? key : null,

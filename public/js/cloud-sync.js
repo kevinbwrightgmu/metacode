@@ -405,14 +405,16 @@ const CloudSync = (() => {
     for (const k of KINDS) for (const r of await LocalDB.all(k)) await raw.del(k, r.id);
     try { localStorage.removeItem(WS_KEY); } catch (e) { /* ignore */ }
   }
+  let asking = 0;           // account questions open right now
   function ask(title, html, buttons) {
+    asking++;
     return new Promise(resolve => {
       const wrap = document.createElement('div');
       wrap.className = 'acct-overlay';
       wrap.innerHTML = '<div class="acct-dialog" role="alertdialog" aria-modal="true" aria-labelledby="cs-title"><div class="acct-d-head"><h2 id="cs-title">' + title + '</h2></div><div class="acct-d-body">' + html +
         '<div class="acct-row">' + buttons.map((b, i) => '<button type="button" class="' + (i === 0 ? 'acct-primary' : 'acct-secondary') + '" data-i="' + i + '">' + b.label + '</button>').join('') + '</div></div></div>';
       document.body.appendChild(wrap);
-      wrap.querySelectorAll('[data-i]').forEach(b => { b.onclick = () => { wrap.remove(); resolve(buttons[Number(b.dataset.i)].value); }; });
+      wrap.querySelectorAll('[data-i]').forEach(b => { b.onclick = () => { wrap.remove(); asking--; resolve(buttons[Number(b.dataset.i)].value); }; });
       setTimeout(() => { const f = wrap.querySelector('[data-i="0"]'); if (f) f.focus(); }, 30);
     });
   }
@@ -443,7 +445,7 @@ const CloudSync = (() => {
         if (n.projects) parts.push(n.projects + ' saved project' + (n.projects === 1 ? '' : 's'));
         if (n.surveys) parts.push(n.surveys + ' survey' + (n.surveys === 1 ? '' : 's'));
         add = await ask('Add this browser\'s work to your account?',
-          '<p>This browser has ' + escHtml(parts.join(', ').replace(/, ([^,]*)$/, ' and $1')) + ' that aren\'t in your account yet. Add them, so they\'re saved to your account and on your other devices?</p>',
+          '<p>This browser has ' + escHtml(parts.join(', ').replace(/, ([^,]*)$/, ' and $1')) + (total === 1 ? ' that isn\'t in your account yet. Add it, so it\'s' : ' that aren\'t in your account yet. Add them, so they\'re') + ' saved to your account and on your other devices?</p>',
           [{ label: 'Add to my account', value: true }, { label: 'Remove from this browser', value: false }]);
         if (!add) await clearLocal();
       }
@@ -486,10 +488,33 @@ const CloudSync = (() => {
     return true;
   }
 
-  if (window.Account) Account.onChange(me => { onAccount(me).catch(e => console.error('[sync]', e)); });
+  // Account changes are handled one at a time: Account can report the same sign-in again
+  // while the first report is still asking "Add this browser's work…?", and each report
+  // would otherwise ask its own question (two stacked dialogs).
+  let accountTurn = Promise.resolve(), turns = 0, reported;
+  const firstReport = new Promise(r => { reported = r; });
+  if (window.Account) Account.onChange(me => {
+    turns++;
+    accountTurn = accountTurn.then(() => onAccount(me)).catch(e => console.error('[sync]', e)).then(() => { turns--; });
+    reported();
+  });
+  // Resolves once this tab's account questions are answered and the first sync after them is
+  // done (or 10 s after the last answer, when the account storage is slow). Dialogs that change
+  // the open project wait for it (the AI Coding Lab's "Save coding rule", lab-handoff.js): the
+  // answer decides which project stays open, so it comes first and neither decision is lost.
+  async function settled() {
+    if (!window.Account) return;
+    await Promise.race([firstReport, new Promise(r => setTimeout(r, 15000))]);   // (Account always reports once)
+    let last = Date.now();
+    while (turns > 0 || asking > 0) {
+      if (asking > 0) last = Date.now();
+      else if (Date.now() - last > 10000) return;
+      await new Promise(r => setTimeout(r, 100));
+    }
+  }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncNow(); else if (user) { checkWorkspace(); if (st && Object.keys(st.pending).length) syncNow(); } });
   window.addEventListener('online', () => syncNow());
 
-  return { syncNow, noteWorkspace, beforeSignOut, status: () => status, _hash: hash };
+  return { syncNow, noteWorkspace, beforeSignOut, settled, status: () => status, _hash: hash };
 })();
 window.CloudSync = CloudSync;

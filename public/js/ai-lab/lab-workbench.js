@@ -4,7 +4,8 @@
    Conversations with a coding assistant: streamed answers (Stop cancels the
    model request), regenerate, summaries of older messages, and a context
    panel showing exactly what was sent. Answers are rendered as untrusted
-   Markdown; code is shown, copied or compared — never run.
+   Markdown; code is shown, copied or compared — never run (only Code
+   Experiments run code, in their sandbox, when the user clicks Run).
    ══════════════════════════════════════════════ */
 
 (() => {
@@ -142,7 +143,7 @@
     const lastAnswer = [...c.messages].reverse().find(m => m.role === 'assistant');
     const lastIsAnswer = c.messages.length && c.messages[c.messages.length - 1].role === 'assistant';
     box.innerHTML = (c.summary ? '<div class="lab-note">Older messages are summarised (' + fmt(c.summary.coversMessages) + ' messages, ' + when(c.summary.createdAt) + '); the summary is sent instead of the ones that no longer fit.</div>' : '') +
-      (c.messages.length ? c.messages.map(m => messageHTML(m, lastIsAnswer && lastAnswer && m.id === lastAnswer.id)).join('') : '<p class="lab-muted">No messages yet. Answers are generated text: review code before you use it. Nothing here is run.</p>');
+      (c.messages.length ? c.messages.map(m => messageHTML(m, lastIsAnswer && lastAnswer && m.id === lastAnswer.id)).join('') : '<p class="lab-muted">No messages yet. Answers are generated text: review code before you use it. Code in Workbench answers is never run — only Code Experiments run code, in an isolated sandbox, when you click Run.</p>');
     LabMarkdown.enhance(box, compareWithFile);
     box.querySelectorAll('[data-del-msg]').forEach(b => { b.onclick = () => act(b, async () => { S.conv = (await del('/conversations/' + c.id + '/messages/' + b.dataset.delMsg)).conversation; renderMessages(); }); });
     box.querySelectorAll('[data-copy-msg]').forEach(b => { b.onclick = async () => {

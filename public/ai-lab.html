@@ -19,6 +19,34 @@
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/account.css">
   <link rel="stylesheet" href="/css/ai-lab.css">
+  <!-- CodeMirror 6 (ES modules from node_modules, served by server.js /vendor/cm/) for Code Experiments -->
+  <script type="importmap">
+  {
+    "imports": {
+      "codemirror": "/vendor/cm/codemirror.js?v=6",
+      "@codemirror/state": "/vendor/cm/state.js?v=6",
+      "@codemirror/view": "/vendor/cm/view.js?v=6",
+      "@codemirror/language": "/vendor/cm/language.js?v=6",
+      "@codemirror/commands": "/vendor/cm/commands.js?v=6",
+      "@codemirror/search": "/vendor/cm/search.js?v=6",
+      "@codemirror/autocomplete": "/vendor/cm/autocomplete.js?v=6",
+      "@codemirror/lint": "/vendor/cm/lint.js?v=6",
+      "@codemirror/lang-javascript": "/vendor/cm/lang-javascript.js?v=6",
+      "@codemirror/lang-python": "/vendor/cm/lang-python.js?v=6",
+      "@codemirror/merge": "/vendor/cm/merge.js?v=6",
+      "@codemirror/streamparser": "/vendor/cm/streamparser.js?v=6",
+      "@lezer/common": "/vendor/cm/lezer-common.js?v=6",
+      "@lezer/highlight": "/vendor/cm/lezer-highlight.js?v=6",
+      "@lezer/lr": "/vendor/cm/lezer-lr.js?v=6",
+      "@lezer/javascript": "/vendor/cm/lezer-javascript.js?v=6",
+      "@lezer/python": "/vendor/cm/lezer-python.js?v=6",
+      "style-mod": "/vendor/cm/style-mod.js?v=6",
+      "w3c-keyname": "/vendor/cm/w3c-keyname.js?v=6",
+      "crelt": "/vendor/cm/crelt.js?v=6",
+      "@marijn/find-cluster-break": "/vendor/cm/find-cluster-break.js?v=6"
+    }
+  }
+  </script>
 </head>
 <body class="lab-page">
 <a class="lab-skip" href="#lab-main">Skip to content</a>
@@ -38,6 +66,7 @@
         <a class="nav-item" data-view="overview" href="#overview">Overview</a>
         <a class="nav-item" data-view="projects" href="#projects">Projects</a>
         <a class="nav-item" data-view="workbench" href="#workbench">AI Workbench</a>
+        <a class="nav-item" data-view="experiments" href="#experiments">Experiments</a>
         <a class="nav-item" data-view="profiles" href="#profiles">Coding Profiles</a>
         <a class="nav-item" data-view="knowledge" href="#knowledge">Knowledge Base</a>
       </div>
@@ -96,9 +125,11 @@
 <script src="/js/ai-lab/lab-core.js"></script>
 <script src="/js/ai-lab/lab-markdown.js"></script>
 <script src="/js/ai-lab/lab-views.js"></script>
+<script src="/js/ai-lab/lab-experiments.js"></script>
 <script src="/js/ai-lab/lab-workbench.js"></script>
 <script src="/js/ai-lab/lab-training.js"></script>
 <script src="/js/ai-lab/lab-evals.js"></script>
+<script type="module" src="/js/ai-lab/lab-editor.mjs" onerror="window.LabEditorFailed = true; window.dispatchEvent(new Event('lab-editor-failed'));"></script>
 <script>Lab.start();</script>
 </body>
 </html>

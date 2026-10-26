@@ -599,7 +599,7 @@ quota used up), bad keys (`auth_error`), Reddit blocking the server (`reddit_blo
 | "Python scrapers need Node.js 22.15 or newer" / "The Python sandbox (Pyodide) isn't installed" | Update Node.js / run `npm install` |
 | "Python 3.8+ wasn't found for the Python scraper engine" | Only with `SCRAPER_SERVER_TRANSPORT=python`: install Python 3 or set `SCRAPER_PYTHON`. With `auto`, MetaCode uses epoxy-tls instead |
 | "Couldn't verify the server's TLS certificate … (Python engine)" | On macOS with Python from python.org run *Install Certificates.command* (or `pip install certifi`); otherwise an HTTPS-inspecting proxy is in the way |
-| "The custom-code sandbox needs Node.js 22 …" / "TypeScript needs Node.js 22.13 …" | Upgrade Node.js |
+| "The custom-code sandbox needs Node.js 22.13 …" / "TypeScript needs Node.js 22.13 …" | Upgrade Node.js |
 | Browse Reddit: "couldn't start" | Needs a browser with service workers and MetaCode at `http://localhost` or `https://`; check that `SCRAPER_BROWSER_ENABLED` isn't `false` |
 | Results disappeared | Finished jobs are deleted after `SCRAPER_JOB_RETENTION_MINUTES` — export or add to the project. With `SCRAPER_PERSIST_JOBS=false` they are also lost on restart |
 | A job says *Waiting* or *Paused* | A temporary failure (network route down, Reddit rate limit or server errors): it retries on its own a few times, then pauses — see [scraper-network.md](scraper-network.md) |
