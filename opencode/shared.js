@@ -119,4 +119,9 @@ function readOrCreateToken(dataDir, tokenFromEnv) {
   throw new Error('Couldn\'t read or create the AI service\'s token file (' + file + ').');
 }
 
-module.exports = { REPO_DIR, DEFAULT_HOST, DEFAULT_PORT, serviceSettings, readOrCreateToken, readTokenFile, tokenPath, validToken, isOff, isOn, isLoopback };
+// Which MetaCode copy a service belongs to, without saying anything secret: the
+// first 16 hex of sha256(the data folder's full path). GET /health answers it as
+// "home", so a MetaCode can tell its own service from another copy's on the same port.
+const homeId = dataDir => crypto.createHash('sha256').update(path.resolve(dataDir)).digest('hex').slice(0, 16);
+
+module.exports = { REPO_DIR, DEFAULT_HOST, DEFAULT_PORT, serviceSettings, readOrCreateToken, readTokenFile, tokenPath, validToken, homeId, isOff, isOn, isLoopback };

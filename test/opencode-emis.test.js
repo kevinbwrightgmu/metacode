@@ -24,7 +24,9 @@ const KEY2 = 'emis-second-test-key-9876543210';
 const BAD_KEY = 'emis-rejected-test-key-000000';      // the stand-in answers chats with 401 for it
 const LIST_BAD_KEY = 'emis-list-rejected-key-00000';   // …and GET /models with 401 for this one
 const SPENT_KEY = 'emis-spent-test-key-1111111111';    // …and 429 "budget used up" for it
-const ALL_KEYS = [KEY, KEY2, BAD_KEY, LIST_BAD_KEY, SPENT_KEY];
+const UNPAID_KEY = 'emis-unpaid-test-key-3333333333';  // …and 402 (no credit left) for it
+const HEADER_SECRET = 'gw-header-secret-0123456789';   // a provider's own header (options.headers); some gateways echo it
+const ALL_KEYS = [KEY, KEY2, BAD_KEY, LIST_BAD_KEY, SPENT_KEY, UNPAID_KEY, HEADER_SECRET];
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-opencode-emis-'));
 let P, O, E, emis, emisBase;
 
@@ -35,7 +37,7 @@ const python = ['python3', 'python'].some(cmd => { try { return spawnSync(cmd, [
 const LISTED = ['prompts-only', 'budget-said', 'gemini-3.8-flash', 'gemini-3.7-flash', 'slow', 'picture', 'picture-only', 'other-1',
   'forbidden-model', 'blocked-model', 'budget-model', 'busy-a', 'busy-b', 'busy-c', 'limited-model', 'sse-model', 'json-model', 'eos-model',
   'unicode-model', 'missing-model', 'error200-model', 'claude-opus-5.5', 'dall-e-3', 'text-embedding-3-large',
-  'streams-unless-told', 'stream-only-model', 'empty-unless-stream', 'think-model', 'redirect-model'];
+  'streams-unless-told', 'stream-only-model', 'empty-unless-stream', 'think-model', 'redirect-model', 'echo-header', 'cut-short', 'finish-only'];
 const state = { calls: [], seen: [], modelsMode: 'ok', models: LISTED, listCalls: 0, remaining: 100, websiteListNotFound: false, cutShort: 0 };
 const reset = seconds => String(Math.floor(Date.now() / 1000) + seconds);
 const chunk = (model, delta, finish) => JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', model, choices: [Object.assign({ index: 0, delta }, finish ? { finish_reason: finish } : {})] });
@@ -72,6 +74,7 @@ function startEmis() {
       const quota = { 'X-RateLimit-Window': 'day', 'X-RateLimit-Limit-Prompts': '100', 'X-RateLimit-Remaining-Prompts': String(state.remaining), 'X-RateLimit-Reset': reset(3600) };
       if (key === BAD_KEY) return send(401, {}, '{"error":{"message":"Invalid API key"}}');
       if (key === SPENT_KEY) return send(429, Object.assign({}, quota, { 'X-RateLimit-Remaining-Prompts': '0', 'X-RateLimit-Reset': reset(7200) }), '{"error":{"message":"budget used up"}}');
+      if (key === UNPAID_KEY) return send(402, {}, '{"error":{"message":"Insufficient credits on this key"}}');
       if (!state.models.includes(j.model)) return send(404, {}, JSON.stringify({ error: { message: 'The model `' + j.model + '` does not exist' } }));
       switch (j.model) {
         // A key with only a prompt budget, reporting its (absent) token budget as 0 of 0
@@ -120,6 +123,16 @@ function startEmis() {
         case 'think-model':
           if (!(j.max_tokens >= 1024)) return send(200, {}, JSON.stringify({ model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: null, reasoning_content: 'thinking…' }, finish_reason: 'length' }] }));
           return send(200, {}, answer('ok from think-model'));
+        // a gateway that quotes the provider's own header back in its error
+        case 'echo-header': return send(400, {}, JSON.stringify({ error: { message: 'gateway token ' + req.headers['x-gateway-token'] + ' is not allowed for this route' } }));
+        // the answer stops in the middle: no finish_reason, no [DONE] (a proxy closed it cleanly)
+        case 'cut-short':
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          return res.end('data: ' + chunk(j.model, { role: 'assistant', content: 'The answer is: ' }) + '\n\ndata: ' + chunk(j.model, { content: '{"label": "pos' }) + '\n\n');
+        // a finish_reason, then the end without [DONE]
+        case 'finish-only':
+          res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+          return res.end('data: ' + chunk(j.model, { role: 'assistant', content: 'finished' }, 'stop') + '\n\n');
         case 'sse-model':                                                                           // streams even when not asked
           res.writeHead(200, Object.assign({ 'Content-Type': 'text/event-stream' }, quota));
           return res.end('data: ' + chunk(j.model, { role: 'assistant', content: 'ok ' }) + '\n\ndata: ' + chunk(j.model, { content: 'from sse' }, 'stop') + '\n\ndata: [DONE]\n\n');
@@ -938,4 +951,84 @@ test('through the service (startService), when it is there: models listed with p
   } finally {
     if (svc && svc.close) await svc.close();
   }
+});
+
+// ── What a review found ───────────────────────────────────────────────────────
+
+test('a secret in the provider\'s own headers (options.headers) never shows in its errors or the log, whatever the gateway quotes back', async () => {
+  await withProvider({ id: 'mygw', config: { name: 'My gateway' }, options: { headers: { 'x-gateway-token': HEADER_SECRET } } }, async p => {
+    state.seen.length = 0;
+    const err = await failure(p, 'echo-header');
+    assert.equal(state.seen[0].headers['x-gateway-token'], HEADER_SECRET, 'the header is sent');
+    assert.equal(err.type, 'invalid_request');
+    assert.match(err.message, /gateway token \[redacted\] is not allowed/);
+    assert.ok(!String(err.log).includes(HEADER_SECRET), 'nor in the line for the service\'s log: ' + err.log);
+    assert.ok(!JSON.stringify(logged).includes(HEADER_SECRET));
+  });
+});
+
+test('a gateway stream that stops without a finish_reason or [DONE] is incomplete (malformed_response), not a finished answer; [DONE] alone or a finish_reason alone still ends it', async () => {
+  for (const transport of ['node'].concat(python ? ['python'] : [])) {
+    await withProvider({ env: { EMIS_TRANSPORT: transport } }, async p => {
+      // (the parts came first: what the service's route makes of it is the failure, not an answer)
+      const err = await ask(p, 'cut-short').then(() => null, e => e);
+      assert.ok(E.isServiceError(err), 'a ServiceError (' + transport + '): ' + (err && err.stack));
+      assert.deepEqual([err.status, err.type, err.code, err.provider], [502, 'malformed_response', 'incomplete', 'emis'], transport);
+      assert.match(err.message, /the answer ended before it was complete/);
+      const entry = await entryFor(p, 'cut-short');
+      const parts = [];
+      await assert.rejects(async () => { for await (const e of p.chat(body(entry, { stream: true }), entry, { stream: true, timeoutMs: 10000 })) parts.push(e); },
+        e => E.isServiceError(e) && e.code === 'incomplete', 'streamed (' + transport + ')');
+      assert.ok(!parts.some(e => e.type === 'finish'), 'no finish was made up');
+      assert.equal((await ask(p, 'finish-only')).choices[0].message.content, 'finished');
+      assert.equal((await ask(p, 'streams-unless-told')).choices[0].message.content, 'streamed by default');
+    });
+  }
+});
+
+test('with a models file, a live list the gateway can\'t send (e.g. a wrong address that answers 404) is a warning in the status', async () => {
+  const file = path.join(tmp, 'models-for-status.json');
+  fs.writeFileSync(file, JSON.stringify({ provider: { emis: { models: { 'claude-opus-5.5': { name: 'Claude Opus 5.5' } } } } }));
+  state.websiteListNotFound = true;
+  try {
+    await withProvider({ options: { baseURL: emisBase.replace(/\/v1$/, '/api/v1') }, env: { EMIS_MODELS_FILE: file } }, async p => {
+      assert.deepEqual((await p.models()).map(m => [m.model, m.available]), [['claude-opus-5.5', null]]);
+      const st = p.status();
+      assert.equal(st.ready, true);
+      assert.ok(st.warnings.some(w => /^Couldn't check which models AI gateway offers right now \(AI gateway couldn't find the requested endpoint\. Check that EMIS_BASE_URL .* ends in \/v1\)\.$/.test(w)), JSON.stringify(st.warnings));
+    });
+  } finally { state.websiteListNotFound = false; }
+});
+
+test('a key the gateway answers 402 (no credit) rests, and the next key answers the same request; with that key alone: quota_exceeded, then no more calls until it resets', async () => {
+  await withProvider({ options: { apiKey: [UNPAID_KEY, KEY].join(',') } }, async p => {
+    state.seen.length = 0;
+    assert.equal((await ask(p, 'other-1')).choices[0].message.content, 'ok from other-1');
+    assert.deepEqual(state.seen.map(s => s.key), [UNPAID_KEY, KEY], 'one try per key, in rotation');
+    assert.deepEqual(p.status().keys.map(k => k.status), ['cooling_down', 'available']);
+    state.seen.length = 0;
+    await ask(p, 'other-1');
+    assert.deepEqual(state.seen.map(s => s.key), [KEY], 'the resting key isn\'t tried');
+    assert.equal(p.status().resting, null);
+  });
+  await withProvider({ options: { apiKey: UNPAID_KEY } }, async p => {
+    state.seen.length = 0;
+    let err = await failure(p, 'other-1');
+    assert.deepEqual([err.status, err.type, err.scope], [429, 'quota_exceeded', 'provider']);
+    assert.ok(err.retryAfterSeconds > 0);
+    assert.equal(p.status().resting.reason, 'quota');
+    err = await failure(p, 'other-1');
+    assert.equal(err.type, 'quota_exceeded');
+    assert.equal(state.seen.length, 1, 'no second upstream call');
+  });
+});
+
+test('python mode: a worker that stops in the middle of a request: the network error says so (details: …)', { timeout: 30000 }, async () => {
+  const fake = path.join(tmp, 'fake-python.js');
+  fs.writeFileSync(fake, 'process.stdout.write(JSON.stringify({ ready: true, python: "3.0-fake", client: "fake" }) + "\\n");\nprocess.stdin.once("data", () => process.exit(3));\n');
+  await withProvider({ env: { EMIS_TRANSPORT: 'python', EMIS_PYTHON: process.execPath + ' ' + fake } }, async p => {
+    const err = await failure(p, 'other-1');
+    assert.deepEqual([err.status, err.type, err.code], [502, 'network', 'ECONNRESET']);
+    assert.match(err.message, /^The connection to AI gateway dropped before it answered\. Try again\. \(details: Python: The Python worker stopped\.\)$/);
+  });
 });

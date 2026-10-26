@@ -12,7 +12,8 @@
 //   substituteMiddleware(marker, h) answer marked requests some other way (EMIS's Python worker)
 //   chatShims(options)              make odd chat upstreams readable: plain JSON on a streamed call
 //                                   → SSE; a web page on 200 → a 502 saying so; an unknown
-//                                   finish_reason → stop; an image-only answer → "[image omitted]"
+//                                   finish_reason → stop; an image-only answer → "[image omitted]";
+//                                   a stream cut off before [DONE] or a finish_reason → an error
 //
 // Middleware is @opencode/ai's RequestExecutor middleware: (request, next) →
 // Effect of a response. It sees the raw response before @opencode/ai turns
@@ -354,6 +355,7 @@ function chatStream(opts) {
   let mode = 'start';                 // start (nothing yet) | sse | json (buffering) | drop (already answered)
   let buffer = '';
   let sawData = false;                // a JSON data line came (not just [DONE])
+  let ended = false;                  // [DONE], a finish_reason or an error came: the answer has an end
   let sawText = false;
   let imageMarked = false;
 
@@ -377,7 +379,7 @@ function chatStream(opts) {
     const m = /^data:[ \t]?(.*?)(\r?)$/.exec(line);
     if (!m) return line;
     const payload = m[1].trim();
-    if (payload === '[DONE]') return sawData ? line : shimEvent('empty_reply', 'The provider sent no answer.').trimEnd();
+    if (payload === '[DONE]') { ended = true; return sawData ? line : shimEvent('empty_reply', 'The provider sent no answer.').trimEnd(); }
     if (!payload.startsWith('{')) return line;
     sawData = true;
     // (the Responses API's or Anthropic's events instead of chat chunks)
@@ -397,6 +399,12 @@ function chatStream(opts) {
       }
       return 'data: ' + JSON.stringify(fixChunk(j)) + m[2];
     } catch (e) { return line; }
+  };
+  // (checked on the fixed line, so the Responses API's and Anthropic's ends count too)
+  const fixEnd = line => {
+    const out = fixLine(line);
+    if (/"finish_reason"\s*:\s*"[^"]/.test(out) || /^data:[ \t]?\{\s*"error"\s*:/.test(out)) ended = true;
+    return out;
   };
 
   return new TransformStream({
@@ -418,7 +426,7 @@ function chatStream(opts) {
       }
       const lines = buffer.split('\n');
       buffer = lines.pop();
-      if (lines.length) ctl.enqueue(enc.encode(lines.map(fixLine).join('\n') + '\n'));
+      if (lines.length) ctl.enqueue(enc.encode(lines.map(fixEnd).join('\n') + '\n'));
     },
     flush(ctl) {
       buffer += dec.decode();
@@ -428,8 +436,10 @@ function chatStream(opts) {
       }
       else if (mode === 'json') ctl.enqueue(enc.encode(jsonToSse(buffer, opts)));
       else if (mode === 'sse') {
-        if (buffer) ctl.enqueue(enc.encode(fixLine(buffer) + '\n'));
+        if (buffer) ctl.enqueue(enc.encode(fixEnd(buffer) + '\n'));
         if (!sawData) ctl.enqueue(enc.encode('\n' + shimEvent('empty_reply', 'The provider sent no answer.')));
+        // (the connection closed in the middle of the answer: not a finished answer, whatever came)
+        else if (!ended) ctl.enqueue(enc.encode('\n' + shimEvent('incomplete', 'The provider\'s answer ended before it was complete.')));
       }
     }
   });
@@ -454,7 +464,8 @@ const responseHeaders = (headers, extra) => {
  *     'web_page' whose JSON message says a web page answered; a chat answer
  *     that starts with "<" whatever its content type, an empty answer and one
  *     that isn't SSE or JSON → an error event marked web_page / empty_reply /
- *     unreadable (fromAIError: malformed_response with that code)
+ *     unreadable (fromAIError: malformed_response with that code); a stream that
+ *     stops without [DONE] or a finish_reason → one marked incomplete
  *   - finishReason: a finish_reason 2.1.4 doesn't know (eos, end_turn, …) →
  *     its usual meaning, else stop (instead of failing the answer)
  *   - images: `message.images` / `delta.images` with no text → content

@@ -519,6 +519,10 @@ test('OPENCODE_SERVICE_MANAGED=on: MetaCode starts opencode/server.mjs on its po
     AI_LAB_DATA_DIR: path.join(dir, 'l'), COLLAB_DATA_DIR: path.join(dir, 'c')
   });
   for (const k of ['OPENCODE_SERVICE_URL', 'OPENCODE_SERVICE_TOKEN', 'OPENCODE_API_KEY', 'NODE_TEST_CONTEXT']) delete env[k];
+  // The service takes a while to start here (4 s, like a slow machine), longer than MetaCode's retries of a refused connection
+  const slow = path.join(dir, 'slow-service.js');
+  fs.writeFileSync(slow, 'if (/opencode[\\\\/]server\\.mjs$/.test(process.argv[1] || \'\')) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 4000);\n');
+  env.NODE_OPTIONS = ((env.NODE_OPTIONS || '') + ' --require ' + JSON.stringify(slow)).trim();
   // A second MetaCode, in its own process: start(0), then server.close() when told
   const code = 'const { start } = require(' + JSON.stringify(path.join(__dirname, '..', 'server.js')) + ');' +
     'start(0).then(s => { console.log("METACODE_PORT=" + s.address().port);' +
@@ -532,6 +536,10 @@ test('OPENCODE_SERVICE_MANAGED=on: MetaCode starts opencode/server.mjs on its po
   try {
     const mcPort = Number((await until(() => /METACODE_PORT=(\d+)/.exec(out), 20000, 'MetaCode to start\n' + out))[1]);
     const mc = 'http://127.0.0.1:' + mcPort;
+    // The model list asked for while the service is starting (the Settings page does): not there yet
+    const early = await (await fetch(mc + '/api/models')).json();
+    assert.deepEqual(early.models, []);
+    assert.match(early.note, /MetaCode is starting it/);
     // MetaCode started the service at OPENCODE_SERVICE_PORT and reaches it there
     const health = await until(async () => {
       try { const h = await fetch('http://127.0.0.1:' + port + '/health'); return h.ok ? h.json() : null; } catch (e) { return null; }
@@ -539,6 +547,10 @@ test('OPENCODE_SERVICE_MANAGED=on: MetaCode starts opencode/server.mjs on its po
     servicePid = health.pid;
     assert.equal(health.service, 'metacode-opencode');
     assert.notEqual(health.pid, child.pid);
+    // once MetaCode has seen it answer, AI requests work at once (that failed list isn't reused)
+    await until(async () => (await (await fetch(mc + '/api/settings/status')).json()).ai.service.running, 10000, 'Settings to show the service running');
+    const first = await fetch(mc + '/api/ai', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ model: 'emis/gpt-5.5-mini', messages: [{ role: 'user', content: 'hi' }] }) });
+    assert.equal(first.status, 200, await first.clone().text());
     const models = await until(async () => {
       const j = await (await fetch(mc + '/api/models')).json();
       return j.models.length ? j : null;

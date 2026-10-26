@@ -1209,3 +1209,190 @@ test('node opencode/server.mjs: reads .env, answers, refuses a second copy on it
     if (child.exitCode === null) child.kill('SIGKILL');
   }
 });
+
+// ── What a review found ───────────────────────────────────────────────────────
+
+test('GET /health says which data folder (which MetaCode copy) the service belongs to, as a hash', async () => {
+  const dataDir = tempDir();
+  const svc = await start({ OPENCODE_SERVICE_DATA_DIR: dataDir });
+  const h = await (await fetch(svc.origin + '/health')).json();
+  assert.equal(h.home, require('../opencode/shared.js').homeId(dataDir));
+  assert.match(h.home, /^[0-9a-f]{16}$/);
+  assert.ok(!JSON.stringify(h).includes(dataDir), 'the folder itself isn\'t said');
+});
+
+test('free models switched off and no key: Zen doesn\'t say it is free', async () => {
+  const zenOf = async svc => (await call(svc, 'GET', '/v1/status')).json.providers.find(p => p.id === 'opencode');
+  const off = await zenOf(await start({ OPENCODE_DISABLE_FREE_MODELS: '1' }));
+  assert.deepEqual([off.ready, off.free, off.keyCount], [false, false, 0]);
+  assert.equal((await zenOf(await start())).free, true, 'no key, free models on: free');
+});
+
+test('a secret in Zen\'s own headers (options.headers in OPENCODE_CONFIG) never shows in its errors or the log', async () => {
+  const SECRET = 'zen-header-secret-0123456789';
+  const cfg = path.join(tempDir(), 'oc.json');
+  fs.writeFileSync(cfg, JSON.stringify({ provider: { opencode: { options: { headers: { 'x-gateway-token': SECRET } } } } }));
+  const svc = await start({ OPENCODE_CONFIG: cfg });
+  up.set((req, res) => reply(403, { error: { message: 'gateway token ' + req.headers['x-gateway-token'] + ' is not allowed for this route' } })(req, res));
+  for (const stream of [false, true]) {
+    const r = await chat(svc, { model: 'opencode/free-chat', stream });
+    assert.equal(r.status, 403);
+    assert.equal(up.calls()[0].headers['x-gateway-token'], SECRET, 'the header is sent');
+    assert.match(r.json.error.message, /gateway token \[redacted\] is not allowed/);
+    assert.ok(!r.text.includes(SECRET), r.text);
+    up.state.seen.length = 0;
+  }
+  assert.ok(!svc.lines.join('\n').includes(SECRET), svc.lines.join('\n'));
+});
+
+test('the catalog can\'t send OPENCODE_API_KEY elsewhere: a model whose address isn\'t under https://opencode.ai/inference/ is left out (unless the catalog is OPENCODE_MODELS_PATH)', async () => {
+  const other = await startUpstream();
+  try {
+    const catalog = JSON.parse(JSON.stringify(FIXTURE));
+    Object.assign(catalog.opencode.models, {
+      'elsewhere-free': zenModel('elsewhere-free', { name: 'Elsewhere', release_date: '2026-09-01', provider: { api: other.base + '/v1' } }),
+      'plain-http': zenModel('plain-http', { release_date: '2026-09-02', provider: { api: 'http://opencode.ai/inference/openai/v1' } }),
+      'other-port': zenModel('other-port', { release_date: '2026-09-03', provider: { api: 'https://opencode.ai:8443/inference/openai/v1' } }),
+      'look-alike': zenModel('look-alike', { release_date: '2026-09-04', provider: { api: 'https://opencode.ai.example/inference/openai/v1' } }),
+      'outside': zenModel('outside', { release_date: '2026-09-05', provider: { api: 'https://opencode.ai/inference/../other/v1' } })
+    });
+    up.state.catalog = (req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify(catalog)); };
+    const env = { OPENCODE_MODELS_PATH: '', OPENCODE_DISABLE_MODELS_FETCH: '', OPENCODE_MODELS_URL: up.base, OPENCODE_API_KEY: ZEN_KEY, OPENCODE_SERVICE_DATA_DIR: tempDir() };
+    const svc = await start(env);
+    const zenStatus = async () => (await call(svc, 'GET', '/v1/status')).json.providers.find(p => p.id === 'opencode');
+    await until(async () => (await zenStatus()).catalog.source === 'remote', 5000, 'the remote catalog');
+    const ids = (await call(svc, 'GET', '/v1/models')).json.data.map(e => e.model);
+    for (const id of ['elsewhere-free', 'plain-http', 'other-port', 'look-alike', 'outside']) assert.ok(!ids.includes(id), id + ' is offered');
+    assert.ok(ids.includes('free-chat') && ids.includes('claude-sonnet-4-5'));
+    const r = await chat(svc, { model: 'opencode/elsewhere-free' });
+    assert.equal(r.status, 404);
+    assert.equal(other.state.seen.length, 0, 'nothing went to the other address');
+    assert.ok((await zenStatus()).warnings.some(w => /5 models .*outside https:\/\/opencode\.ai\/inference\/.*left out/.test(w)), JSON.stringify((await zenStatus()).warnings));
+    await svc.close();
+    running.pop();
+    // a restart with the cached copy and no fetching: still left out
+    const cached = await start(Object.assign({}, env, { OPENCODE_DISABLE_MODELS_FETCH: '1' }));
+    assert.equal((await call(cached, 'GET', '/v1/status')).json.providers.find(p => p.id === 'opencode').catalog.source, 'cache');
+    assert.ok(!(await call(cached, 'GET', '/v1/models')).json.data.some(e => e.model === 'elsewhere-free'));
+    // the operator's own file is trusted as it is
+    const file = path.join(tempDir(), 'catalog.json');
+    fs.writeFileSync(file, JSON.stringify(catalog));
+    const own = await start({ OPENCODE_MODELS_PATH: file, OPENCODE_API_KEY: ZEN_KEY });
+    other.set((req, res) => chatHello(res));
+    const r2 = await chat(own, { model: 'opencode/elsewhere-free' });
+    assert.equal(r2.status, 200, r2.text);
+    assert.equal(other.calls().length, 1);
+    // a plain-http catalog address (not this machine) is warned about
+    const plain = await start({ OPENCODE_MODELS_URL: 'http://models.example', OPENCODE_DISABLE_MODELS_FETCH: '1' });
+    assert.ok((await call(plain, 'GET', '/v1/status')).json.providers.find(p => p.id === 'opencode').warnings.some(w => /OPENCODE_MODELS_URL uses plain http/.test(w)));
+  } finally { await other.close(); }
+});
+
+test('Zen\'s free limit with a key: only the free models wait; paid models still answer (scope model)', async () => {
+  const svc = await start({ OPENCODE_API_KEY: ZEN_KEY });
+  up.set((req, res) => (/\/chat\/completions$/.test(req.url)
+    ? reply(429, { type: 'error', error: { type: 'FreeUsageLimitError', message: 'Rate limit exceeded. Please try again later.' } }, { 'retry-after': '3600' })(req, res)
+    : standard(req, res)));
+  const r = await chat(svc, { model: 'opencode/free-chat' });
+  assert.deepEqual([r.status, r.json.error.type, r.json.error.scope, r.json.error.retry_after_seconds], [429, 'quota_exceeded', 'model', 3600]);
+  assert.match(r.json.error.message, /free models' limit is reached; pick a paid model/);
+  assert.doesNotMatch(r.json.error.message, /balance/);
+  const paid = await chat(svc, { model: 'opencode/claude-sonnet-4-5' });
+  assert.equal(paid.status, 200, paid.text);
+  assert.equal((await chat(svc, { model: 'opencode/gpt-5.4-nano', stream: true })).status, 200);
+  assert.equal(up.calls().length, 3);
+  const free = await chat(svc, { model: 'opencode/big-pickle' });
+  assert.deepEqual([free.status, free.json.error.type, free.json.error.scope], [429, 'quota_exceeded', 'model']);
+  assert.ok(free.json.error.retry_after_seconds > 3500);
+  assert.equal(up.calls().length, 3, 'another free model waits without asking Zen');
+  assert.equal((await call(svc, 'GET', '/v1/status')).json.providers.find(p => p.id === 'opencode').resting, null, 'Zen as a whole isn\'t resting');
+});
+
+test('Zen\'s spend limit for one model (BudgetLimitError, coverage "models"): that model only (scope model, nothing rests); a workspace budget still rests Zen', async () => {
+  const svc = await start({ OPENCODE_API_KEY: ZEN_KEY });
+  const budget = metadata => (req, res) => (/\/anthropic\//.test(req.url)
+    ? reply(429, { type: 'error', error: Object.assign({ type: 'BudgetLimitError', message: 'Budget exceeded' }, metadata ? { metadata } : {}) }, { 'retry-after': '900' })(req, res)
+    : standard(req, res));
+  up.set(budget({ coverage: 'models' }));
+  const r = await chat(svc, { model: 'opencode/claude-sonnet-4-5' });
+  assert.deepEqual([r.status, r.json.error.type, r.json.error.scope], [429, 'quota_exceeded', 'model']);
+  assert.match(r.json.error.message, /this model's spend limit is reached; pick another model/i);
+  assert.equal((await chat(svc, { model: 'opencode/gpt-5.4-nano' })).status, 200);
+  assert.equal((await chat(svc, { model: 'opencode/free-chat' })).status, 200);
+  assert.equal((await chat(svc, { model: 'opencode/claude-sonnet-4-5' })).status, 429);
+  assert.equal(up.calls().length, 4, 'every request went to Zen');
+  assert.equal((await call(svc, 'GET', '/v1/status')).json.providers.find(p => p.id === 'opencode').resting, null);
+
+  up.set(budget(null));
+  const all = await chat(svc, { model: 'opencode/claude-sonnet-4-5' });
+  assert.deepEqual([all.status, all.json.error.type, all.json.error.scope], [429, 'quota_exceeded', 'provider']);
+  assert.equal((await chat(svc, { model: 'opencode/gpt-5.4-nano' })).status, 429);
+  assert.equal(up.calls().length, 1, 'the workspace budget rests Zen');
+});
+
+test('a stream whose first part takes longer than half the time limit: the status line goes out, then a comment now and then, so MetaCode\'s timer doesn\'t run out while the model thinks', async () => {
+  const svc = await start();
+  up.set(async (req, res) => {
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    for (let i = 0; i < 8 && !res.destroyed; i++) { res.write(': PROCESSING\n\n'); await sleep(250); }
+    if (res.destroyed) return;
+    for (const c of [chunk({ role: 'assistant', content: 'Hel' }), chunk({ content: 'lo' }, 'stop')]) res.write('data: ' + JSON.stringify(c) + '\n\n');
+    res.end('data: [DONE]\n\n');
+  });
+  const t0 = Date.now();
+  const res = await fetch(svc.origin + '/v1/chat/completions', {
+    method: 'POST', headers: { authorization: 'Bearer ' + svc.token, 'content-type': 'application/json', 'X-Request-Timeout-Ms': '2000' },
+    body: JSON.stringify({ model: 'opencode/free-chat', stream: true, messages: [{ role: 'user', content: 'hi' }] })
+  });
+  const headersAfter = Date.now() - t0;
+  assert.equal(res.status, 200);
+  const text = await res.text();
+  assert.ok(headersAfter < 1500, 'the status line came after ' + headersAfter + ' ms');
+  assert.ok(Date.now() - t0 >= 1900, 'the answer itself came later');
+  assert.ok((text.match(/^: /gm) || []).length >= 2, text);
+  const ev = events(text);
+  assert.equal(ev.slice(0, -1).map(c => (c.choices[0] && c.choices[0].delta.content) || '').join(''), 'Hello');
+  assert.equal(ev[ev.length - 1], '[DONE]');
+
+  // a failure before the first part (and before the grace time): still a real HTTP status
+  up.set(reply(429, { error: { type: 'rate_limit_error', message: 'slow down' } }));
+  const limited = await chat(svc, { model: 'opencode/free-chat', stream: true }, { 'X-Request-Timeout-Ms': '2000' });
+  assert.deepEqual([limited.status, limited.json.error.type], [429, 'rate_limited']);
+  // one after it (here: after 1 s of a 2 s limit): an error event in the stream
+  up.set(async (req, res) => { await sleep(1400); reply(503, { error: { message: 'overloaded' } })(req, res); });
+  const late = await chat(svc, { model: 'opencode/free-chat', stream: true }, { 'X-Request-Timeout-Ms': '5000' });
+  assert.equal(late.status, 200);
+  const lastEvent = events(late.text).pop();
+  assert.equal(lastEvent.error && lastEvent.error.type, 'upstream_error', late.text);
+});
+
+test('node opencode/server.mjs without its packages installed: one line saying to run npm install (no stack), exit code 1', { timeout: 20000 }, async () => {
+  const dir = tempDir();
+  const hooks = path.join(dir, 'hide-packages.mjs');
+  fs.writeFileSync(hooks, [
+    'export async function resolve(specifier, context, next) {',
+    '  if (specifier === "@opencode/ai" || specifier.startsWith("@opencode/ai/")) {',
+    '    throw Object.assign(new Error("Cannot find package \'@opencode/ai\' imported from " + context.parentURL), { code: "ERR_MODULE_NOT_FOUND" });',
+    '  }',
+    '  return next(specifier, context);',
+    '}'
+  ].join('\n'));
+  const register = path.join(dir, 'register.mjs');
+  fs.writeFileSync(register, 'import { register } from "node:module";\nimport { pathToFileURL } from "node:url";\nregister(pathToFileURL(' + JSON.stringify(hooks) + '));\n');
+  const script = path.join(__dirname, '..', 'opencode', 'server.mjs');
+  for (const pm2 of [true, false]) {
+    const child = spawn(process.execPath, ['--import', register, script], {
+      env: Object.assign({ PATH: process.env.PATH, HOME: dir, METACODE_ENV_FILE: 'none', OPENCODE_SERVICE_DATA_DIR: path.join(dir, 'data'), OPENCODE_SERVICE_PORT: String(await freePort()) },
+        pm2 ? { pm_exec_path: script } : {}),
+      stdio: ['ignore', 'pipe', 'pipe']
+    });
+    let out = '';
+    let err = '';
+    child.stdout.on('data', d => { out += d; });
+    child.stderr.on('data', d => { err += d; });
+    const code = await new Promise(r => child.on('exit', r));
+    assert.equal(code, 1, out + err);
+    assert.equal(err.trim(), 'MetaCode\'s AI service can\'t start: the package @opencode/ai isn\'t installed. Run "npm install", then restart it' + (pm2 ? ' (pm2 restart metacode-opencode)' : '') + '.');
+    assert.equal(out.trim(), '');
+  }
+});

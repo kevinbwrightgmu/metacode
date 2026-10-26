@@ -42,8 +42,15 @@ pm2 status                                            # "metacode" and "metacode
 ```
 
 If `pm2 ls` shows MetaCode under another name, run `pm2 delete <that name> && pm2 start ecosystem.config.cjs &&
-pm2 save` instead of the last three lines. Your `.env` keeps working as it is: the service reads the same file,
-including `EMIS_API_KEY`.
+pm2 save` instead of the last three lines. Your `.env` keeps working: the service reads the same file, including
+`EMIS_API_KEY`.
+
+**New: OpenCode Zen's free models.** Unless `.env` sets `OPENCODE_DISABLE_FREE_MODELS=1`, MetaCode now also offers
+OpenCode Zen's free models (no key needed), next to the gateway's. Their providers may use prompts to improve their
+models, so if your users code sensitive posts, add `OPENCODE_DISABLE_FREE_MODELS=1` to `.env` before the
+`startOrReload` line. A free model never stands in for a paid one unless `.env` sets `AI_FALLBACK_TO_FREE_MODELS=on`:
+when the gateway's budget is used up, requests without a Zen key get the quota message until it resets, as before. If you keep an `ai-lab-pricing.json`, its `metacode:<model-id>` keys still price the
+gateway's models ([ai-lab.md](ai-lab.md)).
 
 If you only run `pm2 reload metacode` after updating, AI keeps working: MetaCode then starts the AI service
 itself, because nothing answers at its address (its lines in `pm2 logs metacode` start with `[opencode]`). Run
@@ -201,7 +208,17 @@ pm2 logs metacode-opencode --lines 30    # the AI service's own log
 ```
 
 The banner's AI line reads `AI → OpenCode service at 127.0.0.1:4097 (external) — …` with the providers that are
-ready.
+ready. pm2 starts both apps at once and the service takes a moment to load its models, so MetaCode waits up to 15
+seconds for it before printing that line. If it still isn't answering then, the line says so and MetaCode checks
+again every few seconds; `pm2 logs metacode-opencode` says *"…is listening on http://127.0.0.1:4097"* once it's up,
+and Settings → AI connection shows the current state. When it says *"isn't running"*, `pm2 status` shows whether
+`metacode-opencode` is online and `pm2 logs metacode-opencode --lines 50` says why not.
+
+**A second MetaCode on the same server** (a staging copy in another folder, say) needs its own `PORT` and its own
+`OPENCODE_SERVICE_PORT` in its `.env` (e.g. `4098`), or it finds the first copy's AI service on 4097 and says
+*"Another MetaCode's AI service (from a different folder) is using port 4097"*. Under pm2 it also needs its own
+app names: copy `ecosystem.config.cjs` in that folder (e.g. to `ecosystem.staging.cjs`), change the two `name`s
+(`metacode-staging`, `metacode-staging-opencode`) and start that file.
 
 Start it again automatically after a reboot:
 
@@ -322,8 +339,8 @@ pages fail from it. Reddit's official API with keys works instead, for both the 
   `SCRAPER_MAX_CONCURRENT_JOBS=8`.
 - AI Scraper jobs also use MetaCode's AI: each step is one AI request (a job makes at most its step limit plus a
   few). The gateway key's budget (prompts and/or tokens per day, week or month) and OpenCode Zen's free limit are
-  shared by everyone; when one runs out, MetaCode uses a similar model from the other provider if it has one, or
-  says when the budget resets.
+  shared by everyone; when one runs out, MetaCode uses a similar model from the other provider if it has one (not
+  a free model for a paid one, unless `AI_FALLBACK_TO_FREE_MODELS=on`), or says when the budget resets.
 
 ## 8. Firewall
 
@@ -462,9 +479,11 @@ receives. Use `proxy_set_header Host $http_host;` (which keeps the port) instead
 MetaCode isn't running: `pm2 status`, then `pm2 logs metacode --lines 50` for the reason (a missing
 `npm install`, a port in use, a Node.js that's too old).
 
-**`Error: Cannot find module '…'` or `ERR_MODULE_NOT_FOUND` in `pm2 logs metacode` or `pm2 logs metacode-opencode`**
+**`Error: Cannot find module '…'`, `ERR_MODULE_NOT_FOUND` or *"…the package … isn't installed"* in `pm2 logs metacode` or `pm2 logs metacode-opencode`**
 The code was updated (`git pull`) but its packages weren't:
-`cd ~/metacode && npm install && pm2 startOrReload ecosystem.config.cjs --update-env`.
+`cd ~/metacode && npm install && pm2 startOrReload ecosystem.config.cjs --update-env`. The AI service says this in
+one line, *"MetaCode's AI service can't start: the package <name> isn't installed. Run "npm install", then restart
+it (pm2 restart metacode-opencode)."*, and pm2 keeps restarting it until the package is there.
 
 **Changed `.env` but nothing changed**
 AI settings (keys, models, providers) can be reloaded from **Settings → AI connection → Reload .env**, which

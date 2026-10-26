@@ -5,7 +5,7 @@
 networkx>=3.0
 
 # AI: the AI service's gateway provider (EMIS; see docs/opencode-service.md)
-# sends its non-streamed requests from Python, with the official OpenAI SDK
-# when it's installed — the client the gateway documents. Without it, Python's
-# standard library is used, and without Python, Node.js.
+# sends its non-streamed requests from Python. Chats go out with httpx
+# (installed with openai) or, without it, Python's standard library; the openai
+# SDK itself is only used for the model list. Without Python, Node.js is used.
 openai>=1.0

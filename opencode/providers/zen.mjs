@@ -15,22 +15,27 @@
 //     and the User-Agent of a custom OpenCode build (http.mjs).
 //   - variants: "#high" in the model id, else reasoning_effort when the model
 //     has a variant of that name (else it's ignored).
-//   - limits: a 429 for the whole account (FreeUsageLimitError,
+//   - limits: a 429 for the whole account (FreeUsageLimitError without a key,
 //     BudgetLimitError, GoUsageLimitError, insufficient quota) rests the
 //     provider until it resets (at most an hour): requests in the meantime are
-//     answered at once with the same failure, without asking Zen. Any other
-//     429 only concerns the model asked for (MetaCode rests that model).
+//     answered at once with the same failure, without asking Zen. With a key,
+//     FreeUsageLimitError rests only the free models (the paid ones still
+//     answer), and a BudgetLimitError whose "coverage" is "models" is that
+//     model's own spend limit (scope 'model', nothing rests). Any other 429
+//     only concerns the model asked for (MetaCode rests that model).
 
 import crypto from 'node:crypto';
 import { LanguageModel } from '@opencode/ai';
 import { createAI } from '../http.mjs';
 import { toLLMInput } from '../openai.mjs';
-import { ServiceError, fromAIError, describeWait } from '../errors.mjs';
+import { ServiceError, fromAIError, describeWait, zenLimitOf } from '../errors.mjs';
 import { createCatalog, normalize, orderModels, PROTOCOL_MODULES } from '../catalog.mjs';
 
 const MAX_REST_SECONDS = 3600;
 const DEFAULT_REST_SECONDS = 900;      // an account limit that didn't say when it resets
 const PUBLIC_KEY = 'public';           // what OpenCode sends to Zen without a key
+const MODEL_BUDGET_HINT = 'This model\'s spend limit is reached; pick another model.';
+const FREE_LIMIT_HINT = 'The free models\' limit is reached; pick a paid model.';
 
 const modules = new Map();
 function protocolModule(protocol) {
@@ -77,7 +82,7 @@ export function createProvider(opts) {
   let settings;                 // from config + env: key, disableFree, inferenceUrl, baseURL, headers, warnings
   let generation = 0;           // bumped by reload(): the model list is recomputed
   let memo = null;
-  let resting = null;           // {until, reason, type, window} while the account limit is used up
+  let resting = null;           // {until, reason, type, window, freeOnly} while the account limit (freeOnly: the free models' limit) is used up
   let requestCount = 0;
   let current = null;           // {ai, inflight}
   const retired = new Set();
@@ -128,7 +133,14 @@ export function createProvider(opts) {
     if (memo && memo.version === cat.version && memo.generation === generation) return memo;
     const warnings = [];
     const overrides = config.models || {};
-    const all = cat.entry ? normalize(cat.entry, { inferenceUrl: settings.inferenceUrl }).models : [];
+    // (the operator's own file, OPENCODE_MODELS_PATH, may send models anywhere; a fetched or cached catalog only to Zen)
+    const normalized = cat.entry ? normalize(cat.entry, { inferenceUrl: settings.inferenceUrl, trusted: cat.source === 'file' }) : null;
+    const all = normalized ? normalized.models : [];
+    if (normalized && normalized.dropped.address.length) {
+      const ids = normalized.dropped.address;
+      warnings.push('The OpenCode Zen catalog gives ' + ids.length + ' model' + (ids.length === 1 ? '' : 's') + ' (' + ids.slice(0, 5).join(', ') + (ids.length > 5 ? ', …' : '') +
+        ') an address outside https://opencode.ai/inference/, so ' + (ids.length === 1 ? 'it is' : 'they are') + ' left out.');
+    }
     const known = new Set(all.map(m => m.id));
     for (const mid of Object.keys(overrides)) {
       if (!known.has(mid)) warnings.push('provider.' + id + '.models.' + mid + ' isn\'t in the OpenCode Zen catalog (or is retired); it is ignored.');
@@ -194,26 +206,38 @@ export function createProvider(opts) {
     };
   }
 
-  // The failure while the provider rests (no request is sent)
+  // The failure while the provider (or, freeOnly, its free models) rests (no request is sent)
   function restingError(entry) {
     const left = Math.max(1, Math.ceil((resting.until - Date.now()) / 1000));
     const what = resting.reason === 'quota'
-      ? name() + '\'s usage limit' + (settings.key ? '' : ' for free models') + ' is used up. It resets ' + describeWait(left) + '.'
+      ? name() + '\'s usage limit' + (settings.key && !resting.freeOnly ? '' : ' for free models') + ' is used up. It resets ' + describeWait(left) + '.'
       : name() + ' asked MetaCode to pause. It can be used again ' + describeWait(left) + '.';
-    const h = hints()[resting.type];
+    const h = resting.freeOnly ? 'Pick a paid model.' : hints()[resting.type];
     return new ServiceError(429, resting.type, what + (h ? ' ' + h : ''), {
-      provider: id, model: entry && entry.id, scope: 'provider', retryAfterSeconds: left, resetAt: new Date(resting.until).toISOString(), window: resting.window
+      provider: id, model: entry && entry.id, scope: resting.freeOnly ? 'model' : 'provider', retryAfterSeconds: left, resetAt: new Date(resting.until).toISOString(), window: resting.window
     });
   }
 
+  // Keys and the config's header values (a gateway may quote them back in an error) are never shown
+  function secrets() {
+    const headers = settings.headers ? Object.values(settings.headers).filter(v => typeof v === 'string' && v.length >= 8) : [];
+    return (settings.key ? [settings.key] : []).concat(headers);
+  }
+
   function fail(err, entry, signal) {
-    const e = fromAIError(err, { provider: id, providerName: name(), model: entry.id, secrets: settings.key ? [settings.key] : [], signal, hint: hints() });
-    if (e.status === 429 && e.scope === 'provider') {
+    // Zen's limit: a spend limit for this model only, or (with a key) the free models' limit, which the paid ones don't share
+    const limit = zenLimitOf(err && err.reason && err.reason.body);
+    const m = catalogModels().byId.get(entry.model);
+    const freeOnly = limit === 'free' && !!settings.key && !!(m && m.free);
+    const hint = Object.assign(hints(), limit === 'model' ? { quota_exceeded: MODEL_BUDGET_HINT } : freeOnly ? { quota_exceeded: FREE_LIMIT_HINT } : {});
+    const e = fromAIError(err, { provider: id, providerName: name(), model: entry.id, secrets: secrets(), signal, hint });
+    if (e.status === 429 && e.type === 'quota_exceeded' && freeOnly) e.scope = 'model';
+    if (e.status === 429 && (e.scope === 'provider' || freeOnly)) {
       const seconds = Math.min(Math.max(1, e.retryAfterSeconds !== undefined ? e.retryAfterSeconds : DEFAULT_REST_SECONDS), MAX_REST_SECONDS);
       if (e.retryAfterSeconds === undefined) e.retryAfterSeconds = seconds;
       if (!e.resetAt) e.resetAt = new Date(Date.now() + seconds * 1000).toISOString();
-      resting = { until: Date.now() + seconds * 1000, reason: e.type === 'quota_exceeded' ? 'quota' : 'paused', type: e.type, window: e.window };
-      log.warn(name() + ' is resting until ' + new Date(resting.until).toISOString() + ' (' + e.type + ').');
+      resting = { until: Date.now() + seconds * 1000, reason: e.type === 'quota_exceeded' ? 'quota' : 'paused', type: e.type, window: e.window, freeOnly };
+      log.warn(name() + (freeOnly ? '\'s free models are' : ' is') + ' resting until ' + new Date(resting.until).toISOString() + ' (' + e.type + ').');
     }
     return e;
   }
@@ -247,13 +271,13 @@ export function createProvider(opts) {
     status() {
       const m = catalogModels();
       const p = problem();
-      const rest = restingNow();
+      const rest = restingNow() && !resting.freeOnly ? resting : null;     // (the free models alone resting: Zen isn't)
       const left = rest ? Math.max(1, Math.ceil((rest.until - Date.now()) / 1000)) : 0;
       return {
         id, name: name(), kind: 'zen', ready: !p, problem: p,
         warnings: settings.warnings.concat(catalog.warnings, m.warnings),
         keyCount: settings.key ? 1 : 0,
-        free: !settings.key,
+        free: !settings.key && !settings.disableFree,
         note: !settings.key && !settings.disableFree ? 'Free models only — add OPENCODE_API_KEY for the others.'
           : settings.key && settings.disableFree ? 'Free models are switched off (OPENCODE_DISABLE_FREE_MODELS).' : null,
         models: { listed: m.offered.length, available: m.offered.length },
@@ -272,9 +296,9 @@ export function createProvider(opts) {
 
     async *chat(body, entry, run) {
       const { signal, timeoutMs, stream, variant } = run || {};
-      if (restingNow()) throw restingError(entry);
       const m = catalogModels().byId.get(entry.model);
       if (!m) throw unlisted(entry.model) || new ServiceError(404, 'model_not_found', name() + ' doesn\'t offer the model "' + entry.id + '". Pick another model.', { provider: id, model: entry.id });
+      if (restingNow() && (!resting.freeOnly || m.free)) throw restingError(entry);
       let chosen = null;
       if (variant && variant !== 'default') {
         chosen = m.variants.find(v => v.id === variant);

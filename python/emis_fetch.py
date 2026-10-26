@@ -8,11 +8,10 @@ non-streamed EMIS requests through this worker when Python is available
 (EMIS_TRANSPORT=auto, the default; =python to require it; =node to skip it),
 and through Node.js otherwise (streamed answers always go through Node.js).
 
-It uses, in order of preference:
-  1. the official `openai` package (pip install openai) — exactly the client
-     EMIS's documentation shows;
-  2. `httpx` (installed with openai);
-  3. Python's standard library (urllib) — no pip install needed.
+Chat requests (always stream:true from the service, read here whole) go out
+with `httpx` (installed with openai: pip install openai), else Python's
+standard library (urllib) — no pip install needed. The official `openai`
+package, the client EMIS's documentation shows, is only used for GET /models.
 Proxies: HTTPS_PROXY / HTTP_PROXY / NO_PROXY are honoured by all three, or
 EMIS_PROXY when given in the request (then for every request, as from Node.js).
 

@@ -226,7 +226,9 @@ Notes on providers and costs:
   ```
 
   For the MetaCode AI service the key includes the model's provider, e.g.
-  `metacode:emis/claude-opus-5.5` or `metacode:opencode/big-pickle`. Fill in
+  `metacode:emis/claude-opus-5.5` or `metacode:opencode/big-pickle`. Keys from
+  before (`metacode:<model-id>`, e.g. `metacode:claude-opus-5.5`) still price
+  the AI gateway's models; new entries use `metacode:<provider>/<model-id>`. Fill in
   the prices from your provider's current price page. The values above
   are placeholders. Without a price, a cost is "unknown". Estimates are labelled
   with the list's date and are never presented as amounts charged.

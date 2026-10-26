@@ -309,7 +309,7 @@ const App = (() => {
             </div>
             <div class="form-group">
               <label class="s-check-row" for="s-switch"><input type="checkbox" id="s-switch" ${settings.switchModels !== false ? 'checked' : ''}> If a model is rate-limited or failing, use the closest similar model</label>
-              <div class="form-hint">When the AI service throttles the model you picked, or can't run it right now, requests go to the most similar available model — the same model from another provider first, else the same family and line, nearest version and size (e.g. Claude Opus 5.5 → Claude Opus 5) — until it can be used again, and a note says which one answered. The same happens to every model of a provider whose usage limit is used up, until the limit resets. (AI Coding waits and tries your model again when the AI service can't run it, so every post is coded by the model you picked.) Turn off to wait for your model instead (with “Server default”, the server still uses a similar model when the AI service can't run its default).</div>
+              <div class="form-hint">When the AI service throttles the model you picked, or can't run it right now, requests go to the most similar available model — the same model from another provider first, else the same family and line, nearest version and size (e.g. Claude Opus 5.5 → Claude Opus 5) — until it can be used again, and a note says which one answered. The same happens to every model of a provider whose usage limit is used up, until the limit resets. A free model never answers for a paid one unless the server allows it. (AI Coding waits and tries your model again when the AI service can't run it, so every post is coded by the model you picked.) Turn off to wait for your model instead (with “Server default”, the server still uses a similar model when the AI service can't run its default).</div>
               <div class="form-hint" id="s-limited"></div>
             </div>
             <div class="form-group">
@@ -656,6 +656,16 @@ const App = (() => {
     return parts.join(' · ') || 'MetaCode\'s AI service is answering.';
   }
 
+  // Every ready provider rests until a usage limit resets (or it asked to pause):
+  // "until 14:05 (OpenCode Zen's usage limit is used up)", else ''
+  function restingSummary(ai) {
+    const ready = (Array.isArray(ai.providers) ? ai.providers : []).filter(p => p && p.ready);
+    const rests = (Array.isArray(ai.restingProviders) ? ai.restingProviders : []).filter(r => r && Date.parse(r.until) > Date.now());
+    if (!ready.length || !ready.every(p => rests.some(r => r.provider === p.id))) return '';
+    const soonest = Math.min(...rests.map(r => Date.parse(r.until)));
+    return 'until ' + esc(whenText(soonest)) + ' (' + rests.map(r => esc(providerTitle(r.provider)) + (r.reason === 'paused' ? ' asked to pause' : '\'s usage limit is used up')).join('; ') + ')';
+  }
+
   // Shows what the server read from .env and whether AI is ready — names of
   // settings only, never values.
   function renderEnvStatus(statusOverride) {
@@ -666,7 +676,8 @@ const App = (() => {
     if (!box) return;
     if (!st) { box.innerHTML = '<div style="color:var(--error)">Couldn\'t reach the MetaCode server to check its settings.</div>'; return; }
     const env = st.env || {}, ai = st.ai || {}, server = st.server || {};
-    if (badge) badge.innerHTML = ai.ready ? '<span class="badge badge-green">Ready</span>' : '<span class="badge badge-red">Not set up</span>';
+    const resting = ai.ready ? restingSummary(ai) : '';
+    if (badge) badge.innerHTML = !ai.ready ? '<span class="badge badge-red">Not set up</span>' : resting ? '<span class="badge badge-amber">Resting</span>' : '<span class="badge badge-green">Ready</span>';
     const rows = [];
     const keys = Array.isArray(env.keys) ? env.keys : [];
     if (env.found && !env.error) {
@@ -682,8 +693,10 @@ const App = (() => {
     }
     (env.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
     if (env.overridden && env.overridden.length) rows.push('<div style="color:#B45309">⚠ .env replaced older values set in this computer\'s environment for: ' + env.overridden.map(k => '<code>' + esc(k) + '</code>').join(' ') + '</div>');
-    if (ai.ready) rows.push('<div>✓ AI is ready: ' + aiSummary(ai) + '</div>');
+    if (resting) rows.push('<div style="color:#B45309">⚠ AI is resting ' + resting + ': ' + aiSummary(ai) + '</div>');
+    else if (ai.ready) rows.push('<div>✓ AI is ready: ' + aiSummary(ai) + '</div>');
     else rows.push('<div style="color:var(--error)">✗ AI isn\'t ready: ' + esc(ai.problem || 'MetaCode\'s AI service isn\'t answering.') + '</div>');
+    if (ai.freeFallback === true) rows.push('<div style="color:#B45309">⚠ Free models may answer for paid ones (AI_FALLBACK_TO_FREE_MODELS=on).</div>');
     const svc = ai.service && typeof ai.service === 'object' ? ai.service : {};
     if (svc.problem && svc.problem !== ai.problem) rows.push('<div style="color:#B45309">⚠ ' + esc(svc.problem) + '</div>');
     (ai.warnings || []).forEach(w => rows.push('<div style="color:#B45309">⚠ ' + esc(w) + '</div>'));
@@ -755,7 +768,15 @@ const App = (() => {
   // provider ("claude-opus-5.5" → "<provider>/claude-opus-5.5"), or under an
   // older spelling. On several providers: the first in the AI service's
   // order that has it under any spelling, the one the server would use for
-  // the old id too. Else null.
+  // the old id too. Else null — also for an id without a provider while a
+  // provider ahead of the match is set up but hasn't listed its models (it
+  // may have the model too; the server maps the saved id on each request
+  // meanwhile). A provider without any key isn't waited for.
+  // A provider Settings reports with no key at all (e.g. the gateway on a server that never had one)
+  function notSetUp(id) {
+    const p = ((serverStatus && serverStatus.ai && serverStatus.ai.providers) || []).find(x => x && x.id === id);
+    return !!p && !p.ready && p.keyCount === 0;
+  }
   function listedModel(wanted, models) {
     const provider = providerOf(wanted), part = modelPart(wanted);
     const rank = p => { const i = modelProviders.findIndex(x => x.id === p); return i < 0 ? modelProviders.length : i; };
@@ -769,7 +790,7 @@ const App = (() => {
     const providers = [...new Set(pool.map(m => providerOf(m.id)))].sort((a, b) => rank(a) - rank(b));
     for (const p of providers) {
       const id = find(pool.filter(m => providerOf(m.id) === p));
-      if (id) return id;
+      if (id) return modelProviders.slice(0, rank(p)).some(x => x.ready === false && !notSetUp(x.id)) ? null : id;
     }
     return null;
   }
@@ -1267,7 +1288,7 @@ const App = (() => {
     init, navigate: (v) => navigate(v), setViewCleanup, fetchModels, fetchKeyStatus, reloadEnv, modelFor, AI_FEATURES,
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
     getState, setState, save, reloadState,
-    callClaude, callClaudeBatch, tooLargeMessage: TOO_LARGE, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus, modelName,
+    callClaude, callClaudeBatch, tooLargeMessage: TOO_LARGE, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus, refreshServerStatus: refreshServerKeyInfo, modelName,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,
     saveProject, saveSettings, downloadBackup, restoreBackup, testApi, clearCodes, resetAll,

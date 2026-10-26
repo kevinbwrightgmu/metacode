@@ -21,7 +21,10 @@
 // models without text in and out and realtime/embedding/reranking models are
 // dropped; the model's npm package picks the protocol; its reasoning_options
 // become variants spelled the way each protocol takes them; a model is free
-// when every price tier's input costs 0.
+// when every price tier's input costs 0. OPENCODE_API_KEY goes to a model's
+// address, so one from a fetched or cached catalog must be Zen's own (under
+// https://opencode.ai/inference/), or the model is left out; the operator's
+// own file (OPENCODE_MODELS_PATH) is used as it is.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -163,6 +166,15 @@ function swapPrefix(url, inferenceUrl) {
   return url.toLowerCase().startsWith(ZEN_INFERENCE_PREFIX) ? inferenceUrl.replace(/\/+$/, '') + url.slice(ZEN_INFERENCE_PREFIX.length) : url;
 }
 
+// A model's address from a fetched or cached catalog, as a URL, only when it is Zen's own
+// (https://opencode.ai/inference/…): OPENCODE_API_KEY goes there, so nowhere else; else null
+function zenAddress(raw) {
+  let u;
+  try { u = new URL(String(raw)); } catch (e) { return null; }
+  if (u.protocol !== 'https:' || u.hostname !== 'opencode.ai' || u.port || u.username || u.password || !u.pathname.startsWith('/inference/')) return null;
+  return u.href;
+}
+
 /** The "opencode" provider entry of a models.dev api.json (or of zen-models.json), or null. */
 export function zenEntry(json) {
   const entry = json && typeof json === 'object' ? json.opencode : null;
@@ -175,15 +187,19 @@ export function zenEntry(json) {
  * @param {object} entry                  the "opencode" provider entry of a models.dev api.json
  * @param {object} [opts]
  * @param {string} [opts.inferenceUrl]    replaces the https://opencode.ai/inference prefix of model addresses
- * @returns {{models: object[], dropped: {deprecated: number, notText: number, unsupported: string[]}}}
+ * @param {boolean} [opts.trusted]        the operator's own file (OPENCODE_MODELS_PATH): model addresses are used as
+ *                                        they are; otherwise a model whose address isn't under
+ *                                        https://opencode.ai/inference/ is left out (dropped.address)
+ * @returns {{models: object[], dropped: {deprecated: number, notText: number, unsupported: string[], address: string[]}}}
  *   models (catalog order): {id, name, family, protocol, baseURL, toolCall, reasoning, attachment, temperature,
  *   input[], output[], contextWindow, inputLimit, maxOutput, cost: [{input, output}], free,
  *   variants: [{id, settings}], releaseDate, released (ms, 0 if unknown), reasoningField, status}
  */
 export function normalize(entry, opts) {
   const inferenceUrl = opts && opts.inferenceUrl;
+  const trusted = !!(opts && opts.trusted);
   const models = [];
-  const dropped = { deprecated: 0, notText: 0, unsupported: [] };
+  const dropped = { deprecated: 0, notText: 0, unsupported: [], address: [] };
   if (!zenEntry({ opencode: entry })) return { models, dropped };
   for (const [key, m] of Object.entries(entry.models)) {
     if (!m || typeof m !== 'object') continue;
@@ -196,6 +212,9 @@ export function normalize(entry, opts) {
     const npm = (m.provider && m.provider.npm) || entry.npm;
     const protocol = PROTOCOL_OF[npm];
     if (!protocol) { dropped.unsupported.push(id); continue; }
+    const raw = (m.provider && m.provider.api) || entry.api;
+    const address = trusted ? raw : zenAddress(raw);
+    if (!address) { dropped.address.push(id); continue; }
 
     const limit = m.limit && typeof m.limit === 'object' ? m.limit : {};
     const cost = [{ input: price(m.cost && m.cost.input), output: price(m.cost && m.cost.output) }]
@@ -210,7 +229,7 @@ export function normalize(entry, opts) {
       name: typeof m.name === 'string' && m.name.trim() ? m.name.trim() : id,
       family: typeof m.family === 'string' ? m.family : undefined,
       protocol,
-      baseURL: swapPrefix((m.provider && m.provider.api) || entry.api, inferenceUrl),
+      baseURL: swapPrefix(address, inferenceUrl),
       toolCall: m.tool_call === true,
       reasoning: m.reasoning === true,
       attachment: typeof m.attachment === 'boolean' ? m.attachment : input.some(x => !x.startsWith('text')),
@@ -307,6 +326,10 @@ function readSettings(env) {
   if (url && !/^https?:\/\/[^/\s]+/i.test(url)) {
     warnings.push('OPENCODE_MODELS_URL isn\'t an http(s) address; the OpenCode Zen catalog comes from ' + DEFAULT_MODELS_URL + '.');
     url = '';
+  } else if (url && /^http:/i.test(url)) {
+    let host = '';
+    try { host = new URL(url).hostname; } catch (e) { host = ''; }
+    if (!['localhost', '127.0.0.1', '[::1]'].includes(host)) warnings.push('OPENCODE_MODELS_URL uses plain http, so the OpenCode Zen catalog could be changed on its way here. Use https.');
   }
   return {
     file: rawFile ? path.resolve(shared.REPO_DIR, rawFile) : null,

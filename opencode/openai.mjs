@@ -254,8 +254,9 @@ const modelName = model => (model && (model.id || model.model)) || 'this model';
  * Model rules (from the catalog entry): tools when `toolCall === false` and
  * images/files when `attachment === false` → unsupported_feature; `maxTokens`
  * capped at `maxOutput` (anthropic without a request: `maxOutput`); temperature
- * dropped when `temperature === false`. `reasoning_effort` is sent only for an
- * entry without `variants` (a provider with variants maps it to a variant and
+ * dropped when `temperature === false` (capped at 1 for anthropic).
+ * `reasoning_effort` is sent only for an entry without `variants` (a
+ * provider with variants maps it to a variant and
  * passes that variant's settings instead). With anthropic thinking settings
  * (`settings.thinking` enabled/adaptive), temperature is dropped and maxTokens
  * kept ≥ 2 × the thinking budget.
@@ -332,7 +333,8 @@ export function toLLMInput(body, opts) {
   const generation = {};
   const set = (key, value) => { if (value !== undefined && value !== null) generation[key] = value; };
   set('maxTokens', maxTokens);
-  if (model.temperature !== false && !thinking) set('temperature', body.temperature);
+  // (OpenAI's range is 0–2, Anthropic's 0–1: capped, not scaled, so the values both take mean the same)
+  if (model.temperature !== false && !thinking) set('temperature', protocol === 'anthropic' && typeof body.temperature === 'number' ? Math.min(body.temperature, 1) : body.temperature);
   set('topP', body.top_p);
   set('frequencyPenalty', body.frequency_penalty);
   set('presencePenalty', body.presence_penalty);

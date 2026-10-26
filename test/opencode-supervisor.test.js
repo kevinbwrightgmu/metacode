@@ -1,9 +1,9 @@
 // MetaCode starting its OpenCode service itself (opencode/supervisor.js):
 // started when nothing answers at the address, left alone when something
-// does, started again with a growing pause after it stops, a readable
-// problem when its packages are missing, and stopped with MetaCode. The
-// service here is a tiny stand-in script that answers GET /health, not the
-// real opencode/server.mjs.
+// does (with a problem when that isn't this copy's service), started again
+// with a growing pause after it stops, a readable reason when it stops, and
+// stopped with MetaCode. The service here is a tiny stand-in script that
+// answers GET /health, not the real opencode/server.mjs.
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const crypto = require('crypto');
@@ -11,7 +11,8 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
-const { createSupervisor, checkHealth, PACKAGES_MISSING } = require('../opencode/supervisor');
+const { createSupervisor, checkHealth, describeExit, PACKAGES_MISSING } = require('../opencode/supervisor');
+const { homeId, serviceSettings } = require('../opencode/shared');
 
 const TOKEN = 'supervisor-test-token-0123456789';
 const sha = s => crypto.createHash('sha256').update(String(s)).digest('hex');
@@ -199,4 +200,179 @@ test('stop: SIGTERM, then SIGKILL for a service that doesn\'t exit', async () =>
   assert.ok(Date.now() - t0 >= 250, 'it waited for the grace period');
   assert.equal(alive(st.pid), false);
   assert.equal(sup.state().managed, false);
+});
+
+test('stop() twice (server.close, then the shutdown handler): the second waits for the kill in progress too', async t => {
+  const port = await freePort();
+  const script = fakeService('stubborn-twice.js', 'process.on("SIGTERM", () => console.log("not stopping"));');
+  const sup = createSupervisor({ script, log: quietLog(), killAfterMs: 600 });
+  t.after(() => sup.stop());   // also when an assertion fails
+  const st = await sup.start({ mode: 'auto', url: 'http://127.0.0.1:' + port + '/v1', custom: false, token: TOKEN });
+  assert.equal(await sup.whenReady(10000), true);
+  const t0 = Date.now();
+  const first = sup.stop();
+  await sup.stop();
+  assert.ok(Date.now() - t0 >= 500, 'the second stop() waited for the SIGKILL: ' + (Date.now() - t0) + ' ms');
+  assert.equal(alive(st.pid), false, 'nothing is left behind when MetaCode exits right after');
+  await first;
+});
+
+test('a service that answers only after readyTimeoutMs: the problem is reported, then cleared once it answers', async t => {
+  const port = await freePort();
+  // listens 1.5 s after it starts (a slow machine at boot)
+  const script = fakeService('slow-start.js', `
+const listen = http.Server.prototype.listen;
+http.Server.prototype.listen = function (...a) { setTimeout(() => listen.apply(this, a), 1500); return this; };`);
+  const readyCalls = [];
+  const sup = createSupervisor({ script, log: quietLog(), readyTimeoutMs: 300, onReady: s => readyCalls.push(s) });
+  t.after(() => sup.stop());
+  await sup.start({ mode: 'auto', url: 'http://127.0.0.1:' + port + '/v1', custom: false, token: TOKEN });
+  assert.equal(await sup.whenReady(5000), false, 'waiters still hear about the deadline');
+  assert.match(sup.state().problem, /started but hasn't answered/);
+  await until(() => sup.state().ready, 8000, 'the late answer to be noticed');
+  assert.deepEqual([sup.state().ready, sup.state().starting, sup.state().problem], [true, false, null]);
+  assert.equal(readyCalls.length, 1);
+  assert.equal(await sup.whenReady(100), true);
+  await sup.stop();
+});
+
+test('a program that isn\'t the service answers at the address: no child, and the problem names the port setting', async t => {
+  const port = await freePort();
+  const other = http.createServer((req, res) => { res.statusCode = 404; res.setHeader('content-type', 'text/html'); res.end('<h1>Not found</h1>'); });
+  await new Promise(r => other.listen(port, '127.0.0.1', r));
+  try {
+    const script = fakeService('never-foreign.js', 'fs.writeFileSync(path.join(__dirname, "never-started-foreign"), "1");');
+    const out = quietLog();
+    const sup = createSupervisor({ script, log: out });
+    t.after(() => sup.stop());
+    const st = await sup.start({ mode: 'auto', url: 'http://127.0.0.1:' + port + '/v1', custom: false, token: TOKEN });
+    const problem = 'Another program, not MetaCode\'s AI service, answers at 127.0.0.1:' + port + '. Set OPENCODE_SERVICE_PORT in .env to a free port and restart MetaCode.';
+    assert.deepEqual([st.managed, st.external, st.running, st.problem], [false, true, false, problem]);
+    assert.ok(out.lines.includes('[opencode] ' + problem), out.lines.join('\n'));
+    await new Promise(r => setTimeout(r, 300));
+    assert.equal(fs.existsSync(path.join(tmp, 'never-started-foreign')), false);
+    await sup.stop();
+  } finally {
+    await new Promise(r => other.close(r));
+  }
+});
+
+test('the service of another MetaCode folder answers at the address: not used as this copy\'s, and the problem says to pick a port', async t => {
+  const port = await freePort();
+  const dataDir = path.join(tmp, 'home-a');
+  let home = 'feedfacefeedface';
+  const other = http.createServer((req, res) => {
+    res.setHeader('content-type', 'application/json');
+    res.end(JSON.stringify(Object.assign({ ok: true, service: 'metacode-opencode', pid: 1 }, home ? { home } : {})));
+  });
+  await new Promise(r => other.listen(port, '127.0.0.1', r));
+  try {
+    const script = fakeService('never-home.js', 'fs.writeFileSync(path.join(__dirname, "never-started-home"), "1");');
+    const out = quietLog();
+    const sup = createSupervisor({ script, log: out });
+    t.after(() => sup.stop());
+    const url = 'http://127.0.0.1:' + port + '/v1';
+    let st = await sup.start({ mode: 'auto', url, custom: false, token: TOKEN, dataDir });
+    const problem = 'Another MetaCode\'s AI service (from a different folder) is using port ' + port + '. Set OPENCODE_SERVICE_PORT in .env to a free port and restart MetaCode.';
+    assert.deepEqual([st.managed, st.external, st.running, st.problem], [false, true, false, problem], 'kept external: no second copy');
+    assert.ok(out.lines.includes('[opencode] ' + problem), out.lines.join('\n'));
+
+    home = homeId(dataDir);
+    st = await sup.start({ mode: 'auto', url, custom: false, token: TOKEN, dataDir });
+    assert.deepEqual([st.managed, st.external, st.problem], [false, true, null], 'its own folder: used as before');
+    home = homeId(serviceSettings(process.env).dataDir);
+    st = await sup.start({ mode: 'auto', url, custom: false, token: TOKEN });
+    assert.deepEqual([st.external, st.problem], [true, null], 'without dataDir: the folder from OPENCODE_SERVICE_DATA_DIR, as the service reads it');
+    home = null;
+    st = await sup.start({ mode: 'auto', url, custom: false, token: TOKEN, dataDir });
+    assert.deepEqual([st.managed, st.external, st.problem], [false, true, null], 'an older service without "home": accepted as before');
+    await new Promise(r => setTimeout(r, 300));
+    assert.equal(fs.existsSync(path.join(tmp, 'never-started-home')), false);
+    await sup.stop();
+  } finally {
+    await new Promise(r => other.close(r));
+  }
+});
+
+test('another folder\'s service takes the port while this one is being restarted: not used as this copy\'s either', async t => {
+  const port = await freePort();
+  const script = fakeService('exits-once.js', 'console.error("Error: fake failure"); process.exit(3);');
+  const out = quietLog();
+  const sup = createSupervisor({ script, log: out, minBackoffMs: 500 });
+  t.after(() => sup.stop());
+  const other = http.createServer((req, res) => { res.setHeader('content-type', 'application/json'); res.end(JSON.stringify({ ok: true, service: 'metacode-opencode', pid: 1, home: 'feedfacefeedface' })); });
+  t.after(() => new Promise(r => other.close(r)));
+  await sup.start({ mode: 'auto', url: 'http://127.0.0.1:' + port + '/v1', custom: false, token: TOKEN, dataDir: path.join(tmp, 'home-b') });
+  await new Promise(r => other.listen(port, '127.0.0.1', r));
+  await until(() => sup.state().external, 5000, 'the restart to find the other service');
+  const st = sup.state();
+  assert.deepEqual([st.managed, st.external, st.running, st.restarts], [false, true, false, 0]);
+  assert.equal(st.problem, 'Another MetaCode\'s AI service (from a different folder) is using port ' + port + '. Set OPENCODE_SERVICE_PORT in .env to a free port and restart MetaCode.');
+});
+
+test('the child gets the data folder MetaCode compares its "home" with', async t => {
+  const port = await freePort();
+  const dataDir = path.join(tmp, 'home-child');
+  const seen = path.join(tmp, 'child-data-dir');
+  const script = fakeService('data-dir.js', `fs.writeFileSync(${JSON.stringify(seen)}, process.env.OPENCODE_SERVICE_DATA_DIR || '');`);
+  const sup = createSupervisor({ script, log: quietLog() });
+  t.after(() => sup.stop());
+  await sup.start({ mode: 'auto', url: 'http://127.0.0.1:' + port + '/v1', custom: false, token: TOKEN, dataDir });
+  assert.equal(await sup.whenReady(10000), true);
+  assert.equal(fs.readFileSync(seen, 'utf8'), dataDir);
+  await sup.stop();
+});
+
+test('killed from outside (SIGKILL): the reason isn\'t the last ordinary line it printed', async t => {
+  const port = await freePort();
+  const script = fakeService('killed.js', 'setTimeout(() => console.log("chat emis/mini → 200 in 54 ms"), 50);');
+  const out = quietLog();
+  const sup = createSupervisor({ script, log: out, minBackoffMs: 5000 });
+  t.after(() => sup.stop());
+  const st = await sup.start({ mode: 'auto', url: 'http://127.0.0.1:' + port + '/v1', custom: false, token: TOKEN });
+  assert.equal(await sup.whenReady(10000), true);
+  await until(() => out.lines.some(l => l.includes('chat emis/mini')), 5000, 'the info line');
+  process.kill(st.pid, 'SIGKILL');
+  await until(() => sup.state().problem, 5000, 'the problem');
+  assert.equal(sup.state().problem, 'The AI service was stopped by signal SIGKILL (killed from outside, for example by the system\'s out-of-memory killer).');
+  await sup.stop();
+});
+
+test('an uncaught error: the error line is quoted, not Node\'s version line or the access log', async t => {
+  const port = await freePort();
+  const script = fakeService('throws.js', 'console.log("chat emis/mini → 200 in 54 ms"); setTimeout(() => { throw new TypeError("boom from the fake service"); }, 20);');
+  const sup = createSupervisor({ script, log: quietLog(), minBackoffMs: 5000 });
+  t.after(() => sup.stop());
+  await sup.start({ mode: 'auto', url: 'http://127.0.0.1:' + port + '/v1', custom: false, token: TOKEN });
+  await until(() => sup.state().problem, 10000, 'the problem');
+  const problem = sup.state().problem;
+  assert.equal(problem, 'The AI service stopped unexpectedly (exit code 1): TypeError: boom from the fake service.');
+  assert.ok(!/Node\.js v|chat emis/.test(problem));
+  await sup.stop();
+});
+
+test('describeExit: only what the service printed as an error is quoted', () => {
+  const out = text => ({ text, err: false });
+  const err = text => ({ text, err: true });
+  // a V8 out-of-memory crash
+  assert.equal(describeExit(null, 'SIGABRT', [out('chat emis/mini → 200 in 54 ms'), err('<--- Last few GCs --->'),
+    err('FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory'), err('----- Native stack trace -----'),
+    err(' 1: 0xb8ced1 node::OOMErrorHandler(char const*, v8::OOMDetails const&) [/opt/node22/bin/node]'), err('16: 0x1dcb476  [/opt/node22/bin/node]')], 's', 1),
+  'The AI service stopped unexpectedly (signal SIGABRT): FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory.');
+  // an error with extra properties: Node prints them after the stack
+  assert.equal(describeExit(1, null, [err('Error: no slot'), err('    at f (/x.js:1:1) {'), err('  code: \'X\''), err('}'), err(''), err('Node.js v22.22.0')], 's', 1),
+    'The AI service stopped unexpectedly (exit code 1): Error: no slot.');
+  // nothing on stderr: no quote at all
+  assert.equal(describeExit(0, null, [out('MetaCode\'s OpenCode service is listening on 127.0.0.1:4097')], 's', 1), 'The AI service stopped unexpectedly (exit code 0).');
+  assert.equal(describeExit(1, null, [err('listen EADDRINUSE: address already in use 127.0.0.1:4097')], 's', 4097).startsWith('The AI service couldn\'t start: port 4097 is in use'), true);
+  // the service's own line for a package that isn't installed
+  assert.equal(describeExit(1, null, [err('MetaCode\'s AI service can\'t start: the package @opencode/ai isn\'t installed. Run "npm install", then restart it.')], 's', 1), PACKAGES_MISSING);
+});
+
+test('shared.homeId: the first 16 hex of sha256 of the data folder\'s full path', () => {
+  const dir = path.join(tmp, 'home-id');
+  assert.equal(homeId(dir), sha(path.resolve(dir)).slice(0, 16));
+  assert.match(homeId(dir), /^[0-9a-f]{16}$/);
+  assert.equal(homeId(dir + path.sep), homeId(dir), 'the same folder written another way');
+  assert.notEqual(homeId(path.join(tmp, 'other')), homeId(dir));
 });

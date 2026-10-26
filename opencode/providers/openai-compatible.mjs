@@ -7,10 +7,11 @@
 //   keys       the API key setting may list several keys, comma-separated; they're
 //              used round-robin, each at most once per request. The gateway reports
 //              a key's budget in X-RateLimit-* headers (read on every answer) and
-//              answers 429 once it's used up: that key rests until the reset and
-//              the next key is tried. A 429 for one model while the key has budget
-//              left is that model's (rate_limited, scope 'model': MetaCode rests the
-//              model). A key the gateway refuses (401) is tried after the others.
+//              answers 429 once it's used up (402: no credit left): that key rests
+//              until the reset and the next key is tried. A 429 for one model while
+//              the key has budget left is that model's (rate_limited, scope 'model':
+//              MetaCode rests the model). A key the gateway refuses (401) is tried
+//              after the others.
 //   transport  non-streamed requests go through python/emis_fetch.py when Python
 //              is available (EMIS_TRANSPORT auto | python | node); streams always
 //              through Node.js
@@ -411,7 +412,8 @@ export function createProvider(opts) {
     liveList(false).catch(() => null);
   }
   const keyLabel = key => 'key ' + (settings.keys.indexOf(key) + 1) + '/' + settings.keys.length;
-  const secrets = () => settings.keys;
+  // Keys and the config's header values (a gateway may quote them back in an error) are never shown
+  const secrets = () => settings.keys.concat(Object.values(settings.headers).filter(v => v.length >= 8));
 
   // ── Keys: rotation, resting and quota ──
   function getKeyState(key) {
@@ -449,17 +451,17 @@ export function createProvider(opts) {
     }
   }
 
-  // A 429 for the key: its budget is used up (or the gateway asked to pause). It rests until
-  // X-RateLimit-Reset, else Retry-After, else a short default.
-  function onQuotaExhausted(key, quota, headers, now) {
+  // A 429 for the key: its budget is used up (or the gateway asked to pause); a 402 (status 402):
+  // no credit left. It rests until X-RateLimit-Reset, else Retry-After, else a short default.
+  function onQuotaExhausted(key, quota, headers, now, status) {
     const state = getKeyState(key);
     const resetAt = plausibleResetTime(quota && quota.resetAt, now);
     const waitMs = retryAfterMs(headerOf(headers, 'retry-after'), now);
     const until = resetAt || now + Math.min(MAX_COOLDOWN_MS, waitMs !== null ? Math.max(1000, waitMs) : DEFAULT_COOLDOWN_SEC * 1000);
     const alreadyLogged = state.cooldownUntil === until;
     state.cooldownUntil = until;
-    state.cooldownReason = resetAt ? 'quota' : 'paused';
-    state.lastError = 'HTTP 429';
+    state.cooldownReason = resetAt || status === 402 ? 'quota' : 'paused';
+    state.lastError = 'HTTP ' + (status || 429);
     if (!alreadyLogged) log.warn('key.resting', { provider: id, key: keyLabel(key), reason: state.cooldownReason, until: new Date(until).toISOString() });
   }
 
@@ -591,9 +593,12 @@ export function createProvider(opts) {
   // Whatever a call threw → the ServiceError MetaCode gets
   function describe(err, entry, signal) {
     const reason = err && err._tag === 'AI.Error' ? err.reason : null;
-    const se = fromAIError(err, { provider: id, providerName: name, model: entry && entry.id, secrets: settings.keys, signal });
+    const se = fromAIError(err, { provider: id, providerName: name, model: entry && entry.id, secrets: secrets(), signal });
     if (isServiceError(err)) return se;
     const detail = reason ? providerMessage(reason.body, secrets()) : '';
+    // python mode: what the Python worker said when it failed (auto sends the request from Node.js instead)
+    const py = se.type === 'network' && reason ? /\bPython: .*/.exec(String(reason.message || '')) : null;
+    if (py) return reworded(se, networkText(se.code || '') + ' (details: ' + redact(py[0], secrets(), 200) + ')');
     if (se.type === 'model_not_found') {
       modelList.fetchedAt = 0;                       // the gateway's list may have changed: fetch it again next time
       const file = modelsFile.result && modelsFile.result.ok && entry && modelsFile.result.models.some(m => m.id === entry.model) ? path.basename(settings.modelsFile) : null;
@@ -747,6 +752,8 @@ export function createProvider(opts) {
         if (signal && signal.aborted) throw describe(r.err, entry, signal);
         const se = describe(r.err, entry, signal);
         const detail = r.err && r.err.reason ? providerMessage(r.err.reason.body, secrets()) : '';
+        // no credit left on this key (402): like a used-up budget, the next key is tried
+        if (r.status === 402) { onQuotaExhausted(key, quota, r.headers, now, 402); limited = true; continue; }
         if (r.status === 429) {
           if (keyWideLimit(key, entry.model, quota, now, detail)) { onQuotaExhausted(key, quota, r.headers, now); limited = true; continue; }
           throw modelLimited(se, entry, detail);                 // this model only: MetaCode rests it
@@ -1055,8 +1062,11 @@ export function createProvider(opts) {
     let baseHost = null;
     try { baseHost = settings.baseUrl ? new URL(settings.baseUrl).host : null; } catch (e) { baseHost = null; }
     const file = modelsFile.result;
+    const warnings = settings.warnings.slice();
+    // (with a models file the provider is ready without the live list, so why it couldn't be had is said here)
+    if (fixed && !modelList.ids && modelList.failure) warnings.push('Couldn\'t check which models ' + name + ' offers right now (' + modelList.failure.message.replace(/\.$/, '') + ').');
     return {
-      id, name, kind: 'openai-compatible', ready: !settings.problem, problem: settings.problem, warnings: settings.warnings.slice(),
+      id, name, kind: 'openai-compatible', ready: !settings.problem, problem: settings.problem, warnings,
       keyCount: settings.keys.length, baseHost, proxy: settings.proxyHost, transport: transportText(),
       models: Object.assign({ listed, available, source, checkedAt: modelList.fetchedAt ? new Date(modelList.fetchedAt).toISOString() : null },
         file && !file.ok && file.problem ? { problem: file.problem } : {}),

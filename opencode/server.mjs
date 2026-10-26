@@ -10,7 +10,7 @@
 //   emis          MetaCode's AI gateway, an OpenAI-compatible provider (providers/openai-compatible.mjs)
 //
 // HTTP API (docs/opencode-service.md):
-//   GET  /health                 no token needed; says nothing secret
+//   GET  /health                 no token needed; says nothing secret ("home": which MetaCode copy, hashed)
 //   GET  /v1/models              the models of every provider that is ready, and the default model
 //   POST /v1/chat/completions    OpenAI Chat Completions, streamed (SSE) or not
 //   GET  /v1/status              providers, keys, quotas, catalog, warnings
@@ -94,9 +94,9 @@ import crypto from 'node:crypto';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { ServiceError, isServiceError, fromAIError, redact } from './errors.mjs';
-import { validateChatBody, toChatCompletion, toChunks } from './openai.mjs';
-import { OPENCODE_AI_VERSION } from './http.mjs';
 import { loadConfig } from './config.mjs';
+// (openai.mjs and http.mjs need the @opencode/ai and effect packages: startService() imports them,
+// so that without them "node opencode/server.mjs" can say what to do instead of failing to load)
 
 const require = createRequire(import.meta.url);
 const shared = require('./shared.js');
@@ -126,6 +126,7 @@ const STATUS_DEADLINE_MS = 2000;
 const STATUS_WAIT_MS = 1500;                  // (a provider with a models file answers by then, live availability or not)
 const LIST_DEADLINE_MS = 15000;               // /v1/models, chats, reload (the startup line: as /v1/status)
 const LATE = Symbol('late');
+const WAITING = Symbol('waiting');
 // Why close() cancels the chats still running (they get a failure that says so, not "cancelled")
 const SHUTTING_DOWN = Object.assign(new Error('MetaCode\'s OpenCode service is shutting down.'), { name: 'AbortError' });
 const MAX_LOGGED_WARNINGS = 500;
@@ -274,6 +275,8 @@ async function write(res, text) {
  */
 export async function startService(opts) {
   opts = opts || {};
+  const { validateChatBody, toChatCompletion, toChunks } = await import('./openai.mjs');
+  const { OPENCODE_AI_VERSION } = await import('./http.mjs');
   const log = makeLog(opts.log);
   const baseEnv = opts.env || process.env;
   const loader = createEnvLoader(shared.REPO_DIR);
@@ -665,11 +668,21 @@ export async function startService(opts) {
       }
       const includeUsage = !!(clean.stream_options && clean.stream_options.include_usage);
       const it = toChunks(events, { model: target.fullId, includeUsage })[Symbol.asyncIterator]();
-      let step = await it.next();               // the status line waits for the first upstream event
+      // The status line waits for the first upstream event (a failure before it is a real HTTP status,
+      // so MetaCode can switch models), but at most keepMs: then it goes out, and a comment every
+      // keepMs keeps MetaCode's timer (which waits for the status line, then for each part) from
+      // running out while the model thinks; the upstream limits still end a provider that stalls
+      const keepMs = Math.min(15000, Math.max(500, Math.floor(timeoutMs / 2)));
+      const first = it.next();
+      let step = await within(first, keepMs);
       res.writeHead(200, Object.assign({
         'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no', Connection: 'keep-alive'
       }, headers));
       try {
+        while (step === WAITING) {
+          await write(res, ': waiting for the first part of the answer\n\n');
+          step = await within(first, keepMs);
+        }
         for (; !step.done; step = await it.next()) await write(res, 'data: ' + JSON.stringify(step.value) + '\n\n');
         await write(res, 'data: [DONE]\n\n');
         res.end();
@@ -693,6 +706,12 @@ export async function startService(opts) {
     }
   }
 
+  // What `promise` gives, or WAITING when it takes longer than ms
+  function within(promise, ms) {
+    let timer;
+    return Promise.race([promise, new Promise(resolve => { timer = setTimeout(resolve, ms, WAITING); })]).finally(() => clearTimeout(timer));
+  }
+
   function describeLog(e) {
     const text = e.log || (e.type === 'cancelled' ? '' : e.message);
     return text ? ': ' + redact(text, [], 300) : '';
@@ -713,7 +732,8 @@ export async function startService(opts) {
     let pathname;
     try { pathname = new URL(req.url, 'http://service').pathname.replace(/\/+$/, '') || '/'; } catch (e) { pathname = '/'; }
     if (pathname === '/health' && (req.method === 'GET' || req.method === 'HEAD')) {
-      sendJson(res, 200, { ok: true, service: SERVICE_NAME, version: VERSION, opencode: OPENCODE_AI_VERSION, startedAt, pid: process.pid });
+      // home: which MetaCode copy (data folder) this service belongs to, as a hash (shared.homeId)
+      sendJson(res, 200, { ok: true, service: SERVICE_NAME, version: VERSION, opencode: OPENCODE_AI_VERSION, startedAt, pid: process.pid, home: shared.homeId(dataDir) });
       return;
     }
     if (pathname === '/v1' || pathname.startsWith('/v1/')) {
@@ -830,11 +850,18 @@ export async function startService(opts) {
 // process.argv[1] is pm2's loader. A service started by a MetaCode that pm2
 // runs inherits pm_exec_path=server.js, which isn't this file.)
 
-const isMain = (() => {
+const isThis = (() => {
   const self = fs.realpathSync(fileURLToPath(import.meta.url));
-  const isThis = file => { try { return !!file && fs.realpathSync(file) === self; } catch (e) { return false; } };
-  return isThis(process.argv[1]) || isThis(process.env.pm_exec_path);
+  return file => { try { return !!file && fs.realpathSync(file) === self; } catch (e) { return false; } };
 })();
+const isMain = isThis(process.argv[1]) || isThis(process.env.pm_exec_path);
+
+// A package that isn't installed (after an update without "npm install"), from an import that failed, or null
+function missingPackage(err) {
+  if (!err || err.code !== 'ERR_MODULE_NOT_FOUND') return null;
+  const m = /Cannot find package '([^']+)'/.exec(String(err.message));
+  return m && !/^(?:\.|\/|file:|[A-Za-z]:[\\/])/.test(m[1]) ? m[1] : null;
+}
 
 if (isMain) {
   process.on('unhandledRejection', err => console.error('AI service: unexpected failure: ' + redact(err && (err.stack || err.message), [], 2000)));
@@ -848,7 +875,10 @@ if (isMain) {
     process.on('SIGTERM', stop);
     process.on('SIGINT', stop);
   }, err => {
-    console.error(err && err.code === 'EADDRINUSE' ? err.message : 'MetaCode\'s OpenCode service couldn\'t start: ' + redact(err && (err.stack || err.message), [], 2000));
+    const pkg = missingPackage(err);
+    // (pm2 runs this file itself when pm_exec_path names it)
+    if (pkg) console.error('MetaCode\'s AI service can\'t start: the package ' + pkg + ' isn\'t installed. Run "npm install", then restart it' + (isThis(process.env.pm_exec_path) ? ' (pm2 restart metacode-opencode)' : '') + '.');
+    else console.error(err && err.code === 'EADDRINUSE' ? err.message : 'MetaCode\'s OpenCode service couldn\'t start: ' + redact(err && (err.stack || err.message), [], 2000));
     process.exit(1);
   });
 }

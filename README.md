@@ -475,7 +475,8 @@ browser → POST /api/ai (MetaCode server) → POST http://127.0.0.1:4097/v1/cha
 > the free period. AI Coding sends the text of the posts it codes. If you work with sensitive posts, use paid models
 > or the gateway, and set `OPENCODE_DISABLE_FREE_MODELS=1`. Without a gateway key, the default model is OpenCode
 > Zen's first model, which is a free one unless a Zen key is set (and can be one even then): set `OPENCODE_MODEL`
-> to choose it yourself.
+> to choose it yourself. When MetaCode switches to a similar model, a free model never answers for a paid one
+> unless `AI_FALLBACK_TO_FREE_MODELS=on`.
 
 `npm start` starts the AI service by itself (its log lines start with `[opencode]`); on a server pm2 runs it as a
 second app ([docs/deploy-vps.md](docs/deploy-vps.md)). How it runs, all its settings, its config file, its model
@@ -486,14 +487,15 @@ Configuration lives only in the server's `.env` file, which MetaCode and the AI 
 | Variable | Required | What it does |
 |---|---|---|
 | `OPENCODE_API_KEY` | no | OpenCode Zen key: adds Zen's paid models. Without it only Zen's free models are offered |
-| `OPENCODE_DISABLE_FREE_MODELS` | no | `1`: don't offer Zen's free models (for sensitive data) |
+| `OPENCODE_DISABLE_FREE_MODELS` | no | `1`: don't offer Zen's free models (for sensitive data). Without it they're offered, also when the gateway is set up |
 | `EMIS_API_KEY` | no | The AI gateway's key. Several keys can be listed, comma-separated — the service rotates between them. Without one the gateway isn't used |
 | `EMIS_BASE_URL` | no | The gateway's address, default `https://emis.zxs-is-very.cool/v1` |
 | `EMIS_MODELS_FILE` | no | The gateway's model list file, default `emis-models.json` in the MetaCode folder |
 | `EMIS_TRANSPORT` | no | What sends the gateway's non-streamed requests: `auto` (default — Python when it's found, else Node.js), `python` or `node`. Streamed requests always go from Node.js |
 | `HTTPS_PROXY` / `EMIS_PROXY` | no | Proxy for AI requests (`NO_PROXY` is honoured; `EMIS_PROXY` replaces it for the gateway only) |
-| `OPENCODE_MODEL` | no | Default model, as `provider/model` (`emis/claude-opus-5.5`, `opencode/big-pickle`). If empty: Claude Opus 5.5 on the gateway when it's set up, otherwise OpenCode Zen's first model (Big Pickle without a Zen key). `EMIS_MODEL=<id>` from earlier versions still works (it means `emis/<id>`), and an older spelling of an id (`claude-opus-5-5`) is read as the new one |
+| `OPENCODE_MODEL` | no | Default model, as `provider/model` (`emis/claude-opus-5.5`, `opencode/big-pickle`). If empty: Claude Opus 5.5 on the gateway when it's set up, otherwise OpenCode Zen's first model — Big Pickle without a Zen key, with one the newest release, which can be a free model too. `EMIS_MODEL=<id>` from earlier versions still works (it means `emis/<id>`), and an older spelling of an id (`claude-opus-5-5`) is read as the new one |
 | `AI_MODEL_SWITCH` | no | `off` stops MetaCode from answering with the closest similar model when a model is rate-limited or its provider's budget is used up, or a model picked in Settings can't run (on by default). The server's own default model still falls back to a similar model when it can't run. Older name: `EMIS_MODEL_SWITCH` |
+| `AI_FALLBACK_TO_FREE_MODELS` | no | `on` lets a free model answer for one that isn't free when switching. Off by default: a paid model (for example the gateway's, when its budget is used up) is never answered by a free one |
 | `AI_MAX_PARALLEL` | no | The most copies of the model AI Coding may run at once (default 16, max 64); users choose up to this |
 | `AI_BATCH_PAUSE_SECONDS` | no | How long AI Coding first pauses when the AI service answers with a server error (default 5; doubles with each pause, up to 60) |
 | `AI_TIMEOUT_MS` | no | How long to wait for an AI answer (default 120000 ms). Older name: `EMIS_TIMEOUT_MS` |
@@ -527,15 +529,16 @@ startup banner say when that happens.
   the key gets HTTP 429 until the window rolls over. The AI service then rests that key until the reset time the
   gateway gave (another key is used if you listed several). OpenCode Zen's free models have a usage limit, and its
   paid models use the Zen account's budget. When a provider's budget is used up, MetaCode answers with the closest
-  similar model from the other provider (if switching is on), otherwise with a message saying when the quota
-  resets. Settings → AI providers shows each key's standing. Restarting the AI service clears its memory of resting
-  keys.
+  similar model from the other provider (if switching is on, and never with a free model for a paid one unless
+  `AI_FALLBACK_TO_FREE_MODELS=on`), otherwise with a message saying when the quota resets. Settings → AI providers
+  shows each key's standing. Restarting the AI service clears its memory of resting keys.
 - **Rate-limited models switch to the closest one.** A 429 for one model (while the provider's budget lasts) is
   treated as the provider throttling that one model. MetaCode then rests just that model (1 minute, doubling while
   it keeps happening, up to 15 — or what `Retry-After` says) and answers with the **closest similar model**: the
   same model from the other provider first, then the same family and line (Claude Opus → Claude Opus, Qwen Max
   Thinking → Qwen Max Thinking), the nearest version and size, the same speed tier and capabilities
-  (`model-match.js`). Requests for the resting model go straight to the substitute without calling the AI service,
+  (`model-match.js`); a free model only stands in for a free one (unless `AI_FALLBACK_TO_FREE_MODELS=on`).
+  Requests for the resting model go straight to the substitute without calling the AI service,
   and the app says which model answered (AI Coding's summary counts the posts coded by a substitute). Up to four
   similar models are tried per request. Turn switching off per browser in Settings → AI models (*If a model is
   rate-limited or failing, use the closest similar model*) or for the whole server with `AI_MODEL_SWITCH=off`.
@@ -553,11 +556,13 @@ startup banner say when that happens.
 - **Security.** AI keys are read only by the AI service, from `.env`, and sent only to their provider: never to
   the browser, never logged, never returned by an endpoint or included in an error. The service listens on
   `127.0.0.1` (by default) and answers only requests with its access token, which MetaCode sends
-  (`opencode-data/token`). The browser
+  (`opencode-data/token`); on a computer other people also log in to, read
+  [docs/security.md](docs/security.md#ai-keys-stay-in-the-ai-service) first. The browser
   can't choose the AI service, a provider's address or a key. Other websites open in your browser can't use
   MetaCode's AI endpoints (they're same-origin only).
 - **Settings page.** *AI connection* shows the `.env` file that was read (name, location, encoding), the names
-  of the settings in it, warnings, whether AI is ready (and whether MetaCode started the AI service), and
+  of the settings in it, warnings, whether AI is ready (and whether MetaCode started the AI service), or resting
+  until a usage limit resets when every provider is, whether free models may answer for paid ones, and
   **Reload .env** / **Test connection**. *AI models* has a default model plus one per feature — AI Coding, Ask
   MetaCode, Import Data (column detection), Analyze CSV (edge detection) and AI Scraper (beta); "Same as default"
   follows the default. *AI Coding: copies of the model working at once* sets how many posts are coded side by side;
@@ -815,8 +820,9 @@ models.
 → The gateway key's budget (prompts and/or tokens) for the current day, week or month is spent, and the gateway
 answers 429 until the window rolls over — or OpenCode Zen's free usage limit (or the Zen account's budget) is
 reached. The message says when it resets. Meanwhile MetaCode answers with a similar model from the other provider
-when it has one (switching on). Wait until then, add another key to `EMIS_API_KEY` (comma-separated; keys are
-issued by hand — message @kawaii_zxs on Discord), or add an `OPENCODE_API_KEY`.
+when it has one (switching on; a free model answers for a paid one only with `AI_FALLBACK_TO_FREE_MODELS=on`).
+Wait until then, add another key to `EMIS_API_KEY` (comma-separated; keys are issued by hand — message @kawaii_zxs
+on Discord), or add an `OPENCODE_API_KEY`.
 
 **"The AI service doesn't offer the model …" / a model "— not offered now"**
 → In Settings → AI models, pick another model and click "Save model settings" (or set `OPENCODE_MODEL` in `.env`).
@@ -828,8 +834,9 @@ needs `OPENCODE_API_KEY`.
 → The model list changed and no longer has that model under that id. Models whose id was only respelled (on
 2026-10-22 many ids got dots: `claude-opus-5-5` → `claude-opus-5.5`, `gpt-5-5` → `gpt-5.5`, `glm-5-3` → `glm-5.3`)
 are picked up by themselves, and so are ids saved without their provider (`claude-opus-5.5` →
-`emis/claude-opus-5.5`); for any other, pick a model again in Settings → AI models and click "Save model settings"
-(and change `OPENCODE_MODEL` or `EMIS_MODEL` in `.env` if it names it).
+`emis/claude-opus-5.5`, once the providers ahead of it have listed their models); for any other, pick a model
+again in Settings → AI models and click "Save model settings" (and change `OPENCODE_MODEL` or `EMIS_MODEL` in
+`.env` if it names it).
 
 **"NetworkX not available" on the Analyze CSV page**
 → Run `pip install -r requirements.txt` (or `pip3 install -r requirements.txt`) in the project folder, then refresh the page

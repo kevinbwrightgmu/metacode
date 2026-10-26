@@ -1173,3 +1173,44 @@ test('chatShims: odd chat upstreams become readable', async t => {
     });
   } finally { await shimmed.dispose(); }
 });
+
+// ── What a review found ───────────────────────────────────────────────────────
+
+test('toLLMInput: a temperature above 1 is capped at 1 for the anthropic protocol (its range is 0–1); other protocols keep it', () => {
+  const at = (t, protocol, model) => O.toLLMInput(O.validateChatBody({ messages: [{ role: 'user', content: 'x' }], temperature: t }), { protocol, model: model || {} }).generation.temperature;
+  assert.equal(at(1.5, 'anthropic'), 1);
+  assert.equal(at(2, 'anthropic'), 1);
+  assert.equal(at(0.7, 'anthropic'), 0.7, 'not scaled');
+  assert.equal(at(1.5, 'chat'), 1.5);
+  assert.equal(at(1.5, 'responses'), 1.5);
+  assert.equal(at(1.5, 'anthropic', { temperature: false }), undefined);
+});
+
+test('chatShims: a stream that stops without a finish_reason or [DONE] is incomplete; [DONE] alone or a finish_reason alone still ends it', async () => {
+  const shimmed = H.createAI({ middleware: H.chatShims() });
+  const lenient = () => chatModel({ maxTokensField: 'max_tokens', requireFinishReason: false });
+  const cut = (q, r) => sse(r, [chunk({ role: 'assistant', content: 'The answer is: ' }), chunk({ content: '{"label": "pos' })], { done: false });
+  try {
+    up.set(cut);
+    const err = await failure(shimmed, lenient());
+    checkError(err, { status: 502, type: 'malformed_response', code: 'incomplete', message: /the answer ended before it was complete/ }, 'cut short');
+    // streamed: the parts that came, then the failure (no answer that looks finished)
+    up.set(cut);
+    const seen = [];
+    await assert.rejects(async () => { for await (const c of O.toChunks(shimmed.llm.stream(Object.assign({ model: lenient() }, userSays('x'))), { model: 'emis/m' })) seen.push(c); },
+      e => E.fromAIError(e, ZEN).code === 'incomplete');
+    assert.ok(!seen.some(c => c.choices[0] && c.choices[0].finish_reason), 'no finish_reason was made up');
+    up.set((q, r) => sse(r, [chunk({ role: 'assistant', content: 'done only' })]));
+    assert.equal((await O.toChatCompletion(shimmed.llm.stream(Object.assign({ model: lenient() }, userSays('x'))), { model: 'emis/m' })).choices[0].message.content, 'done only');
+    up.set((q, r) => sse(r, [chunk({ role: 'assistant', content: 'finish only' }), chunk({}, 'stop')], { done: false }));
+    assert.equal((await O.toChatCompletion(shimmed.llm.stream(Object.assign({ model: lenient() }, userSays('x'))), { model: 'emis/m' })).choices[0].message.content, 'finish only');
+    // the Responses API's events end with response.completed (made a finish_reason)
+    up.set((q, r) => { r.writeHead(200, { 'content-type': 'text/event-stream' }); r.end([{ type: 'response.output_text.delta', delta: 'ok' }, { type: 'response.completed', response: { output_text: 'ok' } }].map(e => 'event: ' + e.type + '\ndata: ' + JSON.stringify(e) + '\n\n').join('')); });
+    assert.equal((await O.toChatCompletion(shimmed.llm.stream(Object.assign({ model: lenient() }, userSays('x'))), { model: 'emis/m' })).choices[0].message.content, 'ok');
+  } finally { await shimmed.dispose(); }
+});
+
+test('errors: Zen\'s spend limit for one model (BudgetLimitError with "coverage": "models") is quota_exceeded for that model only', async () => {
+  up.set(reply(429, { type: 'error', error: { type: 'BudgetLimitError', message: 'Model budget reached', metadata: { coverage: 'models' } } }, { 'retry-after': '900' }));
+  checkError(await failure(ai, chatModel()), { status: 429, type: 'quota_exceeded', scope: 'model', retryAfterSeconds: 900 }, 'model budget');
+});

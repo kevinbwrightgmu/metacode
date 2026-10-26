@@ -2,6 +2,7 @@ const express = require('express');
 const cors    = require('cors');
 const path    = require('path');
 const fs      = require('fs');
+const crypto  = require('crypto');
 const { spawn } = require('child_process');
 // Read the settings file (.env): next to server.js, the folder the server was
 // started from, or the folder above; UTF-16 files and ".env.txt" work too, and
@@ -207,11 +208,11 @@ function firstSet(env, names) {
   return names.find(n => env[n] !== undefined && String(env[n]).trim() !== '') || null;
 }
 
-// → { off, url, baseHost, custom, managed, model, modelVar, timeoutMs, switching, settings, problem, warnings }
+// → { off, url, baseHost, custom, managed, model, modelVar, timeoutMs, switching, freeFallback, settings, problem, warnings }
 function loadAiConfig(env) {
   const settings = shared.serviceSettings(env);
   const config = { off: false, url: null, baseHost: null, custom: false, managed: 'auto', model: '', modelVar: null,
-    timeoutMs: DEFAULT_TIMEOUT_MS, switching: true, settings, problem: null, warnings: [] };
+    timeoutMs: DEFAULT_TIMEOUT_MS, switching: true, freeFallback: false, settings, problem: null, warnings: [] };
 
   const managed = String(env.OPENCODE_SERVICE_MANAGED || '').trim().toLowerCase();
   if (managed === 'on' || managed === 'always' || shared.isOn(managed)) config.managed = 'on';
@@ -232,6 +233,9 @@ function loadAiConfig(env) {
   }
   const switchVar = firstSet(env, ['AI_MODEL_SWITCH', 'EMIS_MODEL_SWITCH']);
   config.switching = !(switchVar && shared.isOff(env[switchVar]));
+  // AI_FALLBACK_TO_FREE_MODELS=on: a free model may answer for one that isn't free (see closestModel)
+  const freeVar = firstSet(env, ['AI_FALLBACK_TO_FREE_MODELS']);
+  config.freeFallback = !!(freeVar && shared.isOn(env[freeVar]));
 
   const rawUrl = String(env.OPENCODE_SERVICE_URL || '').trim();
   if (rawUrl && shared.isOff(rawUrl)) { config.off = true; return config; }
@@ -249,6 +253,8 @@ function loadAiConfig(env) {
       config.problem = 'OPENCODE_SERVICE_URL in the server\'s .env file is not a valid http(s) URL.';
     } else {
       config.url = (url.origin + url.pathname).replace(/\/+$/, '');
+      // (the default address written out is still the default: MetaCode may start the service there)
+      if (config.url === settings.url) config.custom = false;
       if (!/\/v1$/.test(config.url)) config.warnings.push('OPENCODE_SERVICE_URL normally ends in /v1 (default: ' + settings.url + ').');
       if (url.protocol === 'http:' && !shared.isLoopback(url.hostname)) {
         config.warnings.push('OPENCODE_SERVICE_URL uses plain http to another machine, so MetaCode\'s requests (and the service\'s access token) travel unencrypted. Use https, or run the service on this machine.');
@@ -310,7 +316,8 @@ function plainText(value, max) {
 // 4… up to 15 minutes, or what Retry-After says). scope "provider": the whole
 // provider can't be used for a while (see "Resting providers" below).
 // AI_MODEL_SWITCH=off in .env turns switching off; each browser can also
-// turn it off (Settings → AI models).
+// turn it off (Settings → AI models). A free model never answers for one that
+// isn't free unless AI_FALLBACK_TO_FREE_MODELS=on (see closestModel).
 
 // model -> { until, hits, lastAt }
 const modelLimits = new Map();
@@ -371,8 +378,9 @@ function restingProviders(now) {
 function plausibleResetTime(resetAt, now) {
   return resetAt && resetAt > now && resetAt - now <= MAX_COOLDOWN_MS ? resetAt : null;
 }
+// (a quota_exceeded with scope "model" — one model's spend limit, the free models' limit with a key — rests only that model)
 function isProviderLimit(f) {
-  return !!f && f.status === 429 && (f.scope === 'provider' || f.type === 'quota_exceeded');
+  return !!f && f.status === 429 && (f.scope === 'provider' || (f.type === 'quota_exceeded' && f.scope !== 'model'));
 }
 function onProviderLimited(failure, model, now) {
   const provider = failure.provider || providerOf(model);
@@ -407,10 +415,12 @@ function onLimited(failure, model, now) {
 // that still failed rests a little (30 s, doubling while it keeps failing, up
 // to 5 minutes): requests for the server's default model go straight to the
 // closest similar model meanwhile, and failing models aren't picked as
-// substitutes. When 3 different models fail within a minute, it's the
-// service (or the providers) as a whole: trying other models won't help, so
-// MetaCode stops switching and says so (and AI Coding batches pause; see
-// /api/ai/batch). Any answer clears this.
+// substitutes. When 3 different models of one provider fail within a minute,
+// it's that provider as a whole: its other models aren't tried as substitutes,
+// requests switch to another provider's models, and when none is left MetaCode
+// says so (and AI Coding batches pause; see /api/ai/batch). An answer from
+// one of the provider's models clears this. (Ids without a provider, from an
+// older service, count as one provider: the service.)
 const MODEL_DOWN_MS = 30 * 1000;
 const MODEL_DOWN_MAX_MS = 5 * 60 * 1000;
 const SERVICE_TROUBLE_WINDOW_MS = 60 * 1000;
@@ -442,29 +452,38 @@ function modelDownFailure(model) {
 }
 function onModelAnswered(model) {
   modelDown.delete(model);
-  serverErrors = [];
+  const provider = providerOf(model);
+  serverErrors = provider ? serverErrors.filter(e => providerOf(e.model) !== provider) : [];
 }
-// → { models, status } while several models are failing with server errors, else null
-function serviceTrouble(now) {
-  const recent = serverErrors.filter(e => now - e.at < SERVICE_TROUBLE_WINDOW_MS);
+// → { models, status } while several models (of `provider`, when given) are failing with server errors, else null
+function serviceTrouble(now, provider) {
+  const recent = serverErrors.filter(e => now - e.at < SERVICE_TROUBLE_WINDOW_MS && (provider === undefined || providerOf(e.model) === provider));
   return recent.length >= SERVICE_TROUBLE_MODELS ? { models: recent.map(e => e.model), status: recent[recent.length - 1].status } : null;
 }
 
 // The available model most like `target` that can take this request (not
-// rate-limited or failing, its provider not resting, not tried yet, offered
-// right now, supports what the request needs), or null. The same model from
-// another provider comes first (rankSimilar).
+// rate-limited or failing, its provider not resting or failing as a whole,
+// not tried yet, offered right now, supports what the request needs), or
+// null. The same model from another provider comes first (rankSimilar). A
+// free model never answers for one that isn't free (free models' providers
+// may use the prompts to improve their models), unless the operator allows it
+// (AI_FALLBACK_TO_FREE_MODELS=on); free for free is fine.
 async function closestModel(target, chatRequest, tried) {
   const list = await getModelList(false);
   if (!list.ok) return null;
   const now = Date.now();
   const infoOf = id => list.info.get(id) || null;
-  const candidates = list.ids.filter(id => !tried.has(id) && !NOT_A_CHAT_MODEL.test(splitModel(id).model) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
-    !providerRestingUntil(providerOf(id), now) && !(infoOf(id) && infoOf(id).available === false) && !capabilityProblem(chatRequest, infoOf(id)));
+  const isFree = id => !!(infoOf(id) && infoOf(id).free === true);
+  // (a model with a reasoning variant, "…#high", is that model here)
+  const base = splitVariant(target).base;
+  const done = new Set(Array.from(tried, t => splitVariant(t).base));
+  const freeOk = AI.freeFallback || isFree(base);
+  const candidates = list.ids.filter(id => !done.has(id) && (freeOk || !isFree(id)) && !NOT_A_CHAT_MODEL.test(splitModel(id).model) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
+    !providerRestingUntil(providerOf(id), now) && !serviceTrouble(now, providerOf(id)) && !(infoOf(id) && infoOf(id).available === false) && !capabilityProblem(chatRequest, infoOf(id)));
   // The same model under another spelling of its id (claude-opus-4-8 / claude-opus-4.8) as one
   // already tried is most likely limited or failing too: a different model first, other spellings last
-  const ranked = rankSimilar(target, candidates, list.info);
-  const triedAlready = id => [target, ...tried].some(t => sameModel(t, id, list.info));
+  const ranked = rankSimilar(base, candidates, list.info);
+  const triedAlready = id => [base, ...done].some(t => sameModel(t, id, list.info));
   return ranked.find(id => !triedAlready(id)) || ranked[0] || null;
 }
 
@@ -483,10 +502,12 @@ const CANCELLED   = new Error('Request cancelled');
 
 // Straight to the service: HTTPS_PROXY and the like are for the service's own
 // requests to the providers, and a proxy would also see the access token.
+// undici's own response timeouts (300 s) are off: AI_TIMEOUT_MS (up to 600 s)
+// limits every request and every gap in a stream (TIMED_OUT below).
 const undici = require('undici');
 let serviceAgent = null;
 function serviceDispatcher() {
-  if (!serviceAgent) serviceAgent = new undici.Agent({ connect: { timeout: 10000 } });
+  if (!serviceAgent) serviceAgent = new undici.Agent({ connect: { timeout: 10000 }, headersTimeout: 0, bodyTimeout: 0 });
   return serviceAgent;
 }
 
@@ -550,17 +571,21 @@ function tokenRefused(r) {
 // Retries a call to the service that failed for a temporary reason (a dropped
 // connection, a provider's server error 500/502/503/504, 408): up to 2 more
 // tries, 0.6 s then 1.8 s apart. This is the only place AI requests are
-// retried (the service never retries a provider itself). A service that
-// isn't running (connection refused), configuration problems, a timeout that
-// already took the whole AI_TIMEOUT_MS and unreadable answers aren't retried.
+// retried (the service never retries a provider itself). The service
+// refusing the connection or shutting down is retried too: it's restarting
+// (pm2 restart, after a crash, Reload .env), which takes a moment.
+// Configuration problems, a timeout that already took the whole AI_TIMEOUT_MS
+// and unreadable answers aren't retried.
 const RETRY_STATUS = new Set([408, 500, 502, 503, 504, 520, 521, 522, 523, 524, 529]);
 const PERMANENT_NETWORK = /^(ENOTFOUND|EAI_AGAIN|ECONNREFUSED|ERR_INVALID_URL)$|CERT|TLS|SSL|SELF_SIGNED|UNABLE_TO_VERIFY/i;
 function isTransient(r) {
-  if (r.failed === 'network') return !PERMANENT_NETWORK.test(String(r.code || ''));
+  if (r.failed === 'network') return r.code === 'ECONNREFUSED' || !PERMANENT_NETWORK.test(String(r.code || ''));
   if (r.failed) return false;
   const e = serviceError(r);
   if (e) {
+    if (e.code === 'shutting_down') return true;
     if (e.type === 'upstream_error') return !e.upstream_status || RETRY_STATUS.has(Number(e.upstream_status));
+    // (a provider's address refusing the service's connection is a setting to fix)
     if (e.type === 'network') return !PERMANENT_NETWORK.test(String(e.code || ''));
     return false;
   }
@@ -663,8 +688,39 @@ function notRunningMessage(startingNow) {
   const where = AI.baseHost || 'its address';
   if (sup.managed && sup.problem) return 'MetaCode\'s AI service (OpenCode) isn\'t running at ' + where + '. ' + sup.problem;
   if (sup.managed || startingNow) return 'MetaCode\'s AI service (OpenCode) isn\'t running at ' + where + ' yet: MetaCode is starting it. Try again in a few seconds.';
-  if (AI.managed === 'off') return 'MetaCode\'s AI service (OpenCode) isn\'t running at ' + where + '. Start it (with pm2: "pm2 start ecosystem.config.cjs"), or check OPENCODE_SERVICE_URL in the server\'s .env file.';
+  // (pm2 has most likely started it already: then it keeps stopping, and its log says why)
+  if (AI.managed === 'off') {
+    return 'MetaCode\'s AI service (OpenCode) isn\'t running at ' + where + '. If pm2 runs it, "pm2 status" shows whether metacode-opencode is online and ' +
+      '"pm2 logs metacode-opencode --lines 50" says why not (after an update: run "npm install", then "pm2 restart metacode-opencode"); if it isn\'t listed, ' +
+      'run "pm2 start ecosystem.config.cjs". Otherwise check OPENCODE_SERVICE_URL in the server\'s .env file.';
+  }
   return 'MetaCode\'s AI service (OpenCode) isn\'t running at ' + where + '. Start it ("node opencode/server.mjs", or with pm2: "pm2 start ecosystem.config.cjs"), or check OPENCODE_SERVICE_URL in the server\'s .env file.';
+}
+
+// What answers at the service's address isn't this copy's service: another
+// program, or another MetaCode's service (opencode/supervisor.js asks GET
+// /health when MetaCode may start the service); what to do, else null
+function serviceForeign() {
+  const sup = supervisor.state();
+  return adoptedService() && sup.problem ? sup.problem : null;
+}
+// MetaCode found a service already answering at the address it would start one at
+function adoptedService() {
+  return AI.managed !== 'off' && !AI.off && supervisor.state().external;
+}
+// Something at the default address that answers "not found" like a web server would
+function anotherProgramMessage() {
+  return 'Another program, not MetaCode\'s AI service, answers at ' + (AI.baseHost || 'its address') + '. Set OPENCODE_SERVICE_PORT in .env to a free port and ' +
+    'restart MetaCode (under pm2: both apps).';
+}
+// The service refused MetaCode's access token: the two don't share it, or it's another MetaCode's service on the same port
+function tokenRefusedMessage() {
+  const foreign = serviceForeign();
+  if (foreign) return foreign;
+  const head = 'MetaCode\'s AI service (OpenCode) at ' + (AI.baseHost || 'its address') + ' didn\'t accept MetaCode\'s access token. ';
+  const share = 'If the service runs separately (pm2), give both the same OPENCODE_SERVICE_TOKEN (or the same OPENCODE_SERVICE_DATA_DIR) in .env, restart the service and click Reload .env in Settings.';
+  const port = 'If it\'s another MetaCode\'s (a second copy on this computer), give this copy its own OPENCODE_SERVICE_PORT (a free port) in .env and restart it.';
+  return head + (adoptedService() ? port + ' ' + share : share + ' ' + port);
 }
 
 function networkMessage(code) {
@@ -687,10 +743,7 @@ const SERVICE_STATUS = { invalid_request: 400, unsupported_feature: 400, authent
 function fromServiceError(r, e) {
   const status = r.status >= 400 && r.status < 600 ? r.status : SERVICE_STATUS[e.type];
   let message = plainText(e.message, 600) || 'The AI service couldn\'t answer (' + e.type + ').';
-  if (e.type === 'authentication_error' && !e.provider) {
-    message = 'MetaCode\'s AI service (OpenCode) didn\'t accept MetaCode\'s access token. If the service runs separately (pm2), give both the same ' +
-      'OPENCODE_SERVICE_TOKEN (or the same OPENCODE_SERVICE_DATA_DIR) in .env, restart the service and click Reload .env in Settings.';
-  }
+  if (e.type === 'authentication_error' && !e.provider) message = tokenRefusedMessage();
   const f = fail(status, e.type, message, 'HTTP ' + r.status + (e.provider ? ' from ' + plainText(e.provider, 40) : '') + ': ' + message);
   const seconds = Number(e.retry_after_seconds);
   f.retryAfterSeconds = Number.isFinite(seconds) && seconds > 0 ? Math.ceil(seconds) : (retryAfterSecondsOf(r) || undefined);
@@ -703,6 +756,7 @@ function fromServiceError(r, e) {
   else if (e.type === 'upstream_error') f.upstreamStatus = 502;
   if (typeof e.code === 'string' && /^[A-Za-z0-9_.-]{1,60}$/.test(e.code)) f.code = e.code;
   if (e.type === 'network') f.transient = !PERMANENT_NETWORK.test(String(e.code || ''));
+  if (e.code === 'shutting_down') f.transient = true;          // the service is restarting
   if (e.type === 'model_not_found') modelList.fetchedAt = 0;      // the list may have changed: fetch it again next time
   return f;
 }
@@ -721,7 +775,7 @@ function describeFailure(r, ctx) {
   }
   if (r.failed === 'network') {
     return Object.assign(fail(502, 'network', networkMessage(r.code), 'network error ' + (r.code || '(no code)') + ' reaching the AI service at ' + (AI.baseHost || '?')),
-      { transient: isTransient(r) });
+      { transient: isTransient(r), code: r.code || undefined });
   }
   const e = serviceError(r);
   if (e) return fromServiceError(r, e);
@@ -734,8 +788,10 @@ function describeFailure(r, ctx) {
     return fail(502, 'bad_base_url', 'MetaCode\'s AI service answered with a redirect instead of a result. Check OPENCODE_SERVICE_URL in the server\'s .env file.', log);
   }
   if (status === 401) {
+    if (serviceForeign()) return fail(401, 'authentication_error', serviceForeign(), log);
     return fail(401, 'authentication_error', 'The AI service didn\'t accept the request' + (detail ? ' ("' + detail + '")' : '') + '. Check the AI provider\'s key ' +
-      '(Settings → AI providers); if the service runs separately, give MetaCode and the service the same OPENCODE_SERVICE_TOKEN.', log);
+      '(Settings → AI providers); if the service runs separately, give MetaCode and the service the same OPENCODE_SERVICE_TOKEN. A second MetaCode copy on ' +
+      'this computer needs its own OPENCODE_SERVICE_PORT.', log);
   }
   if (status === 403) {
     if (/^\s*</.test(r.text || '')) {
@@ -751,11 +807,13 @@ function describeFailure(r, ctx) {
       return fail(404, 'model_not_found', 'The AI service doesn\'t offer the model "' + modelName(ctx.model) + '". Pick a model in Settings → AI models, ' +
         'or set OPENCODE_MODEL in the server\'s .env file.', log);
     }
-    return fail(404, 'not_found', 'The AI service answered "not found" for the model "' + modelName(ctx.model) + '". Check the model (Settings → AI models) ' +
-      'and that OPENCODE_SERVICE_URL in the server\'s .env file ends in /v1.', log);
+    return fail(404, 'not_found', 'The AI service answered "not found" for the model "' + modelName(ctx.model) + '". Check the model (Settings → AI models) and ' +
+      (AI.custom ? 'that OPENCODE_SERVICE_URL in the server\'s .env file ends in /v1.' : 'that it\'s MetaCode\'s AI service that answers at ' + AI.baseHost + ' (OPENCODE_SERVICE_PORT in .env).'), log);
   }
+  // (at the default address the service always has its endpoints: another program answers there)
   if (status === 404) {
-    return fail(502, 'bad_base_url', 'MetaCode\'s AI service couldn\'t find the requested endpoint. Check that OPENCODE_SERVICE_URL in the server\'s .env file ends in /v1.', log);
+    return fail(502, 'bad_base_url', AI.custom ? 'MetaCode\'s AI service couldn\'t find the requested endpoint. Check that OPENCODE_SERVICE_URL in the server\'s .env file ends in /v1.'
+      : anotherProgramMessage(), log);
   }
   if (status === 408) return fail(504, 'timeout', 'The AI service took too long to answer. Try again.', log);
   if (status === 413) return fail(413, 'request_too_large', 'The request was too large for the AI service. Try a shorter text or a smaller sample.', log);
@@ -811,36 +869,83 @@ function sendFailure(res, f) {
 // AI counts as ready when it's configured (not switched off) and the service,
 // when last asked (GET /v1/status), was answering with at least one provider
 // set up. Before the first answer — and while MetaCode is starting the
-// service — it counts as ready, so pages don't flash "AI not set up". The
-// answer is kept, and asked again at start, after Reload .env, when the
-// Settings page reads it and it's older than 10 s, and by the status page.
-const serviceState = { ok: null, at: 0, status: null, failure: null, pending: null, generation: 0 };
+// service, or waiting at start for one it doesn't run — it counts as ready,
+// so pages don't flash "AI not set up". The answer is kept, and asked again
+// at start, after Reload .env, when the Settings page reads it and it's older
+// than 10 s (a failure: 3 s), by the status page, and every few seconds while
+// the service isn't answering.
+const serviceState = { ok: null, at: 0, status: null, failure: null, pending: null, generation: 0, downSince: 0 };
 
 function probeService() {
   if (notConfigured()) return Promise.resolve(serviceState);
   if (serviceState.pending) return serviceState.pending;
   const gen = serviceState.generation;
+  const wasDown = serviceState.ok === false;
+  const settled = () => {
+    if (serviceState.ok !== false) return serviceState;
+    if (!wasDown) serviceState.downSince = serviceState.at;
+    scheduleReprobe();
+    return serviceState;
+  };
   const pending = aiRequest('GET', '/status', null, { timeoutMs: STATUS_TIMEOUT_MS, retry: false })
     .then(r => {
       if (gen !== serviceState.generation) return serviceState;
       serviceState.at = Date.now();
       if (!r.failed && r.ok && r.json && typeof r.json === 'object' && !Array.isArray(r.json)) Object.assign(serviceState, { ok: true, status: r.json, failure: null });
-      // (an older service, or a stand-in, without /v1/status: it answers, so it counts as up)
-      else if (!r.failed && r.status === 404 && !serviceError(r)) Object.assign(serviceState, { ok: true, status: null, failure: null });
-      else Object.assign(serviceState, { ok: false, status: null, failure: describeFailure(r) });
-      return serviceState;
+      // (an older service, or a stand-in at an OPENCODE_SERVICE_URL, without /v1/status: it answers, so it
+      // counts as up; at the default address the service always has it, so another program answers there)
+      else if (!r.failed && r.status === 404 && !serviceError(r)) {
+        Object.assign(serviceState, AI.custom ? { ok: true, status: null, failure: null } : { ok: false, status: null, failure: fail(502, 'bad_base_url', anotherProgramMessage()) });
+      } else Object.assign(serviceState, { ok: false, status: null, failure: describeFailure(r) });
+      return settled();
     })
     .catch(err => {
       Object.assign(serviceState, { ok: false, at: Date.now(), status: null, failure: fail(500, 'internal_error', 'Couldn\'t ask the AI service how it is.', redact(err && err.message)) });
-      return serviceState;
+      return settled();
     })
     .finally(() => { if (serviceState.pending === pending) serviceState.pending = null; });
   serviceState.pending = pending;
   return pending;
 }
 async function freshServiceState(maxAgeMs) {
-  if (!notConfigured() && !serviceStarting() && (serviceState.ok === null || Date.now() - serviceState.at > maxAgeMs)) await probeService();
+  // (a failure is asked about again sooner: the service may have been starting or restarting)
+  const maxAge = serviceState.ok === false ? Math.min(maxAgeMs, 3000) : maxAgeMs;
+  if (!notConfigured() && !serviceStarting() && (serviceState.ok === null || Date.now() - serviceState.at > maxAge)) await probeService();
   return serviceState;
+}
+
+// While the service isn't answering (not running yet, restarting), it's asked
+// again every 3 s (every 30 s once that has lasted a minute), so readiness —
+// the AI Scraper, the desktop app, /api/health — comes back without waiting
+// for someone to open Settings.
+let reprobeTimer = null;
+function scheduleReprobe() {
+  const f = serviceState.failure;
+  if (reprobeTimer || serviceState.ok !== false || !f || (f.type !== 'network' && f.type !== 'timeout')) return;
+  reprobeTimer = setTimeout(() => {
+    reprobeTimer = null;
+    if (serviceState.ok === false && !serviceStarting()) probeService();
+  }, Date.now() - serviceState.downSince < 60000 ? 3000 : 30000);
+  reprobeTimer.unref();
+}
+
+// When MetaCode doesn't run the service itself (pm2 starts both apps at once,
+// and the service takes a moment longer to listen), a refused connection at
+// start is asked about again every 0.5 s for up to 15 s before it counts:
+// meanwhile AI counts as starting, and the banner and the status page wait.
+const STARTUP_WAIT_MS = 15 * 1000;
+let startupWait = null;
+function startupProbe() {
+  const until = Date.now() + STARTUP_WAIT_MS;
+  const refused = st => st.ok === false && !!st.failure && st.failure.type === 'network' && st.failure.code === 'ECONNREFUSED';
+  startupWait = (async () => {
+    for (;;) {
+      const st = await probeService();
+      if (!refused(st) || supervisor.state().managed || Date.now() > until) return st;
+      await new Promise(resolve => setTimeout(resolve, 500).unref());
+    }
+  })().finally(() => { startupWait = null; });
+  return startupWait;
 }
 
 // MetaCode started the service and is waiting for its first answer
@@ -854,8 +959,8 @@ function serviceFailing() {
   return sup.managed && !sup.ready && !!sup.problem;
 }
 function aiReady() {
-  if (notConfigured() || serviceFailing()) return false;
-  if (serviceState.ok === null || serviceStarting()) return true;
+  if (notConfigured() || serviceFailing() || serviceForeign()) return false;
+  if (serviceState.ok === null || serviceStarting() || startupWait) return true;
   if (!serviceState.ok) return false;
   return !serviceState.status || serviceState.status.ready !== false;
 }
@@ -865,6 +970,7 @@ function aiProblem() {
   if (f) return f.message;
   if (aiReady()) return null;
   if (serviceFailing()) return notRunningMessage();
+  if (serviceForeign()) return serviceForeign();
   if (!serviceState.ok) return serviceState.failure ? serviceState.failure.message : notRunningMessage();
   return 'MetaCode\'s AI service is running, but no AI provider is set up yet. Settings → AI providers shows what each one needs.';
 }
@@ -873,6 +979,7 @@ function serviceProblem() {
   if (notConfigured()) return null;
   const sup = supervisor.state();
   if (sup.managed && sup.problem) return sup.problem;
+  if (serviceForeign()) return serviceForeign();
   if (serviceState.ok === false) return serviceState.failure ? serviceState.failure.message : notRunningMessage();
   return null;
 }
@@ -880,11 +987,23 @@ function serviceProblem() {
 // MetaCode's own copy of the service (opencode/supervisor.js)
 const supervisor = createSupervisor({
   onReady() {
+    // a model-list failure from while the service was starting no longer applies
+    if (modelList.failure || modelList.pending) {
+      modelList.generation++;
+      Object.assign(modelList, { failure: null, failedAt: 0, pending: null });
+    }
     probeService().then(st => { if (st.ok) console.log('[ai] ' + serviceSummary(st.status)); });
   }
 });
+// What the service MetaCode may run depends on; Reload .env starts it again
+// when this changes. The token counts by its value (a hash of it, never the
+// token itself), so a new OPENCODE_SERVICE_TOKEN or token file reaches it.
 function serviceTarget() {
-  return { mode: AI.managed, url: AI.url, custom: AI.custom, token: AI.settings.tokenFromEnv ? 'env' : 'file:' + AI.settings.dataDir };
+  let token = null;
+  if (!(AI.off || AI.problem || AI.managed === 'off' || (AI.custom && AI.managed !== 'on'))) {
+    try { token = crypto.createHash('sha256').update(serviceToken()).digest('hex').slice(0, 16); } catch (e) { token = 'unreadable'; }
+  }
+  return { mode: AI.managed, url: AI.url, custom: AI.custom, dataDir: AI.settings.dataDir, token };
 }
 let serviceTargetKey = null;
 // Starts (or finds) the service for the current settings
@@ -894,7 +1013,7 @@ async function startService() {
   if (AI.off || AI.problem || AI.managed === 'off') return supervisor.stop();
   let token = null;
   try { token = serviceToken(); } catch (e) { console.warn('[ai] ' + describeFailure({ failed: 'token', code: e.code }).message); }
-  return supervisor.start({ mode: target.mode, url: target.url, custom: target.custom, token });
+  return supervisor.start({ mode: target.mode, url: target.url, custom: target.custom, dataDir: target.dataDir, token });
 }
 // A service that stopped answering while MetaCode doesn't run it: start it (at most every 30 s)
 let lastStartAttempt = 0;
@@ -1031,17 +1150,40 @@ function getModelList(forceRefresh) {
 // audio or embedding model. → { model, warning? } or { error }
 const NOT_A_CHAT_MODEL = /(image|video|dall-?e|sora|veo|imagen|flux|stable-?diffusion|sdxl|tts|whisper|transcri|speech|audio|embed|moderation|rerank|guard)/i;
 
+// "opencode/big-pickle#high" → { base: 'opencode/big-pickle', variant: 'high' }. The service lists each
+// model once, with the reasoning variants it has ("#variant", see docs/ai-models.md): the base id is
+// what's looked up in the list, and the variant goes along when the request is sent ("default": none).
+function splitVariant(id) {
+  const s = String(id || '');
+  const i = s.lastIndexOf('#');
+  const variant = i > 0 ? s.slice(i + 1) : '';
+  return { base: i > 0 ? s.slice(0, i) : s, variant: variant && variant !== 'default' ? variant : null };
+}
+// A variant the listed model doesn't have (a model listed without variants: the service decides)
+function unknownVariant(info, variant) {
+  return !!variant && !!info && info.variants.length > 0 && !info.variants.includes(variant);
+}
+
 function noModelsFailure() {
   return fail(503, 'not_configured', 'MetaCode\'s AI service has no AI provider set up yet, so there are no models to use. Settings → AI providers shows what each one needs.');
 }
 
+// (model is always a listed id; a variant set with it, "…#high", comes as variant)
 function chooseDefaultModel(list) {
   const ids = list.ids;
   let warning = null;
   if (AI.model) {
-    if (ids.includes(AI.model)) return { model: AI.model };
-    const renamed = renamedModel(AI.model, ids);
-    if (renamed) { noteRename(AI.model, renamed, AI.modelVar); return { model: renamed }; }
+    const { base, variant } = splitVariant(AI.model);
+    const found = ids.includes(base) ? base : renamedModel(base, ids);
+    if (found) {
+      if (found !== base) noteRename(base, found, AI.modelVar);
+      const info = list.info.get(found);
+      if (!unknownVariant(info, variant)) return variant ? { model: found, variant } : { model: found };
+      warning = 'The model set in ' + AI.modelVar + ' ("' + AI.model + '") has no variant "' + variant + '" (it has ' + info.variants.join(', ') + '), so it is used without one. ' +
+        'Change ' + AI.modelVar + ' in the server\'s .env file.';
+      noteOnce('variant:' + AI.model, '[ai] ' + warning);
+      return { model: found, warning };
+    }
     warning = 'The model set in ' + AI.modelVar + ' ("' + AI.model + '") isn\'t offered by the AI service right now, so its default model is used. ' +
       'Change ' + AI.modelVar + ' in the server\'s .env file, or remove it to let the service choose.';
   }
@@ -1074,6 +1216,7 @@ function noteRename(from, to, where) {
 const FATAL_LIST_FAILURES = new Set(['timeout', 'network', 'authentication_error', 'permission_error', 'not_configured', 'bad_base_url']);
 
 // → { ok: true, model, verified, source, info } (info: the model's entry in the list) or a failure.
+// A model's reasoning variant ("…#high") is sent along; one the model doesn't have is refused here.
 async function resolveModel(requested) {
   const wanted = safeModelId(requested) || '';
   const list = await getModelList(false);
@@ -1084,17 +1227,25 @@ async function resolveModel(requested) {
     const model = AI.model || wanted;
     return model ? { ok: true, model, verified: false, source: 'opencode', info: null } : list;
   }
-  const pick = model => ({ ok: true, model, verified: true, source: list.source, info: list.info.get(model) || null });
-  if (wanted && list.ids.includes(wanted)) return pick(wanted);
-  // The same model under the id the list spells it with now (or with its provider)
-  const renamed = renamedModel(wanted, list.ids);
-  if (renamed) { noteRename(wanted, renamed); return Object.assign(pick(renamed), { renamedFrom: wanted }); }
+  const pick = (model, variant) => ({ ok: true, model: model + (variant ? '#' + variant : ''), verified: true, source: list.source, info: list.info.get(model) || null });
+  const { base, variant } = splitVariant(wanted);
+  // The listed id, or the same model under the id the list spells it with now (or with its provider)
+  const found = base && list.ids.includes(base) ? base : renamedModel(base, list.ids);
+  if (found) {
+    const info = list.info.get(found);
+    if (unknownVariant(info, variant)) {
+      return fail(400, 'invalid_request', 'The model "' + found + '" has no variant "' + variant + '" (it has ' + info.variants.join(', ') + ').');
+    }
+    if (found === base) return pick(found, variant);
+    noteRename(base, found);
+    return Object.assign(pick(found, variant), { renamedFrom: wanted });
+  }
   // Anything else gets the default — the same model Settings shows as selected
   // when the saved one isn't listed, so what's shown is what's used.
   const choice = chooseDefaultModel(list);
   if (choice.error) return choice.error;
   if (wanted) noteSubstitution(wanted, choice.model);
-  return pick(choice.model);
+  return pick(choice.model, choice.variant);
 }
 
 // Capability flags from the service's model list: a request that needs
@@ -1720,8 +1871,9 @@ async function answerChat(prep, signal) {
     const now = Date.now();
     const resting = modelRestingUntil(model, now);
     const providerResting = !resting && providerRestingUntil(providerOf(model), now);
-    // The model is failing at the moment: a similar model answers, without waiting on it
-    if (!resting && !providerResting && model === ctx.model && (!explicit || swapPicked) && modelDownUntil(model, now) && !serviceTrouble(now)) {
+    // The model is failing at the moment: a similar model answers, without waiting on it (closestModel
+    // leaves out providers failing as a whole: with none left, the model is tried after all)
+    if (!resting && !providerResting && model === ctx.model && (!explicit || swapPicked) && modelDownUntil(model, now)) {
       const alt = await closestModel(ctx.model, chatRequest, tried);
       if (alt) { own = modelDownFailure(ctx.model); otherSwitches++; noteSwitch(ctx.model, alt, 'failed'); model = alt; fallback = alt; fallbackReason = 'failed'; continue; }
     }
@@ -1735,9 +1887,9 @@ async function answerChat(prep, signal) {
     let why = null;
     if ((result.type === 'model_rate_limited' || isProviderLimit(result)) && prep.switchModels && rateSwitches < MAX_RATE_LIMIT_SWITCHES) why = 'rate_limited';
     // (once switching, a similar model that fails in its own way — not offered, not allowed for the
-    // key, unreadable answers — is skipped too; when the service as a whole is failing, other models would fail too)
+    // key, unreadable answers — is skipped too; a provider failing as a whole isn't switched to: closestModel)
     else if ((((!explicit || fallbackReason) && fallbackType(result)) || (swapPicked && TEMPORARY_MODEL_FAILURES.has(result.type))) &&
-      otherSwitches < 2 && !(result.type === 'upstream_error' && serviceTrouble(Date.now()))) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
+      otherSwitches < 2) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
     if (!why) break;
     const alt = await closestModel(ctx.model, chatRequest, tried);     // closest to what was asked for
     if (!alt) break;
@@ -1746,10 +1898,10 @@ async function answerChat(prep, signal) {
     model = alt; fallback = alt; fallbackReason = why;
   }
   // The search ended on a similar model's own problem (not offered, not allowed for the key, rate-limited,
-  // its provider resting…): what to report is what happened to the model asked for. Not when the AI
-  // service as a whole is the problem (failing for every model): that applies to any model
+  // its provider resting…): what to report is what happened to the model asked for. Not when that
+  // model's provider as a whole is the problem (failing for every model): that is what to say
   if (!result.ok && model !== ctx.model && own && (result.type === 'model_rate_limited' || isProviderLimit(result) || fallbackType(result)) &&
-    !(result.type === 'upstream_error' && serviceTrouble(Date.now()))) result = own;
+    !(result.type === 'upstream_error' && serviceTrouble(Date.now(), providerOf(model)))) result = own;
   if (!result.ok && result.type === 'model_rate_limited') {
     const others = Array.from(tried).filter(m => m !== ctx.model && modelRestingUntil(m, Date.now()));
     const soonest = Math.min(...Array.from(tried).map(m => modelRestingUntil(m, Date.now()) || Infinity));
@@ -1759,13 +1911,18 @@ async function answerChat(prep, signal) {
     result = Object.assign({}, result, { message, retryAfterSeconds: Number.isFinite(soonest) ? Math.max(1, Math.ceil((soonest - Date.now()) / 1000)) : result.retryAfterSeconds });
   }
   if (!result.ok && result.type === 'upstream_error') {
-    // Say which models failed, and whether it's the service as a whole
-    const trouble = serviceTrouble(Date.now());
+    // Say which models failed, and whether it's their provider (or the service) as a whole
+    const failed = result === own ? ctx.model : model;
+    const provider = providerOf(failed);
+    const trouble = serviceTrouble(Date.now(), provider);
     const code = 'HTTP ' + (result.upstreamStatus || 502);
     const others = Array.from(tried).filter(m => m !== ctx.model && modelDownUntil(m, Date.now()));
     result = Object.assign({}, result, trouble ? {
-      message: 'The AI service is having server problems right now: ' + trouble.models.length + ' different models answered with server errors (' + code + ') in the last minute. ' +
-        'This is on the AI providers\' side, not MetaCode\'s — try again in a few minutes.',
+      message: provider
+        ? 'The AI provider of "' + modelName(failed) + '" is having server problems right now: ' + trouble.models.length + ' of its models answered with server errors (' + code + ') ' +
+          'in the last minute. This is on the provider\'s side, not MetaCode\'s — try again in a few minutes, or pick a model of another provider in Settings → AI models.'
+        : 'The AI service is having server problems right now: ' + trouble.models.length + ' different models answered with server errors (' + code + ') in the last minute. ' +
+          'This is on the AI providers\' side, not MetaCode\'s — try again in a few minutes.',
       retryAfterSeconds: 30, serviceTrouble: true
     } : {
       message: 'The AI service couldn\'t run the model "' + modelName(ctx.model) + '"' + (others.length ? ' or the most similar model' + (others.length === 1 ? '' : 's') + ' (' + others.map(m => '"' + modelName(m) + '"').join(', ') + ')' : '') +
@@ -1821,7 +1978,7 @@ app.post('/api/ai', accounts.aiSingle, async (req, res) => {
 // (fallback: the similar model that answered because the requested one was rate-limited or failing)
 // then { done: true, parallel } — parallel is how many ran at the end (it is
 // lowered when the AI service rate-limits). Closing the connection stops the batch.
-// When the AI service answers with server errors (or the connection drops), the batch pauses
+// When the AI service answers with server errors (or the connection drops, or it's restarting), the batch pauses
 // (5 s — AI_BATCH_PAUSE_SECONDS — doubling up to 60 s), runs fewer at once and tries the request
 // again (up to 4 times); it goes back up as answers arrive. Each pause is
 // announced with a line { notice: { type, message, waitSeconds, parallel } }.
@@ -1890,7 +2047,7 @@ async function aiBatchRoute(req, res) {
       queue.unshift(item);
       return;
     }
-    if (out.failure && (BATCH_TRANSIENT.has(out.failure.type) || (out.failure.type === 'network' && out.failure.transient))) {
+    if (out.failure && (BATCH_TRANSIENT.has(out.failure.type) || out.failure.transient)) {
       okStreak = 0;
       const now = Date.now();
       // Requests that were already running when the batch paused don't make the pause longer
@@ -1953,7 +2110,8 @@ async function aiBatchRoute(req, res) {
   }
 }
 
-// Batch failures worth a pause and another try: provider server errors (and dropped connections, flagged `transient`).
+// Batch failures worth a pause and another try: provider server errors, and failures flagged `transient`
+// (a dropped or refused connection, the service shutting down: it's restarting).
 // Timeouts aren't: each one already took AI_TIMEOUT_MS.
 const BATCH_TRANSIENT = new Set(['upstream_error']);
 // Failures that a different model may not have (its provider can't run it right now, or isn't set up).
@@ -2296,8 +2454,10 @@ app.get('/wisp/', scraper.wispPlainHttp);         // only reached when a proxy d
 // The AI part asks the service how it is (GET /v1/status, at most once a minute, no prompts spent).
 async function aiStatusCheck() {
   if (notConfigured()) return { status: 'off', note: 'AI isn\'t set up on this server.' };
+  // (at start, MetaCode may be waiting for a service it doesn't run: its answer first, for up to 10 s)
+  if (startupWait) await Promise.race([startupWait, new Promise(resolve => setTimeout(resolve, 10000).unref())]);
   const st = await freshServiceState(60000);
-  if (serviceStarting()) return { status: 'degraded', note: 'The AI service is starting.' };
+  if (serviceStarting() || startupWait) return { status: 'degraded', note: 'The AI service is starting.' };
   if (!st.ok) return { status: 'outage', note: 'The AI service isn\'t answering.' };
   let now = Date.now();
   const providers = st.status && Array.isArray(st.status.providers) ? st.status.providers.filter(p => p && typeof p === 'object') : null;
@@ -2317,7 +2477,15 @@ async function aiStatusCheck() {
     }
   }
   now = Date.now();
-  if (serviceTrouble(now)) return { status: 'outage', note: 'The AI service is answering with server errors for several models; AI requests are failing.' };
+  // Server errors from several models of every provider that is set up (or of an older service's ids without
+  // a provider): requests are failing; of some providers: their requests use other providers' models
+  const troubled = ready ? ready.filter(p => serviceTrouble(now, p.id)) : [];
+  if (serviceTrouble(now, ready ? '' : undefined) || (troubled.length && troubled.length === ready.length)) {
+    return { status: 'outage', note: 'The AI service is answering with server errors for several models; AI requests are failing.' };
+  }
+  if (troubled.length) {
+    return { status: 'degraded', note: 'One of the AI providers is answering with server errors for several models' + (switchingAllowed() ? '; requests use the closest model of another provider.' : '.') };
+  }
   const failing = Array.from(modelDown.keys()).filter(m => modelDownUntil(m, now)).length;
   const limited = restingModels(now).length;
   const parts = [];
@@ -2374,7 +2542,7 @@ const VERSION = (() => {
 // settings.ai: { provider: 'opencode', ready, problem, warnings,
 //   service: { host, mode, managed, running, version, opencode, startedAt, problem },
 //   providers: [{ id, name, ready, problem, keyCount, free, note, models: { listed, available }, resting }],
-//   defaultModel, defaultModelName, modelSwitch, rateLimitedModels, restingProviders, maxParallel }
+//   defaultModel, defaultModelName, modelSwitch, freeFallback, rateLimitedModels, restingProviders, maxParallel }
 // (service.mode is OPENCODE_SERVICE_MANAGED; service.managed: MetaCode runs the service itself;
 // service.running: null = not asked yet)
 function aiSettings() {
@@ -2395,7 +2563,7 @@ function aiSettings() {
     warnings: AI.warnings.concat(status && Array.isArray(status.warnings) ? status.warnings.map(w => plainText(w)).filter(Boolean).slice(0, 30) : []),
     service: {
       host: AI.off ? null : AI.baseHost, mode: AI.managed, managed: sup.managed,
-      running: off || serviceStarting() || serviceFailing() ? false : st.ok === null ? null : !!st.ok,
+      running: off || serviceStarting() || serviceFailing() || serviceForeign() ? false : st.ok === null ? null : !!st.ok,
       version: plainText(svc.version, 40), opencode: plainText(svc.opencode, 40), startedAt: plainText(svc.startedAt, 40),
       problem: serviceProblem()
     },
@@ -2403,6 +2571,7 @@ function aiSettings() {
       models: p.models ? { listed: p.models.listed, available: p.models.available } : null, resting: p.resting })),
     defaultModel, defaultModelName: defaultInfo && defaultInfo.named ? defaultInfo.name : null,
     modelSwitch: switchingAllowed(),
+    freeFallback: AI.freeFallback,
     rateLimitedModels: restingModels(now).map(x => ({ model: x.model, until: new Date(x.until).toISOString() })),
     restingProviders: restingProviders(now).map(x => ({ provider: x.provider, until: new Date(x.until).toISOString(), reason: x.reason })),
     maxParallel: aiMaxParallel()
@@ -2432,7 +2601,9 @@ function resetAiState() {
   modelList.generation++;
   Object.assign(modelList, { result: null, fetchedAt: 0, failure: null, failedAt: 0, pending: null });
   serviceState.generation++;
-  Object.assign(serviceState, { ok: null, at: 0, status: null, failure: null, pending: null });
+  Object.assign(serviceState, { ok: null, at: 0, status: null, failure: null, pending: null, downSince: 0 });
+  clearTimeout(reprobeTimer);
+  reprobeTimer = null;
   modelLimits.clear();
   modelDown.clear();
   serverErrors = [];
@@ -2444,14 +2615,15 @@ function resetAiState() {
 
 // Re-reads .env without restarting: the AI settings apply at once, and the AI
 // service re-reads it too (its providers' keys and models). A service MetaCode
-// runs itself is started again when its address or token changed.
+// runs itself is started again when its address or token changed (and what
+// answers at the address is looked at again when it wasn't this copy's service).
 // Scraper/port settings still need a restart.
 app.post('/api/settings/reload', async (req, res) => {
   envLoader.load();
   AI = loadAiConfig(process.env);
   resetAiState();
   try {
-    if (JSON.stringify(serviceTarget()) !== serviceTargetKey) await startService();
+    if (JSON.stringify(serviceTarget()) !== serviceTargetKey || serviceForeign()) await startService();
     else if (!notConfigured()) {
       // (POST /v1/reload: the service re-reads .env, its config and catalogs; requests it's working on finish first)
       const r = await aiRequest('POST', '/reload', null, { timeoutMs: 30000, retry: false });
@@ -2508,7 +2680,7 @@ function start(port) {
       aiLab.start();                                         // AI Coding Lab: reloads saved evaluation runs
       // MetaCode's AI service: started here when nothing answers at its address (opencode/supervisor.js)
       try { await startService(); } catch (err) { console.error('[ai] Couldn\'t start the AI service: ' + redact(err && err.message)); }
-      if (!serviceStarting()) probeService();
+      if (!serviceStarting()) startupProbe();
       statusMonitor.start();
       resolve(server);
     });
@@ -2521,6 +2693,7 @@ function start(port) {
       aiLab.shutdown();
       collab.shutdown();
       statusMonitor.stop();
+      clearTimeout(reprobeTimer);
       scraper.onUpgrade.closeAll();
       // the AI service MetaCode started goes too (closed is called once it has stopped)
       const stopped = supervisor.stop();
@@ -2538,13 +2711,16 @@ function aiBanner() {
   const how = sup.managed ? 'started by MetaCode' : 'external';
   const head = 'OpenCode service at ' + AI.baseHost + ' (' + how + ')';
   if (sup.managed && sup.problem) return head + ' — not running: ' + sup.problem;
+  if (serviceForeign()) return head + ' — not used: ' + serviceForeign();
   if (serviceStarting()) return head + ' — starting…';
   if (serviceState.ok === false) return head + ' — not answering: ' + (serviceState.failure ? serviceState.failure.message : 'no answer');
   return head + ' — ' + serviceSummary(serviceState.status);
 }
 
 async function printBanner(PORT) {
-  if (!notConfigured() && !serviceStarting() && serviceState.ok === null) await probeService();   // so the banner can say how the service is
+  // so the banner can say how the service is (one MetaCode doesn't run: once it answers, or the wait at start is over)
+  if (startupWait) await startupWait;
+  else if (!notConfigured() && !serviceStarting() && serviceState.ok === null) await probeService();
   console.log('\n  ╔══════════════════════════════════════════╗');
   console.log('  ║   MetaCode — Social Media Coding Platform ║');
   console.log('  ╚══════════════════════════════════════════╝\n');

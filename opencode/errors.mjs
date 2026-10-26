@@ -12,7 +12,8 @@
 //   model_not_found       404  the provider doesn't offer the model
 //   request_too_large     413  the request is too big for the provider
 //   rate_limited          429  scope 'model': only this model is throttled; 'provider': the provider asked to pause
-//   quota_exceeded        429  scope 'provider': the provider's budget / free limit is used up
+//   quota_exceeded        429  scope 'provider': the provider's budget / free limit is used up; 'model': a spend
+//                              limit for this model only (Zen's BudgetLimitError with "coverage": "models")
 //   cancelled             499  the caller went away
 //   internal_error        500  a bug in the service (details only in its log)
 //   upstream_error        502  the provider had a server problem (5xx, 408)
@@ -222,12 +223,23 @@ function retryAfterOf(reason) {
 
 // OpenCode Zen's typed account limits (its 429 body's error.type), which are budgets, not throttles
 const ZEN_LIMITS = /^(FreeUsageLimitError|BudgetLimitError|GoUsageLimitError|CreditLimitExceeded)$/i;
-function zenLimit(body) {
-  if (typeof body !== 'string' || !/LimitError|CreditLimit/i.test(body)) return false;
-  try {
-    const e = JSON.parse(body).error;
-    return !!e && typeof e === 'object' && (ZEN_LIMITS.test(String(e.type || '')) || ZEN_LIMITS.test(String(e.code || '')));
-  } catch (err) { return false; }
+
+/**
+ * Which of OpenCode Zen's limits an error body names: 'free' (FreeUsageLimitError, the free
+ * models' limit), 'model' (BudgetLimitError whose "coverage" is "models": a spend limit for the
+ * model asked for, as OpenCode reads it), 'account' (any other: a budget for the whole account),
+ * or null (not one of Zen's limits).
+ */
+export function zenLimitOf(body) {
+  if (typeof body !== 'string' || !/LimitError|CreditLimit/i.test(body)) return null;
+  let e;
+  try { e = JSON.parse(body).error; } catch (err) { return null; }
+  if (!e || typeof e !== 'object') return null;
+  const type = [e.type, e.code].map(v => String(v || '')).find(v => ZEN_LIMITS.test(v));
+  if (!type) return null;
+  if (/^FreeUsageLimitError$/i.test(type)) return 'free';
+  if (/^BudgetLimitError$/i.test(type) && /"coverage"\s*:\s*"models"/.test(body)) return 'model';
+  return 'account';
 }
 
 // The numeric status an error event inside a stream carries (`{"error":{"code":503}}`)
@@ -252,7 +264,8 @@ function eventStatus(body) {
  * the provider scope or to quota_exceeded when they know better), 408/5xx →
  * upstream_error with upstreamStatus. A `QuotaExceeded` reason (402,
  * insufficient_quota, Zen's FreeUsageLimitError / BudgetLimitError /
- * GoUsageLimitError) → quota_exceeded scope 'provider' with resetAt.
+ * GoUsageLimitError) → quota_exceeded scope 'provider' with resetAt (scope
+ * 'model' for a BudgetLimitError whose "coverage" is "models": zenLimitOf()).
  * Without an HTTP error status: `Transport` code 'Timeout' (or a `Timeout`
  * reason) → timeout; other `Transport` → network with `code`;
  * `InvalidProviderOutput` / `UnknownProvider` (and answers the shims marked) →
@@ -335,15 +348,17 @@ export function fromAIError(err, ctx) {
     if (mark.code === 'web_page') message = 'A web page answered' + (up ? ' (HTTP ' + up + ')' : '') + ' instead of ' + whose + ' API' + (at ? ' at ' + at : '') + '. Check the provider\'s address (base URL): it must be the API address, not the website.';
     else if (mark.code === 'redirect') message = who + ' answered with a redirect' + (up ? ' (HTTP ' + up + ')' : '') + (at ? ' to ' + at : '') + ' instead of an answer. Check the provider\'s address (base URL).';
     else if (mark.code === 'empty_reply') message = who + ' sent an empty answer' + named.replace(/^ /, ' for ') + '. Try again in a moment.';
+    else if (mark.code === 'incomplete') message = who + ' sent an answer MetaCode couldn\'t read' + named.replace(/^ /, ' for ') + ' (the answer ended before it was complete).';
     else message = who + ' sent an answer MetaCode couldn\'t read' + named.replace(/^ /, ' for ') + '.';
     return make('malformed_response', message, extra({ code: mark.code, upstreamStatus: up }));
   }
 
-  if (tag === 'QuotaExceeded' || status === 402 || ((status === 429 || !status) && zenLimit(reason.body))) {
+  const zen = status === 429 || !status ? zenLimitOf(reason.body) : null;
+  if (tag === 'QuotaExceeded' || status === 402 || zen) {
     const resetAt = retryAfterSeconds !== undefined ? new Date(Date.now() + retryAfterSeconds * 1000).toISOString() : undefined;
     return make('quota_exceeded', whose.replace(/^./, c => c.toUpperCase()) + ' usage limit is used up' + quoted(detail) + '.' +
       (retryAfterSeconds !== undefined ? ' It resets ' + describeWait(retryAfterSeconds) + '.' : ' Try again later.'),
-    extra({ scope: 'provider', upstreamStatus: status, resetAt }));
+    extra({ scope: zen === 'model' ? 'model' : 'provider', upstreamStatus: status, resetAt }));
   }
 
   if (status) {

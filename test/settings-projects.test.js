@@ -275,7 +275,7 @@ test('settings status shows what .env set (names only) and the AI service\'s pro
   assert.equal((await json('POST', '/api/settings/reload', {}, { Origin: 'https://evil.example' })).status, 403);
 });
 
-test('the AI service not answering, or refusing MetaCode\'s token: AI isn\'t ready, says what to do, and requests fail at once', async () => {
+test('the AI service not answering, or refusing MetaCode\'s token: AI isn\'t ready, says what to do, and requests fail after a moment', async () => {
   const closed = http.createServer();
   await new Promise(r => closed.listen(0, '127.0.0.1', r));
   const deadPort = closed.address().port;
@@ -290,7 +290,7 @@ test('the AI service not answering, or refusing MetaCode\'s token: AI isn\'t rea
     let r = await json('POST', '/api/ai', Object.assign({ model: 'model-b' }, hi));
     assert.deepEqual([r.status, r.json.error.type], [502, 'network']);
     assert.match(r.json.error.message, /AI service \(OpenCode\) isn't running/);
-    assert.ok(Date.now() - t0 < 1500, 'not retried: nothing is listening');
+    assert.ok(Date.now() - t0 < 4000, 'tried again for a moment only (time for a restarting service to be back)');
     const keys = (await json('GET', '/api/keys/status')).json;
     assert.deepEqual([keys.providers, keys.keys], [[], []]);
     assert.match(keys.problem, /isn't running/);

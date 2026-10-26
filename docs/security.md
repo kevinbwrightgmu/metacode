@@ -22,6 +22,18 @@ service with an access token (`OPENCODE_SERVICE_TOKEN`, or the file
 `opencode-data/token`, readable only by its owner); the service's port (4097)
 isn't opened in the firewall.
 
+**Run it on a computer only you log in to.** MetaCode can't prove that what
+answers on the service's port is its own service: it only checks what that
+program says about itself. Another user of the same computer who takes the
+port first (for example while the service restarts) would receive MetaCode's
+access token and every AI request, including the posts being coded, and could
+then spend the providers' keys through the real service. On a single-user
+server (the [deploy guide](deploy-vps.md)'s setup) nobody else can. If other
+people have accounts on the computer, set an unusual `OPENCODE_SERVICE_PORT`
+(harder to guess) and your own `OPENCODE_SERVICE_TOKEN` (easy to change) in
+`.env`, and change the token if you suspect it was taken
+([opencode-service.md](opencode-service.md#8-security)).
+
 ## Code that runs on the server never sees secrets
 
 Two features run user-supplied or AI-written code: the Scraper's custom code

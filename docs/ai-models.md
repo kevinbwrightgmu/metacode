@@ -69,10 +69,14 @@ use paid models or the gateway, and set `OPENCODE_DISABLE_FREE_MODELS=1`
    in Settings, while the server's default model still falls back when it
    can't run). A used-up budget — the gateway's keys (prompts and/or tokens per
    day, week or month) or Zen's free limit — rests the whole provider until it
-   resets, and the closest model from the other provider answers meanwhile. A
-   provider that isn't set up, a wrong address or a rejected key give a clear
-   message naming the setting to fix; unknown capabilities are shown as
-   unknown, never assumed. Context windows come from Zen's catalog; for the
+   resets, and the closest model from the other provider answers meanwhile
+   (never a free model for a paid one, below). With a Zen key, Zen's free limit
+   rests only its free models, and a spend limit Zen sets for one model rests
+   only that model. When three models of one provider answer with server
+   errors within a minute, that provider counts as failing: requests switch to
+   the closest model of another provider until one of its models answers. A provider that isn't set up, a
+   wrong address or a rejected key give a clear message naming the setting to
+   fix; unknown capabilities are shown as unknown, never assumed. Context windows come from Zen's catalog; for the
    gateway they're unknown unless the file states them (the Lab then uses a
    conservative budget).
 
@@ -80,7 +84,9 @@ use paid models or the gateway, and set `OPENCODE_DISABLE_FREE_MODELS=1`
 
 - **Ids** are `provider/model`: `opencode/big-pickle`, `emis/claude-opus-5.5`.
   A Zen model can take one of its reasoning variants after `#`
-  (`opencode/glm-5.3-flash-free#high`). Pickers group the models by provider,
+  (`opencode/glm-5.3-flash-free#high`), in requests and in `OPENCODE_MODEL`
+  (quoted in `.env`, or `#…` is read as a comment); a variant the model doesn't
+  have is refused in a request (400), not answered by another model. Pickers group the models by provider,
   mark free ones (*· free*) and show names; when two providers offer a model
   under the same name, the provider's name is added.
 - **The default model**: `OPENCODE_MODEL` in `.env` (or `EMIS_MODEL=<id>` from
@@ -91,12 +97,21 @@ use paid models or the gateway, and set `OPENCODE_DISABLE_FREE_MODELS=1`
 - **Ids saved by earlier versions** (without `emis/`) in Settings, the AI
   Coding Lab and `EMIS_MODEL` still work: they're read as the model of the
   first provider (the gateway before Zen) that lists that id or another
-  spelling of it (below).
+  spelling of it (below). Settings saves the new id once the providers ahead
+  of the match have listed their models (a provider without any key isn't
+  waited for).
 - **Switching.** The closest similar model is the same model from the other
   provider first (Zen spells some ids with dashes where the gateway uses dots;
   `opencode/claude-opus-5-5` is the closest model to `emis/claude-opus-5.5`),
   then the same family and line, the nearest version and size, the same speed
   tier and capabilities. Up to four similar models are tried per request.
+  **A free model never answers for one that isn't free**: when the gateway's
+  budget is used up, for example, its models are answered by a paid Zen model
+  (with a Zen key) or get the quota message, never by Zen's free models (which
+  are offered by default; `OPENCODE_DISABLE_FREE_MODELS=1` turns them off). Any
+  model can answer for a free one. `AI_FALLBACK_TO_FREE_MODELS=on` in `.env`
+  lets free models answer for paid ones too; Settings → AI connection then
+  says so.
 
 ## Models by status
 

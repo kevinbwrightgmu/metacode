@@ -52,22 +52,43 @@ there is nothing else to install.
 
 | Value | MetaCode starts the service… |
 |---|---|
-| `auto` (default) | only when `OPENCODE_SERVICE_URL` is unset (the default address) and `GET /health` doesn't answer within 1 second |
-| `on` | also when `OPENCODE_SERVICE_URL` points at this computer |
+| `auto` (default) | only when `OPENCODE_SERVICE_URL` is unset or exactly the default address (`http://127.0.0.1:4097/v1`, from `OPENCODE_SERVICE_HOST` and `OPENCODE_SERVICE_PORT`) and `GET /health` doesn't answer within 1 second |
+| `on` | also when `OPENCODE_SERVICE_URL` points at another address on this computer |
 | `off` | never: pm2 (or something else) runs it |
 
 A service started by MetaCode writes to MetaCode's log, each line starting with
 `[opencode]`. If it stops unexpectedly it is started again after 1 second,
-then 2, 4… up to 60 seconds, and the last lines it printed say why (for
+then 2, 4… up to 60 seconds, and the last error it printed says why (for
 example *"The AI service couldn't start: its packages aren't installed. Run
-"npm install" and restart MetaCode."*). It stops with MetaCode. The startup
-banner's AI line says which kind is running: `AI → OpenCode service at
-127.0.0.1:4097 (started by MetaCode) — …` or `(external)`.
+"npm install" and restart MetaCode."*), or that it was killed from outside (for
+example by the system's out-of-memory killer). A service that takes more than 60
+seconds to answer is reported, and used once it answers. It stops with
+MetaCode. When what answers at the address isn't this MetaCode's service
+(another program, or another MetaCode's service), MetaCode starts none and says
+to set `OPENCODE_SERVICE_PORT` to a free port. The startup banner's AI line
+says which kind is running: `AI → OpenCode service at 127.0.0.1:4097 (started
+by MetaCode) — …` or `(external)`. Under pm2 MetaCode and the service start at
+the same moment, so MetaCode waits up to 15 seconds for the service before it
+prints that line; if it still isn't answering, the line says so, and MetaCode
+checks again every few seconds.
 
 When its port is taken, the service prints one line (*"port 4097 is in use —
 another MetaCode OpenCode service is probably running …"*) and exits with code
 1. Under pm2 that is retried, waiting a little longer each time, which covers a
-previous copy that's still stopping.
+previous copy that's still stopping. When one of its packages is missing (after
+`git pull` without `npm install`), it prints one line too and exits with code 1:
+*"MetaCode's AI service can't start: the package @opencode/ai isn't installed.
+Run "npm install", then restart it (pm2 restart metacode-opencode)."*
+
+**Two MetaCode copies on one computer** (production and staging, or a
+development copy beside a pm2 install) each need their own service: give the
+second copy its own `OPENCODE_SERVICE_PORT` in its `.env` (and its own `PORT`),
+and under pm2 its own app names (a copy of `ecosystem.config.cjs` in its folder
+with other `name`s). Each service's `GET /health` says which MetaCode folder it
+belongs to (`home`), so a MetaCode never uses another copy's service: it starts
+none of its own either, and says *"Another MetaCode's AI service (from a
+different folder) is using port 4097. Set OPENCODE_SERVICE_PORT in .env to a
+free port and restart MetaCode."*
 
 **One `.env` for both.** The service reads MetaCode's `.env`, found the same
 way MetaCode finds it (next to `server.js` first; `METACODE_ENV_FILE` is
@@ -76,8 +97,8 @@ settings and asks the service to reload too (`POST /v1/reload`): `.env`, the
 config file, the gateway's models file and the catalog cache are read again,
 key states are reset, and the Python worker is restarted once its requests
 have finished. A service MetaCode started is restarted when its own settings
-(`OPENCODE_SERVICE_*`) changed; under pm2, restart both apps for those:
-`pm2 restart metacode metacode-opencode`.
+(`OPENCODE_SERVICE_*`, the token included, also a deleted token file) changed;
+under pm2, restart both apps for those: `pm2 restart metacode metacode-opencode`.
 
 **The access token.** MetaCode sends a token with every request, and the
 service refuses requests without it. It is `OPENCODE_SERVICE_TOKEN` when that
@@ -118,8 +139,18 @@ says ([section 6](#6-the-zen-model-catalog)).
   quota), the service rests the whole provider until the time Zen gave (at most
   an hour) and answers at once meanwhile, without calling Zen. MetaCode then
   answers with the closest similar model from the gateway, if the gateway is
-  set up and switching is on.
+  set up and switching is on. Two of these apply to fewer models: with
+  `OPENCODE_API_KEY`, the free limit (`FreeUsageLimitError` for a free model)
+  rests only the free models, and the paid ones keep answering; a
+  `BudgetLimitError` with `"coverage":"models"` is that one model's spend limit,
+  and nothing rests (both: `quota_exceeded` with `scope:"model"`, and MetaCode
+  rests that model).
   Any other 429 rate-limits just that model, and MetaCode rests that model.
+- **Free models are offered by default**, also on a server where the gateway
+  is set up. They only stand in for other free models: when a paid model (the
+  gateway's, or a paid Zen one) is rate-limited or its budget is used up,
+  MetaCode never switches to a free model, unless `.env` sets
+  `AI_FALLBACK_TO_FREE_MODELS=on`.
 - Every request carries `x-opencode-session` (a new `ses_…` id each time),
   `x-opencode-client: metacode` and `User-Agent: opencode/metacode/2.1.4/metacode`.
 
@@ -130,6 +161,8 @@ says ([section 6](#6-the-zen-model-catalog)).
 > `OPENCODE_DISABLE_FREE_MODELS=1`. Without a gateway key and without
 > `OPENCODE_MODEL`, the default model is Zen's first: a free model when there's
 > no Zen key, and with a key the newest model, which can be a free one too.
+> Posts meant for a paid model aren't sent to a free one when MetaCode
+> switches models, unless `AI_FALLBACK_TO_FREE_MODELS=on`.
 
 ### The AI gateway (`emis`, EMIS)
 
@@ -142,7 +175,8 @@ An OpenAI-compatible gateway (`https://emis.zxs-is-very.cool/v1`), shown as
   spend per day, week or month; when it runs out the gateway answers 429 until
   the window rolls over. Several keys can be listed, comma-separated: they are
   used in turn, a key whose budget is used up rests until the reset time the
-  gateway gave, and a rejected key is tried last. Placeholders such as
+  gateway gave (a key the gateway answers 402, no credit, rests too, and the
+  next key is tried), and a rejected key is tried last. Placeholders such as
   `emis-...` or `your-key` are ignored with a warning. Without a key the
   gateway isn't offered (*"Add the gateway key to EMIS_API_KEY in .env, then
   Reload .env."*).
@@ -168,7 +202,9 @@ An OpenAI-compatible gateway (`https://emis.zxs-is-very.cool/v1`), shown as
   video-only models. The live list is also checked (every 5 minutes): models the
   file lists but the gateway doesn't offer right now are marked *"— not offered
   now"*. Until the first list has arrived, `/v1/status` says the gateway is
-  *"still loading its model list"*.
+  *"still loading its model list"*. When the live list can't be read while a
+  models file is in use, the gateway's warnings say *"Couldn't check which
+  models AI gateway offers right now (…)"* with the reason.
 - **Transport.** `EMIS_TRANSPORT`: `auto` (default) sends non-streamed requests
   from Python (`python/emis_fetch.py`) and falls back to Node.js without
   Python; `python` always uses Python; `node` never does. Streamed requests
@@ -193,7 +229,11 @@ Model ids name the provider: `provider/model`, for example
 `opencode/big-pickle` or `emis/claude-opus-5.5`. A Zen model can add a
 reasoning variant from its catalog entry after `#`
 (`opencode/glm-5.3-flash-free#high`); a `reasoning_effort` in the request picks
-the variant of that name when the model has one. An unknown variant is refused.
+the variant of that name when the model has one. An unknown variant is refused
+(MetaCode refuses it too, with 400, rather than using another model). In
+`.env`, quote an `OPENCODE_MODEL` with a variant
+(`OPENCODE_MODEL="opencode/glm-5.3-flash-free#high"`): unquoted, everything from
+`#` on is read as a comment.
 
 **Ids without a provider** (saved by earlier versions, e.g. in Settings, the AI
 Coding Lab or `EMIS_MODEL`) still work: the service uses the first provider —
@@ -201,7 +241,11 @@ OpenAI-compatible providers first, in config order, then Zen — that lists the
 model, either under exactly that id or under another spelling of it
 (`claude-opus-5-5` for `claude-opus-5.5`; `model-match.js`). So an old id stays
 with the gateway even when Zen spells the same model exactly that way. MetaCode
-and the browser map saved ids to the new ones the same way.
+maps such an id on every request, the same way. The browser rewrites a saved id
+(in Settings) only once the providers ahead of the match have listed their
+models; until then the id stays as saved and is mapped on each request, so a
+gateway that is still loading its list doesn't move it to Zen for good. A
+provider without any key (a gateway that was never set up) isn't waited for.
 
 **The default model** is the first of these that is offered and usable:
 
@@ -221,8 +265,10 @@ then Zen), each provider's models in its own order.
 When a model is rate-limited, failing or its provider is resting, MetaCode
 answers with the closest similar model (`model-match.js`, on by default; off
 with `AI_MODEL_SWITCH=off` or per browser in Settings → AI models). The same
-model from the other provider counts as the closest. More in
-[ai-models.md](ai-models.md).
+model from the other provider counts as the closest. A free model only answers
+for another free model, never for one that isn't free, unless
+`AI_FALLBACK_TO_FREE_MODELS=on` (Settings → AI connection then says *"Free
+models may answer for paid ones"*). More in [ai-models.md](ai-models.md).
 
 ## 4. Settings
 
@@ -233,7 +279,7 @@ All in MetaCode's `.env` ([.env.example](../.env.example)).
 | Variable | Meaning |
 |---|---|
 | `OPENCODE_SERVICE_HOST` | Address it listens on, default `127.0.0.1` (an address other machines can reach gets a warning) |
-| `OPENCODE_SERVICE_PORT` | Port, default `4097` (OpenCode's own `opencode serve` uses 4096) |
+| `OPENCODE_SERVICE_PORT` | Port, default `4097` (OpenCode's own `opencode serve` uses 4096). A second MetaCode copy on the same computer needs its own |
 | `OPENCODE_SERVICE_TOKEN` | Access token, at least 16 visible characters without spaces; unset: the token file |
 | `OPENCODE_SERVICE_DATA_DIR` | Folder for the token file and the catalog cache, default `opencode-data/` in the MetaCode folder |
 | `OPENCODE_CONFIG` | An operator config file merged over `opencode/opencode.json` |
@@ -253,11 +299,12 @@ All in MetaCode's `.env` ([.env.example](../.env.example)).
 
 | Variable | Meaning |
 |---|---|
-| `OPENCODE_SERVICE_URL` | The service's address, default `http://127.0.0.1:4097/v1` (from the host and port above); `off` switches MetaCode's AI off |
+| `OPENCODE_SERVICE_URL` | The service's address, default `http://127.0.0.1:4097/v1` (from the host and port above; set to exactly that, it counts as unset). Another address is a service MetaCode doesn't start unless `OPENCODE_SERVICE_MANAGED=on`; `off` switches MetaCode's AI off |
 | `OPENCODE_SERVICE_TOKEN` / `OPENCODE_SERVICE_DATA_DIR` | The same as the service's: the token from the setting, otherwise from the token file |
 | `OPENCODE_SERVICE_MANAGED` | `auto` (default) / `on` / `off` ([section 1](#1-running-it)) |
 | `OPENCODE_MODEL` | Default model (also read by the service); `EMIS_MODEL` is used when it's unset |
 | `AI_MODEL_SWITCH` | `off` turns switching to the closest similar model off (older name: `EMIS_MODEL_SWITCH`) |
+| `AI_FALLBACK_TO_FREE_MODELS` | `on` lets a free model answer for one that isn't free when switching; default `off` |
 | `AI_TIMEOUT_MS` | How long one AI request may take, 1000–600000 ms, default 120000 (older name: `EMIS_TIMEOUT_MS`) |
 | `AI_MAX_PARALLEL`, `AI_BATCH_PAUSE_SECONDS` | AI Coding's copies at once and its pause after server errors (unchanged) |
 
@@ -340,7 +387,10 @@ As in OpenCode, deprecated models, models without text in and out, and
 realtime, embedding and reranking models are left out. Each model's protocol,
 address, capabilities (tool calling, attachments, reasoning, temperature),
 limits, prices (free = no input cost in any tier) and reasoning variants come
-from its entry.
+from its entry. Model addresses from a fetched or cached catalog must be under
+`https://opencode.ai/inference/` (`OPENCODE_API_KEY` is only sent there); other
+models are left out with a warning. A file in `OPENCODE_MODELS_PATH` is used as
+it is. A plain-http `OPENCODE_MODELS_URL` other than localhost gets a warning.
 
 **Updating the bundled copy** (for a server that can't reach
 `models.opencode.ai`, or before a release):
@@ -365,7 +415,9 @@ The service listens on `OPENCODE_SERVICE_HOST:OPENCODE_SERVICE_PORT`
 - JSON bodies up to 32 MB (`413 request_too_large` above that). Unknown routes
   answer `404` `{"error":{"type":"not_found"}}`.
 - `GET /health` needs no token and shows nothing secret:
-  `{"ok":true,"service":"metacode-opencode","version":"<MetaCode's version>","opencode":"2.1.4","startedAt":"…","pid":123}`.
+  `{"ok":true,"service":"metacode-opencode","version":"<MetaCode's version>","opencode":"2.1.4","startedAt":"…","pid":123,"home":"<16 hex>"}`.
+  `home` is the first 16 hex digits of the SHA-256 of the data folder's full
+  path: it tells a MetaCode whether the service is its own copy's.
 
 ### `GET /v1/models`
 
@@ -402,10 +454,14 @@ default model answers.
   `message.reasoning_content` and `tool_calls` when there are any; `usage`).
 - `"stream": true`: `200 text/event-stream` with `chat.completion.chunk`
   events, a usage chunk when `stream_options.include_usage` is set, then
-  `data: [DONE]`. The status line is sent only after the provider's first
-  event, so an early failure is still a real HTTP error; a failure after that
-  is a last `data: {"error":{…}}` event, and the stream ends without
-  `[DONE]`.
+  `data: [DONE]`. The status line is sent with the provider's first event, or
+  after half the time limit (at most 15 seconds) if that takes longer; until
+  the first part comes, a comment line `: waiting for the first part of the
+  answer` follows every as long. A failure before the status line is a real
+  HTTP error; after it, a last `data: {"error":{…}}` event, and the stream ends
+  without `[DONE]`. A provider's stream that stops without `[DONE]` or a
+  finish reason is a failure too (`malformed_response`, code `incomplete`),
+  not a finished answer.
 - Successful answers carry `X-OpenCode-Provider` and `X-OpenCode-Model`.
 - When the caller goes away, the request to the provider is cancelled.
 
@@ -425,16 +481,18 @@ check, name the provider, and never contain keys, tokens or full addresses.
 | `not_configured` | 503 | the model's provider isn't set up (no key, switched off, config problem), or a paid Zen model without `OPENCODE_API_KEY` |
 | `request_too_large` | 413 | over 32 MB; the provider said 413 |
 | `rate_limited` | 429 | `scope:"model"`: only this model is throttled (MetaCode rests it); `scope:"provider"`: the provider asked to pause |
-| `quota_exceeded` | 429 | `scope:"provider"`: the provider's budget is used up (gateway: every key's; Zen: free limit or budget), with `reset_at` and `window` when known |
+| `quota_exceeded` | 429 | `scope:"provider"`: the provider's budget is used up (gateway: every key's; Zen: free limit or budget), with `reset_at` and `window` when known; `scope:"model"`: Zen's spend limit for this model, or its free limit with a key (only the free models) |
 | `cancelled` | 499 | the caller went away |
 | `upstream_error` | 502 | the provider had a server error (`upstream_status`) |
-| `malformed_response` | 502 | the provider's answer couldn't be read |
+| `malformed_response` | 502 | the provider's answer couldn't be read (`code:"incomplete"`: the stream stopped before `[DONE]` or a finish reason) |
 | `network` | 502 | the provider couldn't be reached (`code`: `ENOTFOUND`, `ECONNREFUSED`, …) |
 | `timeout` | 504 | the provider took too long |
 | `internal_error` | 500 | a bug in the service (details in its log) |
 
-**Retries happen in one place: MetaCode** (2 more tries on 408, 5xx and
-passing network failures). The service never repeats a failed call, apart from
+**Retries happen in one place: MetaCode** (2 more tries, 0.6 and 1.8 seconds
+apart, on 408, 5xx and passing network failures, and while the service itself
+refuses the connection or is shutting down, as it does for a moment when it
+restarts). The service never repeats a failed call, apart from
 moving on to the next gateway key and the `/v1` fix above, which aren't
 repeats of the same request.
 
@@ -476,6 +534,16 @@ once its requests have finished, and answers with the status.
   file `opencode-data/token` is readable only by its owner, and
   `opencode-data/` is in `.gitignore`. `GET /health` needs no token and reveals
   nothing secret.
+- **A computer other people log in to.** MetaCode checks only that whatever
+  answers on the service's port says it's a MetaCode AI service (of this
+  MetaCode folder); it can't prove it. Another user of the same computer who
+  gets the port first (for example while the service restarts) would receive
+  MetaCode's access token and every AI request, posts included, and could then
+  use the providers' keys through the real service. So run MetaCode on a server
+  only you (and its admins) log in to. If that isn't possible, set an unusual
+  `OPENCODE_SERVICE_PORT` (harder to guess) and your own
+  `OPENCODE_SERVICE_TOKEN` (easy to change), and change the token if you
+  suspect it was taken.
 - **Keys stay in `.env`.** The gateway and Zen keys are read only by the
   service. They are never sent to the browser, logged, returned by an endpoint
   or put in an error message: provider messages are cleaned of keys, tokens and
@@ -493,9 +561,11 @@ missing, `pm2 start ecosystem.config.cjs && pm2 save`; if it keeps restarting,
 `pm2 logs metacode-opencode --lines 50` says why. Without pm2, MetaCode starts
 it itself; its log lines start with `[opencode]`.
 
-**"The AI service couldn't start: its packages aren't installed"**
-Run `npm install` in the MetaCode folder, then restart MetaCode (or
-`pm2 restart metacode-opencode`).
+**"The AI service couldn't start: its packages aren't installed" / "MetaCode's AI service can't start: the package … isn't installed"**
+The code was updated without `npm install`. Run `npm install` in the MetaCode
+folder, then restart MetaCode (or `pm2 restart metacode-opencode`). Under pm2
+the second message is the whole of what `pm2 logs metacode-opencode` shows, and
+pm2 keeps restarting the service until the package is there.
 
 **"port 4097 is in use"**
 Another copy is running — for example one MetaCode started itself before pm2
@@ -505,9 +575,22 @@ uses the port, set `OPENCODE_SERVICE_PORT` in `.env` (both read it) and restart
 both apps.
 
 **"…needs its access token" (401)**
-MetaCode and the service don't share a token: both must read the same `.env`
-(the same `OPENCODE_SERVICE_TOKEN`, or the same `OPENCODE_SERVICE_DATA_DIR`).
-Restart both after changing it.
+MetaCode and the service don't share a token. If the service is this copy's
+own (pm2), both must read the same `.env` (the same `OPENCODE_SERVICE_TOKEN`,
+or the same `OPENCODE_SERVICE_DATA_DIR`); restart both after changing it. If
+another MetaCode on this computer already runs its AI service on that port,
+don't share its token: give this copy its own `OPENCODE_SERVICE_PORT` instead
+(next entry).
+
+**"Another program, not MetaCode's AI service, answers at 127.0.0.1:4097"**
+Something else uses the service's port. Set `OPENCODE_SERVICE_PORT` in `.env`
+to a free port and restart MetaCode (under pm2: both apps).
+
+**"Another MetaCode's AI service (from a different folder) is using port 4097"**
+A second MetaCode copy on this computer found the first copy's service on its
+port. Set `OPENCODE_SERVICE_PORT` in this copy's `.env` to a free port (e.g.
+`4098`) and restart it; under pm2, give it its own app names too
+([section 1](#1-running-it)).
 
 **Only free models / "Free models only — add OPENCODE_API_KEY for the others."**
 Add `OPENCODE_API_KEY` to `.env` and click **Reload .env**. If Zen offers no
@@ -529,7 +612,9 @@ check that `EMIS_BASE_URL` is `https://emis.zxs-is-very.cool/v1` (or leave it
 out) and that `EMIS_API_KEY` holds your key (`emis-…`), then **Reload .env**. A
 proxy or firewall on your network may be answering instead. A used-up quota
 resets when the message says; another key can be added to `EMIS_API_KEY`
-(comma-separated).
+(comma-separated). Meanwhile a paid Zen model (with `OPENCODE_API_KEY`) can
+answer for the gateway's models, a free one only with
+`AI_FALLBACK_TO_FREE_MODELS=on`.
 
 **The Zen catalog never refreshes (the service's log says the refresh failed)**
 The server can't reach `models.opencode.ai`. The bundled or cached catalog
