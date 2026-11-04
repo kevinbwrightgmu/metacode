@@ -208,11 +208,14 @@ An OpenAI-compatible gateway (`https://emis.zxs-is-very.cool/v1`), shown as
 - **Transport.** `EMIS_TRANSPORT`: `auto` (default) sends non-streamed requests
   from Python (`python/emis_fetch.py`) and falls back to Node.js without
   Python; `python` always uses Python; `node` never does. Streamed requests
-  always go from Node.js. The worker asks for a streamed answer and reads it
-  up to its `data: [DONE]` line (not until the gateway closes the connection,
-  which it may keep open), with `httpx` when it's installed (it comes with the
-  `openai` package in `requirements.txt`), else Python's own `urllib`; the
-  `openai` package itself is only used for the model list. The config's `options.headers` are
+  always go from Node.js. A request for a whole answer (AI Coding, Ask
+  MetaCode, Import Data…) goes to the gateway as one (`stream: false`, a plain
+  JSON answer — as MetaCode always sent them), with the `openai` package from
+  `requirements.txt` when it's installed, else `httpx`, else Python's own
+  `urllib`; a model that answers such a request empty is asked again streamed
+  (and from then on). A stream is read up to its `data: [DONE]` line, or ends
+  2 s after its `finish_reason` — never "until the gateway closes the
+  connection", which it may keep open. The config's `options.headers` are
   sent from Python too, and the worker doesn't get MetaCode's `OPENAI_*`
   variables (the `openai` package would send some of them as headers).
   `EMIS_PYTHON` (or `SCRAPER_PYTHON`) sets the Python command.

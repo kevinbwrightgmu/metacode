@@ -37,7 +37,7 @@ const python = ['python3', 'python'].some(cmd => { try { return spawnSync(cmd, [
 const LISTED = ['prompts-only', 'budget-said', 'gemini-3.8-flash', 'gemini-3.7-flash', 'slow', 'picture', 'picture-only', 'other-1',
   'forbidden-model', 'blocked-model', 'budget-model', 'busy-a', 'busy-b', 'busy-c', 'limited-model', 'sse-model', 'json-model', 'eos-model',
   'unicode-model', 'missing-model', 'error200-model', 'claude-opus-5.5', 'dall-e-3', 'text-embedding-3-large',
-  'streams-unless-told', 'stream-only-model', 'empty-unless-stream', 'think-model', 'redirect-model', 'echo-header', 'cut-short', 'finish-only', 'held-open'];
+  'streams-unless-told', 'stream-only-model', 'empty-unless-stream', 'think-model', 'redirect-model', 'echo-header', 'cut-short', 'finish-only', 'held-open', 'finish-held'];
 const state = { calls: [], seen: [], modelsMode: 'ok', models: LISTED, listCalls: 0, remaining: 100, websiteListNotFound: false, cutShort: 0 };
 const reset = seconds => String(Math.floor(Date.now() / 1000) + seconds);
 const chunk = (model, delta, finish) => JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', model, choices: [Object.assign({ index: 0, delta }, finish ? { finish_reason: finish } : {})] });
@@ -138,6 +138,15 @@ function startEmis() {
           res.writeHead(200, Object.assign({ 'Content-Type': 'text/event-stream' }, quota));
           res.write('data: ' + chunk(j.model, { role: 'assistant', content: 'done, but still connected' }) + '\n\ndata: ' + chunk(j.model, {}, 'stop') + '\n\n' +
             'data: ' + JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', model: j.model, choices: [], usage: { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 } }) + '\n\ndata: [DONE]\n\n');
+          const ping = setInterval(() => { if (!res.destroyed) res.write(': ping\n\n'); }, 300);
+          return res.on('close', () => clearInterval(ping));
+        }
+        // always a stream (even when asked for a whole answer): the answer, its finish_reason and usage —
+        // no [DONE] — then the connection stays open (keep-alive comments) until the caller closes it
+        case 'finish-held': {
+          res.writeHead(200, Object.assign({ 'Content-Type': 'text/event-stream' }, quota));
+          res.write('data: ' + chunk(j.model, { role: 'assistant', content: 'finished, never closed' }) + '\n\ndata: ' + chunk(j.model, {}, 'stop') + '\n\n' +
+            'data: ' + JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', model: j.model, choices: [], usage: { prompt_tokens: 6, completion_tokens: 4, total_tokens: 10 } }) + '\n\n');
           const ping = setInterval(() => { if (!res.destroyed) res.write(': ping\n\n'); }, 300);
           return res.on('close', () => clearInterval(ping));
         }
@@ -513,9 +522,10 @@ test('answers in plain JSON or SSE, asked for streamed or not; an unknown finish
     assert.equal(done.choices[0].message.content, 'ok from sse');
     done = await ask(p, 'eos-model');
     assert.deepEqual([done.choices[0].message.content, done.choices[0].finish_reason], ['ended oddly', 'stop']);
-    // EMIS's quirks: a stream without finish_reason, a model that only streams, an empty 200 unless
-    // streamed (and asked for with Accept: text/event-stream) — every call is a streamed one upstream
-    for (const [model, text] of [['streams-unless-told', 'streamed by default'], ['stream-only-model', 'ok via stream'], ['empty-unless-stream', 'ok streamed']]) {
+    // EMIS's quirks: a model that streams unless told not to (a whole answer is asked for as one, so it
+    // answers plain), a model that only streams, an empty 200 unless streamed (and asked for with
+    // Accept: text/event-stream) — the last two are asked again streamed, and from then on
+    for (const [model, text] of [['streams-unless-told', 'plain'], ['stream-only-model', 'ok via stream'], ['empty-unless-stream', 'ok streamed']]) {
       done = await ask(p, model);
       assert.deepEqual([done.choices[0].message.content, done.choices[0].finish_reason], [text, 'stop'], model);
     }
@@ -552,10 +562,11 @@ test('the request reaching the gateway: the client\'s messages exactly as sent, 
     assert.equal(sent.body.tools[0].function.name, 'lookup');
     assert.equal(sent.body.tool_choice, 'auto');
     assert.deepEqual(sent.body.response_format, { type: 'json_object' });
-    assert.equal(sent.body.stream, true);
+    assert.equal(sent.body.stream, false, 'a whole answer is asked for as one');
+    assert.equal(sent.body.stream_options, undefined);
     assert.equal(sent.headers.authorization, 'Bearer ' + KEY);
     assert.equal(sent.headers['x-team'], 'metacode', 'the config\'s headers');
-    assert.match(sent.headers.accept, /text\/event-stream/);
+    assert.match(sent.headers.accept, /application\/json/);
     for (const h of ['x-oc-trace', 'x-oc-transport', 'traceparent', 'b3']) assert.equal(sent.headers[h], undefined, h);
     assert.ok(p.status().warnings.some(w => /"Authorization" .* can't be sent/.test(w)));
   });
@@ -631,6 +642,22 @@ test('a gateway that keeps the connection open after [DONE]: the answer is used 
         assert.equal(done.choices[0].message.content, 'done, but still connected', transport);
         assert.deepEqual(done.usage, { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 }, transport);
         assert.ok(Date.now() - t0 < 4000, transport + (stream ? ' (streamed)' : '') + ': answered in ' + (Date.now() - t0) + ' ms, not at the time limit');
+      }
+    });
+  }
+});
+
+test('a gateway that streams (even when asked for a whole answer), sends its finish_reason but no [DONE] and keeps the connection open: the answer is used ~2 s after it finished, through Node.js and through Python', { timeout: 90000 }, async () => {
+  for (const transport of ['node'].concat(python ? ['auto', 'python'] : [])) {
+    await withProvider({ env: { EMIS_TRANSPORT: transport } }, async p => {
+      await p.models();
+      for (const stream of [false, true]) {
+        const t0 = Date.now();
+        const done = await ask(p, 'finish-held', {}, { timeoutMs: 15000, stream });
+        const ms = Date.now() - t0;
+        assert.equal(done.choices[0].message.content, 'finished, never closed', transport);
+        assert.deepEqual(done.usage, { prompt_tokens: 6, completion_tokens: 4, total_tokens: 10 }, transport + ': the usage after the finish still counts');
+        assert.ok(ms < 6000, transport + (stream ? ' (streamed)' : '') + ': answered in ' + ms + ' ms, not at the time limit');
       }
     });
   }
@@ -726,13 +753,13 @@ test('the Python transport: non-streamed requests go through python/emis_fetch.p
     state.seen.length = 0;
     const done = await ask(p, 'other-1');
     assert.equal(done.choices[0].message.content, 'ok from other-1');
-    assert.deepEqual(done.usage, { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 }, 'the buffered stream: usage too');
+    assert.deepEqual(done.usage, { prompt_tokens: 5, completion_tokens: 3, total_tokens: 8 }, 'the plain answer: usage too');
     const sent = state.seen[0];
     assert.match(String(sent.headers['user-agent']), /^MetaCode\/1\.0 \(OpenAI-compatible client; Python 3|^OpenAI\/Python/, 'sent from Python');
     assert.equal(sent.headers['x-team'], 'metacode', 'the config\'s headers, from Python too');
     assert.equal(sent.headers.authorization, 'Bearer ' + KEY);
-    assert.equal(sent.body.stream, true, 'the request is streamed, the answer read whole');
-    assert.match(sent.headers.accept, /event-stream/);
+    assert.equal(sent.body.stream, false, 'a whole answer is asked for as one, like MetaCode always did');
+    assert.match(sent.headers.accept, /application\/json/);
     assert.equal(sent.headers['x-oc-transport'], undefined);
     assert.match(p.status().transport, /^Python 3\.\d+(\.\d+)? \((openai|httpx|urllib)/);
     // its answers are read like any other: quota headers, a 429 for the budget, a 403
@@ -1004,7 +1031,10 @@ test('a gateway stream that stops without a finish_reason or [DONE] is incomplet
         e => E.isServiceError(e) && e.code === 'incomplete', 'streamed (' + transport + ')');
       assert.ok(!parts.some(e => e.type === 'finish'), 'no finish was made up');
       assert.equal((await ask(p, 'finish-only')).choices[0].message.content, 'finished');
-      assert.equal((await ask(p, 'streams-unless-told')).choices[0].message.content, 'streamed by default');
+      const entry2 = await entryFor(p, 'streams-unless-told');
+      const streamed = [];
+      for await (const e of p.chat(body(entry2, { stream: true }), entry2, { stream: true, timeoutMs: 10000 })) streamed.push(e);
+      assert.equal(streamed.filter(e => e.type === 'text-delta').map(e => e.text).join(''), 'streamed by default', '[DONE] without a finish_reason ends it (' + transport + ')');
     });
   }
 });

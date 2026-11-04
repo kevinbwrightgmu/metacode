@@ -347,6 +347,11 @@ function jsonToSse(text, opts) {
   return shimEvent('unreadable', 'The provider answered with something that isn\'t a chat completion.');
 }
 
+// After an answer's finish_reason (or an error event) without [DONE], how long the stream may stay
+// silent before it counts as over: a gateway may keep a finished stream open, and @opencode/ai would
+// wait for it to close (the usage chunk, sent right after, still comes through)
+const END_GRACE_MS = 2000;
+
 // The streamed answer of a chat upstream, fixed on the fly (never buffered,
 // except when it turns out not to be SSE at all)
 function chatStream(opts) {
@@ -356,6 +361,9 @@ function chatStream(opts) {
   let buffer = '';
   let sawData = false;                // a JSON data line came (not just [DONE])
   let ended = false;                  // [DONE], a finish_reason or an error came: the answer has an end
+  let done = false;                   // [DONE] came
+  let control = null, endTimer = null;
+  let freshData = false;              // a data line came since the end timer started (comments, pings don't count)
   let sawText = false;
   let imageMarked = false;
 
@@ -378,8 +386,9 @@ function chatStream(opts) {
   const fixLine = line => {
     const m = /^data:[ \t]?(.*?)(\r?)$/.exec(line);
     if (!m) return line;
+    freshData = true;
     const payload = m[1].trim();
-    if (payload === '[DONE]') { ended = true; return sawData ? line : shimEvent('empty_reply', 'The provider sent no answer.').trimEnd(); }
+    if (payload === '[DONE]') { ended = true; done = true; return sawData ? line : shimEvent('empty_reply', 'The provider sent no answer.').trimEnd(); }
     if (!payload.startsWith('{')) return line;
     sawData = true;
     // (the Responses API's or Anthropic's events instead of chat chunks)
@@ -407,7 +416,20 @@ function chatStream(opts) {
     return out;
   };
 
+  // The answer has its end but the stream stays open: it ends here (with the [DONE] it didn't send)
+  const armEnd = () => {
+    if (!ended || done || !control) { clearTimeout(endTimer); endTimer = null; return; }
+    if (endTimer && !freshData) return;               // (only more of the answer extends the wait)
+    clearTimeout(endTimer);
+    freshData = false;
+    endTimer = setTimeout(() => {
+      try { control.enqueue(enc.encode('data: [DONE]\n\n')); control.terminate(); } catch (e) { /* already closed */ }
+    }, END_GRACE_MS);
+    if (endTimer.unref) endTimer.unref();
+  };
+
   return new TransformStream({
+    start(ctl) { control = ctl; },
     transform(chunk, ctl) {
       if (mode === 'drop') return;
       buffer += dec.decode(chunk, { stream: true });
@@ -427,8 +449,10 @@ function chatStream(opts) {
       const lines = buffer.split('\n');
       buffer = lines.pop();
       if (lines.length) ctl.enqueue(enc.encode(lines.map(fixEnd).join('\n') + '\n'));
+      armEnd();
     },
     flush(ctl) {
+      clearTimeout(endTimer);
       buffer += dec.decode();
       if (mode === 'start') {
         const s = buffer.trim();

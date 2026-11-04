@@ -8,13 +8,13 @@ non-streamed EMIS requests through this worker when Python is available
 (EMIS_TRANSPORT=auto, the default; =python to require it; =node to skip it),
 and through Node.js otherwise (streamed answers always go through Node.js).
 
-Chat requests (always stream:true from the service) go out with `httpx`
-(installed with openai: pip install openai), else Python's standard library
-(urllib) — no pip install needed. Their answer is read up to its
-"data: [DONE]" line, not until the connection closes: a gateway may keep a
-finished stream open, and reading on would wait for the time limit. The
-official `openai` package, the client EMIS's documentation shows, is only
-used for GET /models.
+Chat requests (whole answers: stream:false, as MetaCode always sent them)
+go out with the official `openai` package when it's installed (the client
+EMIS's documentation shows), else `httpx` (installed with openai: pip install
+openai), else Python's standard library (urllib) — no pip install needed. An
+answer that comes as a stream anyway is read up to its "data: [DONE]" line,
+not until the connection closes: a gateway may keep a finished stream open,
+and reading on would wait for the time limit.
 Proxies: HTTPS_PROXY / HTTP_PROXY / NO_PROXY are honoured by all three, or
 EMIS_PROXY when given in the request (then for every request, as from Node.js).
 
@@ -32,6 +32,7 @@ with; it is never printed or logged.
 import base64
 import json
 import platform
+import queue
 import re
 import socket
 import ssl
@@ -101,34 +102,99 @@ def extra_headers(req):
     return {str(k): str(v) for k, v in given.items() if str(k).lower() not in RESERVED}
 
 
-# The line that ends a streamed answer (OpenAI's SSE format)
+# The line that ends a streamed answer (OpenAI's SSE format), and a chunk that finishes it
 DONE_LINE = re.compile(r"^data:\s*\[DONE\]\s*$")
+FINISH = re.compile(r'"finish_reason"\s*:\s*"[^"]')
+# After a finish_reason without [DONE], how long the stream may stay silent before it counts as over
+END_GRACE_S = 2.0
 
 
-def read_stream(lines, timeout):
-    """A streamed answer's text, up to and including its "data: [DONE]" line.
+def hang_up(resp):
+    """Shuts the connection under a response whose answer is in (urllib's or httpx's), so a
+    thread still waiting on it for more returns and the response can be closed."""
+    sock = None
+    try:
+        sock = resp.fp.raw._sock                                   # urllib
+    except Exception:
+        try:
+            sock = resp.extensions["network_stream"].get_extra_info("socket")    # httpx
+        except Exception:
+            sock = None
+    if sock is not None:
+        try:
+            sock.shutdown(socket.SHUT_RDWR)
+        except Exception:
+            pass
+
+
+def read_stream(lines, timeout, stop=None):
+    """A streamed answer's text, up to its "data: [DONE]" line.
 
     `lines` yields the body's lines (bytes or text, with or without their line
-    ending). Reading stops there even if the gateway keeps the connection open,
-    and after `timeout` seconds in all (keep-alive lines would otherwise keep
-    the socket's own per-read timeout from ever firing). An answer without
-    [DONE] (plain JSON, or a gateway that just closes) is read to its end.
+    ending). Reading stops there even if the gateway keeps the connection open;
+    after a finish_reason, also when no more data comes for END_GRACE_S (a
+    gateway may keep a finished stream open without [DONE]); and after
+    `timeout` seconds in all (keep-alive lines would otherwise keep the socket's
+    own per-read timeout from ever firing). An answer without either (plain
+    JSON, or a gateway that just closes) is read to its end. The lines are read
+    in a thread of their own, so a silent connection can't hold this one;
+    `stop()` (hang_up) ends that thread when reading stops before the end.
     """
     deadline = time.monotonic() + timeout
+    q = queue.Queue()
+
+    def pump():
+        try:
+            for raw in lines:
+                q.put(raw)
+        except Exception as e:  # (the connection closed under it, once the answer is in)
+            q.put(e)
+        q.put(None)
+    threading.Thread(target=pump, daemon=True).start()
     out = []
-    for raw in lines:
-        line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+    finished_at = None
+    ended = False                           # the thread is done (the connection closed or failed)
+    while True:
+        now = time.monotonic()
+        wait = deadline - now
+        if finished_at is not None:
+            wait = min(wait, finished_at + END_GRACE_S - now)
+        if wait <= 0:
+            if finished_at is not None:
+                break
+            raise TimeoutError("the answer took longer than %d s" % timeout)
+        try:
+            item = q.get(timeout=wait)
+        except queue.Empty:
+            continue
+        if item is None:
+            ended = True
+            break
+        if isinstance(item, Exception):
+            ended = True
+            if finished_at is not None:
+                break
+            raise item
+        line = item.decode("utf-8", "replace") if isinstance(item, bytes) else item
         out.append(line if line.endswith("\n") else line + "\n")
-        if DONE_LINE.match(line.strip()):
+        text = line.strip()
+        if DONE_LINE.match(text):
             out.append("\n")       # (the blank line that ends the event)
             break
-        if time.monotonic() > deadline:
-            raise TimeoutError("the answer took longer than %d s" % timeout)
+        if text.startswith("data:") and (finished_at is not None or FINISH.search(text)):
+            finished_at = time.monotonic()      # (more of the answer, e.g. its usage, extends the wait)
+    if not ended and stop is not None:
+        stop()
     return "".join(out)
 
 
 def streaming_body(req):
     return isinstance(req.get("body"), dict) and bool(req["body"].get("stream"))
+
+
+def is_event_stream(content_type):
+    # (a gateway may stream even when asked for a whole answer: read like a stream then)
+    return "event-stream" in str(content_type or "").lower()
 
 
 def via_openai(req):
@@ -143,14 +209,20 @@ def via_openai(req):
     try:
         if path == "/models":
             raw = client.models.with_raw_response.list()
-        else:
-            body = dict(req.get("body") or {})
-            model = body.pop("model", None)
-            messages = body.pop("messages", [])
-            # Everything else goes through as-is, so no SDK version can reject a field
-            raw = client.chat.completions.with_raw_response.create(model=model, messages=messages, extra_body=body or None)
-        resp = raw.http_response
-        return {"status": resp.status_code, "headers": dict(resp.headers), "body": resp.text}
+            resp = raw.http_response
+            return {"status": resp.status_code, "headers": dict(resp.headers), "body": resp.text}
+        body = dict(req.get("body") or {})
+        model = body.pop("model", None)
+        messages = body.pop("messages", [])
+        # Everything else goes through as-is, so no SDK version can reject a field. The answer is
+        # read as it comes: one that is a stream after all is read up to its end (read_stream)
+        with client.chat.completions.with_streaming_response.create(model=model, messages=messages, extra_body=body or None) as raw:
+            resp = raw.http_response
+            if resp.status_code < 400 and is_event_stream(resp.headers.get("content-type")):
+                text = read_stream(resp.iter_lines(), timeout, lambda: hang_up(resp))
+            else:
+                text = resp.read().decode(resp.encoding or "utf-8", "replace")
+            return {"status": resp.status_code, "headers": dict(resp.headers), "body": text}
     except openai.APIStatusError as e:
         resp = e.response
         return {"status": resp.status_code, "headers": dict(resp.headers), "body": resp.text}
@@ -177,11 +249,11 @@ def via_httpx(req):
     proxy = req.get("proxy") or None
     data = json.dumps(req["body"]).encode("utf-8") if req.get("body") is not None else None
     with httpx.Client(proxy=proxy, timeout=timeout, follow_redirects=False) as c:
-        if not streaming_body(req):
-            resp = c.request(req.get("method", "GET"), req["url"], headers=headers_for(req), content=data)
-            return {"status": resp.status_code, "headers": dict(resp.headers), "body": resp.text}
         with c.stream(req.get("method", "GET"), req["url"], headers=headers_for(req), content=data) as resp:
-            body = read_stream(resp.iter_lines(), timeout) if resp.status_code < 400 else resp.read().decode("utf-8", "replace")
+            if resp.status_code < 400 and (streaming_body(req) or is_event_stream(resp.headers.get("content-type"))):
+                body = read_stream(resp.iter_lines(), timeout, lambda: hang_up(resp))
+            else:
+                body = resp.read().decode(resp.encoding or "utf-8", "replace")
             return {"status": resp.status_code, "headers": dict(resp.headers), "body": body}
 
 
@@ -218,7 +290,10 @@ def via_urllib(req):
         r.set_proxy(host + (":" + str(p.port) if p.port else ""), p.scheme or "http")
     try:
         with opener.open(r, timeout=timeout) as resp:
-            body = read_stream(resp, timeout) if streaming_body(req) else resp.read().decode("utf-8", "replace")
+            if streaming_body(req) or is_event_stream(resp.headers.get("Content-Type")):
+                body = read_stream(resp, timeout, lambda: hang_up(resp))
+            else:
+                body = resp.read().decode("utf-8", "replace")
             return {"status": resp.status, "headers": dict(resp.headers.items()), "body": body}
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace") if e.fp else ""
