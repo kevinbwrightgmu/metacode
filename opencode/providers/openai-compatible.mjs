@@ -60,6 +60,10 @@ const TRANSPORTS = ['auto', 'python', 'node'];
 // How the gateway is asked: max_tokens (as MetaCode always sent it), and an answer
 // without a finish_reason (some gateways end with [DONE] only) is complete
 const COMPATIBILITY = { maxTokensField: 'max_tokens', requireFinishReason: false };
+// A request the client asked for as a whole answer goes to the gateway as one too (stream:false,
+// a plain JSON answer, as MetaCode always sent them before): it doesn't depend on how the gateway
+// ends a stream (some keep a finished one open) or on how many streams it runs at once
+const PLAIN_COMPATIBILITY = Object.assign({}, COMPATIBILITY, { streamUsage: false });
 
 // Model ids end up in MetaCode's model pickers, so only plain ids are accepted
 // (letters, digits and . _ - : / @ +), never markup.
@@ -400,6 +404,7 @@ export function createProvider(opts) {
   let modelsFile = { result: null, mtimeMs: null, checkedAt: 0, loads: 0, file: null };
   let python = makePython();
   let client = null;                       // { ai, capture, active, retired }
+  let streamsOnly = new Set();             // models that answered a plain request empty, but streamed answers
   let dispatcher = null;                   // { agent } for raw requests (the live model list)
 
   function makePython() {
@@ -685,18 +690,22 @@ export function createProvider(opts) {
     throw Object.assign(new Error('Python: ' + redact(r.message || r.failed, secrets(), 200)), { code: r.code || 'ECONNRESET' });
   }
 
-  const languageModel = (baseURL, apiKey, modelId) =>
-    LanguageModel.update(OpenAICompatible.configure({ baseURL, apiKey, provider: id }).model(modelId), { compatibility: COMPATIBILITY });
+  const languageModel = (baseURL, apiKey, modelId, plain) =>
+    LanguageModel.update(OpenAICompatible.configure({ baseURL, apiKey, provider: id }).model(modelId), { compatibility: plain ? PLAIN_COMPATIBILITY : COMPATIBILITY });
 
   // One try with one key. Waits for the first event, so the upstream status and headers
   // are known: → {ok: true, it, first, headers} or {ok: false, err, status, headers}.
+  // A request for a whole answer is sent as one (stream:false; through the Python worker when it's
+  // used), unless the model only answers streamed (o.forceStream, then from Node.js)
   async function attempt(c, key, baseURL, input, entry, o) {
     const tag = crypto.randomUUID();
-    const headers = Object.assign({}, settings.headers, { accept: 'text/event-stream' }, c.capture.tag(tag));
-    if (!o.stream && python) headers[TRANSPORT_HEADER] = settings.transport + ' ' + o.timeoutMs;
+    const plain = !o.stream && !o.forceStream;
+    const headers = Object.assign({}, settings.headers, { accept: plain ? 'application/json' : 'text/event-stream' }, c.capture.tag(tag));
+    if (plain && python) headers[TRANSPORT_HEADER] = settings.transport + ' ' + o.timeoutMs;
     const http = Object.assign({}, input.http, { headers, headerTimeout: o.timeoutMs, chunkTimeout: o.timeoutMs });
+    if (plain) http.body = Object.assign({}, http.body, { stream: false });
     if (!o.stream) http.timeout = o.timeoutMs;
-    const it = c.ai.llm.stream(Object.assign({}, input, { model: languageModel(baseURL, key, entry.model), http }), { signal: o.signal })[Symbol.asyncIterator]();
+    const it = c.ai.llm.stream(Object.assign({}, input, { model: languageModel(baseURL, key, entry.model, plain), http }), { signal: o.signal })[Symbol.asyncIterator]();
     try {
       const first = await it.next();
       const seen = c.capture.take(tag);
@@ -722,7 +731,7 @@ export function createProvider(opts) {
     const signal = o.signal;
     const timeoutMs = Number.isFinite(o.timeoutMs) && o.timeoutMs > 0 ? Math.round(o.timeoutMs) : DEFAULT_TIMEOUT_MS;
     const stream = o.stream !== undefined ? !!o.stream : !!body.stream;
-    const run = { signal, timeoutMs, stream };
+    const run = { signal, timeoutMs, stream, forceStream: !stream && streamsOnly.has(entry.model) };
     if (closed) throw new ServiceError(503, 'not_configured', name + ' is shutting down.', { provider: id, model: entry.id });
     if (settings.problem) throw notConfigured(entry.id);
     let input;
@@ -752,6 +761,18 @@ export function createProvider(opts) {
         if (signal && signal.aborted) throw describe(r.err, entry, signal);
         const se = describe(r.err, entry, signal);
         const detail = r.err && r.err.reason ? providerMessage(r.err.reason.body, secrets()) : '';
+        // An empty or unreadable answer to a plain request: some gateway models only answer streamed —
+        // asked again that way, from Node.js (and so from now on, for this model)
+        if (!stream && !run.forceStream && se.type === 'malformed_response' && (se.code === 'empty_reply' || se.code === 'unreadable')) {
+          const r2 = await attempt(c, key, baseURL, input, entry, Object.assign({}, run, { forceStream: true }));
+          recordQuota(key, readQuotaHeaders(r2.headers), Date.now());
+          if (!r2.ok) throw describe(r2.err, entry, signal);
+          if (!streamsOnly.has(entry.model)) log.info('model.streamed_only', { provider: id, model: entry.model });
+          streamsOnly.add(entry.model);
+          markKeyUsed(key);
+          opened = r2;
+          break;
+        }
         // no credit left on this key (402): like a used-up budget, the next key is tried
         if (r.status === 402) { onQuotaExhausted(key, quota, r.headers, now, 402); limited = true; continue; }
         if (r.status === 429) {
@@ -1139,6 +1160,7 @@ export function createProvider(opts) {
     for (const w of settings.warnings) log.warn('provider.warning', { provider: id, warning: w });
     keyState = new Map();
     rotationCursor = 0;
+    streamsOnly = new Set();
     modelList = { ids: null, fetchedAt: 0, failure: null, failedAt: 0, pending: null, logged: null };
     modelsFile = { result: null, mtimeMs: null, checkedAt: 0, loads: 0, file: null };
     retire(client);

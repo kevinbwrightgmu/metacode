@@ -330,6 +330,16 @@ const AICoder = (() => {
     const system = buildSystemPrompt();
     let parallel = App.getParallel();
     let done = 0, coded = 0, failed = 0, lastError = '', serverFailed = 0, serverProblems = false, gaveUp = false, limitHit = '';
+    // No answer for a while (a slow, busy or overloaded model): the status line says so, so the run doesn't look stuck
+    let lastAnswer = Date.now();
+    const waitTicker = setInterval(() => {
+      const quiet = Math.round((Date.now() - lastAnswer) / 1000);
+      const el = document.getElementById('status-msg');
+      if (!running || quiet < 30 || !el) return;
+      const base = el.textContent.split(WAIT_NOTE)[0];
+      updateStatus(base + WAIT_NOTE + (quiet < 120 ? quiet + ' s' : Math.floor(quiet / 60) + ' min ' + (quiet % 60) + ' s') +
+        ' — the model may be slow or busy; MetaCode keeps waiting (Stop ends the run).', false);
+    }, 5000);
     const substitutes = {};      // model → posts it coded because the chosen model was rate-limited or failing
     const anyModel = keepGoing();
     let randomPicks = false;     // ("keep going": a model picked at random took over)
@@ -340,19 +350,24 @@ const AICoder = (() => {
       const byId = new Map(pending.map(p => [p.id, p]));
       const retry = [], settled = new Set();      // settled: coded, or failed for good, in this round
       // Posts that failed because of the AI service: give it a little time first
-      if (round && serverFailed && !(await countdown(round === 1 ? 15 : 30, pending.length))) break;
+      if (round && serverFailed) {
+        lastAnswer = Date.now() + (round === 1 ? 15 : 30) * 1000;      // (the countdown says what's happening meanwhile)
+        if (!(await countdown(round === 1 ? 15 : 30, pending.length))) break;
+      }
       serverFailed = 0;
       updateStatus('Coding ' + pending.length + ' post' + (pending.length !== 1 ? 's' : '') + ' with ' + parallel + ' cop' + (parallel !== 1 ? 'ies' : 'y') + ' of the model at once' + (round ? ' (retry ' + round + ')' : '') + '…');
       try {
         const out = await App.callClaudeBatch(pending.map(p => ({ id: p.id, system, messages: [{ role: 'user', content: buildUserMessage(p) }], max_tokens: 1000 })), {
           feature: 'coding', parallel, delay: App.getState().settings.delay || 0, signal: abort.signal, anyModel,
           onNotice(n) {
+            lastAnswer = Date.now();
             const code = (String(n.message || '').match(/HTTP \d{3}/) || [])[0];
             console.warn('[AICoder] ' + n.message);
             updateStatus('The AI service had a server problem' + (code ? ' (' + code + ')' : n.type === 'network' ? ' (the connection dropped)' : '') +
               ' — pausing ' + n.waitSeconds + ' s, then coding ' + n.parallel + ' at once. ' + coded + ' of ' + toCode.length + ' coded so far…', true);
           },
           onResult(r) {
+            lastAnswer = Date.now();
             const post = byId.get(r.id);
             if (!post) return;
             let codings = null, problem = '';
@@ -395,6 +410,7 @@ const AICoder = (() => {
     }
     if (!stopFlag) { failed += pending.length; done += pending.length; }
 
+    clearInterval(waitTicker);
     running = false; abort = null;
     toggleRunButton(false);
     refreshTable();
@@ -548,6 +564,7 @@ const AICoder = (() => {
     if (pctEl) pctEl.textContent  = pct + '%';
   }
 
+  const WAIT_NOTE = ' — no answer from the AI service for ';
   function updateStatus(msg, isError) {
     const el = document.getElementById('status-msg');
     if (!el) return;
