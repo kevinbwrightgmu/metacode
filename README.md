@@ -498,6 +498,7 @@ Configuration lives only in the server's `.env` file, which MetaCode and the AI 
 | `AI_FALLBACK_TO_FREE_MODELS` | no | `on` lets a free model answer for one that isn't free when switching. Off by default: a paid model (for example the gateway's, when its budget is used up) is never answered by a free one |
 | `AI_MAX_PARALLEL` | no | The most copies of the model AI Coding may run at once (default 16, max 64); users choose up to this |
 | `AI_BATCH_PAUSE_SECONDS` | no | How long AI Coding first pauses when the AI service answers with a server error (default 5; doubles with each pause, up to 60) |
+| `AI_KEEPALIVE_SECONDS` | no | The longest a streamed AI response (an AI Coding run, a Lab answer) stays silent while the model works: MetaCode sends a blank line or an SSE comment that every reader skips, so a proxy in front (Cloudflare, nginx) doesn't close it (default 15, 1–60) |
 | `AI_TIMEOUT_MS` | no | How long to wait for an AI answer (default 120000 ms). Older name: `EMIS_TIMEOUT_MS` |
 | `OPENCODE_SERVICE_URL`, `OPENCODE_SERVICE_PORT`, `OPENCODE_SERVICE_MANAGED`, … | no | Where the AI service runs and who starts it (default: `127.0.0.1:4097`, started by MetaCode unless pm2 runs it). `OPENCODE_SERVICE_URL=off` switches MetaCode's AI off. See [docs/opencode-service.md](docs/opencode-service.md#4-settings) |
 

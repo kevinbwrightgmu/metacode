@@ -17,6 +17,7 @@ const { createSurveys } = require('./surveys');
 const { createAccounts } = require('./accounts');
 const { createProjects } = require('./projects');
 const { rankSimilar, renamedModel, sameModel, canonicalId, splitModel } = require('./model-match');
+const { keepAlive } = require('./lib/keepalive');
 const { createStatusMonitor, statusRoutes } = require('./status-page');
 
 const app = express();
@@ -1667,6 +1668,8 @@ async function relayStream(res, attempt, model) {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
   res.on('error', () => {});      // a browser that vanished mid-write must not crash the server
+  // (an SSE comment while the model works without sending: a proxy in front would close a silent response)
+  const alive = keepAlive(res, ': keep-alive\n\n');
 
   const reader = attempt.response.body.getReader();
   const decoder = new TextDecoder();
@@ -1697,6 +1700,7 @@ async function relayStream(res, attempt, model) {
     }
     if (Array.isArray(chunk.choices) && chunk.choices.some(c => c && c.finish_reason)) finishSeen = true;
     const written = await writeSse(res, 'data: ' + JSON.stringify(chunk) + '\n\n');
+    alive.touch();
     forwarded++;
     return written ? null : { gone: true };
   };
@@ -1728,6 +1732,7 @@ async function relayStream(res, attempt, model) {
     }
   } finally {
     attempt.finish();
+    alive.stop();
   }
 
   if (outcome && outcome.gone) {
@@ -2017,7 +2022,9 @@ async function aiBatchRoute(req, res) {
   res.status(200).set({ 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
   res.flushHeaders();
   const client = watchClient(res);
-  const send = obj => { if (!res.writableEnded && !client.signal.aborted) res.write(JSON.stringify(obj) + '\n'); };
+  // (a blank line while no post has finished for a while: a proxy in front would close a silent response)
+  const alive = keepAlive(res, '\n');
+  const send = obj => { if (!res.writableEnded && !client.signal.aborted) { res.write(JSON.stringify(obj) + '\n'); alive.touch(); } };
   const wait = ms => new Promise(resolve => { const t = setTimeout(resolve, ms); client.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true }); });
 
   // The plan's posts left this week (accounts/): the rest of the batch isn't sent
@@ -2104,6 +2111,7 @@ async function aiBatchRoute(req, res) {
     await Promise.all(Array.from({ length: parallel }, (_, i) => worker(i)));
     send({ done: true, parallel: ceiling });
   } finally {
+    alive.stop();
     if (req.settleAi) req.settleAi(successes);     // only answered posts count against the plan
     client.release();
     if (!res.writableEnded) res.end();

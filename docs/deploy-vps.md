@@ -456,6 +456,13 @@ Run `npm run collector:install && npm run collector:build` in `~/metacode`, then
 Install Python 3 (step 3), or point `SCRAPER_PYTHON` at it, then `pm2 reload metacode`. For the AI, see the next
 entry and Settings → AI connection.
 
+**AI Coding stops with "network error" (`net::ERR_INCOMPLETE_CHUNKED_ENCODING` in the browser console)**
+A proxy closed the run's response because nothing arrived for a while: Cloudflare after about 100 s, nginx after
+`proxy_read_timeout` (60 s unless set; [step 6](#6-nginx-and-https) sets 3600 s). MetaCode sends a blank line at
+least every 15 s (`AI_KEEPALIVE_SECONDS`) while posts are being coded, so update (`git pull && npm install`, then
+`pm2 startOrReload ecosystem.config.cjs --update-env`). If every post says it timed out, see
+[opencode-service.md](opencode-service.md#9-troubleshooting).
+
 **"MetaCode's AI service (OpenCode) isn't running at 127.0.0.1:4097…"**
 `pm2 status` should list `metacode-opencode` as online. If it's missing, `pm2 start ecosystem.config.cjs && pm2 save`.
 If it keeps restarting, `pm2 logs metacode-opencode --lines 50` says why: missing packages (`npm install`, then

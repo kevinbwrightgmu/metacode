@@ -209,9 +209,10 @@ An OpenAI-compatible gateway (`https://emis.zxs-is-very.cool/v1`), shown as
   from Python (`python/emis_fetch.py`) and falls back to Node.js without
   Python; `python` always uses Python; `node` never does. Streamed requests
   always go from Node.js. The worker asks for a streamed answer and reads it
-  whole, with `httpx` when it's installed (it comes with the `openai` package
-  in `requirements.txt`), else Python's own `urllib`; the `openai` package
-  itself is only used for the model list. The config's `options.headers` are
+  up to its `data: [DONE]` line (not until the gateway closes the connection,
+  which it may keep open), with `httpx` when it's installed (it comes with the
+  `openai` package in `requirements.txt`), else Python's own `urllib`; the
+  `openai` package itself is only used for the model list. The config's `options.headers` are
   sent from Python too, and the worker doesn't get MetaCode's `OPENAI_*`
   variables (the `openai` package would send some of them as headers).
   `EMIS_PYTHON` (or `SCRAPER_PYTHON`) sets the Python command.
@@ -307,6 +308,7 @@ All in MetaCode's `.env` ([.env.example](../.env.example)).
 | `AI_FALLBACK_TO_FREE_MODELS` | `on` lets a free model answer for one that isn't free when switching; default `off` |
 | `AI_TIMEOUT_MS` | How long one AI request may take, 1000–600000 ms, default 120000 (older name: `EMIS_TIMEOUT_MS`) |
 | `AI_MAX_PARALLEL`, `AI_BATCH_PAUSE_SECONDS` | AI Coding's copies at once and its pause after server errors (unchanged) |
+| `AI_KEEPALIVE_SECONDS` | The longest a streamed AI response stays silent: MetaCode sends a blank line (AI Coding's NDJSON) or an SSE comment (streams, Lab answers) while the model works, so a proxy in front doesn't close it; default 15, 1–60 |
 
 ## 5. The config file
 
@@ -554,6 +556,17 @@ once its requests have finished, and answers with the status.
 - Request bodies are limited to 32 MB.
 
 ## 9. Troubleshooting
+
+**AI Coding stops with "network error" (the browser console says `net::ERR_INCOMPLETE_CHUNKED_ENCODING`), or every post "timed out"**
+The response was closed before it was complete. Two causes, both handled now:
+a proxy in front of MetaCode closing a response that sent nothing for a while
+(Cloudflare after about 100 s, nginx after `proxy_read_timeout`): MetaCode
+sends a blank line at least every `AI_KEEPALIVE_SECONDS` (15) while posts are
+being coded; and the gateway keeping a finished stream open, which made the
+Python worker wait for the time limit on every non-streamed request (it now
+stops at `data: [DONE]`). After updating, run `npm install` and reload both
+apps. If posts still time out, Settings → AI providers says which provider,
+and `pm2 logs metacode-opencode --lines 50` shows its answers.
 
 **"MetaCode's AI service (OpenCode) isn't running at 127.0.0.1:4097…"**
 Under pm2: `pm2 status` should list `metacode-opencode` as online; if it's

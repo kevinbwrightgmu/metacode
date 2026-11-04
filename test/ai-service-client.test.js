@@ -106,7 +106,7 @@ const baseEnv = () => testEnv({
   ACCOUNT_DATA_DIR: path.join(tmp, 'a'), SURVEY_DATA_DIR: path.join(tmp, 's'), PROJECT_DATA_DIR: path.join(tmp, 'p'), AI_LAB_DATA_DIR: path.join(tmp, 'l'), COLLAB_DATA_DIR: path.join(tmp, 'c')
 });
 const VARIABLES = ['OPENCODE_SERVICE_URL', 'OPENCODE_SERVICE_PORT', 'OPENCODE_SERVICE_TOKEN', 'OPENCODE_SERVICE_MANAGED', 'OPENCODE_MODEL', 'EMIS_MODEL', 'AI_MODEL_SWITCH',
-  'AI_FALLBACK_TO_FREE_MODELS', 'AI_BATCH_PAUSE_SECONDS', 'AI_TIMEOUT_MS'];
+  'AI_FALLBACK_TO_FREE_MODELS', 'AI_BATCH_PAUSE_SECONDS', 'AI_TIMEOUT_MS', 'AI_KEEPALIVE_SECONDS'];
 
 test.before(async () => {
   main = standIn(0);
@@ -441,6 +441,68 @@ test('started beside its AI service (pm2 starts both at once): MetaCode waits fo
 });
 
 // ── The AI Coding Lab's price list ────────────────────────────────────────────
+
+// ── Long answers behind a proxy ───────────────────────────────────────────────
+// A proxy in front of MetaCode that closes a response once it has sent nothing for `idleMs`
+// (Cloudflare does after about 100 s, nginx after its proxy_read_timeout): the browser then
+// reports net::ERR_INCOMPLETE_CHUNKED_ENCODING and the batch fails with "network error".
+async function silentProxy(idleMs) {
+  const s = http.createServer((req, res) => {
+    const up = http.request(base + req.url, { method: req.method, headers: req.headers }, ur => {
+      res.writeHead(ur.statusCode, ur.headers);
+      let timer = null;
+      const idle = () => { clearTimeout(timer); timer = setTimeout(() => { res.destroy(); ur.destroy(); }, idleMs); };
+      idle();
+      ur.on('data', c => { idle(); res.write(c); });
+      ur.on('end', () => { clearTimeout(timer); res.end(); });
+      ur.on('error', () => { clearTimeout(timer); res.destroy(); });
+    });
+    up.on('error', () => res.destroy());
+    req.pipe(up);
+  });
+  await new Promise(r => s.listen(0, '127.0.0.1', r));
+  return { url: 'http://127.0.0.1:' + s.address().port, close: () => new Promise(r => { s.closeAllConnections(); s.close(r); }) };
+}
+// The whole body as the browser gets it through the proxy, or how it broke off
+async function through(proxy, p, body) {
+  const r = await fetch(proxy.url + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  try { return { status: r.status, text: await r.text() }; } catch (e) { return { status: r.status, broken: String(e && e.cause ? e.cause.code || e.cause.message : e) }; }
+}
+
+test('a batch whose first answers take longer than a proxy waits: MetaCode keeps the response open with a blank line every AI_KEEPALIVE_SECONDS', { timeout: 30000 }, async () => {
+  await configure({ AI_KEEPALIVE_SECONDS: '1' }, () => {
+    svc.chat = (body, send) => { setTimeout(() => send(200, completion(body.model, 'coded')), 3500); return true; };
+  });
+  const proxy = await silentProxy(2000);
+  try {
+    const r = await through(proxy, '/api/ai/batch', { requests: [1, 2, 3].map(i => ({ id: 'p' + i, body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post ' + i }] } })), parallel: 3 });
+    assert.equal(r.broken, undefined, 'the proxy closed the batch: ' + r.broken);
+    const lines = r.text.split('\n');
+    const results = lines.filter(l => l.trim()).map(l => JSON.parse(l));
+    assert.deepEqual(results.filter(x => x.id).map(x => [x.id, x.ok, x.data.choices[0].message.content]).sort(), [['p1', true, 'coded'], ['p2', true, 'coded'], ['p3', true, 'coded']]);
+    assert.ok(results.some(x => x.done), 'the batch finished');
+    assert.ok(lines.indexOf('') >= 0 && lines.indexOf('') < lines.findIndex(l => l.includes('"p')), 'blank lines came while nothing was answered yet');
+  } finally { await proxy.close(); }
+});
+
+test('a streamed answer whose first part takes longer than a proxy waits: MetaCode sends SSE comments meanwhile', { timeout: 30000 }, async () => {
+  await configure({ AI_KEEPALIVE_SECONDS: '1' }, () => {
+    svc.chat = (body, send, res) => {
+      // (like the service: the status line once it has waited a while, then nothing until the first part)
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.flushHeaders();
+      setTimeout(() => res.end('data: ' + JSON.stringify({ model: body.model, choices: [{ index: 0, delta: { content: 'thought it over' }, finish_reason: 'stop' }] }) + '\n\ndata: [DONE]\n\n'), 3500);
+      return true;
+    };
+  });
+  const proxy = await silentProxy(2000);
+  try {
+    const r = await through(proxy, '/api/ai', { model: 'gw/gpt-5.5', stream: true, messages: [{ role: 'user', content: 'think first' }] });
+    assert.equal(r.broken, undefined, 'the proxy closed the stream: ' + r.broken);
+    assert.match(r.text, /^: keep-alive$/m);
+    assert.match(r.text, /thought it over[\s\S]*data: \[DONE\]/);
+  } finally { await proxy.close(); }
+});
 
 test('price lists from before model ids named their provider ("metacode:<id>") still price the gateway\'s models, never another provider\'s', () => {
   const file = path.join(tmp, 'pricing.json');
