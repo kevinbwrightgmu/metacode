@@ -201,6 +201,70 @@ test('a free model never answers for one that isn\'t free (its provider may use 
   assert.match(r.headers.get('x-metacode-model-fallback'), /^zen\/(glm-5\.3-flash-free|big-pickle)$/);
 });
 
+test('AI Coding\'s "keep going" (anyModel): when the model runs out, a model of any provider picked at random codes the rest of the run — one pick while it lasts, then another; never a free one for a paid one; nothing with AI_MODEL_SWITCH=off', { timeout: 60000 }, async () => {
+  const gatewayOut = (body, send) => {
+    if (!/^gw\//.test(body.model)) return false;
+    send(429, { error: { type: 'quota_exceeded', scope: 'provider', provider: 'gw', retry_after_seconds: 3600, message: 'Test gateway\'s usage quota is used up.' } }, { 'Retry-After': '3600' });
+    return true;
+  };
+  const posts = (n, model) => Array.from({ length: n }, (_, i) => ({ id: 'p' + (i + 1), body: { model: model || 'gw/glm-5.3-flash', messages: [{ role: 'user', content: 'post ' + (i + 1) }] } }));
+  const batch = async (extra, requests) => {
+    const r = await request('POST', '/api/ai/batch', Object.assign({ parallel: 1, requests: requests || posts(6), switchModels: false }, extra));
+    assert.equal(r.status, 200, r.text);
+    return r.text.trim().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(l => l.id);
+  };
+  const PAID_ELSEWHERE = ['zen/claude-opus-5.5', 'zen/claude-sonnet-4-5'];
+
+  // Without the option (and switching off in the browser): the run stops at the used-up quota
+  await configure({}, () => { svc.chat = gatewayOut; });
+  let lines = await batch({});
+  assert.deepEqual(lines.map(l => (l.ok ? 'ok' : l.error.type)), Array(6).fill('quota_exceeded'));
+
+  // With it: every post is coded, all by one paid model of the other provider, picked at random
+  await configure({}, () => { svc.chat = gatewayOut; });
+  lines = await batch({ anyModel: true });
+  assert.deepEqual(lines.map(l => l.ok), Array(6).fill(true), JSON.stringify(lines));
+  const used = [...new Set(lines.map(l => l.fallback))];
+  assert.equal(used.length, 1, 'one pick for the run: ' + used);
+  assert.ok(PAID_ELSEWHERE.includes(used[0]), 'a paid model, not a free one: ' + used[0]);
+  assert.ok(lines.every(l => l.fallbackPick === 'random' && l.requested === 'gw/glm-5.3-flash' && l.fallbackReason === 'rate_limited'), JSON.stringify(lines[0]));
+  assert.equal(svc.seen.filter(m => /^gw\//.test(m)).length, 1, 'the used-up gateway was asked once (then it rests)');
+
+  // The pick runs out too: the other paid model takes over, and the run goes on
+  await configure({}, () => {
+    let first = null;
+    svc.chat = (body, send) => {
+      if (gatewayOut(body, send)) return true;
+      if (!first) first = body.model;
+      if (body.model !== first || svc.seen.filter(m => m === first).length < 3) return false;
+      send(429, { error: { type: 'quota_exceeded', scope: 'model', provider: 'zen', model: body.model, retry_after_seconds: 3600, message: 'This model\'s spend limit is reached.' } });
+      return true;
+    };
+  });
+  lines = await batch({ anyModel: true });
+  assert.deepEqual(lines.map(l => l.ok), Array(6).fill(true), JSON.stringify(lines));
+  assert.deepEqual([...new Set(lines.map(l => l.fallback))].sort(), PAID_ELSEWHERE.slice().sort(), 'the second paid model took over');
+
+  // A model that keeps failing at its provider (server errors) is left too — even one picked in Settings
+  await configure({}, () => {
+    svc.chat = (body, send) => {
+      if (body.model !== 'gw/gpt-5.5') return false;
+      send(502, { error: { type: 'upstream_error', upstream_status: 503, provider: 'gw', model: body.model, message: 'Test gateway couldn\'t run the model (HTTP 503).' } });
+      return true;
+    };
+  });
+  lines = await batch({ anyModel: true }, posts(2, 'gw/gpt-5.5'));
+  assert.deepEqual(lines.map(l => [l.ok, l.fallbackPick, l.fallbackReason]), [[true, 'random', 'failed'], [true, 'random', 'failed']], JSON.stringify(lines));
+  assert.notEqual(lines[0].fallback, 'gw/gpt-5.5');
+  assert.ok(!MODELS.find(m => m.id === lines[0].fallback).free, 'not a free model');
+
+  // The operator turned switching off: the option changes nothing
+  await configure({ AI_MODEL_SWITCH: 'off' }, () => { svc.chat = gatewayOut; });
+  lines = await batch({ anyModel: true });
+  assert.deepEqual(lines.map(l => (l.ok ? 'ok' : l.error.type)), Array(6).fill('quota_exceeded'));
+  assert.deepEqual(svc.seen.filter(m => /^zen\//.test(m)), [], 'nothing went to another provider');
+});
+
 test('a usage limit of one model (quota_exceeded with scope "model") rests that model, not its provider', async () => {
   await configure({});
   svc.chat = (body, send) => {

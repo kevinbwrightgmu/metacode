@@ -112,6 +112,18 @@ use paid models or the gateway, and set `OPENCODE_DISABLE_FREE_MODELS=1`
   model can answer for a free one. `AI_FALLBACK_TO_FREE_MODELS=on` in `.env`
   lets free models answer for paid ones too; Settings → AI connection then
   says so.
+- **AI Coding: "Keep going if the model runs out"** (a checkbox next to **Run
+  AI Coding**, off by default, for big runs). When the run's model runs out —
+  its usage limit or its provider's budget is used up, it's rate-limited — or
+  it stops answering (server errors, not offered), a model picked **at
+  random** from every model the AI service offers right now (any provider)
+  codes the rest of the run, even when you picked the model yourself and even
+  with switching turned off in Settings. The run keeps that pick while it can,
+  and picks another one at random when it runs out too (up to eight models per
+  post). The same rules apply as above: no free model for a paid one unless
+  `AI_FALLBACK_TO_FREE_MODELS=on`, nothing from a provider that is resting or
+  failing, and nothing at all with `AI_MODEL_SWITCH=off`. A note says which
+  model took over, and the run's summary how many posts each model coded.
 
 ## Models by status
 

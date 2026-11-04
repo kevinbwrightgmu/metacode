@@ -7,6 +7,8 @@
 //   - its advice after a used-up usage limit offers another provider only when one can answer
 //   - Settings → AI connection says when every ready provider is resting, and when free models may
 //     answer for paid ones (AI_FALLBACK_TO_FREE_MODELS=on)
+//   - AI Coding's "Keep going if the model runs out": saved, sent with the run; a model picked at
+//     random codes the posts when the chosen one's provider has run out, and the run says so
 // Skipped when no Chromium is available (set CHROMIUM_PATH to point at one).
 const test = require('node:test');
 const assert = require('node:assert/strict');
@@ -80,7 +82,9 @@ test.before(async () => {
         return send(res, 429, { error: { type: 'quota_exceeded', scope: 'provider', provider, window: 'day', retry_after_seconds: 3600, reset_at: new Date(Date.now() + 3600 * 1000).toISOString(),
           message: PROVIDERS.find(p => p.id === provider).name + '\'s usage limit for this day is used up. It resets in an hour.' } }, { 'Retry-After': '3600' });
       }
-      send(res, 200, { id: 'x', object: 'chat.completion', model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: 'ok from ' + j.model }, finish_reason: 'stop' }] });
+      // (AI Coding's test posts get codings back)
+      const coding = (j.messages || []).some(m => m.role === 'user' && /KEEP-GOING-TEST/.test(String(m.content)));
+      send(res, 200, { id: 'x', object: 'chat.completion', model: j.model, choices: [{ index: 0, message: { role: 'assistant', content: coding ? '{"codings":{"d1":"pos"}}' : 'ok from ' + j.model }, finish_reason: 'stop' }] });
     });
   });
   await new Promise(r => aiService.listen(0, '127.0.0.1', r));
@@ -221,4 +225,33 @@ test('after a used-up usage limit the assistant offers another provider only whe
     assert.equal(await page.textContent('#s-ai-badge'), 'Resting');
     assert.deepEqual(page.errors, []);
   } finally { await page.close(); }
+});
+
+test('AI Coding: "Keep going if the model runs out" is saved and sent with the run; when the chosen model\'s provider has run out, a model picked at random codes the posts and the run says so', { skip, timeout: 60000 }, async () => {
+  svc.gwReady = true;
+  await fetch(base + '/api/settings/reload', { method: 'POST' });
+  const page = await openApp({ models: { coding: 'gw/limit-model' } });
+  try {
+    await page.evaluate(() => {
+      App.setState({ project: { name: 'Keep going', description: '' }, codebook: [{ id: 'd1', name: 'Stance', description: '', codes: [{ id: 'pos', label: 'Positive', description: '' }] }],
+        posts: Array.from({ length: 4 }, (_, i) => ({ id: 'k' + i, text: 'KEEP-GOING-TEST post ' + i, humanCodes: {}, aiCodes: {} })) });
+      App.navigate('ai-coding');
+    });
+    await page.waitForSelector('#ai-keepgoing');
+    assert.equal(await page.isChecked('#ai-keepgoing'), false, 'off unless asked for');
+    await page.check('#ai-keepgoing');
+    assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('strata_v1')).settings.keepGoing), true, 'saved with the settings');
+    const sent = [];
+    page.on('request', r => { if (r.url().endsWith('/api/ai/batch')) sent.push(JSON.parse(r.postData())); });
+    await page.click('#run-btn');
+    await page.waitForFunction(() => /Done|Nothing was coded|Stopped/.test(document.getElementById('status-msg').textContent), null, { timeout: 30000 });
+    assert.equal(sent.length && sent[0].anyModel, true, 'the run asked for it');
+    assert.match(await page.textContent('#status-msg'), /✓ Done — 4 posts coded\. 4 of them by “Claude Opus 5\.5[^”]*” — picked at random from the available models while the chosen one had run out/);
+    assert.match(await page.textContent('#notif-stack'), /“Limit Model[^”]*” has run out for now .*“Claude Opus 5\.5[^”]*”, picked at random from the available models, is coding instead/);
+    assert.equal(await page.evaluate(() => App.getState().posts.filter(p => p.aiCodes && p.aiCodes.d1 === 'pos').length), 4);
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.close();
+    await fetch(base + '/api/settings/reload', { method: 'POST' });   // (the providers' rests start over)
+  }
 });

@@ -79,6 +79,10 @@ const AICoder = (() => {
               '<input class="form-input" id="ai-parallel" type="number" min="1" max="' + App.maxParallel() + '" step="1" value="' + App.getParallel() + '" onchange="AICoder.setParallel(this.value)">' +
               '<span>at once</span>' +
             '</label>' +
+            '<label class="ai-keepgoing" for="ai-keepgoing" title="' + keepGoingTitle() + '">' +
+              '<input type="checkbox" id="ai-keepgoing"' + (keepGoing() ? ' checked' : '') + (switchingOff() ? ' disabled' : '') + ' onchange="AICoder.setKeepGoing(this.checked)">' +
+              '<span>Keep going if the model runs out</span>' +
+            '</label>' +
             '<button class="btn btn-violet" id="run-btn" onclick="AICoder.run()">' +
               '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>' +
               ' Run AI Coding' +
@@ -327,6 +331,8 @@ const AICoder = (() => {
     let parallel = App.getParallel();
     let done = 0, coded = 0, failed = 0, lastError = '', serverFailed = 0, serverProblems = false, gaveUp = false, limitHit = '';
     const substitutes = {};      // model → posts it coded because the chosen model was rate-limited or failing
+    const anyModel = keepGoing();
+    let randomPicks = false;     // ("keep going": a model picked at random took over)
     let pending = toCode.slice();
     updateProgress(0, toCode.length);
 
@@ -339,7 +345,7 @@ const AICoder = (() => {
       updateStatus('Coding ' + pending.length + ' post' + (pending.length !== 1 ? 's' : '') + ' with ' + parallel + ' cop' + (parallel !== 1 ? 'ies' : 'y') + ' of the model at once' + (round ? ' (retry ' + round + ')' : '') + '…');
       try {
         const out = await App.callClaudeBatch(pending.map(p => ({ id: p.id, system, messages: [{ role: 'user', content: buildUserMessage(p) }], max_tokens: 1000 })), {
-          feature: 'coding', parallel, delay: App.getState().settings.delay || 0, signal: abort.signal,
+          feature: 'coding', parallel, delay: App.getState().settings.delay || 0, signal: abort.signal, anyModel,
           onNotice(n) {
             const code = (String(n.message || '').match(/HTTP \d{3}/) || [])[0];
             console.warn('[AICoder] ' + n.message);
@@ -356,7 +362,7 @@ const AICoder = (() => {
               const updated = App.getState().posts.map(p => p.id === post.id ? Object.assign({}, p, { aiCodes: codings }) : p);
               App.setState({ posts: updated });
               coded++; done++; settled.add(post.id);
-              if (r.model) substitutes[r.model] = (substitutes[r.model] || 0) + 1;
+              if (r.model) { substitutes[r.model] = (substitutes[r.model] || 0) + 1; if (r.pick === 'random') randomPicks = true; }
               scheduleRefresh();
             } else {
               lastError = problem;
@@ -399,7 +405,8 @@ const AICoder = (() => {
     updateProgress(done, toCode.length);
 
     const subs = Object.keys(substitutes);
-    const subMsg = subs.length ? ' ' + subs.map(m => substitutes[m] + ' of them by “' + App.modelName(m) + '”').join(', ') + ' — the closest model, used while the chosen one was rate-limited or unavailable.' : '';
+    const subMsg = subs.length ? ' ' + subs.map(m => substitutes[m] + ' of them by “' + App.modelName(m) + '”').join(', ') +
+      (randomPicks ? ' — picked at random from the available models while the chosen one had run out or wasn\'t working.' : ' — the closest model, used while the chosen one was rate-limited or unavailable.') : '';
     const doneMsg = (stopFlag
       ? 'Stopped after ' + coded + ' posts.'
       : (coded || !failed ? '✓ Done — ' : 'Nothing was coded — ') + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError.replace(/\.$/, '') + ')' : '') : '') + '.' +
@@ -433,6 +440,22 @@ const AICoder = (() => {
     const el = document.getElementById('ai-parallel');
     if (el) el.value = n;
     if (running) App.notify('The new number applies to the next run', 'info');
+  }
+
+  // "Keep going if the model runs out" (for big runs): when the model's usage limit runs out, it's
+  // rate-limited or it stops answering, a model picked at random from the ones the AI service offers
+  // (any provider) codes the rest of the run. Saved with the settings, like "at once".
+  const switchingOff = () => { const s = App.getServerStatus && App.getServerStatus(); return !!(s && s.ai && s.ai.modelSwitch === false); };
+  const keepGoing = () => App.getState().settings.keepGoing === true && !switchingOff();
+  function keepGoingTitle() {
+    return switchingOff() ? 'Switching to another model is turned off on this server.'
+      : 'For big runs: when the model runs out (its usage limit, a rate limit) or stops answering, a model picked at random from the ones ' +
+        'your AI providers offer takes over and codes the rest of the run, as long as it can. Free models only take over from a free one, ' +
+        'unless the server allows it. The run\'s summary says which models coded how many posts.';
+  }
+  function setKeepGoing(on) {
+    App.setState({ settings: Object.assign({}, App.getState().settings, { keepGoing: !!on }) });
+    if (running) App.notify('This applies to the next run', 'info');
   }
 
   /* ── Single-post coding ──────────────────────*/
@@ -536,5 +559,5 @@ const AICoder = (() => {
 
   /* ── Public API ──────────────────────────────*/
   return { render, run, stop, codeOne, clearOne, clearAll, showReasoning,
-           setFilter, prevPage, nextPage, setParallel };
+           setFilter, prevPage, nextPage, setParallel, setKeepGoing };
 })();
