@@ -265,6 +265,29 @@ test('AI Coding\'s "keep going" (anyModel): when the model runs out, a model of 
   assert.deepEqual(svc.seen.filter(m => /^zen\//.test(m)), [], 'nothing went to another provider');
 });
 
+test('a provider paused for hours: a batch doesn\'t wait it out in 30-second steps (each post fails at once), and the message says what could answer meanwhile', { timeout: 60000 }, async () => {
+  const paused = (body, send) => {
+    if (!/^gw\//.test(body.model)) return false;
+    send(429, { error: { type: 'rate_limited', scope: 'provider', provider: 'gw', retry_after_seconds: 79200,
+      message: 'Test gateway asked MetaCode to pause (it said: "Daily request budget used up"). Try again in about 22 hours.' } }, { 'Retry-After': '79200' });
+    return true;
+  };
+  await configure({}, () => { svc.chat = paused; });
+  const t0 = Date.now();
+  const b = await request('POST', '/api/ai/batch', { parallel: 1, switchModels: false, requests: [1, 2, 3, 4, 5].map(i => ({ id: 'p' + i, body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post ' + i }] } })) });
+  const lines = b.text.trim().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(l => l.id);
+  assert.ok(Date.now() - t0 < 8000, 'no 30-second waits (' + (Date.now() - t0) + ' ms)');
+  assert.deepEqual(lines.map(l => (l.ok ? 'ok' : l.error.type)), Array(5).fill('rate_limited'), b.text);
+  assert.match(lines[0].error.message, /Try again in about 22 hours\. Models of another AI provider can answer meanwhile: pick one in Settings → AI models, or turn on "Keep going if the model runs out" next to Run AI Coding\./);
+  assert.equal(svc.seen.filter(m => /^gw\//.test(m)).length, 1, 'the paused gateway was asked once');
+
+  // Only free models elsewhere (switching on): the message says how they could stand in
+  await configure({}, () => { svc.chat = paused; svc.models = MODELS.filter(m => !/^zen\//.test(m.id) || m.free); });
+  const r = await ask('gw/gpt-5.5');
+  assert.equal(r.status, 429, r.text);
+  assert.match(r.json.error.message, /Free models of another AI provider can answer meanwhile: pick one in Settings → AI models \(marked "· free"\), or let them stand in for paid ones with AI_FALLBACK_TO_FREE_MODELS=on/);
+});
+
 test('a usage limit of one model (quota_exceeded with scope "model") rests that model, not its provider', async () => {
   await configure({});
   svc.chat = (body, send) => {

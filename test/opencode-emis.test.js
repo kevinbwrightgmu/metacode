@@ -37,8 +37,11 @@ const python = ['python3', 'python'].some(cmd => { try { return spawnSync(cmd, [
 const LISTED = ['prompts-only', 'budget-said', 'gemini-3.8-flash', 'gemini-3.7-flash', 'slow', 'picture', 'picture-only', 'other-1',
   'forbidden-model', 'blocked-model', 'budget-model', 'busy-a', 'busy-b', 'busy-c', 'limited-model', 'sse-model', 'json-model', 'eos-model',
   'unicode-model', 'missing-model', 'error200-model', 'claude-opus-5.5', 'dall-e-3', 'text-embedding-3-large',
-  'streams-unless-told', 'stream-only-model', 'empty-unless-stream', 'think-model', 'redirect-model', 'echo-header', 'cut-short', 'finish-only', 'held-open', 'finish-held'];
-const state = { calls: [], seen: [], modelsMode: 'ok', models: LISTED, listCalls: 0, remaining: 100, websiteListNotFound: false, cutShort: 0 };
+  'streams-unless-told', 'stream-only-model', 'empty-unless-stream', 'think-model', 'redirect-model', 'echo-header', 'cut-short', 'finish-only', 'held-open', 'finish-held',
+  'paused-long', 'seps-sse', 'hang-up-wait', 'drop-before-headers', 'drop-mid-body', 'finish-data-pings'];
+const state = { calls: [], seen: [], modelsMode: 'ok', models: LISTED, listCalls: 0, remaining: 100, websiteListNotFound: false, cutShort: 0, waits: [] };
+// An answer's text with characters a JSON string may hold as they are (JSON.stringify doesn't escape them)
+const SEPARATORS = 'first\u2028second\u2029third\u0085fourth';
 const reset = seconds => String(Math.floor(Date.now() / 1000) + seconds);
 const chunk = (model, delta, finish) => JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', model, choices: [Object.assign({ index: 0, delta }, finish ? { finish_reason: finish } : {})] });
 
@@ -81,6 +84,9 @@ function startEmis() {
         case 'prompts-only':
           return send(200, { 'X-RateLimit-Window': 'week', 'X-RateLimit-Limit-Prompts': '100', 'X-RateLimit-Remaining-Prompts': '99', 'X-RateLimit-Limit-Tokens': '0', 'X-RateLimit-Remaining-Tokens': '0', 'X-RateLimit-Reset': reset(3600) }, answer('ok'));
         // The budget ran out, which the message says before the headers do
+        // the key may not be used for most of a day, said only in words and a Retry-After (no quota headers)
+        case 'paused-long':
+          return send(429, { 'Retry-After': '79200' }, '{"error":{"message":"Daily request budget used up for this key"}}');
         case 'budget-said':
           return send(429, { 'X-RateLimit-Window': 'day', 'X-RateLimit-Limit-Tokens': '5000', 'X-RateLimit-Remaining-Tokens': '400', 'X-RateLimit-Reset': reset(3600) }, '{"error":{"message":"Token budget exceeded for this window"}}');
         // One model limited by its provider, in the provider's words, while the key has plenty of budget left
@@ -143,12 +149,34 @@ function startEmis() {
         }
         // always a stream (even when asked for a whole answer): the answer, its finish_reason and usage —
         // no [DONE] — then the connection stays open (keep-alive comments) until the caller closes it
-        case 'finish-held': {
+        // (finish-data-pings: the same, its keep-alives data lines with nothing in them)
+        case 'finish-held':
+        case 'finish-data-pings': {
           res.writeHead(200, Object.assign({ 'Content-Type': 'text/event-stream' }, quota));
           res.write('data: ' + chunk(j.model, { role: 'assistant', content: 'finished, never closed' }) + '\n\ndata: ' + chunk(j.model, {}, 'stop') + '\n\n' +
             'data: ' + JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', model: j.model, choices: [], usage: { prompt_tokens: 6, completion_tokens: 4, total_tokens: 10 } }) + '\n\n');
-          const ping = setInterval(() => { if (!res.destroyed) res.write(': ping\n\n'); }, 300);
+          const keepAlive = j.model === 'finish-data-pings' ? 'data: {"choices":[]}\n\ndata: {"type":"ping"}\n\n' : ': ping\n\n';
+          const ping = setInterval(() => { if (!res.destroyed) res.write(keepAlive); }, 300);
           return res.on('close', () => clearInterval(ping));
+        }
+        // always a stream, whose text holds U+2028, U+2029 and U+0085 as they are
+        case 'seps-sse':
+          res.writeHead(200, Object.assign({ 'Content-Type': 'text/event-stream' }, quota));
+          return res.end('data: ' + chunk(j.model, { role: 'assistant', content: SEPARATORS }) + '\n\ndata: ' + chunk(j.model, {}, 'stop') + '\n\ndata: [DONE]\n\n');
+        // no answer for a long while: when the caller hangs up is noted
+        case 'hang-up-wait': {
+          const w = { at: Date.now(), closedAt: null };
+          state.waits.push(w);
+          const late = setTimeout(() => send(200, quota, answer('far too late')), 20000);
+          return res.on('close', () => { clearTimeout(late); w.closedAt = Date.now(); });
+        }
+        // the connection breaks once the request is in: before any answer, or halfway through one
+        case 'drop-before-headers': return req.socket.destroy();
+        case 'drop-mid-body': {
+          const text = answer('this answer never ends');
+          res.writeHead(200, Object.assign({ 'Content-Type': 'application/json', 'Content-Length': String(text.length) }, quota));
+          res.write(text.slice(0, 30));
+          return setTimeout(() => req.socket.destroy(), 100);
         }
         case 'sse-model':                                                                           // streams even when not asked
           res.writeHead(200, Object.assign({ 'Content-Type': 'text/event-stream' }, quota));
@@ -350,6 +378,22 @@ test('a 429 that says the budget is spent rests the key until the reset, even if
   });
 });
 
+test('a key paused for most of a day (a Retry-After of 22 hours, said in words): the pause says what the gateway said, also on the key in the status', async () => {
+  await withProvider({}, async p => {
+    const err = await failure(p, 'paused-long');
+    assert.deepEqual([err.status, err.type, err.scope], [429, 'rate_limited', 'provider']);
+    assert.match(err.message, /^AI gateway asked MetaCode to pause \(it said: "Daily request budget used up for this key"\)\. Try again in about 22 hours/);
+    assert.ok(err.retryAfterSeconds > 79000, String(err.retryAfterSeconds));
+    assert.equal(key0(p).status, 'cooling_down');
+    assert.equal(key0(p).said, 'Daily request budget used up for this key');
+    state.calls.length = 0;
+    assert.match((await failure(p, 'other-1')).message, /it said: "Daily request budget used up for this key"/, 'every model, without calling the gateway');
+    assert.deepEqual(state.calls, []);
+    await p.reload();
+    assert.equal(key0(p).said, undefined, 'Reload .env forgets it');
+  });
+});
+
 test('a 429 for one model whose provider says "exhausted … quota" while the key has budget left: that model is rate-limited (scope model), not the key', async () => {
   await withProvider({}, async p => {
     state.calls.length = 0;
@@ -389,7 +433,7 @@ test('a used-up key budget rests the key (scope provider, no other model tried);
     assert.deepEqual([err.type, err.scope], ['rate_limited', 'model']);
     err = await failure(p, 'busy-c');
     assert.deepEqual([err.status, err.type, err.scope], [429, 'rate_limited', 'provider'], 'the key is paused: the provider asked to pause');
-    assert.match(err.message, /AI gateway asked MetaCode to pause\. Try again in \d+ seconds?/);
+    assert.match(err.message, /AI gateway asked MetaCode to pause \(it said: "slow down"\)\. Try again in \d+ seconds?/, 'with what it said');
     assert.equal(err.retryAfterSeconds, 1);
     assert.deepEqual(state.calls, ['busy-a', 'busy-b', 'busy-c']);
     assert.equal(p.status().resting.reason, 'paused');
@@ -647,20 +691,73 @@ test('a gateway that keeps the connection open after [DONE]: the answer is used 
   }
 });
 
-test('a gateway that streams (even when asked for a whole answer), sends its finish_reason but no [DONE] and keeps the connection open: the answer is used ~2 s after it finished, through Node.js and through Python', { timeout: 90000 }, async () => {
+test('a gateway that streams (even when asked for a whole answer), sends its finish_reason but no [DONE] and keeps the connection open (pinging with comments or empty data lines): the answer is used ~2 s after it finished, through Node.js and through Python', { timeout: 120000 }, async () => {
+  for (const transport of ['node'].concat(python ? ['auto', 'python'] : [])) {
+    await withProvider({ env: { EMIS_TRANSPORT: transport } }, async p => {
+      await p.models();
+      for (const model of ['finish-held', 'finish-data-pings']) {
+        for (const stream of [false, true]) {
+          const t0 = Date.now();
+          const done = await ask(p, model, {}, { timeoutMs: 15000, stream });
+          const ms = Date.now() - t0;
+          assert.equal(done.choices[0].message.content, 'finished, never closed', transport);
+          assert.deepEqual(done.usage, { prompt_tokens: 6, completion_tokens: 4, total_tokens: 10 }, transport + ': the usage after the finish still counts');
+          assert.ok(ms < 6000, transport + ' ' + model + (stream ? ' (streamed)' : '') + ': answered in ' + ms + ' ms, not at the time limit');
+        }
+      }
+    });
+  }
+});
+
+test('an answer whose text holds U+2028, U+2029 or U+0085 (legal in JSON as they are) comes through whole, through Node.js and through Python', { timeout: 60000 }, async () => {
   for (const transport of ['node'].concat(python ? ['auto', 'python'] : [])) {
     await withProvider({ env: { EMIS_TRANSPORT: transport } }, async p => {
       await p.models();
       for (const stream of [false, true]) {
-        const t0 = Date.now();
-        const done = await ask(p, 'finish-held', {}, { timeoutMs: 15000, stream });
-        const ms = Date.now() - t0;
-        assert.equal(done.choices[0].message.content, 'finished, never closed', transport);
-        assert.deepEqual(done.usage, { prompt_tokens: 6, completion_tokens: 4, total_tokens: 10 }, transport + ': the usage after the finish still counts');
-        assert.ok(ms < 6000, transport + (stream ? ' (streamed)' : '') + ': answered in ' + ms + ' ms, not at the time limit');
+        const done = await ask(p, 'seps-sse', {}, { stream });
+        assert.equal(done.choices[0].message.content, SEPARATORS, transport + (stream ? ' (streamed)' : ''));
       }
     });
   }
+});
+
+test('Python: a request whose caller goes away (Stop) or whose time is up is cancelled in the worker too — the gateway sees its connection close at once, not when it would have answered', { skip: !python && 'no Python', timeout: 60000 }, async () => {
+  for (const transport of ['auto', 'python']) {
+    await withProvider({ env: { EMIS_TRANSPORT: transport } }, async p => {
+      await p.models();
+      state.waits.length = 0;
+      const ac = new AbortController();
+      setTimeout(() => ac.abort(), 400);
+      const gone = await failure(p, 'hang-up-wait', {}, { signal: ac.signal });
+      assert.equal(gone.type, 'cancelled', transport);
+      const stoppedAt = Date.now();
+      for (let i = 0; i < 40 && !(state.waits[0] && state.waits[0].closedAt); i++) await sleep(50);
+      assert.equal(state.waits.length, 1, transport + ': asked once');
+      assert.ok(state.waits[0].closedAt && state.waits[0].closedAt - stoppedAt < 1500, transport + ': the gateway saw the connection close ' + (state.waits[0].closedAt ? (state.waits[0].closedAt - stoppedAt) + ' ms after Stop' : 'never'));
+
+      state.waits.length = 0;
+      const t0 = Date.now();
+      const late = await failure(p, 'hang-up-wait', {}, { timeoutMs: 700 });
+      assert.deepEqual([late.status, late.type], [504, 'timeout'], transport);
+      for (let i = 0; i < 60 && !(state.waits[0] && state.waits[0].closedAt); i++) await sleep(50);
+      assert.ok(state.waits[0].closedAt && state.waits[0].closedAt - t0 < 3000, transport + ': closed ' + (state.waits[0].closedAt ? (state.waits[0].closedAt - t0) + ' ms in' : 'never') + ' (time limit 700 ms)');
+      assert.equal(state.waits.length, 1, transport + ': not sent again from Node.js');
+    });
+  }
+});
+
+test('auto: a connection that breaks once the request is in (before the answer, or halfway through it) isn\'t sent again from Node.js in what is left of the time — it fails as a dropped connection, which MetaCode tries again', { skip: !python && 'no Python', timeout: 60000 }, async () => {
+  await withProvider({ env: { EMIS_TRANSPORT: 'auto' } }, async p => {
+    await p.models();
+    for (const model of ['drop-before-headers', 'drop-mid-body']) {
+      state.calls.length = 0;
+      const err = await failure(p, model);
+      assert.deepEqual([err.status, err.type], [502, 'network'], model + ': ' + err.message);
+      assert.match(err.code || '', /^(ECONNRESET|EPIPE|UND_ERR_SOCKET)$/, model);
+      assert.match(err.message, /dropped|broke/, model);
+      assert.deepEqual(state.calls, [model], model + ': the gateway got it once');
+    }
+  });
 });
 
 // ── The /v1 fix, the proxy, the Python transport ──────────────────────────────

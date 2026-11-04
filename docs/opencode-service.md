@@ -186,8 +186,11 @@ An OpenAI-compatible gateway (`https://emis.zxs-is-very.cool/v1`), shown as
   429 that applies to the whole key (budget used up, or the key paused) moves
   on to the next key; a 429 for one model rate-limits that model. When every
   key is resting, the service answers at once, without calling the gateway,
-  that the quota is used up (or that the gateway asked to pause) and when that
-  ends.
+  that the quota is used up (or that the gateway asked to pause, with what it
+  said — e.g. *"AI gateway asked MetaCode to pause (it said: "Daily request
+  budget used up"). Try again in about 22 hours"*) and when that ends; the
+  key's row in Settings → AI providers shows the same words on its *Resting*
+  badge.
 - **Address.** `EMIS_BASE_URL` (default above): http(s), no user name or
   password in it; Settings warns when it doesn't end in `/v1` or uses plain
   http. When a web page answers at an address without `/v1`, the service tries
@@ -206,19 +209,27 @@ An OpenAI-compatible gateway (`https://emis.zxs-is-very.cool/v1`), shown as
   models file is in use, the gateway's warnings say *"Couldn't check which
   models AI gateway offers right now (…)"* with the reason.
 - **Transport.** `EMIS_TRANSPORT`: `auto` (default) sends non-streamed requests
-  from Python (`python/emis_fetch.py`) and falls back to Node.js without
-  Python; `python` always uses Python; `node` never does. Streamed requests
-  always go from Node.js. A request for a whole answer (AI Coding, Ask
-  MetaCode, Import Data…) goes to the gateway as one (`stream: false`, a plain
-  JSON answer — as MetaCode always sent them), with the `openai` package from
-  `requirements.txt` when it's installed, else `httpx`, else Python's own
-  `urllib`; a model that answers such a request empty is asked again streamed
-  (and from then on). A stream is read up to its `data: [DONE]` line, or ends
-  2 s after its `finish_reason` — never "until the gateway closes the
-  connection", which it may keep open. The config's `options.headers` are
-  sent from Python too, and the worker doesn't get MetaCode's `OPENAI_*`
-  variables (the `openai` package would send some of them as headers).
-  `EMIS_PYTHON` (or `SCRAPER_PYTHON`) sets the Python command.
+  from Python (`python/emis_fetch.py`) and from Node.js when Python isn't
+  there or couldn't send the request (no connection); `python` always uses
+  Python; `node` never does. Streamed requests always go from Node.js. A
+  request for a whole answer (AI Coding, Ask MetaCode, Import Data…) goes to
+  the gateway as one (`stream: false`, a plain JSON answer — as MetaCode always
+  sent them), with the `openai` package from `requirements.txt` when it's
+  installed (with its own HTTP library: `httpx2` from openai 3.x on, `httpx`
+  before), else `httpx`, else Python's own `urllib`; a model that answers such
+  a request empty is asked again streamed (and from then on). A stream is read
+  up to its `data: [DONE]` line, or ends 2 s after its `finish_reason` (pings,
+  as comments or empty data lines, don't extend that) — never "until the
+  gateway closes the connection", which it may keep open. A request whose
+  caller goes away (Stop, a closed tab) or whose time is up is cancelled in the
+  worker too: its connection to the gateway is closed at once. When the
+  connection breaks after the request went out, it isn't sent again from
+  Node.js (the gateway has it, and would count it twice): it fails as a dropped
+  connection, which MetaCode tries again with a fresh time limit. The config's
+  `options.headers` are sent from Python too, and the worker doesn't get
+  MetaCode's `OPENAI_*` variables (the `openai` package would send some of
+  them as headers). `EMIS_PYTHON` (or `SCRAPER_PYTHON`) sets the Python
+  command.
 - **Proxy.** `EMIS_PROXY` for the gateway only; otherwise `HTTPS_PROXY` /
   `HTTP_PROXY` / `NO_PROXY`, like Zen.
 
@@ -468,7 +479,8 @@ default model answers.
   finish reason is a failure too (`malformed_response`, code `incomplete`),
   not a finished answer.
 - Successful answers carry `X-OpenCode-Provider` and `X-OpenCode-Model`.
-- When the caller goes away, the request to the provider is cancelled.
+- When the caller goes away, the request to the provider is cancelled (also
+  one the Python worker is sending).
 
 Errors are `{"error":{"message","type","code"?,"provider"?,"model"?,"scope"?,"upstream_status"?,"retry_after_seconds"?,"reset_at"?,"window"?}}`
 with a `Retry-After` header when `retry_after_seconds` is set. Messages are
@@ -560,6 +572,22 @@ once its requests have finished, and answers with the status.
 
 ## 9. Troubleshooting
 
+**AI Coding fails each post with "AI gateway asked MetaCode to pause (it said: …). Try again in about 22 hours"**
+The gateway refused the key (HTTP 429) and asked for a pause that long, usually
+because the key's budget for the day is used up — requests count when they are
+sent, also ones whose answers never arrived (earlier stuck runs). MetaCode
+doesn't send the key anything until then: an AI Coding run fails its posts at
+once with that message (it doesn't wait out pauses longer than a minute), and
+says what could answer meanwhile. Options: pick a model of another provider for
+AI Coding in Settings → AI models; or tick **Keep going if the model runs out**
+next to Run AI Coding (a model of another provider takes over — a free one
+only with `AI_FALLBACK_TO_FREE_MODELS=on`, since free models' providers may use
+the prompts); add another gateway key to `EMIS_API_KEY` (comma-separated) or
+`OPENCODE_API_KEY` for Zen's paid models; or wait. **Reload .env** in Settings
+forgets the pause and asks the gateway once more. `pm2 logs metacode-opencode
+--lines 80` has a `key.resting` line with the gateway's status, `Retry-After`
+and words.
+
 **AI Coding stops with "network error" (the browser console says `net::ERR_INCOMPLETE_CHUNKED_ENCODING`), or every post "timed out"**
 The response was closed before it was complete. Two causes, both handled now:
 a proxy in front of MetaCode closing a response that sent nothing for a while
@@ -567,7 +595,11 @@ a proxy in front of MetaCode closing a response that sent nothing for a while
 sends a blank line at least every `AI_KEEPALIVE_SECONDS` (15) while posts are
 being coded; and the gateway keeping a finished stream open, which made the
 Python worker wait for the time limit on every non-streamed request (it now
-stops at `data: [DONE]`). After updating, run `npm install` and reload both
+stops at `data: [DONE]`, or 2 s after the answer's `finish_reason`). A single
+post's **Code this** waits for the whole answer without sending anything
+meanwhile: behind Cloudflare, an answer that takes more than about 100 s ends
+with *"The web server in front of MetaCode stopped waiting for the model's
+answer (HTTP 524…)"* — use **Run AI Coding** for slow models. After updating, run `npm install` and reload both
 apps. If posts still time out, Settings → AI providers says which provider,
 and `pm2 logs metacode-opencode --lines 50` shows its answers.
 

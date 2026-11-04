@@ -473,8 +473,8 @@ function serviceTrouble(now, provider) {
 // The models that may answer for `target` right now: not tried yet, a chat model, not resting or
 // failing, its provider neither resting nor failing as a whole, offered, able to take the request —
 // and not a free model when `target` isn't one (free models' providers may use the prompts), unless
-// AI_FALLBACK_TO_FREE_MODELS=on. → { list, base, triedAlready(id), candidates } or null
-async function switchCandidates(target, chatRequest, tried) {
+// AI_FALLBACK_TO_FREE_MODELS=on (or allowFree). → { list, base, triedAlready(id), candidates } or null
+async function switchCandidates(target, chatRequest, tried, allowFree) {
   const list = await getModelList(false);
   if (!list.ok) return null;
   const now = Date.now();
@@ -483,7 +483,7 @@ async function switchCandidates(target, chatRequest, tried) {
   // (a model with a reasoning variant, "…#high", is that model here)
   const base = splitVariant(target).base;
   const done = new Set(Array.from(tried, t => splitVariant(t).base));
-  const freeOk = AI.freeFallback || isFree(base);
+  const freeOk = allowFree || AI.freeFallback || isFree(base);
   const candidates = list.ids.filter(id => !done.has(id) && (freeOk || !isFree(id)) && !NOT_A_CHAT_MODEL.test(splitModel(id).model) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
     !providerRestingUntil(providerOf(id), now) && !serviceTrouble(now, providerOf(id)) && !(infoOf(id) && infoOf(id).available === false) && !capabilityProblem(chatRequest, infoOf(id)));
   // The same model under another spelling of its id (claude-opus-4-8 / claude-opus-4.8) as one
@@ -507,6 +507,22 @@ async function anyModel(target, chatRequest, tried, current) {
   const fresh = c.candidates.filter(id => !c.triedAlready(id));
   const pool = fresh.length ? fresh : c.candidates;
   return pool[Math.floor(Math.random() * pool.length)];
+}
+
+// A model whose provider rests for a long while, and nothing took over: what could answer meanwhile
+// (a sentence for the message, or '' when switching would have found it)
+async function standInHint(target, chatRequest, prep) {
+  const paid = await switchCandidates(target, chatRequest, new Set([target]));
+  if (paid && paid.candidates.length) {
+    return prep.switchModels ? '' : 'Models of another AI provider can answer meanwhile: pick one in Settings → AI models' +
+      (prep.inBatch ? ', or turn on "Keep going if the model runs out" next to Run AI Coding' : '') + '.';
+  }
+  const free = await switchCandidates(target, chatRequest, new Set([target]), true);
+  if (free && free.candidates.length) {
+    return 'Free models of another AI provider can answer meanwhile: pick one in Settings → AI models (marked "· free"), or let them stand in ' +
+      'for paid ones with AI_FALLBACK_TO_FREE_MODELS=on in the server\'s .env (their providers may use the prompts to improve their models).';
+  }
+  return 'No other AI provider can answer right now.';
 }
 
 const switchesLogged = new Map();
@@ -1869,7 +1885,8 @@ async function prepareChat(body, formatName, opts) {
     switchModels: switchingAllowed() && (!!(opts && opts.anyModel) || !(opts && opts.switchModels === false)),
     pickedFallback: !(opts && opts.pickedFallback === false) || !!(opts && opts.anyModel),
     anyModel: switchingAllowed() && !!(opts && opts.anyModel),
-    pick: (opts && opts.pick) || null                                  // { to }: the run's current random pick (anyModel)
+    pick: (opts && opts.pick) || null,                                 // { to }: the run's current random pick (anyModel)
+    inBatch: !!(opts && opts.inBatch)                                  // (AI Coding: its messages can point at its own options)
   };
 }
 
@@ -1968,6 +1985,11 @@ async function answerChat(prep, signal) {
         ' right now: it answered with a server error (' + code + ') each time MetaCode tried. This is on the AI provider\'s side and usually passes; try again in a moment.'
     });
   }
+  // A provider resting for long (a used-up budget, a pause of hours) and nothing took over: say what could
+  if (!result.ok && isProviderLimit(result) && !fallback && (result.retryAfterSeconds || 0) > 600) {
+    const hint = await standInHint(ctx.model, chatRequest, prep);
+    if (hint) result = Object.assign({}, result, { message: result.message.replace(/\.?$/, '.') + ' ' + hint });
+  }
   if (!result.ok && explicit && fallbackType(result) && result.type !== 'malformed_response' && !result.serviceTrouble) {
     result = Object.assign({}, result, { message: result.message.replace(/\.?$/, '.') + ' This happened with the model "' + modelName(ctx.model) +
       '" you picked — choose another one in Settings → AI models (or "Server default").' });
@@ -2028,6 +2050,8 @@ app.post('/api/ai', accounts.aiSingle, async (req, res) => {
 // answer, the rest of the batch fails with type 'service_unavailable'
 // instead of being sent.
 const AI_BATCH_MAX_REQUESTS = 2000;
+// The longest rate-limit wait a batch waits out before trying a post again (longer: the post fails with the message)
+const BATCH_RETRY_WAIT_MAX_SECONDS = 60;
 // The first pause after a server error in a batch (AI_BATCH_PAUSE_SECONDS, default 5); it doubles up to 60 s.
 function aiBatchPauseSeconds() {
   const n = parseFloat(process.env.AI_BATCH_PAUSE_SECONDS);
@@ -2079,14 +2103,17 @@ async function aiBatchRoute(req, res) {
     if (gaveUp) return send({ id: item.id, ok: false, status: 503, error: { message: gaveUp, type: 'service_unavailable' } });
     let out;
     try {
-      const prep = await prepareChat(item.body, 'openai', { switchModels, pickedFallback: false, anyModel, pick });
+      const prep = await prepareChat(item.body, 'openai', { switchModels, pickedFallback: false, anyModel, pick, inBatch: true });
       out = prep.failure ? { failure: prep.failure } : await answerChat(prep, client.signal);
     } catch (err) {
       console.error('[ai] Unexpected error in /api/ai/batch: ' + redact(err && err.message));
       out = { failure: fail(500, 'internal_error', 'Something went wrong in MetaCode\'s AI service.') };
     }
     if (out.aborted) return;
-    if (out.failure && out.failure.status === 429 && (out.failure.type === 'rate_limited' || out.failure.type === 'model_rate_limited') && item.tries < 3) {
+    // (a wait longer than a minute — a provider paused for hours, a used-up budget — isn't waited out
+    // in 30-second steps: the post fails at once with what the provider said)
+    if (out.failure && out.failure.status === 429 && (out.failure.type === 'rate_limited' || out.failure.type === 'model_rate_limited') && item.tries < 3 &&
+      !(out.failure.retryAfterSeconds > BATCH_RETRY_WAIT_MAX_SECONDS)) {
       // The AI service asked us to slow down: fewer copies at once, a short pause, then this one again
       item.tries++;
       if (parallel > 1) { parallel = Math.max(1, Math.floor(parallel / 2)); console.warn('[ai] Rate-limited during a batch; running ' + parallel + ' at once now.'); }
@@ -2244,6 +2271,7 @@ function publicProvider(p) {
     const entry = { masked, status: ['available', 'cooling_down', 'invalid'].includes(k.status) ? k.status : 'available',
       cooldownSecondsLeft: num(k.cooldownSecondsLeft) || 0, requestCount: num(k.requestCount) || 0 };
     if (quota(k.quota)) entry.quota = quota(k.quota);
+    if (entry.status === 'cooling_down' && text(k.said, 160)) entry.said = text(k.said, 160);    // (why: the provider's own words)
     return entry;
   };
   const models = p.models && typeof p.models === 'object' ? p.models : null;

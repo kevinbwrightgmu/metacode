@@ -943,7 +943,7 @@ const App = (() => {
     const statusBadge = k.status === 'available'
       ? '<span class="badge badge-green">Available</span>'
       : k.status === 'cooling_down'
-        ? '<span class="badge badge-amber" title="' + esc(new Date(back).toLocaleString()) + '">Resting ' + (left < 120 ? left + 's' : 'until ' + esc(whenText(back))) + '</span>'
+        ? '<span class="badge badge-amber" title="' + esc(new Date(back).toLocaleString() + (k.said ? ' — the provider said: ' + k.said : '')) + '">Resting ' + (left < 120 ? left + 's' : 'until ' + esc(whenText(back))) + '</span>'
         : '<span class="badge badge-red">Rejected by the provider</span>';
     // The budget is prompts and/or tokens: show whichever the provider reports (0 of 0: the key has no budget of that kind)
     const q = k.quota && typeof k.quota === 'object' ? k.quota : {};
@@ -1000,10 +1000,13 @@ const App = (() => {
     let data = null;
     try { data = await res.json(); } catch (e) { data = null; }
     if (!res.ok) {
-      const msg = (data && data.error && data.error.message) ? data.error.message : res.status === 413 ? TOO_LARGE : ('API error ' + res.status);
+      // (no JSON with a 504 / 524: a web server in front of MetaCode stopped waiting for the answer)
+      const proxyTimeout = !data && (res.status === 504 || res.status === 524);
+      const msg = (data && data.error && data.error.message) ? data.error.message : res.status === 413 ? TOO_LARGE : proxyTimeout ? PROXY_TIMEOUT(res.status) : ('API error ' + res.status);
       const err = new Error(msg);
       err.status = res.status;
       err.type = data && data.error && data.error.type;
+      if (proxyTimeout) err.proxyTimeout = true;
       throw err;
     }
     lastModelUsed = (data && data.model) || model;
@@ -1029,6 +1032,9 @@ const App = (() => {
   // A web server in front of MetaCode (nginx's client_max_body_size) refused a
   // request body as too large: its answer is a web page, not MetaCode's JSON.
   const TOO_LARGE = 'The request is larger than the web server in front of MetaCode accepts (HTTP 413). Whoever runs this server can raise that limit (nginx: client_max_body_size — see docs/deploy-vps.md).';
+  // …or stopped waiting for an answer that took long (one request's answer only comes when it's whole)
+  const PROXY_TIMEOUT = status => 'The web server in front of MetaCode stopped waiting for the model\'s answer (HTTP ' + status + ': Cloudflare waits about 100 seconds, nginx as long as its proxy_read_timeout). ' +
+    'Try again, pick a faster model, or code the posts with Run AI Coding, which keeps the connection open while the model works.';
   // Bytes a request body takes on the wire (UTF-8), not characters
   const bodyBytes = text => new Blob([text]).size;
 
@@ -1295,7 +1301,7 @@ const App = (() => {
   return {
     init, navigate: (v) => navigate(v), setViewCleanup, fetchModels, fetchKeyStatus, reloadEnv, modelFor, AI_FEATURES,
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
-    getState, setState, save, reloadState,
+    getState, setState, save, reloadState, updateSidebarStats,
     callClaude, callClaudeBatch, tooLargeMessage: TOO_LARGE, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus, refreshServerStatus: refreshServerKeyInfo, modelName,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,

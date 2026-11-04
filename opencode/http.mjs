@@ -363,7 +363,7 @@ function chatStream(opts) {
   let ended = false;                  // [DONE], a finish_reason or an error came: the answer has an end
   let done = false;                   // [DONE] came
   let control = null, endTimer = null;
-  let freshData = false;              // a data line came since the end timer started (comments, pings don't count)
+  let freshData = false;              // more of the answer's end (its usage, another finish) came since the end timer started (pings don't count)
   let sawText = false;
   let imageMarked = false;
 
@@ -386,8 +386,9 @@ function chatStream(opts) {
   const fixLine = line => {
     const m = /^data:[ \t]?(.*?)(\r?)$/.exec(line);
     if (!m) return line;
-    freshData = true;
     const payload = m[1].trim();
+    // (a gateway's keep-alive may be a data line too: {"type":"ping"}, {"choices":[]})
+    if (/"usage"\s*:\s*\{|"finish_reason"\s*:\s*"[^"]/.test(payload)) freshData = true;
     if (payload === '[DONE]') { ended = true; done = true; return sawData ? line : shimEvent('empty_reply', 'The provider sent no answer.').trimEnd(); }
     if (!payload.startsWith('{')) return line;
     sawData = true;

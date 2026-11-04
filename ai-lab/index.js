@@ -618,15 +618,23 @@ function createAiLab(opts) {
       else { msg.error = { type: e.type, message: e.message }; ops.errors[e.type] = (ops.errors[e.type] || 0) + 1; }
       if (partial) msg.usage = { promptTokens: built.report.estimatedInputTokens, completionTokens: estimateTokens(partial), measured: false };
     }
-    const fresh = /** @type {Conversation} */ (u.get('conversations', c.id)) || c;
-    if (msg.content || msg.error) fresh.messages.push(msg);
-    if (fresh.title === 'Untitled conversation' && fresh.messages.length) fresh.title = (fresh.messages.find(m => m.role === 'user') || { content: 'Conversation' }).content.replace(/\s+/g, ' ').slice(0, 80);
-    fresh.updatedAt = now();
-    u.put('conversations', fresh);
-    if (msg.error) send('error', msg.error);
-    send('done', { message: msg, title: fresh.title });
-    alive.stop();
-    res.end();
+    try {
+      const fresh = /** @type {Conversation} */ (u.get('conversations', c.id)) || c;
+      if (msg.content || msg.error) fresh.messages.push(msg);
+      if (fresh.title === 'Untitled conversation' && fresh.messages.length) fresh.title = (fresh.messages.find(m => m.role === 'user') || { content: 'Conversation' }).content.replace(/\s+/g, ' ').slice(0, 80);
+      fresh.updatedAt = now();
+      u.put('conversations', fresh);
+      if (msg.error) send('error', msg.error);
+      send('done', { message: msg, title: fresh.title });
+    } catch (err) {
+      // (saving the answer failed, e.g. a full disk: said in the stream, which ends either way — the
+      // keep-alive would otherwise hold it open until the browser gives up)
+      log.error('answer.save', { detail: redact(err && /** @type {Error} */ (err).stack || String(err), 600) });
+      send('error', { type: 'internal_error', message: 'The answer couldn\'t be saved. The server log has details.' });
+    } finally {
+      alive.stop();
+      if (!res.writableEnded) res.end();
+    }
   }
 
   /** @param {any} b */

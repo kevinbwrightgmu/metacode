@@ -458,7 +458,8 @@ export function createProvider(opts) {
 
   // A 429 for the key: its budget is used up (or the gateway asked to pause); a 402 (status 402):
   // no credit left. It rests until X-RateLimit-Reset, else Retry-After, else a short default.
-  function onQuotaExhausted(key, quota, headers, now, status) {
+  // (detail: the gateway's own words, already redacted — shown with the pause, so it's clear why)
+  function onQuotaExhausted(key, quota, headers, now, status, detail) {
     const state = getKeyState(key);
     const resetAt = plausibleResetTime(quota && quota.resetAt, now);
     const waitMs = retryAfterMs(headerOf(headers, 'retry-after'), now);
@@ -467,7 +468,11 @@ export function createProvider(opts) {
     state.cooldownUntil = until;
     state.cooldownReason = resetAt || status === 402 ? 'quota' : 'paused';
     state.lastError = 'HTTP ' + (status || 429);
-    if (!alreadyLogged) log.warn('key.resting', { provider: id, key: keyLabel(key), reason: state.cooldownReason, until: new Date(until).toISOString() });
+    state.lastDetail = detail ? String(detail).slice(0, 160) : null;
+    if (!alreadyLogged) {
+      log.warn('key.resting', { provider: id, key: keyLabel(key), reason: state.cooldownReason, until: new Date(until).toISOString(),
+        status: status || 429, retryAfter: headerOf(headers, 'retry-after') || undefined, said: state.lastDetail || undefined });
+    }
   }
 
   // Several models refused on one key in a short time: the key is being paused.
@@ -511,7 +516,7 @@ export function createProvider(opts) {
     const windowName = next.quota && next.quota.window;
     const usedUp = next.cooldownReason === 'quota';
     let message;
-    if (!usedUp) message = name + ' asked MetaCode to pause. Try again ' + when + '.';
+    if (!usedUp) message = name + ' asked MetaCode to pause' + (next.lastDetail ? ' (it said: "' + next.lastDetail.replace(/\.$/, '') + '")' : '') + '. Try again ' + when + '.';
     else if (settings.keys.length > 1) message = 'Every configured AI key has used up its usage quota. The first one resets ' + when + '.';
     else message = 'Your AI usage quota' + (windowName ? ' for this ' + windowName : '') + ' is used up. It resets ' + when + '.';
     return new ServiceError(429, usedUp ? 'quota_exceeded' : 'rate_limited', message, {
@@ -667,7 +672,9 @@ export function createProvider(opts) {
 
   // A request marked for Python (value "<auto|python> <timeout ms>"), sent by python/emis_fetch.py
   // with its buffered answer; null = send it from Node.js after all (auto: no Python, or it failed
-  // before an answer — but not after a timeout: the gateway has the request, and the time is up)
+  // before the gateway had the request — not after a timeout, the time is up; nor when the connection
+  // broke once the request had gone out: the gateway has it, and sending it again here would spend the
+  // key's budget twice in what is left of the time; the failure goes back, and MetaCode tries again)
   async function viaPython(req) {
     const [mode, ms] = String(req.marker).split(' ');
     const worker = python;
@@ -684,10 +691,11 @@ export function createProvider(opts) {
     }
     if (r && r.failed === 'aborted') throw Object.assign(new Error('The request was cancelled.'), { name: 'AbortError' });
     if (r) log.warn('python.failed', { provider: id, outcome: r.failed, code: r.code, detail: redact(r.message || '', secrets(), 300) });
-    if (mode !== 'python' && !(r && r.failed === 'timeout')) return null;     // auto: the same request from Node.js
+    if (mode !== 'python' && !(r && (r.failed === 'timeout' || (r.failed === 'network' && r.sent)))) return null;     // auto: the same request from Node.js
     if (!r) throw Object.assign(new Error('Python wasn\'t found'), { code: 'NO_PYTHON' });
     if (r.failed === 'timeout') throw Object.assign(new Error('Timed out waiting for the response to complete (Python)'), { code: 'Timeout' });
-    throw Object.assign(new Error('Python: ' + redact(r.message || r.failed, secrets(), 200)), { code: r.code || 'ECONNRESET' });
+    throw Object.assign(new Error('Python: ' + (r.sent ? 'the connection broke after the request went out (' : '') + redact(r.message || r.failed, secrets(), 200) + (r.sent ? ')' : '')),
+      { code: r.code || 'ECONNRESET' });
   }
 
   const languageModel = (baseURL, apiKey, modelId, plain) =>
@@ -774,9 +782,9 @@ export function createProvider(opts) {
           break;
         }
         // no credit left on this key (402): like a used-up budget, the next key is tried
-        if (r.status === 402) { onQuotaExhausted(key, quota, r.headers, now, 402); limited = true; continue; }
+        if (r.status === 402) { onQuotaExhausted(key, quota, r.headers, now, 402, detail); limited = true; continue; }
         if (r.status === 429) {
-          if (keyWideLimit(key, entry.model, quota, now, detail)) { onQuotaExhausted(key, quota, r.headers, now); limited = true; continue; }
+          if (keyWideLimit(key, entry.model, quota, now, detail)) { onQuotaExhausted(key, quota, r.headers, now, 429, detail); limited = true; continue; }
           throw modelLimited(se, entry, detail);                 // this model only: MetaCode rests it
         }
         // a web page or a model this key can't use isn't the key's fault
@@ -1069,6 +1077,7 @@ export function createProvider(opts) {
         requestCount: state.requestCount,
         source: isEmis ? 'env' : 'config'
       };
+      if (isRest && state.lastDetail) entry.said = state.lastDetail;       // (the gateway's own words for the pause)
       if (state.quota) {
         const q = state.quota;
         entry.quota = {

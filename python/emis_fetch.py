@@ -10,11 +10,12 @@ and through Node.js otherwise (streamed answers always go through Node.js).
 
 Chat requests (whole answers: stream:false, as MetaCode always sent them)
 go out with the official `openai` package when it's installed (the client
-EMIS's documentation shows), else `httpx` (installed with openai: pip install
-openai), else Python's standard library (urllib) — no pip install needed. An
-answer that comes as a stream anyway is read up to its "data: [DONE]" line,
-not until the connection closes: a gateway may keep a finished stream open,
-and reading on would wait for the time limit.
+EMIS's documentation shows), else `httpx`, else Python's standard library
+(urllib) — no pip install needed. The openai SDK brings its own HTTP
+library: httpx2 from its 3.x releases, httpx before. An answer that comes as
+a stream anyway is read up to its "data: [DONE]" line, not until the
+connection closes: a gateway may keep a finished stream open, and reading on
+would wait for the time limit.
 Proxies: HTTPS_PROXY / HTTP_PROXY / NO_PROXY are honoured by all three, or
 EMIS_PROXY when given in the request (then for every request, as from Node.js).
 
@@ -24,12 +25,18 @@ Protocol (UTF-8 JSON, one object per line):
             "key": "emis-…", "body": {…} | null, "headers": {…extra headers from the
             provider's config…}, "timeoutMs": 120000, "proxy": ""}
   stdout   {"id": 1, "status": 200, "headers": {...}, "body": "text"}
-       or  {"id": 1, "error": {"kind": "timeout|dns|tls|connection|invalid", "code": "...", "message": "..."}}
+       or  {"id": 1, "error": {"kind": "timeout|dns|tls|connection|client", "code": "...", "message": "...",
+                               "sent": true (the gateway had the whole request when the exchange broke:
+                               sending it again from Node.js would spend the key's budget twice)}}
+  stdin    {"id": 1, "cancel": true}     the caller has gone (Stop, its time is up): the request's
+                                         connection is closed at once and nothing more is sent for it
 The key is used only for the Authorization header of the request it came
 with; it is never printed or logged.
 """
 
 import base64
+import http.client
+import importlib
 import json
 import platform
 import queue
@@ -47,18 +54,34 @@ from concurrent.futures import ThreadPoolExecutor
 USER_AGENT = "MetaCode/1.0 (OpenAI-compatible client; Python %s)" % platform.python_version()
 out_lock = threading.Lock()
 
-try:
-    import openai  # noqa: F401
-    import httpx
-    CLIENT = "openai " + getattr(openai, "__version__", "?")
-except Exception:  # pragma: no cover - depends on what is installed
-    openai = None
+
+def _load_clients():
+    """The openai SDK (or None) and the HTTP library for it and for the other requests: the one
+    that SDK release uses (httpx2 from 3.x on, httpx before), else whichever is installed."""
     try:
-        import httpx
-        CLIENT = "httpx " + getattr(httpx, "__version__", "?")
-    except Exception:
-        httpx = None
-        CLIENT = "urllib"
+        import openai as sdk
+        major = int(str(getattr(sdk, "__version__", "0")).split(".")[0] or 0)
+    except Exception:  # pragma: no cover - depends on what is installed
+        sdk, major = None, 0
+    lib = None
+    for name in (("httpx2", "httpx") if sdk is not None and major >= 3 else ("httpx", "httpx2")):
+        try:
+            lib = importlib.import_module(name)
+            break
+        except Exception:
+            pass
+    if lib is None:
+        sdk = None
+    return sdk, lib
+
+
+openai, httpx = _load_clients()
+if openai is not None:
+    CLIENT = "openai " + getattr(openai, "__version__", "?")
+elif httpx is not None:
+    CLIENT = httpx.__name__ + " " + getattr(httpx, "__version__", "?")
+else:
+    CLIENT = "urllib"
 
 
 def emit(obj):
@@ -102,45 +125,144 @@ def extra_headers(req):
     return {str(k): str(v) for k, v in given.items() if str(k).lower() not in RESERVED}
 
 
-# The line that ends a streamed answer (OpenAI's SSE format), and a chunk that finishes it
+class BadRequest(ValueError):
+    """A request this worker can't send (not a network problem)."""
+
+
+class CutOff(Exception):
+    """The gateway's answer had begun (its status line came) when reading it failed."""
+
+    def __init__(self, inner):
+        Exception.__init__(self, str(inner))
+        self.inner = inner
+
+
+def shut(sock):
+    """Shuts a socket down (not just closes it): a thread blocked reading from it returns at once."""
+    try:
+        # (the plain socket's shutdown, also for a TLS one: SSLSocket.shutdown would unwrap it under
+        # the thread that is reading)
+        socket.socket.shutdown(sock, socket.SHUT_RDWR)
+    except Exception:
+        pass
+
+
+class Job:
+    """One request: when it came, its time limit, and the sockets it opened — shut when its caller
+    goes away (a cancel message) or its time is up, which stops it wherever it is waiting (for
+    the connection, the headers or the rest of the answer)."""
+
+    def __init__(self, rid, timeout):
+        self.id = rid
+        self.timeout = timeout
+        self.deadline = time.monotonic() + timeout
+        self.cancelled = False              # the caller has gone: nothing is sent for this request
+        self.expired = False                # its time was up (it fails as a timeout)
+        self.sent = False                   # the whole request went out (the gateway has it)
+        self._socks = []
+        self._lock = threading.Lock()
+
+    def add(self, sock):
+        if sock is None:
+            return
+        with self._lock:
+            self._socks.append(sock)
+            late = self.cancelled or self.expired
+        if late:
+            shut(sock)
+
+    def hang_up(self):
+        with self._lock:
+            socks = list(self._socks)
+        for s in socks:
+            shut(s)
+
+    def cancel(self):
+        with self._lock:
+            self.cancelled = True
+        self.hang_up()
+
+    def expire(self):
+        with self._lock:
+            self.expired = True
+        self.hang_up()
+
+
+jobs = {}                                   # id → Job, while it runs (or waits for a thread)
+jobs_lock = threading.Lock()
+
+
+def watchdog():
+    """Ends requests whose time is up wherever they wait (a gateway that sends headers late, or
+    keeps a connection open without an answer, would otherwise hold a thread past the caller's limit)."""
+    while True:
+        time.sleep(0.5)
+        now = time.monotonic()
+        with jobs_lock:
+            late = [j for j in jobs.values() if not j.expired and now > j.deadline + 1.0]
+        for j in late:
+            j.expire()
+
+
+def traced(job):
+    """httpx's (or httpx2's) event hooks that hand each connection's socket to the job, as it opens
+    (and note when the whole request has gone out)."""
+    def trace(event, info):
+        if event.endswith((".connect_tcp.complete", ".start_tls.complete")):
+            try:
+                job.add(info["return_value"].get_extra_info("socket"))
+            except Exception:
+                pass
+        elif event.endswith(".send_request_body.complete"):
+            job.sent = True
+
+    def hook(request):
+        request.extensions["trace"] = trace
+    return {"request": [hook]}
+
+
+# The line that ends a streamed answer (OpenAI's SSE format), a chunk that finishes it, and its usage
 DONE_LINE = re.compile(r"^data:\s*\[DONE\]\s*$")
 FINISH = re.compile(r'"finish_reason"\s*:\s*"[^"]')
+USAGE = re.compile(r'"usage"\s*:\s*\{')
 # After a finish_reason without [DONE], how long the stream may stay silent before it counts as over
 END_GRACE_S = 2.0
 
 
-def hang_up(resp):
-    """Shuts the connection under a response whose answer is in (urllib's or httpx's), so a
-    thread still waiting on it for more returns and the response can be closed."""
-    sock = None
-    try:
-        sock = resp.fp.raw._sock                                   # urllib
-    except Exception:
-        try:
-            sock = resp.extensions["network_stream"].get_extra_info("socket")    # httpx
-        except Exception:
-            sock = None
-    if sock is not None:
-        try:
-            sock.shutdown(socket.SHUT_RDWR)
-        except Exception:
-            pass
+def byte_lines(chunks):
+    """The body's lines, split at "\\n" only. (httpx's iter_lines also splits at U+2028, U+2029 and
+    U+0085, which a JSON string may hold as they are: the answer couldn't be read.)"""
+    pending = []
+    for chunk in chunks:
+        start = 0
+        while True:
+            i = chunk.find(b"\n", start)
+            if i < 0:
+                if start < len(chunk):
+                    pending.append(chunk[start:])
+                break
+            pending.append(chunk[start:i + 1])
+            yield b"".join(pending)
+            pending = []
+            start = i + 1
+    if pending:
+        yield b"".join(pending)
 
 
-def read_stream(lines, timeout, stop=None):
+def read_stream(lines, job):
     """A streamed answer's text, up to its "data: [DONE]" line.
 
     `lines` yields the body's lines (bytes or text, with or without their line
     ending). Reading stops there even if the gateway keeps the connection open;
-    after a finish_reason, also when no more data comes for END_GRACE_S (a
-    gateway may keep a finished stream open without [DONE]); and after
-    `timeout` seconds in all (keep-alive lines would otherwise keep the socket's
-    own per-read timeout from ever firing). An answer without either (plain
-    JSON, or a gateway that just closes) is read to its end. The lines are read
-    in a thread of their own, so a silent connection can't hold this one;
-    `stop()` (hang_up) ends that thread when reading stops before the end.
+    after a finish_reason, also when no more of the answer (its usage, another
+    finish) comes for END_GRACE_S — pings don't count (a gateway may keep a
+    finished stream open without [DONE]); and at the job's deadline
+    (keep-alive lines would otherwise keep the socket's own per-read timeout
+    from ever firing). An answer without either (plain JSON, or a gateway that
+    just closes) is read to its end. The lines are read in a thread of their
+    own, so a silent connection can't hold this one; job.hang_up() ends that
+    thread when reading stops before the end.
     """
-    deadline = time.monotonic() + timeout
     q = queue.Queue()
 
     def pump():
@@ -156,13 +278,13 @@ def read_stream(lines, timeout, stop=None):
     ended = False                           # the thread is done (the connection closed or failed)
     while True:
         now = time.monotonic()
-        wait = deadline - now
+        wait = job.deadline - now
         if finished_at is not None:
             wait = min(wait, finished_at + END_GRACE_S - now)
         if wait <= 0:
             if finished_at is not None:
                 break
-            raise TimeoutError("the answer took longer than %d s" % timeout)
+            raise TimeoutError("the answer took longer than %d s" % job.timeout)
         try:
             item = q.get(timeout=wait)
         except queue.Empty:
@@ -181,10 +303,10 @@ def read_stream(lines, timeout, stop=None):
         if DONE_LINE.match(text):
             out.append("\n")       # (the blank line that ends the event)
             break
-        if text.startswith("data:") and (finished_at is not None or FINISH.search(text)):
-            finished_at = time.monotonic()      # (more of the answer, e.g. its usage, extends the wait)
-    if not ended and stop is not None:
-        stop()
+        if text.startswith("data:") and (FINISH.search(text) or (finished_at is not None and USAGE.search(text))):
+            finished_at = time.monotonic()      # (more of the answer's end, e.g. its usage, extends the wait)
+    if not ended:
+        job.hang_up()
     return "".join(out)
 
 
@@ -197,13 +319,22 @@ def is_event_stream(content_type):
     return "event-stream" in str(content_type or "").lower()
 
 
-def via_openai(req):
+def client_options(req, job, **more):
+    """httpx.Client's settings for a request: its time limit, the hooks that give the job its
+    sockets, and EMIS_PROXY when it's set (`proxy=` only then: httpx before 0.26 hasn't that name)."""
+    kw = dict(timeout=job.timeout, event_hooks=traced(job), **more)
+    if req.get("proxy"):
+        kw["proxy"] = req["proxy"]
+    return kw
+
+
+def via_openai(req, job):
     base, path = base_and_path(req["url"])
     if not base or path not in ("/chat/completions", "/models"):
         return None
-    timeout = max(1.0, req.get("timeoutMs", 120000) / 1000.0)
-    proxy = req.get("proxy") or None
-    http_client = httpx.Client(proxy=proxy, timeout=timeout) if proxy else None
+    timeout = job.timeout
+    # (an HTTP client of its own: its connections' sockets go to the job)
+    http_client = httpx.Client(**client_options(req, job))
     client = openai.OpenAI(base_url=base, api_key=req["key"], timeout=timeout, max_retries=0, http_client=http_client,
                            default_headers=extra_headers(req) or None)
     try:
@@ -218,10 +349,13 @@ def via_openai(req):
         # read as it comes: one that is a stream after all is read up to its end (read_stream)
         with client.chat.completions.with_streaming_response.create(model=model, messages=messages, extra_body=body or None) as raw:
             resp = raw.http_response
-            if resp.status_code < 400 and is_event_stream(resp.headers.get("content-type")):
-                text = read_stream(resp.iter_lines(), timeout, lambda: hang_up(resp))
-            else:
-                text = resp.read().decode(resp.encoding or "utf-8", "replace")
+            try:
+                if resp.status_code < 400 and is_event_stream(resp.headers.get("content-type")):
+                    text = read_stream(byte_lines(resp.iter_bytes()), job)
+                else:
+                    text = resp.read().decode(resp.encoding or "utf-8", "replace")
+            except Exception as e:
+                raise CutOff(e)
             return {"status": resp.status_code, "headers": dict(resp.headers), "body": text}
     except openai.APIStatusError as e:
         resp = e.response
@@ -232,6 +366,7 @@ def via_openai(req):
         raise ConnectionError(str(e.__cause__ or e))
     finally:
         client.close()
+        http_client.close()
 
 
 def headers_for(req):
@@ -244,21 +379,22 @@ def headers_for(req):
     return h
 
 
-def via_httpx(req):
-    timeout = max(1.0, req.get("timeoutMs", 120000) / 1000.0)
-    proxy = req.get("proxy") or None
+def via_httpx(req, job):
     data = json.dumps(req["body"]).encode("utf-8") if req.get("body") is not None else None
-    with httpx.Client(proxy=proxy, timeout=timeout, follow_redirects=False) as c:
+    with httpx.Client(**client_options(req, job, follow_redirects=False)) as c:
         with c.stream(req.get("method", "GET"), req["url"], headers=headers_for(req), content=data) as resp:
-            if resp.status_code < 400 and (streaming_body(req) or is_event_stream(resp.headers.get("content-type"))):
-                body = read_stream(resp.iter_lines(), timeout, lambda: hang_up(resp))
-            else:
-                body = resp.read().decode(resp.encoding or "utf-8", "replace")
+            try:
+                if resp.status_code < 400 and (streaming_body(req) or is_event_stream(resp.headers.get("content-type"))):
+                    body = read_stream(byte_lines(resp.iter_bytes()), job)
+                else:
+                    body = resp.read().decode(resp.encoding or "utf-8", "replace")
+            except Exception as e:
+                raise CutOff(e)
             return {"status": resp.status_code, "headers": dict(resp.headers), "body": body}
 
 
-def via_urllib(req):
-    timeout = max(1.0, req.get("timeoutMs", 120000) / 1000.0)
+def via_urllib(req, job):
+    timeout = job.timeout
     data = json.dumps(req["body"]).encode("utf-8") if req.get("body") is not None else None
     handlers = []
     proxy = req.get("proxy")
@@ -271,12 +407,39 @@ def via_urllib(req):
         ctx = ssl.create_default_context(cafile=certifi.where())
     except Exception:
         ctx = ssl.create_default_context()
-    handlers.append(urllib.request.HTTPSHandler(context=ctx))
+
+    # (connections whose sockets go to the job, as they open; the request has gone out once its
+    # answer is awaited)
+    class Conn(http.client.HTTPConnection):
+        def connect(self):
+            http.client.HTTPConnection.connect(self)
+            job.add(self.sock)
+
+        def getresponse(self):
+            job.sent = True
+            return http.client.HTTPConnection.getresponse(self)
+
+    class TLSConn(http.client.HTTPSConnection):
+        def connect(self):
+            http.client.HTTPSConnection.connect(self)
+            job.add(self.sock)
+
+        def getresponse(self):
+            job.sent = True
+            return http.client.HTTPSConnection.getresponse(self)
+
+    class Plain(urllib.request.HTTPHandler):
+        def http_open(self, r):
+            return self.do_open(Conn, r)
+
+    class Secure(urllib.request.HTTPSHandler):
+        def https_open(self, r):
+            return self.do_open(TLSConn, r, context=ctx)
 
     class NoRedirect(urllib.request.HTTPRedirectHandler):
         def redirect_request(self, *args, **kwargs):
             return None
-    handlers.append(NoRedirect())
+    handlers += [Plain(), Secure(context=ctx), NoRedirect()]
     opener = urllib.request.build_opener(*handlers)
     r = urllib.request.Request(req["url"], data=data, headers=headers_for(req), method=req.get("method", "GET"))
     if proxy:
@@ -290,57 +453,105 @@ def via_urllib(req):
         r.set_proxy(host + (":" + str(p.port) if p.port else ""), p.scheme or "http")
     try:
         with opener.open(r, timeout=timeout) as resp:
-            if streaming_body(req) or is_event_stream(resp.headers.get("Content-Type")):
-                body = read_stream(resp, timeout, lambda: hang_up(resp))
-            else:
-                body = resp.read().decode("utf-8", "replace")
+            try:
+                if streaming_body(req) or is_event_stream(resp.headers.get("Content-Type")):
+                    body = read_stream(resp, job)
+                else:
+                    body = resp.read().decode("utf-8", "replace")
+            except Exception as e:
+                raise CutOff(e)
             return {"status": resp.status, "headers": dict(resp.headers.items()), "body": body}
     except urllib.error.HTTPError as e:
-        body = e.read().decode("utf-8", "replace") if e.fp else ""
+        try:
+            body = e.read().decode("utf-8", "replace") if e.fp else ""
+        except Exception as e2:
+            raise CutOff(e2)
         return {"status": e.code, "headers": dict(e.headers.items()) if e.headers else {}, "body": body}
     except urllib.error.URLError as e:
         raise e.reason if isinstance(e.reason, Exception) else ConnectionError(str(e.reason))
 
 
-def handle(line):
-    try:
-        req = json.loads(line)
-    except Exception:
-        return
+def is_network_error(e):
+    return isinstance(e, (OSError, TimeoutError, ConnectionError)) or (httpx is not None and isinstance(e, httpx.TransportError)) \
+        or (openai is not None and isinstance(e, (openai.APIConnectionError,)))
+
+
+def handle(req, job):
     rid = req.get("id")
     try:
+        if job.cancelled:
+            return                          # (its caller went away while it waited for a thread)
+        if job.expired:
+            raise TimeoutError("the request waited for a free thread for its whole time limit")
         if not isinstance(req.get("url"), str) or not req["url"].startswith(("https://", "http://")):
-            raise ValueError("invalid url")
+            raise BadRequest("invalid url")
         res = None
         if openai is not None and not streaming_body(req):
-            res = via_openai(req)
+            res = via_openai(req, job)
         if res is None:
-            res = via_httpx(req) if httpx is not None else via_urllib(req)
+            res = via_httpx(req, job) if httpx is not None else via_urllib(req, job)
+        if job.cancelled:
+            return
         res["id"] = rid
         emit(res)
-    except ValueError as e:
+    except BadRequest as e:
         emit({"id": rid, "error": {"kind": "client", "code": "ERR_INVALID_URL", "message": str(e)}})
     except Exception as e:
-        msg = (type(e).__name__ + ": " + str(e)).replace(req.get("key") or "\0", "[redacted]")[:400]
-        net = isinstance(e, (OSError, TimeoutError, ConnectionError)) or (httpx is not None and isinstance(e, httpx.TransportError)) \
-            or (openai is not None and isinstance(e, (openai.APIConnectionError,)))
-        if net:
-            kind, code = classify(e)
+        if job.cancelled:
+            return                          # (nobody waits for this answer any more)
+        answered = isinstance(e, CutOff)
+        inner = e.inner if answered else e
+        msg = (type(inner).__name__ + ": " + str(inner)).replace(req.get("key") or "\0", "[redacted]")[:400]
+        if job.expired:
+            kind, code = "timeout", "ETIMEDOUT"
+        elif answered or is_network_error(inner):
+            kind, code = classify(inner)
         else:
             kind, code = "client", "PYTHON_ERROR"   # a problem in this worker, not the network
+        err = {"kind": kind, "code": code, "message": msg}
+        if answered or job.sent:
+            err["sent"] = True
         try:
-            emit({"id": rid, "error": {"kind": kind, "code": code, "message": msg}})
+            emit({"id": rid, "error": err})
         except Exception:
             pass
+    finally:
+        with jobs_lock:
+            if jobs.get(rid) is job:
+                del jobs[rid]
 
 
 def main():
     emit({"ready": True, "python": platform.python_version(), "client": CLIENT})
-    pool = ThreadPoolExecutor(max_workers=64)   # AI Coding runs several requests at once (AI_MAX_PARALLEL)
+    threading.Thread(target=watchdog, daemon=True).start()
+    # AI Coding runs several requests at once (AI_MAX_PARALLEL, up to 64 a run, and several runs);
+    # a request whose caller went away gives its thread back at once (a cancel message)
+    pool = ThreadPoolExecutor(max_workers=256)
     for raw in sys.stdin.buffer:            # bytes: decoded as UTF-8 whatever the locale is
         line = raw.decode("utf-8", "replace").strip()
-        if line:
-            pool.submit(handle, line)
+        if not line:
+            continue
+        try:
+            req = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(req, dict):
+            continue
+        rid = req.get("id")
+        if req.get("cancel"):
+            with jobs_lock:
+                job = jobs.get(rid)
+            if job is not None:
+                job.cancel()
+            continue
+        try:
+            timeout = max(1.0, float(req.get("timeoutMs") or 120000) / 1000.0)
+        except Exception:
+            timeout = 120.0
+        job = Job(rid, timeout)
+        with jobs_lock:
+            jobs[rid] = job
+        pool.submit(handle, req, job)
 
 
 if __name__ == "__main__":

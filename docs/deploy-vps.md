@@ -463,6 +463,12 @@ least every 15 s (`AI_KEEPALIVE_SECONDS`) while posts are being coded, so update
 `pm2 startOrReload ecosystem.config.cjs --update-env`). If every post says it timed out, see
 [opencode-service.md](opencode-service.md#9-troubleshooting).
 
+**AI Coding: every post fails with "AI gateway asked MetaCode to pause … Try again in about 22 hours"**
+The gateway refused the key for that long, usually because its daily budget is used up. Pick a model of
+another provider in Settings → AI models, tick **Keep going if the model runs out**, add another key, or wait;
+`pm2 logs metacode-opencode --lines 80` shows what the gateway said (the `key.resting` line). More in
+[opencode-service.md](opencode-service.md#9-troubleshooting).
+
 **"MetaCode's AI service (OpenCode) isn't running at 127.0.0.1:4097…"**
 `pm2 status` should list `metacode-opencode` as online. If it's missing, `pm2 start ecosystem.config.cjs && pm2 save`.
 If it keeps restarting, `pm2 logs metacode-opencode --lines 50` says why: missing packages (`npm install`, then
