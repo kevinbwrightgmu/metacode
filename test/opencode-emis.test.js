@@ -37,7 +37,7 @@ const python = ['python3', 'python'].some(cmd => { try { return spawnSync(cmd, [
 const LISTED = ['prompts-only', 'budget-said', 'gemini-3.8-flash', 'gemini-3.7-flash', 'slow', 'picture', 'picture-only', 'other-1',
   'forbidden-model', 'blocked-model', 'budget-model', 'busy-a', 'busy-b', 'busy-c', 'limited-model', 'sse-model', 'json-model', 'eos-model',
   'unicode-model', 'missing-model', 'error200-model', 'claude-opus-5.5', 'dall-e-3', 'text-embedding-3-large',
-  'streams-unless-told', 'stream-only-model', 'empty-unless-stream', 'think-model', 'redirect-model', 'echo-header', 'cut-short', 'finish-only'];
+  'streams-unless-told', 'stream-only-model', 'empty-unless-stream', 'think-model', 'redirect-model', 'echo-header', 'cut-short', 'finish-only', 'held-open'];
 const state = { calls: [], seen: [], modelsMode: 'ok', models: LISTED, listCalls: 0, remaining: 100, websiteListNotFound: false, cutShort: 0 };
 const reset = seconds => String(Math.floor(Date.now() / 1000) + seconds);
 const chunk = (model, delta, finish) => JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', model, choices: [Object.assign({ index: 0, delta }, finish ? { finish_reason: finish } : {})] });
@@ -133,6 +133,14 @@ function startEmis() {
         case 'finish-only':
           res.writeHead(200, { 'Content-Type': 'text/event-stream' });
           return res.end('data: ' + chunk(j.model, { role: 'assistant', content: 'finished' }, 'stop') + '\n\n');
+        // the whole answer and [DONE], then the connection stays open (keep-alive comments) until the caller closes it
+        case 'held-open': {
+          res.writeHead(200, Object.assign({ 'Content-Type': 'text/event-stream' }, quota));
+          res.write('data: ' + chunk(j.model, { role: 'assistant', content: 'done, but still connected' }) + '\n\ndata: ' + chunk(j.model, {}, 'stop') + '\n\n' +
+            'data: ' + JSON.stringify({ id: 'c1', object: 'chat.completion.chunk', model: j.model, choices: [], usage: { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 } }) + '\n\ndata: [DONE]\n\n');
+          const ping = setInterval(() => { if (!res.destroyed) res.write(': ping\n\n'); }, 300);
+          return res.on('close', () => clearInterval(ping));
+        }
         case 'sse-model':                                                                           // streams even when not asked
           res.writeHead(200, Object.assign({ 'Content-Type': 'text/event-stream' }, quota));
           return res.end('data: ' + chunk(j.model, { role: 'assistant', content: 'ok ' }) + '\n\ndata: ' + chunk(j.model, { content: 'from sse' }, 'stop') + '\n\ndata: [DONE]\n\n');
@@ -609,6 +617,21 @@ test('timeouts: the gateway not answering within timeoutMs is a timeout (504), t
       setTimeout(() => ac.abort(), 200);
       const gone = await failure(p, 'slow', {}, { signal: ac.signal });
       assert.equal(gone.type, 'cancelled', transport);
+    });
+  }
+});
+
+test('a gateway that keeps the connection open after [DONE]: the answer is used at once, through Node.js and through Python (not read until the time limit)', { timeout: 60000 }, async () => {
+  for (const transport of ['node'].concat(python ? ['auto', 'python'] : [])) {
+    await withProvider({ env: { EMIS_TRANSPORT: transport } }, async p => {
+      await p.models();
+      for (const stream of [false, true]) {
+        const t0 = Date.now();
+        const done = await ask(p, 'held-open', {}, { timeoutMs: 8000, stream });
+        assert.equal(done.choices[0].message.content, 'done, but still connected', transport);
+        assert.deepEqual(done.usage, { prompt_tokens: 5, completion_tokens: 4, total_tokens: 9 }, transport);
+        assert.ok(Date.now() - t0 < 4000, transport + (stream ? ' (streamed)' : '') + ': answered in ' + (Date.now() - t0) + ' ms, not at the time limit');
+      }
     });
   }
 });

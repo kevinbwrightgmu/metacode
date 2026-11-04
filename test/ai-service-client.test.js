@@ -106,7 +106,7 @@ const baseEnv = () => testEnv({
   ACCOUNT_DATA_DIR: path.join(tmp, 'a'), SURVEY_DATA_DIR: path.join(tmp, 's'), PROJECT_DATA_DIR: path.join(tmp, 'p'), AI_LAB_DATA_DIR: path.join(tmp, 'l'), COLLAB_DATA_DIR: path.join(tmp, 'c')
 });
 const VARIABLES = ['OPENCODE_SERVICE_URL', 'OPENCODE_SERVICE_PORT', 'OPENCODE_SERVICE_TOKEN', 'OPENCODE_SERVICE_MANAGED', 'OPENCODE_MODEL', 'EMIS_MODEL', 'AI_MODEL_SWITCH',
-  'AI_FALLBACK_TO_FREE_MODELS', 'AI_BATCH_PAUSE_SECONDS', 'AI_TIMEOUT_MS'];
+  'AI_FALLBACK_TO_FREE_MODELS', 'AI_BATCH_PAUSE_SECONDS', 'AI_TIMEOUT_MS', 'AI_KEEPALIVE_SECONDS'];
 
 test.before(async () => {
   main = standIn(0);
@@ -199,6 +199,70 @@ test('a free model never answers for one that isn\'t free (its provider may use 
   const r = await ask('gw/claude-opus-5.5');
   assert.equal(r.status, 200, r.text);
   assert.match(r.headers.get('x-metacode-model-fallback'), /^zen\/(glm-5\.3-flash-free|big-pickle)$/);
+});
+
+test('AI Coding\'s "keep going" (anyModel): when the model runs out, a model of any provider picked at random codes the rest of the run — one pick while it lasts, then another; never a free one for a paid one; nothing with AI_MODEL_SWITCH=off', { timeout: 60000 }, async () => {
+  const gatewayOut = (body, send) => {
+    if (!/^gw\//.test(body.model)) return false;
+    send(429, { error: { type: 'quota_exceeded', scope: 'provider', provider: 'gw', retry_after_seconds: 3600, message: 'Test gateway\'s usage quota is used up.' } }, { 'Retry-After': '3600' });
+    return true;
+  };
+  const posts = (n, model) => Array.from({ length: n }, (_, i) => ({ id: 'p' + (i + 1), body: { model: model || 'gw/glm-5.3-flash', messages: [{ role: 'user', content: 'post ' + (i + 1) }] } }));
+  const batch = async (extra, requests) => {
+    const r = await request('POST', '/api/ai/batch', Object.assign({ parallel: 1, requests: requests || posts(6), switchModels: false }, extra));
+    assert.equal(r.status, 200, r.text);
+    return r.text.trim().split('\n').filter(Boolean).map(l => JSON.parse(l)).filter(l => l.id);
+  };
+  const PAID_ELSEWHERE = ['zen/claude-opus-5.5', 'zen/claude-sonnet-4-5'];
+
+  // Without the option (and switching off in the browser): the run stops at the used-up quota
+  await configure({}, () => { svc.chat = gatewayOut; });
+  let lines = await batch({});
+  assert.deepEqual(lines.map(l => (l.ok ? 'ok' : l.error.type)), Array(6).fill('quota_exceeded'));
+
+  // With it: every post is coded, all by one paid model of the other provider, picked at random
+  await configure({}, () => { svc.chat = gatewayOut; });
+  lines = await batch({ anyModel: true });
+  assert.deepEqual(lines.map(l => l.ok), Array(6).fill(true), JSON.stringify(lines));
+  const used = [...new Set(lines.map(l => l.fallback))];
+  assert.equal(used.length, 1, 'one pick for the run: ' + used);
+  assert.ok(PAID_ELSEWHERE.includes(used[0]), 'a paid model, not a free one: ' + used[0]);
+  assert.ok(lines.every(l => l.fallbackPick === 'random' && l.requested === 'gw/glm-5.3-flash' && l.fallbackReason === 'rate_limited'), JSON.stringify(lines[0]));
+  assert.equal(svc.seen.filter(m => /^gw\//.test(m)).length, 1, 'the used-up gateway was asked once (then it rests)');
+
+  // The pick runs out too: the other paid model takes over, and the run goes on
+  await configure({}, () => {
+    let first = null;
+    svc.chat = (body, send) => {
+      if (gatewayOut(body, send)) return true;
+      if (!first) first = body.model;
+      if (body.model !== first || svc.seen.filter(m => m === first).length < 3) return false;
+      send(429, { error: { type: 'quota_exceeded', scope: 'model', provider: 'zen', model: body.model, retry_after_seconds: 3600, message: 'This model\'s spend limit is reached.' } });
+      return true;
+    };
+  });
+  lines = await batch({ anyModel: true });
+  assert.deepEqual(lines.map(l => l.ok), Array(6).fill(true), JSON.stringify(lines));
+  assert.deepEqual([...new Set(lines.map(l => l.fallback))].sort(), PAID_ELSEWHERE.slice().sort(), 'the second paid model took over');
+
+  // A model that keeps failing at its provider (server errors) is left too — even one picked in Settings
+  await configure({}, () => {
+    svc.chat = (body, send) => {
+      if (body.model !== 'gw/gpt-5.5') return false;
+      send(502, { error: { type: 'upstream_error', upstream_status: 503, provider: 'gw', model: body.model, message: 'Test gateway couldn\'t run the model (HTTP 503).' } });
+      return true;
+    };
+  });
+  lines = await batch({ anyModel: true }, posts(2, 'gw/gpt-5.5'));
+  assert.deepEqual(lines.map(l => [l.ok, l.fallbackPick, l.fallbackReason]), [[true, 'random', 'failed'], [true, 'random', 'failed']], JSON.stringify(lines));
+  assert.notEqual(lines[0].fallback, 'gw/gpt-5.5');
+  assert.ok(!MODELS.find(m => m.id === lines[0].fallback).free, 'not a free model');
+
+  // The operator turned switching off: the option changes nothing
+  await configure({ AI_MODEL_SWITCH: 'off' }, () => { svc.chat = gatewayOut; });
+  lines = await batch({ anyModel: true });
+  assert.deepEqual(lines.map(l => (l.ok ? 'ok' : l.error.type)), Array(6).fill('quota_exceeded'));
+  assert.deepEqual(svc.seen.filter(m => /^zen\//.test(m)), [], 'nothing went to another provider');
 });
 
 test('a usage limit of one model (quota_exceeded with scope "model") rests that model, not its provider', async () => {
@@ -441,6 +505,68 @@ test('started beside its AI service (pm2 starts both at once): MetaCode waits fo
 });
 
 // ── The AI Coding Lab's price list ────────────────────────────────────────────
+
+// ── Long answers behind a proxy ───────────────────────────────────────────────
+// A proxy in front of MetaCode that closes a response once it has sent nothing for `idleMs`
+// (Cloudflare does after about 100 s, nginx after its proxy_read_timeout): the browser then
+// reports net::ERR_INCOMPLETE_CHUNKED_ENCODING and the batch fails with "network error".
+async function silentProxy(idleMs) {
+  const s = http.createServer((req, res) => {
+    const up = http.request(base + req.url, { method: req.method, headers: req.headers }, ur => {
+      res.writeHead(ur.statusCode, ur.headers);
+      let timer = null;
+      const idle = () => { clearTimeout(timer); timer = setTimeout(() => { res.destroy(); ur.destroy(); }, idleMs); };
+      idle();
+      ur.on('data', c => { idle(); res.write(c); });
+      ur.on('end', () => { clearTimeout(timer); res.end(); });
+      ur.on('error', () => { clearTimeout(timer); res.destroy(); });
+    });
+    up.on('error', () => res.destroy());
+    req.pipe(up);
+  });
+  await new Promise(r => s.listen(0, '127.0.0.1', r));
+  return { url: 'http://127.0.0.1:' + s.address().port, close: () => new Promise(r => { s.closeAllConnections(); s.close(r); }) };
+}
+// The whole body as the browser gets it through the proxy, or how it broke off
+async function through(proxy, p, body) {
+  const r = await fetch(proxy.url + p, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+  try { return { status: r.status, text: await r.text() }; } catch (e) { return { status: r.status, broken: String(e && e.cause ? e.cause.code || e.cause.message : e) }; }
+}
+
+test('a batch whose first answers take longer than a proxy waits: MetaCode keeps the response open with a blank line every AI_KEEPALIVE_SECONDS', { timeout: 30000 }, async () => {
+  await configure({ AI_KEEPALIVE_SECONDS: '1' }, () => {
+    svc.chat = (body, send) => { setTimeout(() => send(200, completion(body.model, 'coded')), 3500); return true; };
+  });
+  const proxy = await silentProxy(2000);
+  try {
+    const r = await through(proxy, '/api/ai/batch', { requests: [1, 2, 3].map(i => ({ id: 'p' + i, body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post ' + i }] } })), parallel: 3 });
+    assert.equal(r.broken, undefined, 'the proxy closed the batch: ' + r.broken);
+    const lines = r.text.split('\n');
+    const results = lines.filter(l => l.trim()).map(l => JSON.parse(l));
+    assert.deepEqual(results.filter(x => x.id).map(x => [x.id, x.ok, x.data.choices[0].message.content]).sort(), [['p1', true, 'coded'], ['p2', true, 'coded'], ['p3', true, 'coded']]);
+    assert.ok(results.some(x => x.done), 'the batch finished');
+    assert.ok(lines.indexOf('') >= 0 && lines.indexOf('') < lines.findIndex(l => l.includes('"p')), 'blank lines came while nothing was answered yet');
+  } finally { await proxy.close(); }
+});
+
+test('a streamed answer whose first part takes longer than a proxy waits: MetaCode sends SSE comments meanwhile', { timeout: 30000 }, async () => {
+  await configure({ AI_KEEPALIVE_SECONDS: '1' }, () => {
+    svc.chat = (body, send, res) => {
+      // (like the service: the status line once it has waited a while, then nothing until the first part)
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.flushHeaders();
+      setTimeout(() => res.end('data: ' + JSON.stringify({ model: body.model, choices: [{ index: 0, delta: { content: 'thought it over' }, finish_reason: 'stop' }] }) + '\n\ndata: [DONE]\n\n'), 3500);
+      return true;
+    };
+  });
+  const proxy = await silentProxy(2000);
+  try {
+    const r = await through(proxy, '/api/ai', { model: 'gw/gpt-5.5', stream: true, messages: [{ role: 'user', content: 'think first' }] });
+    assert.equal(r.broken, undefined, 'the proxy closed the stream: ' + r.broken);
+    assert.match(r.text, /^: keep-alive$/m);
+    assert.match(r.text, /thought it over[\s\S]*data: \[DONE\]/);
+  } finally { await proxy.close(); }
+});
 
 test('price lists from before model ids named their provider ("metacode:<id>") still price the gateway\'s models, never another provider\'s', () => {
   const file = path.join(tmp, 'pricing.json');

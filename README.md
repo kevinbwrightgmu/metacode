@@ -429,6 +429,7 @@ For most research contexts, κ ≥ 0.61 is the acceptable threshold.
 - **Codebook quality**: Clear, specific code descriptions dramatically improve AI coding accuracy
 - **Fine-tuning a code**: If the AI keeps misapplying one specific code, open it in the Codebook and add a note in "AI Fine-Tuning Notes" — e.g. "don't count sarcastic praise as Positive." This is read by the AI on every future coding run but never shown to human coders, so it won't bias manual coding or your reliability comparison
 - **Speed (copies at once)**: AI Coding splits the posts between several simultaneous requests to the same model — 4 by default. Change the number in the **at once** box next to **Run AI Coding** or in Settings → AI models (1 = one post at a time; up to `AI_MAX_PARALLEL`, 16 by default). Results appear as each post finishes. If the AI service rate-limits the key, MetaCode halves the number, pauses and retries by itself. Every post still uses one prompt of your quota, so more copies finish sooner but don't cost more
+- **Keep going if the model runs out** (checkbox next to **Run AI Coding**, for big runs): when the model's usage limit runs out, it's rate-limited or it stops answering, a model picked at random from the ones the AI service offers (any provider) codes the rest of the run — the run's summary says which models coded how many posts. A free model only takes over from a free one, unless `AI_FALLBACK_TO_FREE_MODELS=on` ([docs/ai-models.md](docs/ai-models.md))
 - **Stop and resume**: **Stop** cancels the requests still waiting; run again later to code only the uncoded posts
 - **Reasoning**: Click the 💬 button on any AI-coded post to view the model's reasoning
 
@@ -498,6 +499,7 @@ Configuration lives only in the server's `.env` file, which MetaCode and the AI 
 | `AI_FALLBACK_TO_FREE_MODELS` | no | `on` lets a free model answer for one that isn't free when switching. Off by default: a paid model (for example the gateway's, when its budget is used up) is never answered by a free one |
 | `AI_MAX_PARALLEL` | no | The most copies of the model AI Coding may run at once (default 16, max 64); users choose up to this |
 | `AI_BATCH_PAUSE_SECONDS` | no | How long AI Coding first pauses when the AI service answers with a server error (default 5; doubles with each pause, up to 60) |
+| `AI_KEEPALIVE_SECONDS` | no | The longest a streamed AI response (an AI Coding run, a Lab answer) stays silent while the model works: MetaCode sends a blank line or an SSE comment that every reader skips, so a proxy in front (Cloudflare, nginx) doesn't close it (default 15, 1–60) |
 | `AI_TIMEOUT_MS` | no | How long to wait for an AI answer (default 120000 ms). Older name: `EMIS_TIMEOUT_MS` |
 | `OPENCODE_SERVICE_URL`, `OPENCODE_SERVICE_PORT`, `OPENCODE_SERVICE_MANAGED`, … | no | Where the AI service runs and who starts it (default: `127.0.0.1:4097`, started by MetaCode unless pm2 runs it). `OPENCODE_SERVICE_URL=off` switches MetaCode's AI off. See [docs/opencode-service.md](docs/opencode-service.md#4-settings) |
 

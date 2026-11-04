@@ -26,6 +26,7 @@ const { createFineTuning } = require('./finetune');
 const { createCodeSandbox, LANGUAGES: CODE_LANGUAGES } = require('./code-sandbox');
 const { createExperiments } = require('./experiments');
 const { logger, redact, userRef } = require('../lib/log');
+const { keepAlive } = require('../lib/keepalive');
 
 /** @typedef {import('../types/ai-lab').LabPrincipal} LabPrincipal */
 /** @typedef {import('../types/ai-lab').LabProject} LabProject */
@@ -593,7 +594,9 @@ function createAiLab(opts) {
 
     res.status(200).set({ 'Content-Type': 'text/event-stream; charset=utf-8', 'Cache-Control': 'no-cache, no-transform', 'X-Accel-Buffering': 'no' });
     res.flushHeaders();
-    const send = /** @param {string} ev @param {unknown} data */ (ev, data) => { if (!res.writableEnded && !res.destroyed) res.write('event: ' + ev + '\ndata: ' + JSON.stringify(data) + '\n\n'); };
+    // (an SSE comment while the model works without sending: a proxy in front would close a silent response)
+    const alive = keepAlive(res, ': keep-alive\n\n');
+    const send = /** @param {string} ev @param {unknown} data */ (ev, data) => { if (!res.writableEnded && !res.destroyed) { res.write('event: ' + ev + '\ndata: ' + JSON.stringify(data) + '\n\n'); alive.touch(); } };
     const ac = new AbortController();
     res.on('close', () => { if (!res.writableFinished) ac.abort(); });
     send('context', Object.assign({ provider: provider.id, model: model.id }, built.report));
@@ -622,6 +625,7 @@ function createAiLab(opts) {
     u.put('conversations', fresh);
     if (msg.error) send('error', msg.error);
     send('done', { message: msg, title: fresh.title });
+    alive.stop();
     res.end();
   }
 

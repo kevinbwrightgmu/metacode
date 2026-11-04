@@ -20,7 +20,7 @@ const KEY = 'sb_publishable_TestKey_abcdefghijklmnop';
 const FAKE_KEY = ['sk', 'live', '51AbCdEfGhIjKlMnOpQrStUv'].join('_');
 let sb, stripe, aiService, openai, server, base, tmp, srv;
 const U = {}, T = {};
-const aiState = { requests: [], streamDelayMs: 0, fail: false };
+const aiState = { requests: [], streamDelayMs: 0, firstDelayMs: 0, fail: false };
 const oaState = { files: [], jobs: new Map(), calls: [] };
 
 // A stand-in for an OpenAI-compatible fine-tuning API
@@ -249,6 +249,24 @@ test('journey 1: project, versioned coding profile, knowledge base with retrieva
   const search = await me.get('/api/lab/projects/' + ctx.project.id + '/search?q=' + encodeURIComponent('how do I verify the token'));
   assert.equal(search.json.method, 'BM25 keyword search');
   assert.equal(search.json.results[0].name, 'auth.md');
+});
+
+test('a model that takes a while before its first word: the answer stream gets SSE comments meanwhile (a proxy in front would close a silent one)', async () => {
+  const me = as('ultra');
+  const c = (await me.post('/api/lab/conversations', { provider: 'metacode', model: 'lab-model' })).json.conversation;
+  process.env.AI_KEEPALIVE_SECONDS = '1';
+  aiState.firstDelayMs = 2500;
+  try {
+    const res = await fetch(base + '/api/lab/conversations/' + c.id + '/messages', { method: 'POST', headers: { Cookie: 'mc_session=' + T.ultra, 'Content-Type': 'application/json' }, body: JSON.stringify({ content: 'Think first, then answer' }) });
+    const text = await res.text();
+    assert.equal(res.status, 200);
+    assert.match(text, /^: keep-alive$/m);
+    assert.ok(text.indexOf(': keep-alive') < text.indexOf('event: delta'), 'while no part of the answer had come yet');
+    assert.match(text, /event: done/);
+  } finally {
+    aiState.firstDelayMs = 0;
+    delete process.env.AI_KEEPALIVE_SECONDS;
+  }
 });
 
 test('journey 2: a streamed conversation with project context; stop; regenerate; summary', async () => {

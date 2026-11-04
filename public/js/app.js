@@ -972,12 +972,18 @@ const App = (() => {
   // or its provider is resting): say so once in a while, not on every request,
   // naming the models as the pickers do.
   const fallbackNoted = new Map();
-  function noteFallback(requested, used, reason) {
+  // pick: 'random' — AI Coding's "keep going": a model picked at random from the available ones took over
+  function noteFallback(requested, used, reason, pick) {
     if (!requested || !used || requested === used) return;
     const k = requested + '>' + used, now = Date.now();
     if (now - (fallbackNoted.get(k) || 0) < 10 * 60 * 1000) return;
     fallbackNoted.set(k, now);
     const asked = modelName(requested), answered = modelName(used);
+    if (pick === 'random') {
+      notify((reason === 'rate_limited' ? '“' + asked + '” has run out for now (a usage or rate limit)' : '“' + asked + '” isn\'t working at the AI service right now') +
+        ', so “' + answered + '”, picked at random from the available models, is coding instead.', 'warning', 7000);
+      return;
+    }
     notify(reason === 'rate_limited'
       ? 'The AI service is rate-limiting “' + asked + '”, so the closest similar model, “' + answered + '”, is answering until it\'s available again.'
       : '“' + asked + '” isn\'t working at the AI service right now, so the closest model, “' + answered + '”, answered.', 'warning', 7000);
@@ -1016,8 +1022,9 @@ const App = (() => {
   // Many chat requests at once: the server runs up to `parallel` of them side by
   // side with the same model and streams each answer back as it finishes.
   //   items: [{ id, messages, system, max_tokens }]
-  //   opts:  { feature, parallel, delay, signal, onResult({ id, ok, text, error, status, model, requested, fallbackReason }) }
-  //   (model: the model that answered — a similar one when the requested model was rate-limited)
+  //   opts:  { feature, parallel, delay, signal, anyModel, onResult({ id, ok, text, error, status, model, requested, fallbackReason, pick }) }
+  //   (model: the model that answered — a similar one when the requested model was rate-limited; with
+  //   anyModel — AI Coding's "keep going" — one of any provider picked at random, pick 'random')
   // Resolves to { parallel } (how many ran at the end; the server lowers it when rate-limited).
   // A web server in front of MetaCode (nginx's client_max_body_size) refused a
   // request body as too large: its answer is a web page, not MetaCode's JSON.
@@ -1090,7 +1097,8 @@ const App = (() => {
   // One batch: POST /api/ai/batch, answers streamed back as NDJSON → { parallel } or { tooLarge }
   async function sendBatch(chunk, parallel, system, model, opts, onFailure) {
     const res = await fetch('/api/ai/batch', { method: 'POST', signal: opts.signal, headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ requests: chunk.map(r => ({ id: r.id, body: r.body })), parallel, delayMs: opts.delay || 0, switchModels: state.settings.switchModels !== false, system: system || undefined }) });
+      body: JSON.stringify({ requests: chunk.map(r => ({ id: r.id, body: r.body })), parallel, delayMs: opts.delay || 0, switchModels: state.settings.switchModels !== false,
+        anyModel: opts.anyModel === true || undefined, system: system || undefined }) });
     if (!res.ok) {
       let data = null;
       try { data = await res.json(); } catch (e) { data = null; }
@@ -1112,10 +1120,10 @@ const App = (() => {
       if (msg.notice) { opts.onNotice && opts.onNotice(msg.notice); return; }
       if (msg.ok) {
         lastModelUsed = msg.fallback || (msg.data && msg.data.model) || model;
-        if (msg.fallback) noteFallback(msg.requested, msg.fallback, msg.fallbackReason);
+        if (msg.fallback) noteFallback(msg.requested, msg.fallback, msg.fallbackReason, msg.fallbackPick);
         const c = msg.data && msg.data.choices && msg.data.choices[0];
         opts.onResult && opts.onResult({ id: msg.id, ok: true, text: String((c && c.message && c.message.content) || '').trim(),
-          model: msg.fallback || null, requested: msg.requested || null, fallbackReason: msg.fallbackReason || null });
+          model: msg.fallback || null, requested: msg.requested || null, fallbackReason: msg.fallbackReason || null, pick: msg.fallbackPick || null });
       } else {
         const f = { status: msg.status, error: (msg.error && msg.error.message) || 'AI request failed', type: msg.error && msg.error.type };
         onFailure(f);

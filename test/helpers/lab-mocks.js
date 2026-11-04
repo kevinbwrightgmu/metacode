@@ -143,7 +143,8 @@ function answerFor(sys, user) {
   return 'Here it is:\n' + PLAIN + (/slow/.test(user) ? '\n' + 'More text. '.repeat(40) : '');
 }
 
-// state: { requests: [], streamDelayMs: 0, fail: false } — read and changed by the tests
+// state: { requests: [], streamDelayMs: 0, firstDelayMs: 0, fail: false } — read and changed by the tests
+// (firstDelayMs: a streamed answer's status line goes out at once, its first part that much later)
 function startAiService(state) {
   const s = http.createServer((req, res) => {
     let body = '';
@@ -160,6 +161,7 @@ function startAiService(state) {
       const content = answerFor(sys, user);
       if (j.stream) {
         res.writeHead(200, { 'content-type': 'text/event-stream' });
+        if (state.firstDelayMs) { res.flushHeaders(); await new Promise(r => setTimeout(r, state.firstDelayMs)); }
         const parts = content.match(/[\s\S]{1,12}/g);
         for (const p of parts) {
           if (res.destroyed) return;

@@ -8,10 +8,13 @@ non-streamed EMIS requests through this worker when Python is available
 (EMIS_TRANSPORT=auto, the default; =python to require it; =node to skip it),
 and through Node.js otherwise (streamed answers always go through Node.js).
 
-Chat requests (always stream:true from the service, read here whole) go out
-with `httpx` (installed with openai: pip install openai), else Python's
-standard library (urllib) — no pip install needed. The official `openai`
-package, the client EMIS's documentation shows, is only used for GET /models.
+Chat requests (always stream:true from the service) go out with `httpx`
+(installed with openai: pip install openai), else Python's standard library
+(urllib) — no pip install needed. Their answer is read up to its
+"data: [DONE]" line, not until the connection closes: a gateway may keep a
+finished stream open, and reading on would wait for the time limit. The
+official `openai` package, the client EMIS's documentation shows, is only
+used for GET /models.
 Proxies: HTTPS_PROXY / HTTP_PROXY / NO_PROXY are honoured by all three, or
 EMIS_PROXY when given in the request (then for every request, as from Node.js).
 
@@ -29,10 +32,12 @@ with; it is never printed or logged.
 import base64
 import json
 import platform
+import re
 import socket
 import ssl
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -96,6 +101,36 @@ def extra_headers(req):
     return {str(k): str(v) for k, v in given.items() if str(k).lower() not in RESERVED}
 
 
+# The line that ends a streamed answer (OpenAI's SSE format)
+DONE_LINE = re.compile(r"^data:\s*\[DONE\]\s*$")
+
+
+def read_stream(lines, timeout):
+    """A streamed answer's text, up to and including its "data: [DONE]" line.
+
+    `lines` yields the body's lines (bytes or text, with or without their line
+    ending). Reading stops there even if the gateway keeps the connection open,
+    and after `timeout` seconds in all (keep-alive lines would otherwise keep
+    the socket's own per-read timeout from ever firing). An answer without
+    [DONE] (plain JSON, or a gateway that just closes) is read to its end.
+    """
+    deadline = time.monotonic() + timeout
+    out = []
+    for raw in lines:
+        line = raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw
+        out.append(line if line.endswith("\n") else line + "\n")
+        if DONE_LINE.match(line.strip()):
+            out.append("\n")       # (the blank line that ends the event)
+            break
+        if time.monotonic() > deadline:
+            raise TimeoutError("the answer took longer than %d s" % timeout)
+    return "".join(out)
+
+
+def streaming_body(req):
+    return isinstance(req.get("body"), dict) and bool(req["body"].get("stream"))
+
+
 def via_openai(req):
     base, path = base_and_path(req["url"])
     if not base or path not in ("/chat/completions", "/models"):
@@ -142,8 +177,12 @@ def via_httpx(req):
     proxy = req.get("proxy") or None
     data = json.dumps(req["body"]).encode("utf-8") if req.get("body") is not None else None
     with httpx.Client(proxy=proxy, timeout=timeout, follow_redirects=False) as c:
-        resp = c.request(req.get("method", "GET"), req["url"], headers=headers_for(req), content=data)
-        return {"status": resp.status_code, "headers": dict(resp.headers), "body": resp.text}
+        if not streaming_body(req):
+            resp = c.request(req.get("method", "GET"), req["url"], headers=headers_for(req), content=data)
+            return {"status": resp.status_code, "headers": dict(resp.headers), "body": resp.text}
+        with c.stream(req.get("method", "GET"), req["url"], headers=headers_for(req), content=data) as resp:
+            body = read_stream(resp.iter_lines(), timeout) if resp.status_code < 400 else resp.read().decode("utf-8", "replace")
+            return {"status": resp.status_code, "headers": dict(resp.headers), "body": body}
 
 
 def via_urllib(req):
@@ -179,7 +218,7 @@ def via_urllib(req):
         r.set_proxy(host + (":" + str(p.port) if p.port else ""), p.scheme or "http")
     try:
         with opener.open(r, timeout=timeout) as resp:
-            body = resp.read().decode("utf-8", "replace")
+            body = read_stream(resp, timeout) if streaming_body(req) else resp.read().decode("utf-8", "replace")
             return {"status": resp.status, "headers": dict(resp.headers.items()), "body": body}
     except urllib.error.HTTPError as e:
         body = e.read().decode("utf-8", "replace") if e.fp else ""
@@ -198,9 +237,7 @@ def handle(line):
         if not isinstance(req.get("url"), str) or not req["url"].startswith(("https://", "http://")):
             raise ValueError("invalid url")
         res = None
-        body = req.get("body")
-        streaming = isinstance(body, dict) and bool(body.get("stream"))
-        if openai is not None and not streaming:
+        if openai is not None and not streaming_body(req):
             res = via_openai(req)
         if res is None:
             res = via_httpx(req) if httpx is not None else via_urllib(req)

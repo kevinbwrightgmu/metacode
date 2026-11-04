@@ -17,6 +17,7 @@ const { createSurveys } = require('./surveys');
 const { createAccounts } = require('./accounts');
 const { createProjects } = require('./projects');
 const { rankSimilar, renamedModel, sameModel, canonicalId, splitModel } = require('./model-match');
+const { keepAlive } = require('./lib/keepalive');
 const { createStatusMonitor, statusRoutes } = require('./status-page');
 
 const app = express();
@@ -190,6 +191,7 @@ const MAX_COOLDOWN_MS       = 400 * 24 * 3600 * 1000;    // reset times further 
 const MODEL_COOLDOWN_MS     = 60 * 1000;                 // a rate-limited model rests this long (doubling while it keeps happening)
 const MODEL_COOLDOWN_MAX_MS = 15 * 60 * 1000;
 const MAX_RATE_LIMIT_SWITCHES = 4;                       // similar models tried for one request when models are rate-limited
+const ANY_MODEL_SWITCHES = 8;                            // models tried for one post with AI Coding's "keep going" (anyModel)
 
 // Model ids end up in the Settings dropdown, so only plain ids are accepted
 // (letters, digits and . _ - : / @ + #), never markup. OpenCode ids are
@@ -468,7 +470,11 @@ function serviceTrouble(now, provider) {
 // free model never answers for one that isn't free (free models' providers
 // may use the prompts to improve their models), unless the operator allows it
 // (AI_FALLBACK_TO_FREE_MODELS=on); free for free is fine.
-async function closestModel(target, chatRequest, tried) {
+// The models that may answer for `target` right now: not tried yet, a chat model, not resting or
+// failing, its provider neither resting nor failing as a whole, offered, able to take the request —
+// and not a free model when `target` isn't one (free models' providers may use the prompts), unless
+// AI_FALLBACK_TO_FREE_MODELS=on. → { list, base, triedAlready(id), candidates } or null
+async function switchCandidates(target, chatRequest, tried) {
   const list = await getModelList(false);
   if (!list.ok) return null;
   const now = Date.now();
@@ -481,18 +487,34 @@ async function closestModel(target, chatRequest, tried) {
   const candidates = list.ids.filter(id => !done.has(id) && (freeOk || !isFree(id)) && !NOT_A_CHAT_MODEL.test(splitModel(id).model) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
     !providerRestingUntil(providerOf(id), now) && !serviceTrouble(now, providerOf(id)) && !(infoOf(id) && infoOf(id).available === false) && !capabilityProblem(chatRequest, infoOf(id)));
   // The same model under another spelling of its id (claude-opus-4-8 / claude-opus-4.8) as one
-  // already tried is most likely limited or failing too: a different model first, other spellings last
-  const ranked = rankSimilar(base, candidates, list.info);
+  // already tried is most likely limited or failing too
   const triedAlready = id => [base, ...done].some(t => sameModel(t, id, list.info));
-  return ranked.find(id => !triedAlready(id)) || ranked[0] || null;
+  return { list, base, triedAlready, candidates };
+}
+async function closestModel(target, chatRequest, tried) {
+  const c = await switchCandidates(target, chatRequest, tried);
+  if (!c) return null;
+  // a different model first, other spellings of one already tried last
+  const ranked = rankSimilar(c.base, c.candidates, c.list.info);
+  return ranked.find(id => !c.triedAlready(id)) || ranked[0] || null;
+}
+// AI Coding's "keep going" (anyModel): any model that may answer, of any provider, picked at random —
+// the run's current pick while it still may (so a run doesn't hop from model to model)
+async function anyModel(target, chatRequest, tried, current) {
+  const c = await switchCandidates(target, chatRequest, tried);
+  if (!c || !c.candidates.length) return null;
+  if (current && c.candidates.includes(current)) return current;
+  const fresh = c.candidates.filter(id => !c.triedAlready(id));
+  const pool = fresh.length ? fresh : c.candidates;
+  return pool[Math.floor(Math.random() * pool.length)];
 }
 
 const switchesLogged = new Map();
-function noteSwitch(from, to, why) {
+function noteSwitch(from, to, why, random) {
   const k = from + '>' + to, now = Date.now();
   if (now - (switchesLogged.get(k) || 0) < 60000) return;
   switchesLogged.set(k, now);
-  console.warn('[ai] "' + from + '" ' + (why === 'rate_limited' ? 'is rate-limited' : 'failed') + '; answered with the closest model, "' + to + '".');
+  console.warn('[ai] "' + from + '" ' + (why === 'rate_limited' ? 'is rate-limited' : 'failed') + '; answered with ' + (random ? 'a model picked at random' : 'the closest model') + ', "' + to + '".');
 }
 
 // ── Talking to the service ────────────────────────────────────────────────────
@@ -1667,6 +1689,8 @@ async function relayStream(res, attempt, model) {
   res.setHeader('X-Accel-Buffering', 'no');
   res.flushHeaders();
   res.on('error', () => {});      // a browser that vanished mid-write must not crash the server
+  // (an SSE comment while the model works without sending: a proxy in front would close a silent response)
+  const alive = keepAlive(res, ': keep-alive\n\n');
 
   const reader = attempt.response.body.getReader();
   const decoder = new TextDecoder();
@@ -1697,6 +1721,7 @@ async function relayStream(res, attempt, model) {
     }
     if (Array.isArray(chunk.choices) && chunk.choices.some(c => c && c.finish_reason)) finishSeen = true;
     const written = await writeSse(res, 'data: ' + JSON.stringify(chunk) + '\n\n');
+    alive.touch();
     forwarded++;
     return written ? null : { gone: true };
   };
@@ -1728,6 +1753,7 @@ async function relayStream(res, attempt, model) {
     }
   } finally {
     attempt.finish();
+    alive.stop();
   }
 
   if (outcome && outcome.gone) {
@@ -1839,8 +1865,11 @@ async function prepareChat(body, formatName, opts) {
     format, chatRequest,
     ctx: { model: resolved.model, verified: resolved.verified, source: resolved.source },
     explicit: !!askedFor && (askedFor === resolved.model || askedFor === resolved.renamedFrom),    // picked in Settings, not the server default
-    switchModels: switchingAllowed() && !(opts && opts.switchModels === false),
-    pickedFallback: !(opts && opts.pickedFallback === false)
+    // (AI Coding's "keep going" switches even when switching is off in the browser; AI_MODEL_SWITCH=off still wins)
+    switchModels: switchingAllowed() && (!!(opts && opts.anyModel) || !(opts && opts.switchModels === false)),
+    pickedFallback: !(opts && opts.pickedFallback === false) || !!(opts && opts.anyModel),
+    anyModel: switchingAllowed() && !!(opts && opts.anyModel),
+    pick: (opts && opts.pick) || null                                  // { to }: the run's current random pick (anyModel)
   };
 }
 
@@ -1859,10 +1888,16 @@ async function prepareChat(body, formatName, opts) {
 // not when it doesn't exist, the key may not use it or its answers can't be
 // read (the user should pick another), and not in AI Coding batches
 // (opts.pickedFallback, prepareChat).
+// AI Coding's "keep going" (prep.anyModel): whenever the model runs out (its
+// usage limit, a rate limit, its provider resting) or can't answer, a model of
+// any provider picked at random answers instead — the run's pick (prep.pick)
+// while it still can — trying up to ANY_MODEL_SWITCHES models per post.
 async function answerChat(prep, signal) {
   const { chatRequest, ctx, explicit } = prep;
+  const any = !!prep.anyModel;
   const swapPicked = explicit && prep.switchModels && prep.pickedFallback;
   const tried = new Set();
+  const switchTo = () => (any ? anyModel(ctx.model, chatRequest, tried, prep.pick && prep.pick.to) : closestModel(ctx.model, chatRequest, tried));
   let model = ctx.model, fallback = null, fallbackReason = null;
   let rateSwitches = 0, otherSwitches = 0, result;
   let own = null;               // how the model asked for failed (or was failing, when it was skipped)
@@ -1874,8 +1909,8 @@ async function answerChat(prep, signal) {
     // The model is failing at the moment: a similar model answers, without waiting on it (closestModel
     // leaves out providers failing as a whole: with none left, the model is tried after all)
     if (!resting && !providerResting && model === ctx.model && (!explicit || swapPicked) && modelDownUntil(model, now)) {
-      const alt = await closestModel(ctx.model, chatRequest, tried);
-      if (alt) { own = modelDownFailure(ctx.model); otherSwitches++; noteSwitch(ctx.model, alt, 'failed'); model = alt; fallback = alt; fallbackReason = 'failed'; continue; }
+      const alt = await switchTo();
+      if (alt) { own = modelDownFailure(ctx.model); otherSwitches++; noteSwitch(ctx.model, alt, 'failed', any); model = alt; fallback = alt; fallbackReason = 'failed'; continue; }
     }
     result = resting ? modelLimitedFailure(model, resting, now)
       : providerResting ? providerRestFailure(providerOf(model), now)
@@ -1885,18 +1920,22 @@ async function answerChat(prep, signal) {
     if (result.type === 'upstream_error') onModelServerError(model, result.upstreamStatus, Date.now());
     if (model === ctx.model) own = result;
     let why = null;
-    if ((result.type === 'model_rate_limited' || isProviderLimit(result)) && prep.switchModels && rateSwitches < MAX_RATE_LIMIT_SWITCHES) why = 'rate_limited';
+    // ("keep going": any usage or rate limit counts, a model's own quota too)
+    if ((result.type === 'model_rate_limited' || isProviderLimit(result) || (any && result.status === 429)) && prep.switchModels &&
+      rateSwitches < (any ? ANY_MODEL_SWITCHES : MAX_RATE_LIMIT_SWITCHES)) why = 'rate_limited';
     // (once switching, a similar model that fails in its own way — not offered, not allowed for the
     // key, unreadable answers — is skipped too; a provider failing as a whole isn't switched to: closestModel)
-    else if ((((!explicit || fallbackReason) && fallbackType(result)) || (swapPicked && TEMPORARY_MODEL_FAILURES.has(result.type))) &&
-      otherSwitches < 2) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
+    else if ((((!explicit || fallbackReason || any) && fallbackType(result)) || (swapPicked && TEMPORARY_MODEL_FAILURES.has(result.type))) &&
+      otherSwitches < (any ? ANY_MODEL_SWITCHES : 2)) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
     if (!why) break;
-    const alt = await closestModel(ctx.model, chatRequest, tried);     // closest to what was asked for
+    const alt = await switchTo();     // closest to what was asked for (or, "keep going", the run's pick / one at random)
     if (!alt) break;
     if (why === 'rate_limited') rateSwitches++; else otherSwitches++;
-    noteSwitch(ctx.model, alt, why);
+    noteSwitch(ctx.model, alt, why, any);
     model = alt; fallback = alt; fallbackReason = why;
   }
+  // ("keep going": the model that answered is the run's pick from now on)
+  if (any && result.ok && fallback && prep.pick) prep.pick.to = fallback;
   // The search ended on a similar model's own problem (not offered, not allowed for the key, rate-limited,
   // its provider resting…): what to report is what happened to the model asked for. Not when that
   // model's provider as a whole is the problem (failing for every model): that is what to say
@@ -1934,7 +1973,8 @@ async function answerChat(prep, signal) {
       '" you picked — choose another one in Settings → AI models (or "Server default").' });
   }
   if (!result.ok) return { failure: result };
-  return { json: prep.format === 'anthropic' ? toAnthropicResponse(result.completion) : result.completion, fallback, fallbackReason, requested: ctx.model };
+  return { json: prep.format === 'anthropic' ? toAnthropicResponse(result.completion) : result.completion, fallback, fallbackReason, requested: ctx.model,
+    fallbackPick: fallback ? (any ? 'random' : 'closest') : undefined };
 }
 
 // Tells the browser which model answered when it wasn't the one asked for
@@ -1967,15 +2007,17 @@ app.post('/api/ai', accounts.aiSingle, async (req, res) => {
 
 // POST /api/ai/batch — many chat requests answered by several copies of the
 // same model in parallel (AI Coding). Body:
-//   { requests: [{ id, body }], parallel: 1…AI_MAX_PARALLEL, delayMs: 0…5000, switchModels?: false, system?: text }
+//   { requests: [{ id, body }], parallel: 1…AI_MAX_PARALLEL, delayMs: 0…5000, switchModels?: false, anyModel?: true, system?: text }
 // (each body is what POST /api/ai takes, OpenAI format; `system`, when given,
 // is put before each request's messages as its system message, so a codebook
 // prompt shared by every post is sent once — the browser also sends a long
 // run as several batches, which keeps each request small enough for a web
 // server's body limit in front of MetaCode). The answer is NDJSON,
 // one line per request as soon as it finishes, in any order:
-//   { id, ok: true, data, fallback?, fallbackReason?, requested? }  or  { id, ok: false, status, error: { message, type } }
-// (fallback: the similar model that answered because the requested one was rate-limited or failing)
+//   { id, ok: true, data, fallback?, fallbackReason?, requested?, fallbackPick? }  or  { id, ok: false, status, error: { message, type } }
+// (fallback: the similar model that answered because the requested one was rate-limited or failing;
+// with anyModel — AI Coding's "keep going" — a model of any provider picked at random, fallbackPick 'random',
+// which then codes the rest of the batch while it can)
 // then { done: true, parallel } — parallel is how many ran at the end (it is
 // lowered when the AI service rate-limits). Closing the connection stops the batch.
 // When the AI service answers with server errors (or the connection drops, or it's restarting), the batch pauses
@@ -2013,11 +2055,17 @@ async function aiBatchRoute(req, res) {
   let parallel = Math.max(1, Math.min(max, parseInt(req.body.parallel, 10) || 1));
   const delayMs = Math.max(0, Math.min(5000, parseInt(req.body.delayMs, 10) || 0));
   const switchModels = req.body.switchModels !== false;
+  // "Keep going if the model runs out" (AI Coding, for big runs): a model picked at random from those the
+  // AI service offers takes over whenever the model runs out or can't answer; one pick for the whole run
+  const anyModel = req.body.anyModel === true;
+  const pick = { to: null };
 
   res.status(200).set({ 'Content-Type': 'application/x-ndjson; charset=utf-8', 'Cache-Control': 'no-store', 'X-Accel-Buffering': 'no' });
   res.flushHeaders();
   const client = watchClient(res);
-  const send = obj => { if (!res.writableEnded && !client.signal.aborted) res.write(JSON.stringify(obj) + '\n'); };
+  // (a blank line while no post has finished for a while: a proxy in front would close a silent response)
+  const alive = keepAlive(res, '\n');
+  const send = obj => { if (!res.writableEnded && !client.signal.aborted) { res.write(JSON.stringify(obj) + '\n'); alive.touch(); } };
   const wait = ms => new Promise(resolve => { const t = setTimeout(resolve, ms); client.signal.addEventListener('abort', () => { clearTimeout(t); resolve(); }, { once: true }); });
 
   // The plan's posts left this week (accounts/): the rest of the batch isn't sent
@@ -2031,7 +2079,7 @@ async function aiBatchRoute(req, res) {
     if (gaveUp) return send({ id: item.id, ok: false, status: 503, error: { message: gaveUp, type: 'service_unavailable' } });
     let out;
     try {
-      const prep = await prepareChat(item.body, 'openai', { switchModels, pickedFallback: false });
+      const prep = await prepareChat(item.body, 'openai', { switchModels, pickedFallback: false, anyModel, pick });
       out = prep.failure ? { failure: prep.failure } : await answerChat(prep, client.signal);
     } catch (err) {
       console.error('[ai] Unexpected error in /api/ai/batch: ' + redact(err && err.message));
@@ -2078,7 +2126,7 @@ async function aiBatchRoute(req, res) {
     // Answers are coming again: back up to full speed, one more at a time
     if (++okStreak >= 3 && parallel < ceiling) { parallel++; okStreak = 0; }
     successes++;
-    send(Object.assign({ id: item.id, ok: true, data: out.json }, out.fallback ? { fallback: out.fallback, fallbackReason: out.fallbackReason, requested: out.requested } : {}));
+    send(Object.assign({ id: item.id, ok: true, data: out.json }, out.fallback ? { fallback: out.fallback, fallbackReason: out.fallbackReason, requested: out.requested, fallbackPick: out.fallbackPick } : {}));
   }
   async function worker(slot) {
     let first = true;
@@ -2104,6 +2152,7 @@ async function aiBatchRoute(req, res) {
     await Promise.all(Array.from({ length: parallel }, (_, i) => worker(i)));
     send({ done: true, parallel: ceiling });
   } finally {
+    alive.stop();
     if (req.settleAi) req.settleAi(successes);     // only answered posts count against the plan
     client.release();
     if (!res.writableEnded) res.end();
