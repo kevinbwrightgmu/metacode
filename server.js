@@ -567,14 +567,14 @@ function providerLabel(provider) {
 async function standInHint(target, chatRequest, prep, o) {
   const now = Date.now();
   const own = o.own || providerOf(target);
+  // (the similar models of other providers this request tried, rate-limited one by one)
+  const limited = prep.switchModels ? Array.from(o.tried || []).filter(m => providerOf(m) !== own && modelRestingUntil(m, now)) : [];
+  const limitedToo = () => 'The most similar model' + (limited.length === 1 ? '' : 's') + ' of another AI provider (' + limited.map(m => '"' + modelName(m) + '"').join(', ') +
+    ') ' + (limited.length === 1 ? 'is' : 'are') + ' rate-limited too.';
   const paid = await switchCandidates(target, chatRequest, new Set([target]));
   if (paid && paid.candidates.length) {
-    if (prep.switchModels) {
-      // (switching tried its share of similar models of other providers: they're rate-limited too)
-      const limited = Array.from(o.tried || []).filter(m => providerOf(m) !== own && modelRestingUntil(m, now));
-      return { text: limited.length ? 'The most similar model' + (limited.length === 1 ? '' : 's') + ' of another AI provider (' + limited.map(m => '"' + modelName(m) + '"').join(', ') +
-        ') ' + (limited.length === 1 ? 'is' : 'are') + ' rate-limited too.' : '' };
-    }
+    // (switching tried its share of similar models of other providers: they're rate-limited too)
+    if (prep.switchModels) return { text: limited.length ? limitedToo() : '' };
     const elsewhere = paid.candidates.every(id => providerOf(id) !== own);
     return { text: !o.long ? '' : (elsewhere ? 'Models of another AI provider' : 'Other models') + ' can answer meanwhile: ' + (prep.ownPicker ? 'pick another model' : 'pick one in Settings → AI models') +
       (prep.inBatch ? ', or turn on "Keep going if the model runs out" next to Run AI Coding' : '') + '.' };
@@ -584,23 +584,25 @@ async function standInHint(target, chatRequest, prep, o) {
     return { text: !o.long ? '' : 'Free models of another AI provider can answer meanwhile: ' + (prep.ownPicker ? 'pick one' : 'pick one in Settings → AI models') + ' (marked "· free"), or let them stand in ' +
       'for paid ones with AI_FALLBACK_TO_FREE_MODELS=on in the server\'s .env (their providers may use the prompts to improve their models).' };
   }
-  // (why no model of another provider stood in: they rest too — said whatever the wait)
+  // (why no model of another provider stood in: they rest too — said whatever the wait for those whose
+  // models could stand in once their pause ends; one that couldn't anyway, such as a provider with only free
+  // models for a paid model, only when the wait is long)
   const others = restingProviders(now).filter(p => p.provider !== own);
   if (others.length) {
-    // (the soonest of them whose models may answer for this one once its pause ends)
-    let soon = null;
-    if (prep.switchModels) {
-      const later = await switchCandidates(target, chatRequest, new Set([target]), false, true);
-      const usable = new Set(later ? later.candidates.map(providerOf) : []);
-      const ends = others.filter(p => usable.has(p.provider)).map(p => p.until);
-      if (ends.length) soon = Math.min(...ends);
+    const later = await switchCandidates(target, chatRequest, new Set([target]), false, true);
+    const usable = new Set(later ? later.candidates.map(providerOf) : []);
+    const named = others.filter(p => o.long || usable.has(p.provider));
+    const ends = others.filter(p => usable.has(p.provider)).map(p => p.until);
+    if (named.length) {
+      return {
+        text: named.map(p => providerLabel(p.provider) + ' can\'t answer meanwhile either: ' + (p.reason === 'quota' ? 'its usage limit is used up' : 'it asked MetaCode to pause') +
+          ' — it can be used again ' + describeWhen(p.until, now) + '.').join(' ') + (limited.length ? ' ' + limitedToo() : ''),
+        soon: prep.switchModels && ends.length ? Math.min(...ends) : null      // (when the soonest of those is back)
+      };
     }
-    return {
-      text: others.map(p => providerLabel(p.provider) + ' can\'t answer meanwhile either: ' + (p.reason === 'quota' ? 'its usage limit is used up' : 'it asked MetaCode to pause') +
-        ' — it can be used again ' + describeWhen(p.until, now) + '.').join(' '),
-      soon
-    };
   }
+  // (every similar model of the other providers was tried, and each is rate-limited)
+  if (limited.length) return { text: limitedToo() };
   return { text: o.long ? 'No other AI provider can answer right now.' : '' };
 }
 // A failure of the model asked for (rate-limited, its provider or its free models resting) that nothing took
