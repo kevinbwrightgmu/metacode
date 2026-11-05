@@ -353,16 +353,27 @@ test('OpenCode Zen with a key, its free models\' limit used up (code "free_model
       return true;
     };
   });
-  for (const model of ['zen/big-pickle', 'zen/glm-5.3-flash-free']) {
+  for (const [i, model] of ['zen/big-pickle', 'zen/glm-5.3-flash-free'].entries()) {
     svc.seen.length = 0;
     const r = await ask(model);
     assert.equal(r.status, 200, r.text);
     const used = r.headers.get('x-metacode-model-fallback');
     assert.ok(used && !isFree(used), model + ': a paid model answered (' + used + ')');
-    assert.deepEqual(svc.seen.filter(isFree), [model], model + ': no other free Zen model was tried');
+    assert.deepEqual(svc.seen.filter(isFree), i ? [] : [model], model + (i ? ': not even sent (its free models rest)' : ': no other free Zen model was tried'));
   }
   // the paid Zen models still answer for themselves
   assert.equal((await ask('zen/claude-sonnet-4-5')).headers.get('x-metacode-model-fallback'), null);
+  // Switching off: Zen's own words and its reset time, not "rate-limiting the model … 15 minutes"; other free models
+  // get the same answer without being sent
+  svc.seen.length = 0;
+  for (const model of ['zen/big-pickle', 'zen/big-pickle-2-free']) {
+    const off = await ask(model, SWITCH_OFF);
+    assert.equal(off.status, 429, off.text);
+    assert.equal(off.json.error.type, 'quota_exceeded', model);
+    assert.match(off.json.error.message, /^Zen test's usage limit for free models is used up\. It resets in 30 minutes\. Pick a paid model\. Other models can answer meanwhile: pick one in Settings → AI models\.$/, model);
+    assert.ok(off.json.error.retryAfterSeconds > 1700, String(off.json.error.retryAfterSeconds));
+  }
+  assert.deepEqual(svc.seen, [], 'nothing was sent');
 });
 
 test('both providers paused: the message says the other one can\'t answer meanwhile either, and until when — also the first time, when MetaCode only learns it by trying one of its models', async () => {
@@ -383,10 +394,68 @@ test('both providers paused: the message says the other one can\'t answer meanwh
   assert.ok(svc.seen.some(m => /^gw\//.test(m)), 'a gateway model was tried');
   const again = await ask('zen/big-pickle');
   assert.match(again.json.error.message, BOTH);
-  // …and for the gateway's models, the other way round (a short wait: no advice on which model to pick)
+  // …and for the gateway's models, the other way round; Zen's paid models could answer for them when Zen is
+  // back in 5 minutes, so that's when to try again
   const gw = await ask('gw/gpt-5.5');
   assert.equal(gw.status, 429, gw.text);
   assert.match(gw.json.error.message, /^Test gateway asked MetaCode to pause\. Try again in about 22 hours\. Zen test can't answer meanwhile either: it asked MetaCode to pause — it can be used again in 5 minutes \(/);
+  assert.ok(Number(gw.headers.get('retry-after')) <= 300, gw.headers.get('retry-after'));
+
+  // Streamed: the same — the model asked for, and no "answered by" headers on a failure
+  for (const stream of [true]) {
+    await configure({}, setup);
+    const s1 = await ask('zen/big-pickle', {}, { stream });
+    assert.equal(s1.status, 429, s1.text);
+    assert.match(s1.json.error.message, BOTH);
+    assert.equal(s1.headers.get('x-metacode-model-fallback'), null);
+    assert.match((await ask('zen/big-pickle', {}, { stream })).json.error.message, BOTH);
+  }
+});
+
+test('the desktop app and the Lab pick their models themselves: their messages say "pick another model", not Settings → AI models', async () => {
+  await configure({ DESKTOP_WITHOUT_ACCOUNTS: 'on', AI_MODEL_SWITCH: 'off' }, () => { svc.chat = zenPaused(1800); });
+  const d = await request('POST', '/api/desktop/ai', { model: 'zen/big-pickle', messages: [{ role: 'user', content: 'a formula' }] });
+  assert.equal(d.status, 429, d.text);
+  assert.match(d.json.error.message, /^Zen test asked MetaCode to pause\. Models of another AI provider can answer meanwhile: pick another model\.$/);
+  // the website's own request says where to pick
+  const w = await ask('zen/big-pickle');
+  assert.match(w.json.error.message, /^Zen test asked MetaCode to pause\. Models of another AI provider can answer meanwhile: pick one in Settings → AI models\.$/);
+});
+
+test('Zen paused and the gateway\'s similar models rate-limited one by one (a key that isn\'t paused as a whole): the message says those were tried and are limited too', async () => {
+  await configure({}, () => {
+    svc.chat = (body, send) => {
+      if (/^gw\//.test(body.model)) {
+        send(429, { error: { type: 'rate_limited', scope: 'model', provider: 'gw', model: body.model, retry_after_seconds: 79200, message: 'Test gateway is rate-limiting the model.' } }, { 'Retry-After': '79200' });
+        return true;
+      }
+      return zenPaused(900)(body, send);
+    };
+  });
+  const r = await ask('zen/big-pickle');
+  assert.equal(r.status, 429, r.text);
+  assert.match(r.json.error.message, /^Zen test asked MetaCode to pause\. The most similar models of another AI provider \("[^"]+ \(Test gateway\)"(, "[^"]+ \(Test gateway\)")+\) are rate-limited too\.$/);
+  assert.equal(r.headers.get('x-metacode-model-fallback'), null);
+});
+
+test('AI Coding: Zen paused for an hour, the gateway for a few seconds — the posts wait for the gateway instead of failing at once', { timeout: 60000 }, async () => {
+  let gwBackAt = 0;
+  await configure({}, () => {
+    svc.chat = (body, send) => {
+      if (/^gw\//.test(body.model) && Date.now() < gwBackAt) {
+        send(429, { error: { type: 'rate_limited', scope: 'provider', provider: 'gw', retry_after_seconds: 3, message: 'Test gateway asked MetaCode to pause.' } }, { 'Retry-After': '3' });
+        return true;
+      }
+      return zenPaused(3600)(body, send);
+    };
+  });
+  gwBackAt = Date.now() + 3000;
+  const t0 = Date.now();
+  const b = await request('POST', '/api/ai/batch', { parallel: 2, requests: [1, 2, 3].map(i => ({ id: 'p' + i, body: { model: 'zen/big-pickle', messages: [{ role: 'user', content: 'post ' + i }] } })) });
+  const lines = batchLines(b);
+  assert.deepEqual(lines.map(l => (l.ok ? 'ok' : l.error.type)), ['ok', 'ok', 'ok'], b.text);
+  assert.ok(lines.every(l => /^gw\//.test(l.fallback)), b.text);
+  assert.ok(Date.now() - t0 >= 2500, 'waited for the gateway (' + (Date.now() - t0) + ' ms)');
 });
 
 test('one model rate-limited with switching off: its message says so, with nothing about other providers after it', async () => {

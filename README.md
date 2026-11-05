@@ -538,7 +538,8 @@ startup banner say when that happens.
   desktop app (the AI Coding Lab never switches: it compares models). When the other provider is paused too, the
   message says so and until when. An AI Coding run doesn't wait out a pause longer than a minute: its posts fail
   at once with that message, which says what could answer meanwhile (a model of another provider, or **Keep going
-  if the model runs out**). Settings → AI providers shows each key's standing. Restarting the AI service (or
+  if the model runs out**) — unless the other provider's own pause ends within the minute and its models can stand
+  in: then the posts wait for it. Settings → AI providers shows each key's standing. Restarting the AI service (or
   **Reload .env**) clears its memory of resting keys.
 - **Rate-limited models switch to the closest one.** A 429 for one model (while the provider's budget lasts) is
   treated as the provider throttling that one model. MetaCode then rests just that model (1 minute, doubling while

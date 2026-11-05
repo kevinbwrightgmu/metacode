@@ -117,8 +117,11 @@ use paid models or the gateway, and set `OPENCODE_DISABLE_FREE_MODELS=1`
   models pause together while its paid ones go on: none of the free ones is
   tried as a stand-in then. When the other provider is paused too, the message
   says so and until when (*"AI gateway can't answer meanwhile either: it asked
-  MetaCode to pause — it can be used again in about 9 hours (…)"*). The AI
-  Coding Lab never switches: it compares the models you picked.
+  MetaCode to pause — it can be used again in about 9 hours (…)"*), and when its
+  pause ends within a minute, an AI Coding run waits for it instead of failing
+  the posts. When the similar models of the other provider that were tried are
+  rate-limited one by one, the message says that instead. The AI Coding Lab
+  never switches: it compares the models you picked.
   `AI_FALLBACK_TO_FREE_MODELS=on` in `.env` lets free models answer for paid
   ones too; Settings → AI connection then says so.
 - **AI Coding: "Keep going if the model runs out"** (a checkbox next to **Run

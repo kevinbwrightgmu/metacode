@@ -338,13 +338,14 @@ const Assistant = (() => {
     // A provider's usage limit is used up (a free-model limit, or a budget of prompts and/or tokens per day, week or month): the message says when it resets.
     // Another provider is offered only when one is ready and not resting too
     if (/quota|used up|budget|usage limit/i.test(msg) && (err && (err.status === 429 || err.type === 'quota_exceeded'))) {
-      return { settings: true, text: clean(msg, 300) + (otherProviderCanAnswer()
+      // (600: the message may say when another provider can answer, after the provider's own words)
+      return { settings: true, text: clean(msg, 600) + (otherProviderCanAnswer()
         ? ' Until then, a model from another AI provider can answer: pick one in **Settings → AI models** (**AI providers** shows which are set up).'
         : ' AI features work again then; **Settings → AI providers** shows what each provider needs.') };
     }
     // One model is throttled: the message says when it can be used again
     if (err && err.type === 'model_rate_limited') {
-      return { settings: true, text: clean(msg, 300) + ' With **If a model is rate-limited or failing, use the closest similar model** on (**Settings → AI models**), a similar model answers meanwhile.' };
+      return { settings: true, text: clean(msg, 600) + ' With **If a model is rate-limited or failing, use the closest similar model** on (**Settings → AI models**), a similar model answers meanwhile.' };
     }
     if (/rate.?limit|too many requests|\b429\b/i.test(msg)) {
       return { settings: true, text: providerLabel() + ' is rate-limiting requests right now. Wait a few seconds and try again — or pick a model from another AI provider in **Settings → AI models**.' };
@@ -357,7 +358,7 @@ const Assistant = (() => {
     if ((err && ['authentication_error', 'permission_error'].includes(err.type)) || /invalid.{0,12}(api.?key|x-api-key)|unauthori[sz]ed|authentication|\b401\b|\b403\b/i.test(msg)) {
       return { settings: true, text: 'The AI provider didn’t accept the key it was given for this model. Whoever runs the MetaCode server can check that provider in **Settings → AI providers** and its key in the server’s `.env` file, then click **Reload .env** — or pick a model from another provider in **Settings → AI models**.' };
     }
-    return { settings: false, text: 'The assistant couldn’t get an answer: ' + clean(msg, 300) };
+    return { settings: false, text: 'The assistant couldn’t get an answer: ' + clean(msg, 600) };
   }
 
   /* ── Prompt ──────────────────────────────────*/

@@ -411,10 +411,21 @@ function providerRestFailure(provider, now) {
 // free model of that provider, not only the one asked: each would answer 429 at once, and the similar
 // models a request may try (MAX_RATE_LIMIT_SWITCHES) would be used up on them before another
 // provider's model is tried.
-const freeModelsRest = new Map();   // provider -> until
+// Requests for those free models are answered at once with the service's own words (the free models'
+// limit and when it resets), not as one model's rate limit.
+const freeModelsRest = new Map();   // provider -> { until, failure }
 function freeModelsRestingUntil(provider, now) {
-  const until = freeModelsRest.get(provider || '');
-  return until && until > now ? until : 0;
+  const st = freeModelsRest.get(provider || '');
+  return st && st.until > now ? st.until : 0;
+}
+function isFreeModel(id) {
+  const info = modelList.result && modelList.result.info.get(id);
+  return !!(info && info.free === true);
+}
+// The failure a free model gets while its provider's free models rest, without asking the service again
+function freeModelsRestFailure(provider, model, now) {
+  const st = freeModelsRest.get(provider || '');
+  return Object.assign({}, st.failure, { retryAfterSeconds: Math.max(1, Math.ceil((st.until - now) / 1000)), model, provider: provider || undefined, code: 'free_models' });
 }
 // A 429 from the service: only this model (it rests; answerChat picks the closest one) or its whole provider
 function onLimited(failure, model, now) {
@@ -422,9 +433,19 @@ function onLimited(failure, model, now) {
   if (failure.code === 'free_models') {
     const provider = failure.provider || providerOf(model);
     const until = now + Math.min(MAX_COOLDOWN_MS, Math.max(1000, (failure.retryAfterSeconds || DEFAULT_PAUSE_SEC) * 1000));
-    if (until > (freeModelsRest.get(provider) || 0)) freeModelsRest.set(provider, until);
+    const st = freeModelsRest.get(provider);
+    if (!st || until > st.until) {
+      freeModelsRest.set(provider, { until, failure });
+      console.warn('[ai] The AI service says the free models of "' + provider + '" can\'t be used until ' + new Date(until).toLocaleString() + ' (their usage limit is used up)' +
+        (switchingAllowed() ? '; requests for them use the closest paid model.' : '.'));
+    }
+    return freeModelsRestFailure(provider, model, now);
   }
   return onModelLimited(model, failure.retryAfterSeconds ? failure.retryAfterSeconds * 1000 : null, now);
+}
+// (a failure that switching may answer with another model: a model's rate limit, its provider resting, its provider's free models resting)
+function isLimit(result) {
+  return result.type === 'model_rate_limited' || isProviderLimit(result) || result.code === 'free_models';
 }
 
 // Server errors (HTTP 5xx): the provider can't run a model right now, or is
@@ -488,8 +509,9 @@ function serviceTrouble(now, provider) {
 // The models that may answer for `target` right now: not tried yet, a chat model, not resting or
 // failing, its provider neither resting nor failing as a whole, offered, able to take the request —
 // and not a free model when `target` isn't one (free models' providers may use the prompts), unless
-// AI_FALLBACK_TO_FREE_MODELS=on (or allowFree). → { list, base, triedAlready(id), candidates } or null
-async function switchCandidates(target, chatRequest, tried, allowFree) {
+// AI_FALLBACK_TO_FREE_MODELS=on (or allowFree). restingToo: also models whose provider (or whose provider's
+// free models) rest, to know which could answer once that ends. → { list, base, triedAlready(id), candidates } or null
+async function switchCandidates(target, chatRequest, tried, allowFree, restingToo) {
   const list = await getModelList(false);
   if (!list.ok) return null;
   const now = Date.now();
@@ -500,7 +522,7 @@ async function switchCandidates(target, chatRequest, tried, allowFree) {
   const done = new Set(Array.from(tried, t => splitVariant(t).base));
   const freeOk = allowFree || AI.freeFallback || isFree(base);
   const candidates = list.ids.filter(id => !done.has(id) && (freeOk || !isFree(id)) && !NOT_A_CHAT_MODEL.test(splitModel(id).model) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
-    !providerRestingUntil(providerOf(id), now) && !(isFree(id) && freeModelsRestingUntil(providerOf(id), now)) && !serviceTrouble(now, providerOf(id)) &&
+    (restingToo || (!providerRestingUntil(providerOf(id), now) && !(isFree(id) && freeModelsRestingUntil(providerOf(id), now)))) && !serviceTrouble(now, providerOf(id)) &&
     !(infoOf(id) && infoOf(id).available === false) && !capabilityProblem(chatRequest, infoOf(id)));
   // The same model under another spelling of its id (claude-opus-4-8 / claude-opus-4.8) as one
   // already tried is most likely limited or failing too
@@ -539,27 +561,63 @@ function providerLabel(provider) {
   return provider ? 'The AI provider "' + provider + '"' : 'The AI provider';
 }
 // A model that is rate-limited or whose provider rests, and nothing took over: what could answer meanwhile,
-// or why nothing can — the other providers rest too (a sentence for the message, or ''). `long`: the wait
-// is long enough (over 10 minutes) to say which model to pick instead.
-async function standInHint(target, chatRequest, prep, long) {
+// or why nothing did → { text, soon } (text '' when there's nothing to add; soon: when the other providers'
+// pause ends, if switching would use them then). o: { own (the failing provider), long (a wait of over 10
+// minutes: say which model to pick instead), tried (the models this request tried, to say they're limited too) }
+async function standInHint(target, chatRequest, prep, o) {
+  const now = Date.now();
+  const own = o.own || providerOf(target);
   const paid = await switchCandidates(target, chatRequest, new Set([target]));
   if (paid && paid.candidates.length) {
-    return prep.switchModels || !long ? '' : 'Models of another AI provider can answer meanwhile: pick one in Settings → AI models' +
-      (prep.inBatch ? ', or turn on "Keep going if the model runs out" next to Run AI Coding' : '') + '.';
+    if (prep.switchModels) {
+      // (switching tried its share of similar models of other providers: they're rate-limited too)
+      const limited = Array.from(o.tried || []).filter(m => providerOf(m) !== own && modelRestingUntil(m, now));
+      return { text: limited.length ? 'The most similar model' + (limited.length === 1 ? '' : 's') + ' of another AI provider (' + limited.map(m => '"' + modelName(m) + '"').join(', ') +
+        ') ' + (limited.length === 1 ? 'is' : 'are') + ' rate-limited too.' : '' };
+    }
+    const elsewhere = paid.candidates.every(id => providerOf(id) !== own);
+    return { text: !o.long ? '' : (elsewhere ? 'Models of another AI provider' : 'Other models') + ' can answer meanwhile: ' + (prep.ownPicker ? 'pick another model' : 'pick one in Settings → AI models') +
+      (prep.inBatch ? ', or turn on "Keep going if the model runs out" next to Run AI Coding' : '') + '.' };
   }
   const free = await switchCandidates(target, chatRequest, new Set([target]), true);
   if (free && free.candidates.length) {
-    return !long ? '' : 'Free models of another AI provider can answer meanwhile: pick one in Settings → AI models (marked "· free"), or let them stand in ' +
-      'for paid ones with AI_FALLBACK_TO_FREE_MODELS=on in the server\'s .env (their providers may use the prompts to improve their models).';
+    return { text: !o.long ? '' : 'Free models of another AI provider can answer meanwhile: ' + (prep.ownPicker ? 'pick one' : 'pick one in Settings → AI models') + ' (marked "· free"), or let them stand in ' +
+      'for paid ones with AI_FALLBACK_TO_FREE_MODELS=on in the server\'s .env (their providers may use the prompts to improve their models).' };
   }
   // (why no model of another provider stood in: they rest too — said whatever the wait)
-  const now = Date.now(), own = providerOf(target);
   const others = restingProviders(now).filter(p => p.provider !== own);
   if (others.length) {
-    return others.map(p => providerLabel(p.provider) + ' can\'t answer meanwhile either: ' + (p.reason === 'quota' ? 'its usage limit is used up' : 'it asked MetaCode to pause') +
-      ' — it can be used again ' + describeWhen(p.until, now) + '.').join(' ');
+    // (the soonest of them whose models may answer for this one once its pause ends)
+    let soon = null;
+    if (prep.switchModels) {
+      const later = await switchCandidates(target, chatRequest, new Set([target]), false, true);
+      const usable = new Set(later ? later.candidates.map(providerOf) : []);
+      const ends = others.filter(p => usable.has(p.provider)).map(p => p.until);
+      if (ends.length) soon = Math.min(...ends);
+    }
+    return {
+      text: others.map(p => providerLabel(p.provider) + ' can\'t answer meanwhile either: ' + (p.reason === 'quota' ? 'its usage limit is used up' : 'it asked MetaCode to pause') +
+        ' — it can be used again ' + describeWhen(p.until, now) + '.').join(' '),
+      soon
+    };
   }
-  return long ? 'No other AI provider can answer right now.' : '';
+  return { text: o.long ? 'No other AI provider can answer right now.' : '' };
+}
+// A failure of the model asked for (rate-limited, its provider or its free models resting) that nothing took
+// over for, with standInHint's sentence — and, when another provider's pause ends sooner than this one's
+// and switching would use it then, that sooner time (standInSoon: an AI Coding run tries the post again)
+async function withStandInHint(result, target, chatRequest, prep, tried) {
+  if (result.ok || !isLimit(result)) return result;
+  const providerWide = isProviderLimit(result) || result.code === 'free_models';
+  const h = await standInHint(target, chatRequest, prep, { own: result.provider || providerOf(target), long: providerWide && (result.retryAfterSeconds || 0) > 600,
+    tried: providerWide ? tried : null });
+  let out = result;
+  if (h.text) out = Object.assign({}, out, { message: addSentence(out.message, h.text) });
+  if (h.soon) {
+    const seconds = Math.max(1, Math.ceil((h.soon - Date.now()) / 1000));
+    if (!(out.retryAfterSeconds <= seconds)) out = Object.assign({}, out, { retryAfterSeconds: seconds, standInSoon: true });
+  }
+  return out;
 }
 
 const switchesLogged = new Map();
@@ -1838,6 +1896,7 @@ async function streamWith(res, chatRequest, ctx, signal, tokenRetried) {
   if (resting) return { modelLimited: modelLimitedFailure(chatRequest.model, resting, now0) };
   const provider = providerOf(chatRequest.model);
   if (providerRestingUntil(provider, now0)) return { modelLimited: providerRestFailure(provider, now0) };
+  if (isFreeModel(chatRequest.model) && freeModelsRestingUntil(provider, now0)) return { modelLimited: freeModelsRestFailure(provider, chatRequest.model, now0) };
   const attempt = await openStream(chatRequest, signal);
   if (attempt.failed === 'aborted') return;
   if (attempt.failed) return sendFailure(res, describeFailure(attempt, ctx));
@@ -1866,13 +1925,18 @@ async function streamChat(res, prep) {
   try {
     const { chatRequest, ctx } = prep;
     const tried = new Set();
-    let model = ctx.model, switches = 0;
+    let model = ctx.model, switches = 0, own = null;
     for (;;) {
       tried.add(model);
       const out = await streamWith(res, Object.assign({}, chatRequest, { model }), Object.assign({}, ctx, { model }), client.signal);
       if (!out || !out.modelLimited) return;
+      if (model === ctx.model) own = out.modelLimited;
       const alt = prep.switchModels && switches < MAX_RATE_LIMIT_SWITCHES ? await closestModel(ctx.model, chatRequest, tried) : null;
-      if (!alt) return sendFailure(res, out.modelLimited);
+      if (!alt) {
+        // (what happened to the model asked for, and why nothing stood in — as answerChat says it)
+        clearFallbackHeaders(res);
+        return sendFailure(res, await withStandInHint(own || out.modelLimited, ctx.model, chatRequest, prep, tried));
+      }
       switches++;
       noteSwitch(ctx.model, alt, 'rate_limited');
       model = alt;
@@ -1923,7 +1987,8 @@ async function prepareChat(body, formatName, opts) {
     pickedFallback: !(opts && opts.pickedFallback === false) || !!(opts && opts.anyModel),
     anyModel: switchingAllowed() && !!(opts && opts.anyModel),
     pick: (opts && opts.pick) || null,                                 // { to }: the run's current random pick (anyModel)
-    inBatch: !!(opts && opts.inBatch)                                  // (AI Coding: its messages can point at its own options)
+    inBatch: !!(opts && opts.inBatch),                                 // (AI Coding: its messages can point at its own options)
+    ownPicker: !!(opts && opts.ownPicker)                              // (the Lab, the desktop app: models are picked there, not in Settings)
   };
 }
 
@@ -1960,6 +2025,7 @@ async function answerChat(prep, signal) {
     const now = Date.now();
     const resting = modelRestingUntil(model, now);
     const providerResting = !resting && providerRestingUntil(providerOf(model), now);
+    const freeResting = !resting && !providerResting && isFreeModel(model) && freeModelsRestingUntil(providerOf(model), now);
     // The model is failing at the moment: a similar model answers, without waiting on it (closestModel
     // leaves out providers failing as a whole: with none left, the model is tried after all)
     if (!resting && !providerResting && model === ctx.model && (!explicit || swapPicked) && modelDownUntil(model, now)) {
@@ -1968,6 +2034,7 @@ async function answerChat(prep, signal) {
     }
     result = resting ? modelLimitedFailure(model, resting, now)
       : providerResting ? providerRestFailure(providerOf(model), now)
+      : freeResting ? freeModelsRestFailure(providerOf(model), model, now)
       : await completeChat(Object.assign({}, chatRequest, { model }), Object.assign({}, ctx, { model, verified: ctx.verified || model !== ctx.model }), signal);
     if (result.aborted) return { aborted: true };
     if (result.ok) { onModelAnswered(model); break; }
@@ -1975,7 +2042,7 @@ async function answerChat(prep, signal) {
     if (model === ctx.model) own = result;
     let why = null;
     // ("keep going": any usage or rate limit counts, a model's own quota too)
-    if ((result.type === 'model_rate_limited' || isProviderLimit(result) || (any && result.status === 429)) && prep.switchModels &&
+    if ((isLimit(result) || (any && result.status === 429)) && prep.switchModels &&
       rateSwitches < (any ? ANY_MODEL_SWITCHES : MAX_RATE_LIMIT_SWITCHES)) why = 'rate_limited';
     // (once switching, a similar model that fails in its own way — not offered, not allowed for the
     // key, unreadable answers — is skipped too; a provider failing as a whole isn't switched to: closestModel)
@@ -1993,14 +2060,14 @@ async function answerChat(prep, signal) {
   // The search ended on a similar model's own problem (not offered, not allowed for the key, rate-limited,
   // its provider resting…): what to report is what happened to the model asked for. Not when that
   // model's provider as a whole is the problem (failing for every model): that is what to say
-  if (!result.ok && model !== ctx.model && own && (result.type === 'model_rate_limited' || isProviderLimit(result) || fallbackType(result)) &&
+  if (!result.ok && model !== ctx.model && own && (isLimit(result) || fallbackType(result)) &&
     !(result.type === 'upstream_error' && serviceTrouble(Date.now(), providerOf(model)))) result = own;
   if (!result.ok && result.type === 'model_rate_limited') {
     const others = Array.from(tried).filter(m => m !== ctx.model && modelRestingUntil(m, Date.now()));
     const soonest = Math.min(...Array.from(tried).map(m => modelRestingUntil(m, Date.now()) || Infinity));
     let message = 'The AI service is rate-limiting the model "' + modelName(ctx.model) + '"' + (others.length ? ' and the most similar models (' + others.map(m => '"' + modelName(m) + '"').join(', ') + ')' : '') + ' right now.';
     if (Number.isFinite(soonest)) message += ' The first one can be used again ' + describeWhen(soonest, Date.now()) + '.';
-    if (!prep.switchModels) message += switchingAllowed() ? ' (Switching to a similar model is turned off in Settings → AI models.)' : ' (AI_MODEL_SWITCH=off in .env turns off switching to a similar model.)';
+    if (!prep.switchModels && !prep.ownPicker) message += switchingAllowed() ? ' (Switching to a similar model is turned off in Settings → AI models.)' : ' (AI_MODEL_SWITCH=off in .env turns off switching to a similar model.)';
     result = Object.assign({}, result, { message, retryAfterSeconds: Number.isFinite(soonest) ? Math.max(1, Math.ceil((soonest - Date.now()) / 1000)) : result.retryAfterSeconds });
   }
   if (!result.ok && result.type === 'upstream_error') {
@@ -2023,12 +2090,9 @@ async function answerChat(prep, signal) {
     });
   }
   // A rate-limited model or a resting provider and nothing took over: say what could answer meanwhile (a
-  // provider resting for more than 10 minutes), or that the other providers rest too (a model's own rate
-  // limit already says what switching does: only that is added)
-  if (!result.ok && (isProviderLimit(result) || result.type === 'model_rate_limited')) {
-    const hint = await standInHint(ctx.model, chatRequest, prep, isProviderLimit(result) && (result.retryAfterSeconds || 0) > 600);
-    if (hint) result = Object.assign({}, result, { message: addSentence(result.message, hint) });
-  }
+  // provider resting for more than 10 minutes), or why nothing did (a model's own rate limit already says
+  // what switching does: only that the other providers rest is added)
+  result = await withStandInHint(result, ctx.model, chatRequest, prep, tried);
   if (!result.ok && explicit && fallbackType(result) && result.type !== 'malformed_response' && !result.serviceTrouble) {
     result = Object.assign({}, result, { message: result.message.replace(/\.?$/, '.') + ' This happened with the model "' + modelName(ctx.model) +
       '" you picked — choose another one in Settings → AI models (or "Server default").' });
@@ -2044,6 +2108,13 @@ function setFallbackHeaders(res, out) {
   res.set('X-MetaCode-Model-Fallback', out.fallback);
   res.set('X-MetaCode-Model-Fallback-Reason', out.fallbackReason || 'failed');
   res.set('X-MetaCode-Model-Requested', out.requested || '');
+}
+// (a failure isn't an answer from a substitute: a stream that tried one says nothing about it)
+function clearFallbackHeaders(res) {
+  for (const h of ['X-MetaCode-Model-Fallback', 'X-MetaCode-Model-Fallback-Reason', 'X-MetaCode-Model-Requested']) {
+    if (typeof res.removeHeader === 'function') res.removeHeader(h);
+    else if (res.headers) delete res.headers[h.toLowerCase()];
+  }
 }
 
 app.post('/api/ai', accounts.aiSingle, async (req, res) => {
@@ -2151,7 +2222,9 @@ async function aiBatchRoute(req, res) {
     if (out.aborted) return;
     // (a wait longer than a minute — a provider paused for hours, a used-up budget — isn't waited out
     // in 30-second steps: the post fails at once with what the provider said)
-    if (out.failure && out.failure.status === 429 && (out.failure.type === 'rate_limited' || out.failure.type === 'model_rate_limited') && item.tries < 3 &&
+    // (also when the model's provider rests for long but another provider's short pause ends within that
+    // minute, and its models would then answer: standInSoon)
+    if (out.failure && out.failure.status === 429 && (out.failure.type === 'rate_limited' || out.failure.type === 'model_rate_limited' || out.failure.standInSoon) && item.tries < 3 &&
       !(out.failure.retryAfterSeconds > BATCH_RETRY_WAIT_MAX_SECONDS)) {
       // The AI service asked us to slow down: fewer copies at once, a short pause, then this one again
       item.tries++;
@@ -2518,7 +2591,7 @@ const labAi = {
   // (opts.switchModels: a rate-limited model, or one whose provider rests, is answered by the closest model of
   // another provider, as on the website — the desktop app's AI tools; the Lab compares models, so it doesn't)
   async chat(body, opts) {
-    const prep = await prepareChat(body, 'openai', { switchModels: !!(opts && opts.switchModels) });
+    const prep = await prepareChat(body, 'openai', { switchModels: !!(opts && opts.switchModels), ownPicker: true });
     if (prep.failure) return { failure: prep.failure };
     const out = await answerChat(prep, opts && opts.signal);
     if (out.aborted) return { aborted: true };
@@ -2527,7 +2600,7 @@ const labAi = {
   },
   // Streamed: onChunk(chunk) for each chat.completion.chunk → { model } | { failure } | { aborted }
   async stream(body, opts) {
-    const prep = await prepareChat(Object.assign({}, body, { stream: true }), 'openai', { switchModels: false });
+    const prep = await prepareChat(Object.assign({}, body, { stream: true }), 'openai', { switchModels: false, ownPicker: true });
     if (prep.failure) return { failure: prep.failure };
     const parser = createSseParser();
     let failure = null, done = false;
