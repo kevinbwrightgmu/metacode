@@ -4,7 +4,9 @@
 // Python is tried as EMIS_PYTHON, SCRAPER_PYTHON, then python3 / python / py -3.
 // request({method, url, key, body, headers, timeoutMs, signal, proxy}) (headers: the provider's
 // own extra headers, from its config) resolves to the same shape a plain fetch gives that provider:
-//   { status, ok, headers (Headers), text } or { failed: 'network'|'timeout', code }.
+//   { status, ok, headers (Headers), text } or { failed: 'network'|'timeout'|'client'|'aborted', code, sent }
+// (sent: the gateway had the whole request when it failed). A request whose caller goes away
+// (signal) or whose time is up is cancelled in the worker too: its connection is closed there.
 // createEmisPython({ env }): env is where EMIS_PYTHON / SCRAPER_PYTHON and the
 // worker's environment come from (default process.env).
 
@@ -90,7 +92,8 @@ function createEmisPython(opts) {
         w.pending.delete(msg.id);
         clearTimeout(entry.timer);
         if (msg.error) {
-          entry.resolve({ failed: msg.error.kind === 'timeout' ? 'timeout' : msg.error.kind === 'client' ? 'client' : 'network', code: msg.error.code, message: msg.error.message });
+          entry.resolve({ failed: msg.error.kind === 'timeout' ? 'timeout' : msg.error.kind === 'client' ? 'client' : 'network', code: msg.error.code, message: msg.error.message,
+            sent: msg.error.sent === true });
           return;
         }
         entry.resolve({ status: msg.status, ok: msg.status >= 200 && msg.status < 300, headers: new Headers(Object.entries(msg.headers || {}).filter(([k]) => !/^(content-encoding|transfer-encoding|content-length)$/i.test(k))), text: msg.body || '' });
@@ -110,10 +113,13 @@ function createEmisPython(opts) {
     const id = nextId++;
     return new Promise(done => {
       const signal = opts.signal;
-      const onAbort = () => { if (w.pending.delete(id)) { clearTimeout(timer); resolve({ failed: 'aborted' }); } };
+      // (the worker closes the request's connection: the gateway stops working on an answer nobody
+      // reads, and the worker's thread is free again)
+      const cancel = () => { try { if (!w.proc.stdin.writableEnded) w.proc.stdin.write(asciiJson({ id, cancel: true }) + '\n'); } catch (e) { /* gone */ } };
+      const onAbort = () => { if (w.pending.delete(id)) { clearTimeout(timer); cancel(); resolve({ failed: 'aborted' }); } };
       // (the abort listener goes with the answer, whichever comes first)
       const resolve = value => { if (signal) signal.removeEventListener('abort', onAbort); done(value); };
-      const timer = setTimeout(() => { w.pending.delete(id); resolve({ failed: 'timeout', code: 'ETIMEDOUT' }); }, (opts.timeoutMs || 120000) + 5000);
+      const timer = setTimeout(() => { if (w.pending.delete(id)) cancel(); resolve({ failed: 'timeout', code: 'ETIMEDOUT' }); }, (opts.timeoutMs || 120000) + 5000);
       w.pending.set(id, { resolve, timer });
       if (signal) {
         if (signal.aborted) { onAbort(); return; }

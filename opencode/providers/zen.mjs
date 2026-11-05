@@ -36,6 +36,9 @@ const DEFAULT_REST_SECONDS = 900;      // an account limit that didn't say when 
 const PUBLIC_KEY = 'public';           // what OpenCode sends to Zen without a key
 const MODEL_BUDGET_HINT = 'This model\'s spend limit is reached; pick another model.';
 const FREE_LIMIT_HINT = 'The free models\' limit is reached; pick a paid model.';
+// (the code of a 429 that every free model shares — with a key, the free models' limit — so MetaCode
+// leaves them all out when it looks for a model to answer instead)
+const FREE_MODELS_CODE = 'free_models';
 
 const modules = new Map();
 function protocolModule(protocol) {
@@ -214,7 +217,8 @@ export function createProvider(opts) {
       : name() + ' asked MetaCode to pause. It can be used again ' + describeWait(left) + '.';
     const h = resting.freeOnly ? 'Pick a paid model.' : hints()[resting.type];
     return new ServiceError(429, resting.type, what + (h ? ' ' + h : ''), {
-      provider: id, model: entry && entry.id, scope: resting.freeOnly ? 'model' : 'provider', retryAfterSeconds: left, resetAt: new Date(resting.until).toISOString(), window: resting.window
+      provider: id, model: entry && entry.id, scope: resting.freeOnly ? 'model' : 'provider', retryAfterSeconds: left, resetAt: new Date(resting.until).toISOString(), window: resting.window,
+      code: resting.freeOnly ? FREE_MODELS_CODE : undefined
     });
   }
 
@@ -231,7 +235,7 @@ export function createProvider(opts) {
     const freeOnly = limit === 'free' && !!settings.key && !!(m && m.free);
     const hint = Object.assign(hints(), limit === 'model' ? { quota_exceeded: MODEL_BUDGET_HINT } : freeOnly ? { quota_exceeded: FREE_LIMIT_HINT } : {});
     const e = fromAIError(err, { provider: id, providerName: name(), model: entry.id, secrets: secrets(), signal, hint });
-    if (e.status === 429 && e.type === 'quota_exceeded' && freeOnly) e.scope = 'model';
+    if (e.status === 429 && e.type === 'quota_exceeded' && freeOnly) { e.scope = 'model'; e.code = FREE_MODELS_CODE; }
     if (e.status === 429 && (e.scope === 'provider' || freeOnly)) {
       const seconds = Math.min(Math.max(1, e.retryAfterSeconds !== undefined ? e.retryAfterSeconds : DEFAULT_REST_SECONDS), MAX_REST_SECONDS);
       if (e.retryAfterSeconds === undefined) e.retryAfterSeconds = seconds;

@@ -161,7 +161,8 @@ function createDesktopApi(deps) {
       if (problem) return send(res, fail(503, 'ai_unavailable', problem));
       const body = { messages: b.messages, max_tokens: Math.max(1, Math.min(4000, Number(b.max_tokens) || 1000)), temperature: Number.isFinite(Number(b.temperature)) ? Math.max(0, Math.min(1, Number(b.temperature))) : 0.1 };
       if (typeof b.model === 'string' && b.model.length <= 200) /** @type {any} */ (body).model = b.model;
-      const out = await deps.ai.chat(body);
+      // (a model that is rate-limited, or whose provider rests, is answered by the closest model of another provider)
+      const out = await deps.ai.chat(body, { switchModels: true });
       if (out.aborted) return;
       if (out.failure) return send(res, fail(out.failure.status || 502, out.failure.type || 'ai_error', out.failure.message || 'The AI service failed.', out.failure.retryAfterSeconds ? { retryAfterSeconds: out.failure.retryAfterSeconds } : null));
       const choice = out.completion && out.completion.choices && out.completion.choices[0];

@@ -62,7 +62,7 @@ const AICoder = (() => {
         '<div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">' +
           '<div style="flex:1;min-width:200px">' +
             '<div style="font-family:var(--f-display);font-weight:600;font-size:15px">' +
-              posts.length + ' posts &nbsp;·&nbsp; ' + aiCoded + ' AI-coded (' + pct + '%)' +
+              '<span id="ai-coded-count">' + posts.length + ' posts &nbsp;·&nbsp; ' + aiCoded + ' AI-coded (' + pct + '%)</span>' +
             '</div>' +
             '<div style="font-size:13px;color:var(--tx-second);margin-top:2px">' +
               codebook.length + ' dimension' + (codebook.length !== 1 ? 's' : '') + ': ' +
@@ -70,9 +70,9 @@ const AICoder = (() => {
             '</div>' +
           '</div>' +
           '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-            '<button class="btn btn-secondary btn-sm" onclick="AICoder.setFilter(\'all\')">All (' + posts.length + ')</button>' +
-            '<button class="btn btn-secondary btn-sm" onclick="AICoder.setFilter(\'uncoded\')">Uncoded (' + uncodedCount + ')</button>' +
-            '<button class="btn btn-secondary btn-sm" onclick="AICoder.setFilter(\'coded\')">Coded (' + aiCoded + ')</button>' +
+            '<button class="btn btn-secondary btn-sm" id="ai-chip-all" onclick="AICoder.setFilter(\'all\')">All (' + posts.length + ')</button>' +
+            '<button class="btn btn-secondary btn-sm" id="ai-chip-uncoded" onclick="AICoder.setFilter(\'uncoded\')">Uncoded (' + uncodedCount + ')</button>' +
+            '<button class="btn btn-secondary btn-sm" id="ai-chip-coded" onclick="AICoder.setFilter(\'coded\')">Coded (' + aiCoded + ')</button>' +
           '</div>' +
           '<div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
             '<label class="ai-parallel" for="ai-parallel" title="How many copies of the model code posts at the same time">' +
@@ -197,9 +197,22 @@ const AICoder = (() => {
   function prevPage()   { if (viewPage > 0) { viewPage--; refreshTable(); } }
   function nextPage()   { viewPage++; refreshTable(); }
 
+  // (the table, and the counts above it and in the sidebar: posts get coded or cleared while the page is open)
   function refreshTable() {
     const el = document.getElementById('post-table');
     if (el) el.innerHTML = renderTable();
+    refreshCounts();
+  }
+  function refreshCounts() {
+    const { posts } = App.getState();
+    const aiCoded = posts.filter(p => Object.keys(p.aiCodes || {}).length > 0).length;
+    const pct = posts.length ? Math.round(aiCoded / posts.length * 100) : 0;
+    const set = (id, html) => { const e = document.getElementById(id); if (e) e.innerHTML = html; };
+    set('ai-coded-count', posts.length + ' posts &nbsp;·&nbsp; ' + aiCoded + ' AI-coded (' + pct + '%)');
+    set('ai-chip-all', 'All (' + posts.length + ')');
+    set('ai-chip-uncoded', 'Uncoded (' + (posts.length - aiCoded) + ')');
+    set('ai-chip-coded', 'Coded (' + aiCoded + ')');
+    if (App.updateSidebarStats) App.updateSidebarStats();
   }
 
   /* ── Prompt builders ─────────────────────────*/
@@ -292,7 +305,9 @@ const AICoder = (() => {
         const raw = await App.callClaude([{ role: 'user', content: user }], system, 1000, { feature: 'coding' });
         return parseCodings(raw);
       } catch (err) {
-        if (attempt === 2) throw err;   // rethrow after final attempt
+        // (rethrown after the final attempt, or at once when a web server in front gave up waiting: trying
+        // again would wait as long, and the AI service would answer each try)
+        if (attempt === 2 || err.proxyTimeout) throw err;
         await delay(1000);              // wait longer between retries
       }
     }
@@ -507,6 +522,7 @@ const AICoder = (() => {
     const updated = App.getState().posts.map(p => Object.assign({}, p, { aiCodes: {} }));
     App.setState({ posts: updated });
     render();
+    refreshCounts();
     App.notify('All AI codes cleared', 'warning');
   }
 
