@@ -533,7 +533,10 @@ startup banner say when that happens.
   paid models use the Zen account's budget. When a provider's budget is used up, MetaCode answers with the closest
   similar model from the other provider (if switching is on, and never with a free model for a paid one unless
   `AI_FALLBACK_TO_FREE_MODELS=on`), otherwise with a message saying when the quota resets (and, when the gateway
-  asked for a pause, what it said). An AI Coding run doesn't wait out a pause longer than a minute: its posts fail
+  asked for a pause, what it said). When OpenCode Zen is paused (its free limit or budget used up, or it asked to
+  pause), the gateway's models answer for its models — free and paid — on the website, in AI Coding and in the
+  desktop app (the AI Coding Lab never switches: it compares models). When the other provider is paused too, the
+  message says so and until when. An AI Coding run doesn't wait out a pause longer than a minute: its posts fail
   at once with that message, which says what could answer meanwhile (a model of another provider, or **Keep going
   if the model runs out**). Settings → AI providers shows each key's standing. Restarting the AI service (or
   **Reload .env**) clears its memory of resting keys.

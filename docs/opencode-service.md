@@ -139,12 +139,16 @@ says ([section 6](#6-the-zen-model-catalog)).
   quota), the service rests the whole provider until the time Zen gave (at most
   an hour) and answers at once meanwhile, without calling Zen. MetaCode then
   answers with the closest similar model from the gateway, if the gateway is
-  set up and switching is on. Two of these apply to fewer models: with
-  `OPENCODE_API_KEY`, the free limit (`FreeUsageLimitError` for a free model)
-  rests only the free models, and the paid ones keep answering; a
-  `BudgetLimitError` with `"coverage":"models"` is that one model's spend limit,
-  and nothing rests (both: `quota_exceeded` with `scope:"model"`, and MetaCode
-  rests that model).
+  set up and switching is on — on the website, in AI Coding and in the desktop
+  app's AI tools (not in the AI Coding Lab, which compares the models picked);
+  when the gateway rests too, the message says so and until when. Two of these
+  apply to fewer models: with `OPENCODE_API_KEY`, the free limit
+  (`FreeUsageLimitError` for a free model) rests only the free models, and the
+  paid ones keep answering (`quota_exceeded` with `scope:"model"` and
+  `code:"free_models"`: MetaCode then leaves every free Zen model out when it
+  looks for a model to answer instead); a `BudgetLimitError` with
+  `"coverage":"models"` is that one model's spend limit, and nothing rests
+  (`quota_exceeded` with `scope:"model"`; MetaCode rests that model).
   Any other 429 rate-limits just that model, and MetaCode rests that model.
 - **Free models are offered by default**, also on a server where the gateway
   is set up. They only stand in for other free models: when a paid model (the
@@ -647,7 +651,10 @@ models at all, `OPENCODE_DISABLE_FREE_MODELS` is set and there's no key.
 **A quota or free-limit message naming OpenCode Zen**
 Zen's free limit or the account's budget is reached; the message says when it
 resets. Meanwhile MetaCode uses a similar gateway model, if the gateway is set
-up and switching is on. Add a key with budget, or wait.
+up and switching is on (Settings → AI models: *If a model is rate-limited or
+failing, use the closest similar model*). If the message adds *"AI gateway
+can't answer meanwhile either…"*, the gateway is paused too, until the time it
+gives. Add a key with budget, or wait.
 
 **"Couldn't reach OpenCode Zen…" / "Couldn't reach the AI gateway…"**
 The server can't reach the provider. On a network that only reaches the

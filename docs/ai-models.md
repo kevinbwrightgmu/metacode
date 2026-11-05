@@ -109,9 +109,18 @@ use paid models or the gateway, and set `OPENCODE_DISABLE_FREE_MODELS=1`
   budget is used up, for example, its models are answered by a paid Zen model
   (with a Zen key) or get the quota message, never by Zen's free models (which
   are offered by default; `OPENCODE_DISABLE_FREE_MODELS=1` turns them off). Any
-  model can answer for a free one. `AI_FALLBACK_TO_FREE_MODELS=on` in `.env`
-  lets free models answer for paid ones too; Settings → AI connection then
-  says so.
+  model can answer for a free one: **when OpenCode Zen is paused** (its free
+  limit or its account's budget is used up, or it asked MetaCode to pause), its
+  models — free and paid — are answered by the gateway's models, on the website
+  (Ask MetaCode, Import Data, Analyze CSV, **Code this**, streamed answers), in
+  AI Coding runs and in the desktop app's AI tools. With a Zen key, Zen's free
+  models pause together while its paid ones go on: none of the free ones is
+  tried as a stand-in then. When the other provider is paused too, the message
+  says so and until when (*"AI gateway can't answer meanwhile either: it asked
+  MetaCode to pause — it can be used again in about 9 hours (…)"*). The AI
+  Coding Lab never switches: it compares the models you picked.
+  `AI_FALLBACK_TO_FREE_MODELS=on` in `.env` lets free models answer for paid
+  ones too; Settings → AI connection then says so.
 - **AI Coding: "Keep going if the model runs out"** (a checkbox next to **Run
   AI Coding**, off by default, for big runs). When the run's model runs out —
   its usage limit or its provider's budget is used up, it's rate-limited — or

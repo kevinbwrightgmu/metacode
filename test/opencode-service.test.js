@@ -1288,13 +1288,13 @@ test('the catalog can\'t send OPENCODE_API_KEY elsewhere: a model whose address 
   } finally { await other.close(); }
 });
 
-test('Zen\'s free limit with a key: only the free models wait; paid models still answer (scope model)', async () => {
+test('Zen\'s free limit with a key: only the free models wait; paid models still answer (scope model, code "free_models": MetaCode leaves every free model out)', async () => {
   const svc = await start({ OPENCODE_API_KEY: ZEN_KEY });
   up.set((req, res) => (/\/chat\/completions$/.test(req.url)
     ? reply(429, { type: 'error', error: { type: 'FreeUsageLimitError', message: 'Rate limit exceeded. Please try again later.' } }, { 'retry-after': '3600' })(req, res)
     : standard(req, res)));
   const r = await chat(svc, { model: 'opencode/free-chat' });
-  assert.deepEqual([r.status, r.json.error.type, r.json.error.scope, r.json.error.retry_after_seconds], [429, 'quota_exceeded', 'model', 3600]);
+  assert.deepEqual([r.status, r.json.error.type, r.json.error.scope, r.json.error.code, r.json.error.retry_after_seconds], [429, 'quota_exceeded', 'model', 'free_models', 3600]);
   assert.match(r.json.error.message, /free models' limit is reached; pick a paid model/);
   assert.doesNotMatch(r.json.error.message, /balance/);
   const paid = await chat(svc, { model: 'opencode/claude-sonnet-4-5' });
@@ -1302,7 +1302,7 @@ test('Zen\'s free limit with a key: only the free models wait; paid models still
   assert.equal((await chat(svc, { model: 'opencode/gpt-5.4-nano', stream: true })).status, 200);
   assert.equal(up.calls().length, 3);
   const free = await chat(svc, { model: 'opencode/big-pickle' });
-  assert.deepEqual([free.status, free.json.error.type, free.json.error.scope], [429, 'quota_exceeded', 'model']);
+  assert.deepEqual([free.status, free.json.error.type, free.json.error.scope, free.json.error.code], [429, 'quota_exceeded', 'model', 'free_models']);
   assert.ok(free.json.error.retry_after_seconds > 3500);
   assert.equal(up.calls().length, 3, 'another free model waits without asking Zen');
   assert.equal((await call(svc, 'GET', '/v1/status')).json.providers.find(p => p.id === 'opencode').resting, null, 'Zen as a whole isn\'t resting');
