@@ -481,7 +481,9 @@ browser → POST /api/ai (MetaCode server) → POST http://127.0.0.1:4097/v1/cha
 
 `npm start` starts the AI service by itself (its log lines start with `[opencode]`); on a server pm2 runs it as a
 second app ([docs/deploy-vps.md](docs/deploy-vps.md)). How it runs, all its settings, its config file, its model
-catalog and its HTTP API: **[docs/opencode-service.md](docs/opencode-service.md)**.
+catalog and its HTTP API: **[docs/opencode-service.md](docs/opencode-service.md)**. Free, cheap and self-hosted
+models it can use (free tiers, a few cents a run, research credits, our own model):
+**[docs/free-ai-options.md](docs/free-ai-options.md)**.
 
 Configuration lives only in the server's `.env` file, which MetaCode and the AI service both read:
 
@@ -720,6 +722,7 @@ metacode/
 ├── docs/deploy-vps.md         Running MetaCode on a server: pm2, nginx, HTTPS, troubleshooting
 ├── ecosystem.config.cjs        pm2 process file (MetaCode and its AI service: two apps, fork mode)
 ├── docs/opencode-service.md    MetaCode's AI service: running it, providers, settings, API, troubleshooting
+├── docs/free-ai-options.md     Free, cheap and self-hosted AI models MetaCode can use (research, Nov 2026)
 ├── docs/survey-studio.md       Survey Studio guide
 ├── docs/accounts.md            Accounts, plans and limits: setup and how it works
 ├── test/                       node:test suites (+ Playwright browser tests) and a mock Reddit
