@@ -9,6 +9,11 @@
     "opencode": {
       "name": "OpenCode Zen",
       "options": { "apiKey": "{env:OPENCODE_API_KEY}" }
+    },
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local backup (Ollama)",
+      "options": { "baseURL": "{env:OLLAMA_BASE_URL}" }
     }
   }
 }

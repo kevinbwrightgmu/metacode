@@ -256,6 +256,19 @@ plugs into MetaCode as one more provider ([§8](#8-adding-a-provider-to-metacode
 — no limits, no pauses, nothing leaves our machines, and the model never
 changes under us (good for reproducibility).
 
+**Built in now: a tiny local backup.** MetaCode uses Ollama on its own VPS as
+a last resort when every provider is out: `gemma3:1b` (815 MB) and
+`gemma3:270m` (292 MB), downloaded by the AI service itself, one request at a
+time, never as the default
+([deploy-vps.md §12](deploy-vps.md#12-optional-a-local-backup-model-ollama)).
+They were picked for size: the smallest models in Ollama's library that still
+follow a prompt (Google reports instruction-following (IFEval) scores of 80.2
+for the 1B and 51.2 for the 270M), with a 32K context and no "thinking" to
+switch off (`qwen3:0.6b` thinks unless told not to; `tinyllama` has a 2K
+context). That keeps AI Coding going, not coding well: a model this small is
+far weaker than the providers' models, so check what it codes. The rest of
+this section is about hosting a model good enough to code with.
+
 **Server software** **checked** (releases, docs and repositories, November
 2026):
 

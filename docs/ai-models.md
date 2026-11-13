@@ -13,6 +13,7 @@ up: [opencode-service.md](opencode-service.md).
 |---|---|---|---|
 | **OpenCode Zen** (`opencode/…`), through MetaCode's AI service | every AI feature; the Lab's `metacode` provider | nothing for its free models; `OPENCODE_API_KEY` for the others | streaming; tool calling, attachments and reasoning variants per model (catalog); no embeddings, no fine-tuning |
 | **AI gateway** (EMIS, an OpenAI-compatible gateway; `emis/…`), through MetaCode's AI service | every AI feature; the Lab's `metacode` provider | `EMIS_API_KEY` (one or several, rotated); optional `EMIS_BASE_URL` | streaming; tool calling and attachments per model (catalog flags); no embeddings, no fine-tuning |
+| **Local backup** (Ollama on the server; `ollama/…`), through MetaCode's AI service | every AI feature, only when no other provider's model can answer (or picked by hand) | Ollama running on the server ([setup](deploy-vps.md#12-optional-a-local-backup-model-ollama)); `OLLAMA_MODELS` (default `gemma3:1b,gemma3:270m`, downloaded by themselves) | one request at a time, on the server's CPU: slow, much weaker; no tool calling |
 | **OpenAI / OpenAI-compatible API** | the AI Coding Lab only (`openai` provider) | `AI_LAB_OPENAI_API_KEY`; optional `AI_LAB_OPENAI_BASE_URL` (https), `AI_LAB_OPENAI_MODELS` | chat, streaming, JSON mode when asked; fine-tuning only with `AI_LAB_FINE_TUNING=on` and `AI_LAB_FINE_TUNE_MODELS` |
 
 MetaCode's AI service is its OpenCode service (`opencode/`), which runs beside
@@ -124,6 +125,14 @@ use paid models or the gateway, and set `OPENCODE_DISABLE_FREE_MODELS=1`
   never switches: it compares the models you picked.
   `AI_FALLBACK_TO_FREE_MODELS=on` in `.env` lets free models answer for paid
   ones too; Settings → AI connection then says so.
+- **The local backup** (Ollama on the server, `ollama/gemma3:1b`,
+  `ollama/gemma3:270m`) answers only when no other provider's model can — every
+  provider resting, failing or tried — and none is back within a minute: a short
+  rate limit is waited out instead. Then its first model answers (not the
+  closest by name), for paid and free models alike (its prompts stay on the
+  server), one request at a time with `AI_LOCAL_TIMEOUT_MS` (5 minutes). It is
+  never the default model, and "Keep going" takes it only when nothing else is
+  left ([details](opencode-service.md#the-local-backup-ollama-ollama-on-this-server)).
 - **AI Coding: "Keep going if the model runs out"** (a checkbox next to **Run
   AI Coding**, off by default, for big runs). When the run's model runs out —
   its usage limit or its provider's budget is used up, it's rate-limited — or

@@ -108,10 +108,11 @@ is set (the same value for both), otherwise the file `opencode-data/token`
 
 ## 2. Providers
 
-The two providers are set up in `opencode/opencode.json` ([section 5](#5-the-config-file)).
-Only a provider that is **ready** (set up, with at least one model) offers
-models. Settings → **AI providers** shows each one: ready or what's missing,
-its keys and their quotas.
+The providers are set up in `opencode/opencode.json` ([section 5](#5-the-config-file)):
+OpenCode Zen, the AI gateway and, when Ollama runs on the server, a local
+last-resort backup. Only a provider that is **ready** (set up, with at least
+one model) offers models. Settings → **AI providers** shows each one: ready or
+what's missing, its keys and their quotas.
 
 ### OpenCode Zen (`opencode`)
 
@@ -242,6 +243,56 @@ with `"npm": "@ai-sdk/openai-compatible"` works the same way (keys, quota
 headers, models file or live list). The EMIS defaults (address, models file,
 transport) apply only to the provider whose id is `emis`.
 
+### The local backup (`ollama`, Ollama on this server)
+
+Small open models that run on the server itself through
+[Ollama](https://ollama.com), shown as "Local backup (Ollama)". They are a
+**last resort** for when every other provider is out (the gateway paused for
+the day, Zen's limit used up): much slower than the providers (they run on the
+server's CPU) and much weaker. Setting it up on a VPS:
+[deploy-vps.md](deploy-vps.md#12-optional-a-local-backup-model-ollama).
+
+- **Found by itself.** With `OLLAMA_BACKUP=auto` (the default) the service
+  looks for Ollama at `OLLAMA_BASE_URL` (default `http://127.0.0.1:11434/v1`,
+  Ollama's OpenAI-compatible address; its own API is that address without
+  `/v1`) every 30 seconds while it isn't there. While nothing answers, the
+  provider is left out of `/v1/status`, `/v1/models` and Settings, so a server
+  without Ollama shows nothing about it. `OLLAMA_BACKUP=on` always lists it
+  (with *"Ollama isn't answering at http://127.0.0.1:11434 (…). Install and
+  start Ollama on this server (ollama.com), or set OLLAMA_BASE_URL."*);
+  `OLLAMA_BACKUP=off` leaves it out altogether. Ollama takes no key; requests
+  to it on this machine never go through `HTTPS_PROXY`.
+- **Models.** `OLLAMA_MODELS`, comma-separated, best first (default
+  `gemma3:1b,gemma3:270m`: an 815 MB and a 292 MB download, neither of which
+  "thinks" before answering); `all` offers every chat model Ollama has. They're
+  listed as `ollama/gemma3:1b` … with *"(local backup)"* after their names, in
+  that order. A model Ollama has but `OLLAMA_MODELS` doesn't name is refused
+  (404). The models Ollama doesn't have yet are **downloaded** one after the
+  other (`POST /api/pull`), unless `OLLAMA_AUTO_PULL=off`; meanwhile its row
+  says *"Downloading gemma3:1b — the local backup is ready when that's done."*
+  A download that fails is tried again after 10 minutes, and the row says what
+  to run (*"… Run "ollama pull gemma3:1b" on the server."*).
+- **Never the default, and last.** The service lists the backup's models after
+  every other provider's, never makes one of them the default while another
+  provider has a model, and gives a model id without a provider to another
+  provider first. MetaCode answers with them only when no other provider's
+  model can answer, and none is back within a minute — a short rate limit is
+  waited out instead (an AI Coding run tries the post again): then the first
+  of `OLLAMA_MODELS` that can answer. That includes a paid model whose only
+  stand-ins elsewhere are free ones: the backup's prompts stay on the server.
+  A model of the backup can also be picked in Settings like any other.
+- **One at a time.** MetaCode sends the backup one request at a time
+  (`AI_LOCAL_PARALLEL`); the others wait for their turn, which doesn't count
+  toward their time limit. Each then gets `AI_LOCAL_TIMEOUT_MS` (default 5
+  minutes) instead of `AI_TIMEOUT_MS`; when that runs out the message says
+  *"The local backup model "gemma3:1b" didn't answer within 300 seconds. This
+  server's CPU may be too slow for it: pick a smaller model in OLLAMA_MODELS, or
+  raise AI_LOCAL_TIMEOUT_MS in the server's .env file."*
+- **Config file.** A `provider.ollama` entry in `OPENCODE_CONFIG` works as for
+  any provider (`options.baseURL`, `whitelist`, `blacklist`…);
+  `OPENCODE_DISABLED_PROVIDERS=ollama` switches it off like `OLLAMA_BACKUP=off`
+  but keeps its row in Settings.
+
 ## 3. Model ids and the default model
 
 Model ids name the provider: `provider/model`, for example
@@ -313,6 +364,10 @@ All in MetaCode's `.env` ([.env.example](../.env.example)).
 | `EMIS_API_KEY`, `EMIS_BASE_URL`, `EMIS_MODELS_FILE`, `EMIS_TRANSPORT`, `EMIS_PYTHON`, `EMIS_PROXY` | The gateway ([section 2](#the-ai-gateway-emis-emis)) |
 | `EMIS_MODEL` | From earlier versions: the default model `emis/<id>` when `OPENCODE_MODEL` and the config's `model` are unset |
 | `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | Proxy for both providers; `EMIS_PROXY` replaces it for the gateway |
+| `OLLAMA_BACKUP` | The local backup ([section 2](#the-local-backup-ollama-ollama-on-this-server)): `auto` (default: offered while Ollama answers) / `on` / `off` |
+| `OLLAMA_BASE_URL` | Ollama's address, default `http://127.0.0.1:11434/v1` |
+| `OLLAMA_MODELS` | The backup's models, comma-separated, best first; default `gemma3:1b,gemma3:270m`; `all`: every chat model Ollama has |
+| `OLLAMA_AUTO_PULL` | `off`: don't download the models Ollama doesn't have (default `on`) |
 
 **Read by MetaCode:**
 
@@ -327,6 +382,8 @@ All in MetaCode's `.env` ([.env.example](../.env.example)).
 | `AI_TIMEOUT_MS` | How long one AI request may take, 1000–600000 ms, default 120000 (older name: `EMIS_TIMEOUT_MS`) |
 | `AI_MAX_PARALLEL`, `AI_BATCH_PAUSE_SECONDS` | AI Coding's copies at once and its pause after server errors (unchanged) |
 | `AI_KEEPALIVE_SECONDS` | The longest a streamed AI response stays silent: MetaCode sends a blank line (AI Coding's NDJSON) or an SSE comment (streams, Lab answers) while the model works, so a proxy in front doesn't close it; default 15, 1–60 |
+| `AI_LOCAL_TIMEOUT_MS` | How long one request to the local backup may take, 10000–600000 ms, default 300000 (instead of `AI_TIMEOUT_MS`) |
+| `AI_LOCAL_PARALLEL` | How many requests the local backup gets at once, 1–16, default 1 |
 
 ## 5. The config file
 
@@ -345,6 +402,11 @@ config format — the same format as `emis-models.json`:
     "opencode": {
       "name": "OpenCode Zen",
       "options": { "apiKey": "{env:OPENCODE_API_KEY}" }
+    },
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Local backup (Ollama)",
+      "options": { "baseURL": "{env:OLLAMA_BASE_URL}" }
     }
   }
 }
@@ -366,7 +428,8 @@ config format — the same format as `emis-models.json`:
   blacklist[]}`, `model`, `enabled_providers[]`, `disabled_providers[]`. Any
   other key gets a warning (*"…isn't supported by MetaCode's OpenCode service
   and is ignored"*).
-- **Kinds of provider:** the id `opencode` is Zen. Any other id with `"npm":
+- **Kinds of provider:** the id `opencode` is Zen, and the id `ollama` the
+  local backup (left out with `OLLAMA_BACKUP=off`). Any other id with `"npm":
   "@ai-sdk/openai-compatible"` is an OpenAI-compatible provider. Other packages
   are skipped with a warning (*"only OpenCode Zen and OpenAI-compatible
   providers are supported"*).
@@ -466,7 +529,8 @@ OpenAI's Chat Completions format: `model`, `messages` (roles `system`,
 `stream_options`, `n` (only 1). Other fields are ignored. Without `model` the
 default model answers.
 
-- `X-Request-Timeout-Ms` (sent by MetaCode, from `AI_TIMEOUT_MS`): the service
+- `X-Request-Timeout-Ms` (sent by MetaCode, from `AI_TIMEOUT_MS`, or
+  `AI_LOCAL_TIMEOUT_MS` for the local backup's models): the service
   gives up on the provider 3 seconds earlier (at least 1 second; 115 seconds
   without the header) — waiting for the first answer, between two streamed
   pieces, and for a whole non-streamed answer.
@@ -670,6 +734,17 @@ resets when the message says; another key can be added to `EMIS_API_KEY`
 (comma-separated). Meanwhile a paid Zen model (with `OPENCODE_API_KEY`) can
 answer for the gateway's models, a free one only with
 `AI_FALLBACK_TO_FREE_MODELS=on`.
+
+**The local backup: no "Local backup (Ollama)" row, "Downloading …", or slow answers**
+No row: nothing answers at `OLLAMA_BASE_URL` (`systemctl status ollama`;
+`curl http://127.0.0.1:11434/api/tags` should list its models). Set
+`OLLAMA_BACKUP=on` and **Reload .env** to see why. *"Downloading gemma3:1b"*
+lasts a minute or two on a VPS; the service log shows `ollama.pull` lines.
+Answers taking minutes, or *"didn't answer within 300 seconds"*: the server's
+CPU is busy or small for the model — set `OLLAMA_MODELS=gemma3:270m`, or raise
+`AI_LOCAL_TIMEOUT_MS`. A prompt longer than Ollama's context (4096 tokens unless
+`OLLAMA_CONTEXT_LENGTH` is set for its service) is cut silently: see
+[deploy-vps.md](deploy-vps.md#12-optional-a-local-backup-model-ollama).
 
 **The Zen catalog never refreshes (the service's log says the refresh failed)**
 The server can't reach `models.opencode.ai`. The bundled or cached catalog

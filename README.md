@@ -460,7 +460,7 @@ Each question uses one prompt and roughly 3,000 tokens of the provider's budget.
 Every AI feature — AI Coding, the assistant, column detection in Import Data and Analyze CSV, the AI Scraper, the
 AI Coding Lab and Test Connection — goes through MetaCode's own server to its **AI service**: an OpenCode service
 (`opencode/`, built on OpenCode's `@opencode/ai` package) that runs beside MetaCode on the same computer and
-reaches two AI providers:
+reaches two AI providers (and, as a last resort, small models on the server itself):
 
 ```
 browser → POST /api/ai (MetaCode server) → POST http://127.0.0.1:4097/v1/chat/completions (MetaCode's AI service)
@@ -471,6 +471,10 @@ browser → POST /api/ai (MetaCode server) → POST http://127.0.0.1:4097/v1/cha
   `OPENCODE_API_KEY` adds the paid ones, billed to that key's account.
 - **The AI gateway** (EMIS) — an OpenAI-compatible gateway with keys issued by hand (`EMIS_API_KEY`, see
   [Prerequisites](#prerequisites)), each with a budget.
+- **The local backup** (optional) — when [Ollama](https://ollama.com) runs on the server, two small models on it
+  (`gemma3:1b` and `gemma3:270m`, about 1.1 GB together, downloaded by the AI service itself) answer when every
+  other provider is out: only then, never as the default, one request at a time. They run on the server's CPU, so
+  they're slow and make more mistakes. Setup: [docs/deploy-vps.md](docs/deploy-vps.md#12-optional-a-local-backup-model-ollama).
 
 > **Privacy.** Free Zen models are rate-limited, and their providers may use prompts to improve their models during
 > the free period. AI Coding sends the text of the posts it codes. If you work with sensitive posts, use paid models
@@ -503,6 +507,9 @@ Configuration lives only in the server's `.env` file, which MetaCode and the AI 
 | `AI_BATCH_PAUSE_SECONDS` | no | How long AI Coding first pauses when the AI service answers with a server error (default 5; doubles with each pause, up to 60) |
 | `AI_KEEPALIVE_SECONDS` | no | The longest a streamed AI response (an AI Coding run, a Lab answer) stays silent while the model works: MetaCode sends a blank line or an SSE comment that every reader skips, so a proxy in front (Cloudflare, nginx) doesn't close it (default 15, 1–60) |
 | `AI_TIMEOUT_MS` | no | How long to wait for an AI answer (default 120000 ms). Older name: `EMIS_TIMEOUT_MS` |
+| `OLLAMA_BACKUP` | no | The local backup (Ollama on the server): `auto` (default — used when Ollama answers), `on` (always listed, with what's wrong) or `off` |
+| `OLLAMA_MODELS` | no | The local backup's models, best first (default `gemma3:1b,gemma3:270m`; downloaded by themselves unless `OLLAMA_AUTO_PULL=off`). `OLLAMA_BASE_URL`: where Ollama answers (default `http://127.0.0.1:11434/v1`) |
+| `AI_LOCAL_TIMEOUT_MS`, `AI_LOCAL_PARALLEL` | no | How long one answer from the local backup may take (default 300000 ms) and how many it gets at once (default 1) |
 | `OPENCODE_SERVICE_URL`, `OPENCODE_SERVICE_PORT`, `OPENCODE_SERVICE_MANAGED`, … | no | Where the AI service runs and who starts it (default: `127.0.0.1:4097`, started by MetaCode unless pm2 runs it). `OPENCODE_SERVICE_URL=off` switches MetaCode's AI off. See [docs/opencode-service.md](docs/opencode-service.md#4-settings) |
 
 After changing `.env`, click **Settings → Reload .env** (AI settings apply at once, in the AI service too; scraper,

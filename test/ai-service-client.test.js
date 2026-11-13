@@ -45,9 +45,9 @@ function reset() {
     token: TOKEN,               // the token it accepts (null: any)
     home: HOME,                 // GET /health's "home": which MetaCode's data folder (shared.homeId)
     foreign: false,             // another program: "404 Not Found" for everything
-    models: MODELS, default: 'gw/claude-opus-5.5',
+    models: MODELS, default: 'gw/claude-opus-5.5', providers: PROVIDERS,
     chat: null,                 // (body, send, res) → true when it answered the chat itself
-    seen: [], health: 0, reloads: 0
+    seen: [], limits: [], formats: [], health: 0, reloads: 0       // limits: each chat's X-Request-Timeout-Ms; formats: its response_format type
   });
 }
 reset();
@@ -60,13 +60,15 @@ function handle(req, res) {
     if (svc.foreign) { res.writeHead(404, { 'content-type': 'text/plain' }); return res.end('Not Found'); }
     if (req.url === '/health') { svc.health++; return send(200, { ok: true, service: 'metacode-opencode', version: 'test', pid: process.pid, home: svc.home }); }
     if (svc.token && req.headers.authorization !== 'Bearer ' + svc.token) return send(401, { error: { type: 'authentication_error', message: 'MetaCode\'s OpenCode service needs its access token.' } });
-    const status = { service: { name: 'metacode-opencode', version: 'test' }, ready: true, default: svc.default, warnings: [], providers: PROVIDERS };
+    const status = { service: { name: 'metacode-opencode', version: 'test' }, ready: true, default: svc.default, warnings: [], providers: svc.providers };
     if (req.url === '/v1/status') return send(200, status);
     if (req.url === '/v1/reload' && req.method === 'POST') { svc.reloads++; return send(200, status); }
-    if (req.url === '/v1/models') return send(200, { object: 'list', default: svc.default, providers: PROVIDERS, data: svc.models });
+    if (req.url === '/v1/models') return send(200, { object: 'list', default: svc.default, providers: svc.providers.map(p => ({ id: p.id, name: p.name, ready: p.ready, backup: p.backup })), data: svc.models });
     if (req.url !== '/v1/chat/completions') return send(404, { error: { type: 'not_found', message: 'Not found.' } });
     const body = JSON.parse(b || '{}');
     svc.seen.push(body.model);
+    svc.limits.push([body.model, req.headers['x-request-timeout-ms']]);
+    svc.formats.push([body.model, body.response_format ? body.response_format.type : null]);
     if (svc.chat && svc.chat(body, send, res)) return;
     if (body.stream) {
       res.writeHead(200, { 'content-type': 'text/event-stream' });
@@ -106,7 +108,7 @@ const baseEnv = () => testEnv({
   ACCOUNT_DATA_DIR: path.join(tmp, 'a'), SURVEY_DATA_DIR: path.join(tmp, 's'), PROJECT_DATA_DIR: path.join(tmp, 'p'), AI_LAB_DATA_DIR: path.join(tmp, 'l'), COLLAB_DATA_DIR: path.join(tmp, 'c')
 });
 const VARIABLES = ['OPENCODE_SERVICE_URL', 'OPENCODE_SERVICE_PORT', 'OPENCODE_SERVICE_TOKEN', 'OPENCODE_SERVICE_MANAGED', 'OPENCODE_MODEL', 'EMIS_MODEL', 'AI_MODEL_SWITCH',
-  'AI_FALLBACK_TO_FREE_MODELS', 'AI_BATCH_PAUSE_SECONDS', 'AI_TIMEOUT_MS', 'AI_KEEPALIVE_SECONDS', 'DESKTOP_WITHOUT_ACCOUNTS'];
+  'AI_FALLBACK_TO_FREE_MODELS', 'AI_BATCH_PAUSE_SECONDS', 'AI_TIMEOUT_MS', 'AI_KEEPALIVE_SECONDS', 'DESKTOP_WITHOUT_ACCOUNTS', 'AI_LOCAL_TIMEOUT_MS', 'AI_LOCAL_PARALLEL'];
 
 test.before(async () => {
   main = standIn(0);
@@ -571,6 +573,134 @@ test('a model id with a reasoning variant ("provider/model#variant") is sent wit
   assert.match(list.note, /OPENCODE_MODEL \("zen\/claude-sonnet-4-5#nope"\) has no variant "nope" \(it has high, max\)/);
   await ask();
   assert.equal(svc.seen.pop(), 'zen/claude-sonnet-4-5');
+});
+
+// ── The local backup (Ollama on this server) ─────────────────────────────────
+// Its models (backup: true) answer only when no other provider's model can — and none is back within a minute —
+// the first of them (the service lists the best first), one request at a time, with AI_LOCAL_TIMEOUT_MS
+const LOCAL = { id: 'local', name: 'Local backup (Ollama)', ready: true, backup: true, local: true, keyCount: 0, note: 'Last-resort backup.' };
+const LOCAL_MODELS = ['tiny:1b', 'tiny:270m'].map(m => ({ id: 'local/' + m, object: 'model', provider: 'local', provider_name: LOCAL.name, model: m, name: m + ' (local backup)',
+  free: false, available: true, backup: true, local: true }));
+const withLocal = () => { svc.providers = PROVIDERS.concat([LOCAL]); svc.models = MODELS.concat(LOCAL_MODELS); };
+// A provider that asked MetaCode to pause for `seconds` (until `until`, when given: then it answers again)
+const pausedFor = (provider, seconds, until) => (body, send) => {
+  if (!body.model.startsWith(provider + '/') || (until && Date.now() >= until)) return false;
+  send(429, { error: { type: 'rate_limited', scope: 'provider', provider, retry_after_seconds: seconds, message: provider + ' asked MetaCode to pause.' } }, { 'Retry-After': String(seconds) });
+  return true;
+};
+const bothOut = () => (body, send) => pausedFor('gw', 79200)(body, send) || pausedFor('zen', 1800)(body, send);
+const isLocal = m => /^local\//.test(m || '');
+
+test('the local backup: listed as such, never the default, never standing in while another provider\'s model can (or can within a minute); once every other provider is out, its best model answers — a request, a stream, AI Coding, "keep going"', { timeout: 60000 }, async () => {
+  const ai = await configure({}, withLocal);
+  assert.deepEqual(ai.providers.map(p => [p.id, p.backup, p.local]), [['gw', false, false], ['zen', false, false], ['local', true, true]]);
+  const list = await request('GET', '/api/models');
+  assert.equal(list.json.models[0].id, 'gw/claude-opus-5.5', 'the default');
+  assert.deepEqual(list.json.models.filter(m => isLocal(m.id)).map(m => [m.id, m.backup, m.local]), [['local/tiny:1b', true, true], ['local/tiny:270m', true, true]]);
+  assert.equal((await ask()).status, 200);
+  assert.deepEqual(svc.seen, ['gw/claude-opus-5.5']);
+
+  // The gateway paused for hours: Zen's models answer for its models, never the backup
+  await configure({}, () => { withLocal(); svc.chat = pausedFor('gw', 79200); });
+  for (const model of ['gw/gpt-5.5', 'gw/claude-opus-5.5']) {
+    const r = await ask(model);
+    assert.equal(r.status, 200, r.text);
+    assert.match(r.headers.get('x-metacode-model-fallback'), /^zen\//);
+  }
+  let b = await request('POST', '/api/ai/batch', { parallel: 2, anyModel: true, requests: [1, 2, 3].map(i => ({ id: 'p' + i, body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post ' + i }] } })) });
+  assert.deepEqual(batchLines(b).map(l => l.ok && /^zen\//.test(l.fallback)), [true, true, true], b.text);
+  assert.equal(svc.seen.some(isLocal), false, 'nothing went to the backup');
+
+  // Zen's pause ends within a minute: an AI Coding post waits for it rather than going to the backup
+  await configure({}, () => { withLocal(); const until = Date.now() + 2500; svc.chat = (body, send) => pausedFor('gw', 79200)(body, send) || pausedFor('zen', 2, until)(body, send); });
+  b = await request('POST', '/api/ai/batch', { parallel: 1, requests: [{ id: 'p1', body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post 1' }] } }] });
+  const waited = batchLines(b);
+  assert.deepEqual(waited.map(l => [l.ok, /^zen\//.test(l.fallback || '')]), [[true, true]], b.text);
+  assert.equal(svc.seen.some(isLocal), false, 'nothing went to the backup');
+
+  // Every other provider out for longer: the backup's first model answers — for a paid model and a free one, streamed too
+  await configure({}, () => { withLocal(); svc.chat = bothOut(); });
+  for (const model of ['gw/gpt-5.5', 'zen/big-pickle', undefined]) {
+    const r = await ask(model);
+    assert.equal(r.status, 200, r.text);
+    assert.equal(r.headers.get('x-metacode-model-fallback'), 'local/tiny:1b', String(model));
+    assert.equal(r.json.choices[0].message.content, 'ok from local/tiny:1b');
+  }
+  const s = await ask('gw/claude-opus-5.5', {}, { stream: true });
+  assert.equal(s.status, 200, s.text);
+  assert.equal(s.headers.get('x-metacode-model-fallback'), 'local/tiny:1b');
+  assert.match(s.text, /ok from local\/tiny:1b/);
+  // (its requests get AI_LOCAL_TIMEOUT_MS, 5 minutes by default; the others AI_TIMEOUT_MS)
+  assert.ok(svc.limits.filter(([m]) => isLocal(m)).every(([, ms]) => ms === '300000'), JSON.stringify(svc.limits));
+  assert.ok(svc.limits.filter(([m]) => !isLocal(m)).every(([, ms]) => ms === '120000'), JSON.stringify(svc.limits));
+
+  // (only AI Coding's answers must be JSON: nothing above asked for it)
+  assert.ok(svc.formats.every(([, f]) => f === null), JSON.stringify(svc.formats));
+
+  // AI Coding: the model picked, and "keep going" — the backup's best model, not one at random; Ollama is told
+  // to answer with valid JSON (only the backup: the other providers' models get the request as it was)
+  for (const anyModel of [false, true]) {
+    await configure({}, () => { withLocal(); svc.chat = bothOut(); });
+    b = await request('POST', '/api/ai/batch', { parallel: 2, anyModel, requests: [1, 2, 3, 4].map(i => ({ id: 'p' + i, body: { model: 'gw/glm-5.3-flash', messages: [{ role: 'user', content: 'post ' + i }] } })) });
+    assert.deepEqual(batchLines(b).map(l => [l.ok, l.fallback]), Array(4).fill([true, 'local/tiny:1b']), b.text);
+    assert.deepEqual([...new Set(svc.formats.map(([m, f]) => (isLocal(m) ? 'local:' : 'other:') + f))].sort(), ['local:json_object', 'other:null']);
+  }
+  // …and "Code this" (one post: X-MetaCode-Feature: coding)
+  const one = await ask('gw/gpt-5.5', { 'X-MetaCode-Feature': 'coding' });
+  assert.equal(one.headers.get('x-metacode-model-fallback'), 'local/tiny:1b');
+  assert.deepEqual(svc.formats[svc.formats.length - 1], ['local/tiny:1b', 'json_object']);
+
+  // A free model that can't stand in for a paid one (its provider may use the prompts) leaves the backup to answer:
+  // its prompts stay on this server
+  await configure({}, () => { withLocal(); svc.models = svc.models.filter(m => !/^zen\//.test(m.id) || m.free); svc.chat = pausedFor('gw', 79200); });
+  const p = await ask('gw/gpt-5.5');
+  assert.equal(p.status, 200, p.text);
+  assert.equal(p.headers.get('x-metacode-model-fallback'), 'local/tiny:1b');
+  assert.equal(svc.seen.some(m => /^zen\//.test(m)), false);
+});
+
+test('the local backup with switching off: nothing switches to it, and the message says it could answer', async () => {
+  await configure({}, () => { withLocal(); svc.chat = bothOut(); });
+  assert.equal((await ask('zen/claude-opus-5.5', SWITCH_OFF)).status, 429);      // (MetaCode learns that Zen is paused too)
+  const r = await ask('gw/gpt-5.5', SWITCH_OFF);
+  assert.equal(r.status, 429, r.text);
+  assert.match(r.json.error.message, /^gw asked MetaCode to pause\. The local backup \(small models on this server, slower and weaker\) can answer meanwhile: pick one of its models in Settings → AI models\.$/);
+  assert.equal(svc.seen.some(isLocal), false);
+  const lines = batchLines(await request('POST', '/api/ai/batch', { parallel: 1, switchModels: false, requests: [{ id: 'p1', body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post' }] } }] }));
+  assert.equal(svc.seen.some(isLocal), false);
+  assert.match(lines[0].error.message, /The local backup \(small models on this server, slower and weaker\) can answer meanwhile: pick one of its models in Settings → AI models, or turn on "Keep going if the model runs out" next to Run AI Coding\.$/);
+});
+
+test('the local backup answers one request at a time (AI_LOCAL_PARALLEL), the wait not counted toward its time limit (AI_LOCAL_TIMEOUT_MS); a slow answer says what to change', { timeout: 60000 }, async () => {
+  let active = 0, most = 0;
+  const slowLocal = ms => (body, send) => {
+    if (!isLocal(body.model)) return bothOut()(body, send);
+    active++; most = Math.max(most, active);
+    setTimeout(() => { active--; send(200, completion(body.model, 'ok from ' + body.model)); }, ms);
+    return true;
+  };
+  // 4 posts at once, each taking 0.6 s: one after the other, the last one waiting about 1.8 s — longer than AI_TIMEOUT_MS,
+  // which isn't the backup's limit
+  await configure({ AI_TIMEOUT_MS: '1000' }, () => { withLocal(); svc.chat = slowLocal(600); });
+  let b = await request('POST', '/api/ai/batch', { parallel: 4, requests: [1, 2, 3, 4].map(i => ({ id: 'p' + i, body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post ' + i }] } })) });
+  assert.deepEqual(batchLines(b).map(l => [l.ok, l.fallback]), Array(4).fill([true, 'local/tiny:1b']), b.text);
+  assert.equal(most, 1, 'one at a time');
+  assert.ok(svc.limits.filter(([m]) => isLocal(m)).every(([, ms]) => ms === '300000'), 'AI_LOCAL_TIMEOUT_MS, not AI_TIMEOUT_MS: ' + JSON.stringify(svc.limits));
+
+  most = 0;
+  await configure({ AI_LOCAL_PARALLEL: '2', AI_LOCAL_TIMEOUT_MS: '20000' }, () => { withLocal(); svc.chat = slowLocal(300); });
+  b = await request('POST', '/api/ai/batch', { parallel: 4, requests: [1, 2, 3, 4].map(i => ({ id: 'p' + i, body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post ' + i }] } })) });
+  assert.deepEqual(batchLines(b).map(l => l.ok), [true, true, true, true], b.text);
+  assert.equal(most, 2, 'AI_LOCAL_PARALLEL=2');
+  assert.ok(svc.limits.filter(([m]) => isLocal(m)).every(([, ms]) => ms === '20000'), JSON.stringify(svc.limits));
+
+  // Too slow: after AI_LOCAL_TIMEOUT_MS, the message names the model and what to change
+  await configure({ AI_LOCAL_TIMEOUT_MS: '10000', AI_TIMEOUT_MS: '1000' }, () => { withLocal(); svc.chat = (body) => isLocal(body.model); });
+  const t0 = Date.now();
+  const r = await ask('local/tiny:1b');
+  assert.equal(r.status, 504, r.text);
+  assert.ok(Date.now() - t0 >= 9500, 'waited AI_LOCAL_TIMEOUT_MS (' + (Date.now() - t0) + ' ms)');
+  assert.equal(r.json.error.message, 'The local backup model "tiny:1b" didn\'t answer within 10 seconds. This server\'s CPU may be too slow for it: pick a smaller model in OLLAMA_MODELS, or raise AI_LOCAL_TIMEOUT_MS in the server\'s .env file.');
 });
 
 test('one provider failing for every model: requests switch to another provider\'s model; the status page says degraded, not outage', { timeout: 30000 }, async () => {

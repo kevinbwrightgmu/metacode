@@ -8,6 +8,7 @@ Browser ──https──▶ nginx :443 ──http──▶ MetaCode (pm2 app "m
           wss://your-site/wisp/  ──▶  MetaCode's own Wisp server (the Reddit Scraper's in-app browser)
                                       MetaCode ──▶ its AI service (pm2 app "metacode-opencode", 127.0.0.1:4097)
                                                      ──▶ OpenCode Zen / the AI gateway
+                                                     ──▶ (last resort) Ollama on 127.0.0.1:11434 (step 12)
 ```
 
 **Why the proxy matters.** The Reddit Scraper's in-app browser (**Browse Reddit**) and its "This browser"
@@ -51,6 +52,10 @@ models, so if your users code sensitive posts, add `OPENCODE_DISABLE_FREE_MODELS
 `startOrReload` line. A free model never stands in for a paid one unless `.env` sets `AI_FALLBACK_TO_FREE_MODELS=on`:
 when the gateway's budget is used up, requests without a Zen key get the quota message until it resets, as before. If you keep an `ai-lab-pricing.json`, its `metacode:<model-id>` keys still price the
 gateway's models ([ai-lab.md](ai-lab.md)).
+
+**New: a local backup model.** If Ollama runs on the server, MetaCode uses two small models on it
+(`gemma3:1b`, `gemma3:270m`; about 1.1 GB together, downloaded by itself) as a last resort when every AI provider
+is out. Setting it up: [step 12](#12-optional-a-local-backup-model-ollama). Without Ollama nothing changes.
 
 If you only run `pm2 reload metacode` after updating, AI keeps working: MetaCode then starts the AI service
 itself, because nothing answers at its address (its lines in `pm2 logs metacode` start with `[opencode]`). Run
@@ -503,3 +508,69 @@ AI settings (keys, models, providers) can be reloaded from **Settings → AI con
 reaches the AI service too. Where the service runs (`OPENCODE_SERVICE_*`) needs
 `pm2 restart metacode metacode-opencode`. Everything else (`PORT`, `PUBLIC_URL`, scraper settings) needs
 `pm2 reload metacode`.
+
+## 12. Optional: a local backup model (Ollama)
+
+When every AI provider is out — the gateway paused for the day and OpenCode Zen's limit used up — MetaCode can
+still answer with a small model that runs on the VPS itself, through [Ollama](https://ollama.com). It is a last
+resort: MetaCode uses it only when no other provider's model can answer and none is back within a minute (a short
+rate limit is waited out instead), one request at a time. It runs on the server's CPU, so it is much slower than
+the providers, and a model this small makes many more mistakes: AI Coding says which posts it coded (*"answered
+by gemma3:1b (local backup)"*), so check those before you rely on them.
+
+**1. Install Ollama.** Its installer sets it up as the systemd service `ollama`, listening on `127.0.0.1:11434`
+only. *"No NVIDIA/AMD GPU detected. Ollama will run in CPU-only mode."* is expected on a VPS.
+
+```bash
+curl -fsSL https://ollama.com/install.sh | sh
+```
+
+**2. Give it room for a codebook, and let MetaCode go first.** Without a big GPU, Ollama gives each request
+4096 tokens of context and silently cuts longer prompts — too few for a codebook, a post and the answer. Raise
+it, keep it to one request at a time, and give it a lower CPU priority than MetaCode:
+
+```bash
+sudo mkdir -p /etc/systemd/system/ollama.service.d
+sudo tee /etc/systemd/system/ollama.service.d/metacode.conf >/dev/null <<'CONF'
+[Service]
+Environment="OLLAMA_CONTEXT_LENGTH=8192"
+Environment="OLLAMA_NUM_PARALLEL=1"
+Nice=10
+CPUWeight=20
+CONF
+sudo systemctl daemon-reload && sudo systemctl restart ollama
+```
+
+(With a long codebook, use `16384`: more context needs more memory and makes each answer slower.)
+
+**3. Update MetaCode** ([step 10](#10-updating)). Its AI service finds Ollama by itself and downloads the two
+default models one after the other: `gemma3:1b` (815 MB, the better one, used first) and `gemma3:270m` (292 MB,
+for when the first can't answer). Settings → **AI providers** shows **Local backup (Ollama)** with *"Downloading
+gemma3:1b …"* until they're there, then *Ready*. To download them yourself: `ollama pull gemma3:1b && ollama pull
+gemma3:270m`.
+
+**4. Check it.**
+
+```bash
+curl -s http://127.0.0.1:11434/api/tags; echo        # Ollama answers and lists gemma3:1b and gemma3:270m
+ollama run gemma3:1b "Answer in three words: what is a codebook?"     # the first answer also loads the model
+pm2 logs metacode-opencode --lines 20 | grep ollama  # ollama.found, ollama.pull … done
+```
+
+Memory: while it answers, `gemma3:1b` needs roughly 1.5 GB of free RAM and `gemma3:270m` about 0.5 GB (Ollama
+unloads a model 5 minutes after its last answer). On a small VPS, offer only the small one with
+`OLLAMA_MODELS=gemma3:270m` in `.env`, then **Reload .env**. Ollama answers *"model requires more system memory
+… than is available"* when it doesn't fit.
+
+| Variable (`.env`) | Default | What it does |
+|---|---|---|
+| `OLLAMA_BACKUP` | `auto` | `auto`: offered while Ollama answers, invisible otherwise; `on`: always listed, with what's wrong; `off`: never |
+| `OLLAMA_MODELS` | `gemma3:1b,gemma3:270m` | The models to offer, best first; `all`: every model Ollama has |
+| `OLLAMA_BASE_URL` | `http://127.0.0.1:11434/v1` | Where Ollama answers |
+| `OLLAMA_AUTO_PULL` | `on` | `off`: don't download the models Ollama doesn't have |
+| `AI_LOCAL_TIMEOUT_MS` | `300000` | How long one answer from the backup may take (10000–600000 ms) |
+| `AI_LOCAL_PARALLEL` | `1` | How many requests it answers at once (raise it only with `OLLAMA_NUM_PARALLEL` and spare CPU cores) |
+
+**Keep port 11434 closed.** Ollama has no password: anyone who reaches it can use, download and delete models.
+The firewall from [step 8](#8-firewall) keeps it closed; don't set `OLLAMA_HOST=0.0.0.0`. To remove the backup,
+set `OLLAMA_BACKUP=off` (or `sudo systemctl disable --now ollama`).

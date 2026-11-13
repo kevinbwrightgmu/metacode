@@ -915,7 +915,7 @@ const App = (() => {
   function providerBlock(p) {
     const until = p.resting ? Date.parse(p.resting.until) : NaN;
     const resting = !!p.ready && until > Date.now();
-    const badge = !p.ready ? '<span class="badge badge-red">Not set up</span>'
+    const badge = !p.ready ? '<span class="badge badge-red">' + (p.local ? 'Not ready' : 'Not set up') + '</span>'
       : resting ? '<span class="badge badge-amber" title="' + esc(new Date(until).toLocaleString()) + '">Resting until ' + esc(whenText(until)) + '</span>'
         : '<span class="badge badge-green">Ready</span>';
     const keys = Array.isArray(p.keys) ? p.keys.filter(k => k && typeof k === 'object') : [];
@@ -923,7 +923,7 @@ const App = (() => {
     const m = p.models && typeof p.models === 'object' ? p.models : {};
     const facts = [];
     if (Number.isFinite(m.listed) && (m.listed || p.ready)) facts.push(m.listed.toLocaleString() + ' model' + (m.listed === 1 ? '' : 's') + (Number.isFinite(m.available) && m.available < m.listed ? ', ' + m.available.toLocaleString() + ' offered now' : ''));
-    facts.push(keyCount ? keyCount + ' key' + (keyCount === 1 ? '' : 's') : p.free === true ? 'free models, no key needed' : 'no key');
+    facts.push(keyCount ? keyCount + ' key' + (keyCount === 1 ? '' : 's') : p.local ? 'runs on this server, no key needed' : p.free === true ? 'free models, no key needed' : 'no key');
     const lines = [];
     if (p.problem) lines.push('<div style="color:var(--error)">' + esc(p.problem) + '</div>');
     if (resting) lines.push('<div style="color:#B45309">' + esc(restingText(p.resting, until)) + '</div>');

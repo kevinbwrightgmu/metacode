@@ -193,7 +193,8 @@ test.before(async () => {
   svc = await S.startService({
     env: {
       METACODE_ENV_FILE: envFile, OPENCODE_SERVICE_DATA_DIR: dataDir, OPENCODE_DISABLE_MODELS_FETCH: '1',
-      OPENCODE_INFERENCE_URL: zen.base, EMIS_BASE_URL: gateway.base + '/v1', EMIS_TRANSPORT: 'node', EMIS_MODELS_FILE: modelsFile
+      OPENCODE_INFERENCE_URL: zen.base, EMIS_BASE_URL: gateway.base + '/v1', EMIS_TRANSPORT: 'node', EMIS_MODELS_FILE: modelsFile,
+      OLLAMA_BACKUP: 'off'
     },
     port: await freePort(), host: '127.0.0.1', log
   });

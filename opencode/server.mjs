@@ -119,7 +119,9 @@ const MAX_BODY = 32 * 1024 * 1024;
 const MAX_DRAIN = 128 * 1024 * 1024;          // past this, an oversized request is cut off instead of read to the end
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 115000;   // without X-Request-Timeout-Ms (MetaCode's default 120 s − 5 s)
 const MAX_UPSTREAM_TIMEOUT_MS = 600000;
-const PROVIDER_MODULES = { zen: './providers/zen.mjs', 'openai-compatible': './providers/openai-compatible.mjs' };
+const PROVIDER_MODULES = { zen: './providers/zen.mjs', 'openai-compatible': './providers/openai-compatible.mjs', ollama: './providers/ollama.mjs' };
+// (the local last-resort backup: its models answer only when no other provider's can — never the default)
+const isBackupSlot = slot => slot.kind === 'ollama';
 const LEGACY_DEFAULT = 'claude-opus-5.5';     // the gateway's default model before the service
 // How long the routes wait for a provider's model list (MetaCode waits 3 s for /v1/status, 20 s for /v1/models)
 const STATUS_DEADLINE_MS = 2000;
@@ -466,7 +468,8 @@ export async function startService(opts) {
   // A bare id (saved before providers): the OpenAI-compatible providers first (config order), then Zen;
   // the first provider that has the model under any spelling wins (its exact spelling before others)
   function findBare(list, model) {
-    const order = list.slots.filter(s => s.kind !== 'zen').concat(list.slots.filter(s => s.kind === 'zen')).filter(s => list.ready.has(s.id));
+    const order = list.slots.filter(s => s.kind !== 'zen' && !isBackupSlot(s)).concat(list.slots.filter(s => s.kind === 'zen'), list.slots.filter(isBackupSlot))
+      .filter(s => list.ready.has(s.id));
     for (const s of order) {
       const entries = list.byProvider.get(s.id);
       const e = entries.find(x => x.model === model) || findIn(entries, model);
@@ -557,7 +560,8 @@ export async function startService(opts) {
       const e = usable(list.byProvider.get(s.id));
       if (e) return pick(s, e);
     }
-    for (const s of list.slots.filter(x => list.ready.has(x.id))) {
+    // (the local backup only when no other provider has a model)
+    for (const s of list.slots.filter(x => list.ready.has(x.id) && !isBackupSlot(x)).concat(list.slots.filter(x => list.ready.has(x.id) && isBackupSlot(x)))) {
       const e = usable(list.byProvider.get(s.id));
       if (e) return pick(s, e);
     }
@@ -573,6 +577,8 @@ export async function startService(opts) {
       provider: e.provider, provider_name: e.providerName, model: e.model, name: e.name, free: e.free,
       available: e.available === true || e.available === false ? e.available : null
     };
+    if (e.backup === true) out.backup = true;           // (used only when no other provider's model can answer)
+    if (e.local === true) out.local = true;             // (runs on this server)
     if (isDefault) out.default = true;
     Object.assign(out, {
       tool_call: e.toolCall, reasoning: e.reasoning, attachment: e.attachment, temperature: e.temperature,
@@ -589,7 +595,8 @@ export async function startService(opts) {
     sendJson(res, 200, {
       object: 'list',
       default: def.id,
-      providers: list.slots.map((s, i) => ({ id: s.id, name: list.statuses[i].name || s.name, ready: list.ready.has(s.id) })),
+      providers: list.slots.map((s, i) => Object.assign({ id: s.id, name: list.statuses[i].name || s.name, ready: list.ready.has(s.id) }, isBackupSlot(s) ? { backup: true } : {}))
+        .filter((p, i) => !list.statuses[i].hidden),
       data: list.entries.map(e => modelJson(e, e.id === def.id))
     });
   }
@@ -610,7 +617,7 @@ export async function startService(opts) {
       ready: list.entries.length > 0,
       default: def.id,
       warnings: [...new Set(warnings)],
-      providers: list.slots.map((s, i) => Object.assign({}, list.statuses[i], { ready: list.ready.has(s.id) }))
+      providers: list.slots.map((s, i) => Object.assign({}, list.statuses[i], { ready: list.ready.has(s.id) })).filter(p => !p.hidden)
     };
   }
 

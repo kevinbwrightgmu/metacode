@@ -1054,7 +1054,7 @@ test('through the service (startService), when it is there: models listed with p
   const env = {
     OPENCODE_SERVICE_HOST: '127.0.0.1', OPENCODE_SERVICE_PORT: '0', OPENCODE_SERVICE_TOKEN: token, OPENCODE_SERVICE_DATA_DIR: dataDir,
     OPENCODE_DISABLED_PROVIDERS: 'opencode', OPENCODE_DISABLE_MODELS_FETCH: '1', METACODE_ENV_FILE: 'none', METACODE_LOG: 'off',
-    EMIS_BASE_URL: emisBase, EMIS_API_KEY: KEY, EMIS_TRANSPORT: 'node', EMIS_MODELS_FILE: 'none'
+    EMIS_BASE_URL: emisBase, EMIS_API_KEY: KEY, EMIS_TRANSPORT: 'node', EMIS_MODELS_FILE: 'none', OLLAMA_BACKUP: 'off'
   };
   let svc;
   try { svc = await S.startService({ env, port: 0, host: '127.0.0.1', dataDir, token, log }); }
