@@ -128,11 +128,13 @@ use paid models or the gateway, and set `OPENCODE_DISABLE_FREE_MODELS=1`
 - **The local backup** (Ollama on the server, `ollama/gemma3:1b`,
   `ollama/gemma3:270m`) answers only when no other provider's model can — every
   provider resting, failing or tried — and none is back within a minute: a short
-  rate limit is waited out instead. Then its first model answers (not the
-  closest by name), for paid and free models alike (its prompts stay on the
-  server), one request at a time with `AI_LOCAL_TIMEOUT_MS` (5 minutes). It is
-  never the default model, and "Keep going" takes it only when nothing else is
-  left ([details](opencode-service.md#the-local-backup-ollama-ollama-on-this-server)).
+  rate limit is waited out instead (an AI Coding post waits once). Then its first
+  model answers (not the closest by name), for paid and free models alike (its
+  prompts stay on the server), one request at a time with `AI_LOCAL_TIMEOUT_MS`
+  (5 minutes); a request still waiting for its turn when the model asked for is
+  back goes to that model instead. It is never the default model, and "Keep
+  going" takes it only when nothing else is left
+  ([details](opencode-service.md#the-local-backup-ollama-ollama-on-this-server)).
 - **AI Coding: "Keep going if the model runs out"** (a checkbox next to **Run
   AI Coding**, off by default, for big runs). When the run's model runs out —
   its usage limit or its provider's budget is used up, it's rate-limited — or

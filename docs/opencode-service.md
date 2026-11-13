@@ -276,11 +276,15 @@ server's CPU) and much weaker. Setting it up on a VPS:
   every other provider's, never makes one of them the default while another
   provider has a model, and gives a model id without a provider to another
   provider first. MetaCode answers with them only when no other provider's
-  model can answer, and none is back within a minute — a short rate limit is
-  waited out instead (an AI Coding run tries the post again): then the first
-  of `OLLAMA_MODELS` that can answer. That includes a paid model whose only
-  stand-ins elsewhere are free ones: the backup's prompts stay on the server.
-  A model of the backup can also be picked in Settings like any other.
+  model can answer, and none is back within a minute: then the first of
+  `OLLAMA_MODELS` that can answer. A short rate limit or pause (a quota that
+  resets within the minute too) is waited out instead — an AI Coding run waits
+  for it and tries the post again, once; if that model is out again then, the
+  backup codes the post. That includes a paid model whose only stand-ins
+  elsewhere are free ones: the backup's prompts stay on the server. A request
+  that waited for the backup's turn goes to the model asked for (or another
+  provider's) instead if that one is back by then. A model of the backup can
+  also be picked in Settings like any other.
 - **One at a time.** MetaCode sends the backup one request at a time
   (`AI_LOCAL_PARALLEL`); the others wait for their turn, which doesn't count
   toward their time limit. Each then gets `AI_LOCAL_TIMEOUT_MS` (default 5
@@ -288,8 +292,11 @@ server's CPU) and much weaker. Setting it up on a VPS:
   *"The local backup model "gemma3:1b" didn't answer within 300 seconds. This
   server's CPU may be too slow for it: pick a smaller model in OLLAMA_MODELS, or
   raise AI_LOCAL_TIMEOUT_MS in the server's .env file."*
-- **Config file.** A `provider.ollama` entry in `OPENCODE_CONFIG` works as for
-  any provider (`options.baseURL`, `whitelist`, `blacklist`…);
+- **Config file.** A `provider.ollama` of your own in `OPENCODE_CONFIG` (as in
+  OpenCode's docs) stays an ordinary OpenAI-compatible provider, exactly as
+  you wrote it — its models answer like any provider's, nothing is downloaded,
+  and there's no local backup; the backup's own address is `OLLAMA_BASE_URL`.
+  An `enabled_providers` list without `ollama` leaves the backup out (no row);
   `OPENCODE_DISABLED_PROVIDERS=ollama` switches it off like `OLLAMA_BACKUP=off`
   but keeps its row in Settings.
 

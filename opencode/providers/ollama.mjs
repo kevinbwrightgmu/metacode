@@ -21,7 +21,8 @@
 //   OLLAMA_MODELS      the models to offer, comma-separated (default DEFAULT_MODELS); "all": every chat
 //                      model Ollama has
 //   OLLAMA_AUTO_PULL   on (default) | off
-// The config file's provider.ollama entry (options.baseURL, models, whitelist…) works as for any provider.
+// A provider.ollama of the operator's own in OPENCODE_CONFIG isn't this: it stays an ordinary OpenAI-compatible
+// provider (config.mjs), and there's no local backup then.
 
 import { ServiceError } from '../errors.mjs';
 import { createProvider as createOpenAICompatible } from './openai-compatible.mjs';
@@ -65,8 +66,10 @@ export function createProvider(opts) {
   let config = opts.config || {};
   let s = ollamaSettings(env, config);
   let closed = false;
-  // what is known about Ollama: reachable (null = not checked yet), the models it has, downloads
-  const state = { reachable: null, checkedAt: 0, probing: null, have: [], problem: null, pulls: new Map() };
+  // what is known about Ollama: reachable (null = not checked yet), the models it has, downloads;
+  // gen: the settings' generation (a look started under older settings doesn't count)
+  const state = { reachable: null, checkedAt: 0, probing: null, have: [], problem: null, pulls: new Map(), gen: 0 };
+  const providerName = () => (typeof config.name === 'string' && config.name.trim()) || 'Local backup (Ollama)';
 
   const nativeBase = () => s.baseURL.replace(/\/v1$/, '');
   const baseConfig = () => Object.assign({}, config, {
@@ -81,7 +84,13 @@ export function createProvider(opts) {
     for (const k of ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy']) delete out[k];
     return out;
   };
-  let base = createOpenAICompatible(Object.assign({}, opts, { env: baseEnv(), config: baseConfig() }));
+  // The OpenAI-compatible provider that talks to Ollama — made once Ollama has answered, so a server
+  // without Ollama makes no requests and logs nothing for it (that provider fetches its model list at once)
+  let base = null;
+  const baseOf = () => {
+    if (!base && !closed) base = createOpenAICompatible(Object.assign({}, opts, { env: baseEnv(), config: baseConfig() }));
+    return base;
+  };
 
   async function getJson(pathname, init, timeoutMs) {
     const res = await fetch(nativeBase() + pathname, Object.assign({ signal: AbortSignal.timeout(timeoutMs || PROBE_TIMEOUT_MS) }, init));
@@ -94,27 +103,30 @@ export function createProvider(opts) {
   // Is Ollama there, and which models does it have? (GET /api/tags; never throws)
   function probe() {
     if (state.probing) return state.probing;
+    const gen = state.gen;
     const run = (async () => {
+      let r = null, failure = null;
       try {
-        const r = await getJson('/api/tags');
+        r = await getJson('/api/tags');
         if (!r.ok || !r.json || !Array.isArray(r.json.models)) throw new Error('HTTP ' + r.status + (r.text && !r.json ? ' (not Ollama?)' : ''));
-        const was = state.reachable;
+      } catch (e) { failure = e; }
+      if (gen !== state.gen || closed) return;          // (the settings changed meanwhile: a new look decides)
+      const was = state.reachable;
+      state.checkedAt = Date.now();
+      if (!failure) {
         const before = state.have.join('\n');
         state.reachable = true;
         state.problem = null;
         state.have = r.json.models.map(m => m && (m.name || m.model)).filter(n => typeof n === 'string');
         if (was !== true) log.info('ollama.found', { url: nativeBase(), models: state.have.length });
         // (a model pulled or removed by hand: the list of models to offer is fetched again at once)
-        else if (state.have.join('\n') !== before) base.models({ refresh: true }).catch(() => {});
+        else if (state.have.join('\n') !== before && base) base.models({ refresh: true }).catch(() => {});
         pullMissing();
-      } catch (e) {
-        const was = state.reachable;
+      } else {
         state.reachable = false;
-        state.problem = 'Ollama isn\'t answering at ' + nativeBase() + ' (' + (e && e.name === 'TimeoutError' ? 'no answer within ' + (PROBE_TIMEOUT_MS / 1000) + ' s' : String(e && (e.cause && e.cause.code || e.message) || 'unreachable')) +
+        state.problem = 'Ollama isn\'t answering at ' + nativeBase() + ' (' + (failure.name === 'TimeoutError' ? 'no answer within ' + (PROBE_TIMEOUT_MS / 1000) + ' s' : String((failure.cause && failure.cause.code) || failure.message || 'unreachable')) +
           '). Install and start Ollama on this server (ollama.com), or set OLLAMA_BASE_URL.';
         if (was === true) log.warn('ollama.lost', { url: nativeBase() });
-      } finally {
-        state.checkedAt = Date.now();
       }
     })();
     state.probing = run;
@@ -152,7 +164,7 @@ export function createProvider(opts) {
         }
       }
       await probe().catch(() => {});
-      await base.models({ refresh: true }).catch(() => {});      // (the new models are offered at once)
+      if (base) await base.models({ refresh: true }).catch(() => {});      // (the new models are offered at once)
     })();
     // (models a reload asked for meanwhile are downloaded next)
     pulling.finally(() => { pulling = null; pullMissing(); });
@@ -210,7 +222,9 @@ export function createProvider(opts) {
       if (s.mode === 'on') throw new ServiceError(503, 'not_configured', state.problem || 'Ollama isn\'t running.', { provider: id });
       return [];
     }
-    const list = (await base.models(o)).filter(e => !NOT_A_CHAT_MODEL.test(e.model));
+    const b = baseOf();
+    if (!b) return [];
+    const list = (await b.models(o)).filter(e => !NOT_A_CHAT_MODEL.test(e.model));
     const chosen = s.all ? list : wanted().map(w => list.find(e => sameModel(e.model, w))).filter(Boolean);
     return chosen.map(e => Object.assign({}, e, {
       name: e.model + ' (local backup)', free: false, local: true, backup: true,
@@ -222,7 +236,9 @@ export function createProvider(opts) {
     // (the first look for Ollama is waited for — instant when nothing listens — so the first status is right)
     if (state.reachable === null && s.mode !== 'off') await probe();
     else probeIfDue();
-    const b = base.status();
+    // (the OpenAI-compatible provider's own state only while Ollama answers: asked otherwise, it would try
+    // to fetch its model list from an Ollama that isn't there)
+    const b = state.reachable === true && baseOf() ? baseOf().status() : { warnings: [], transport: 'Node.js' };
     const hidden = s.mode === 'off' || (s.mode === 'auto' && state.reachable !== true);
     const downloading = [...state.pulls.entries()].filter(([, p]) => p.state === 'downloading').map(([m, p]) => m + (p.percent ? ' (' + p.percent + '%)' : ''));
     const failed = [...state.pulls.entries()].filter(([, p]) => p.state === 'failed').map(([m, p]) => m + ' (' + p.error + ')');
@@ -237,8 +253,9 @@ export function createProvider(opts) {
     const notes = ['Last-resort backup: answers only when no other provider\'s model can, one request at a time.'];
     if (offered.length) notes.push('Models: ' + offered.join(', ') + (downloading.length ? '; downloading ' + downloading.join(', ') : '') + '.');
     return Object.assign({}, b, {
-      id, name: base.name, kind: 'ollama', ready: !problem && state.reachable === true, problem,
+      id, name: providerName(), kind: 'ollama', ready: !problem && state.reachable === true, problem,
       hidden, backup: true, local: true, keyCount: 0, keys: [], resting: null, free: null,
+      models: { listed: offered.length, available: state.reachable === true ? offered.length : null, source: 'live' },
       note: notes.join(' '), baseHost: (() => { try { return new URL(s.baseURL).host; } catch (e) { return null; } })(),
       warnings: (b.warnings || []).concat(failed.length && offered.length ? ['Couldn\'t download ' + failed.join('; ') + '.'] : [])
     });
@@ -251,33 +268,45 @@ export function createProvider(opts) {
     return null;
   }
 
+  // Reload .env: Ollama is looked at again; when its settings changed, what was known about it is
+  // forgotten and a download under the old settings stops (the new ones decide what to download)
   async function reload(newEnv, newConfig) {
     if (newEnv) env = newEnv;
     if (newConfig) config = newConfig;
+    const before = JSON.stringify(s);
     s = ollamaSettings(env, config);
-    state.reachable = null;
-    state.checkedAt = 0;
-    state.pulls = new Map();
-    if (pullAbort) pullAbort.abort();            // (a download under the old settings stops; the new ones decide)
-    await base.reload(baseEnv(), baseConfig());
-    probe();
+    if (JSON.stringify(s) !== before) {
+      state.gen++;
+      state.reachable = null;
+      state.checkedAt = 0;
+      state.probing = null;
+      state.have = [];
+      state.pulls = new Map();
+      if (pullAbort) pullAbort.abort();
+    }
+    if (base) await base.reload(baseEnv(), baseConfig());
+    if (s.mode !== 'off') await probe();
   }
 
   async function close() {
     closed = true;
     if (pullAbort) pullAbort.abort();
-    await base.close();
+    if (base) await base.close();
   }
 
   if (s.mode !== 'off') probe();
 
   return {
     id,
-    get name() { return base.name; },
+    get name() { return providerName(); },
     kind: 'ollama',
     status,
     models,
-    chat: (body, entry, run) => base.chat(body, entry, run),
+    chat(body, entry, run) {
+      const b = baseOf();
+      if (!b) throw new ServiceError(503, 'not_configured', providerName() + ' is shutting down.', { provider: id, model: entry && entry.id });
+      return b.chat(body, entry, run);
+    },
     unlisted,
     reload,
     close

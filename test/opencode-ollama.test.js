@@ -84,7 +84,9 @@ const closedPort = () => new Promise(resolve => { const s = net.createServer(); 
 // ── The service ──────────────────────────────────────────────────────────────
 let S;
 const running = [];
-async function start(env) {
+const logged = [];             // the service's log lines (start() with { capture: true })
+const capture = { info: (...a) => logged.push(a.map(String).join(' ')), warn: (...a) => logged.push(a.map(String).join(' ')), error: (...a) => logged.push(a.map(String).join(' ')) };
+async function start(env, o) {
   const svc = await S.startService({
     env: Object.assign({
       METACODE_ENV_FILE: 'none', METACODE_LOG: 'off', OPENCODE_SERVICE_DATA_DIR: fs.mkdtempSync(path.join(tmp, 'svc-')), OPENCODE_SERVICE_TOKEN: TOKEN,
@@ -92,7 +94,7 @@ async function start(env) {
       EMIS_BASE_URL: gatewayBase, EMIS_API_KEY: 'emis-test-key-0123456789', EMIS_TRANSPORT: 'node', EMIS_MODELS_FILE: 'none',
       OLLAMA_BASE_URL: ollama.base + '/v1'
     }, env),
-    port: 0, host: '127.0.0.1', log: { info() {}, warn() {}, error() {} }
+    port: 0, host: '127.0.0.1', log: o && o.capture ? capture : { info() {}, warn() {}, error() {} }
   });
   running.push(svc);
   return svc;
@@ -107,6 +109,7 @@ async function call(svc, method, p, body) {
   return { status: res.status, text, json, headers: res.headers };
 }
 const models = async svc => (await call(svc, 'GET', '/v1/models')).json;
+const fileWith = (name, text) => { const f = path.join(fs.mkdtempSync(path.join(tmp, 'cfg-')), name); fs.writeFileSync(f, text); return f; };
 const statusOf = async (svc, id) => (await call(svc, 'GET', '/v1/status')).json.providers.find(p => p.id === id);
 async function until(check, ms, what) {
   const deadline = Date.now() + (ms || 8000);
@@ -166,6 +169,36 @@ test('Ollama answering (OLLAMA_BACKUP=auto, the default): its OLLAMA_MODELS are 
   assert.equal(bare.json.choices[0].message.content, 'gateway gpt-small');
 });
 
+test('the backup comes last whatever the config order: a provider listed after it is the default, and gets an id without a provider first', async () => {
+  ollama.have = ['tiny-a:0.5b', 'gpt-small'];
+  // (the operator's own provider "other" comes after "ollama" in the merged config)
+  const cfg = fileWith('opencode.json', JSON.stringify({ provider: { other: { npm: '@ai-sdk/openai-compatible', name: 'Other gateway', options: { baseURL: gatewayBase, apiKey: 'other-key-0123456789' } } } }));
+  const svc = await start({ OLLAMA_MODELS: 'tiny-a:0.5b', OLLAMA_AUTO_PULL: 'off', OPENCODE_CONFIG: cfg, OPENCODE_DISABLED_PROVIDERS: 'opencode,emis' });
+  const m = await models(svc);
+  assert.deepEqual(m.providers.filter(p => p.ready).map(p => p.id), ['ollama', 'other'], 'config order');
+  assert.equal(m.default, 'other/gpt-small', 'not the backup\'s model, though it is listed first');
+  assert.deepEqual(m.data.map(e => e.id), ['ollama/tiny-a:0.5b', 'other/gpt-small']);
+  const bare = await call(svc, 'POST', '/v1/chat/completions', { model: 'gpt-small', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(bare.json.choices[0].message.content, 'gateway gpt-small', 'not Ollama\'s gpt-small');
+  const none = await call(svc, 'POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(none.json.choices[0].message.content, 'gateway gpt-small', 'the default answers');
+});
+
+test('a provider.ollama of the operator\'s own (OPENCODE_CONFIG, as in OpenCode\'s docs) stays an ordinary provider: its models as they are, nothing downloaded, no backup', async () => {
+  ollama.have = ['llama3:8b', 'tiny-a:0.5b'];
+  const cfg = fileWith('opencode.json', JSON.stringify({ provider: { ollama: { npm: '@ai-sdk/openai-compatible', name: 'My Ollama', options: { baseURL: ollama.base + '/v1', apiKey: 'ollama-placeholder-key' } } } }));
+  const svc = await start({ OPENCODE_CONFIG: cfg, OPENCODE_DISABLED_PROVIDERS: 'opencode,emis' });
+  const m = await models(svc);
+  const own = m.data.filter(e => e.provider === 'ollama');
+  assert.deepEqual(own.map(e => [e.id, e.name, !!e.backup, !!e.local]), [['ollama/llama3:8b', 'llama3:8b', false, false], ['ollama/tiny-a:0.5b', 'tiny-a:0.5b', false, false]]);
+  assert.equal(m.default, 'ollama/llama3:8b');
+  assert.equal(m.providers.find(p => p.id === 'ollama').name, 'My Ollama');
+  const r = await call(svc, 'POST', '/v1/chat/completions', { model: 'ollama/llama3:8b', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.json.choices[0].message.content, 'local llama3:8b');
+  await sleep(300);
+  assert.deepEqual(ollama.pulls, [], 'nothing downloaded');
+});
+
 test('OLLAMA_MODELS=all: every chat model Ollama has (not its embedding models); with only Ollama ready, its first model is the default', async () => {
   ollama.have = ['tiny-b:270m', 'big:70b', 'nomic-embed-text:latest'];
   const svc = await start({ OLLAMA_MODELS: 'all', OPENCODE_DISABLED_PROVIDERS: 'opencode,emis' });
@@ -186,7 +219,21 @@ test('nothing answering at OLLAMA_BASE_URL: with auto it is left out of every li
   assert.equal(p.ready, false);
   assert.match(p.problem, /^Ollama isn't answering at http:\/\/127\.0\.0\.1:\d+ \(.+\)\. Install and start Ollama on this server \(ollama\.com\), or set OLLAMA_BASE_URL\.$/);
 
+  // …and nothing in the log about it: not at the start, not on Reload .env
+  logged.length = 0;
+  const quiet = await start({ OLLAMA_BASE_URL: 'http://127.0.0.1:' + port + '/v1' }, { capture: true });
+  await call(quiet, 'POST', '/v1/reload');
+  await call(quiet, 'GET', '/v1/models');
+  await sleep(300);
+  assert.ok(logged.length > 0, 'the start line was logged');
+  assert.deepEqual(logged.filter(l => /ollama|local backup/i.test(l)), [], logged.join('\n'));
+
+  // an enabled_providers list without it: no backup, and no row saying it's switched off
+  const allow = fileWith('opencode.json', JSON.stringify({ enabled_providers: ['emis'] }));
   ollama.have = ['tiny-a:0.5b'];
+  const listed = await start({ OPENCODE_CONFIG: allow, OLLAMA_MODELS: 'tiny-a:0.5b' });
+  assert.deepEqual((await call(listed, 'GET', '/v1/status')).json.providers.map(x => x.id), ['emis', 'opencode']);
+
   const off = await start({ OLLAMA_BACKUP: 'off', OLLAMA_MODELS: 'tiny-a:0.5b' });
   assert.deepEqual((await call(off, 'GET', '/v1/status')).json.providers.map(x => x.id), ['emis', 'opencode']);
   assert.equal((await models(off)).data.some(e => e.provider === 'ollama'), false);
@@ -214,6 +261,29 @@ test('OLLAMA_AUTO_PULL=off, or a download that fails: nothing more is tried, and
   const failing = await start({ OLLAMA_MODELS: 'missing/model:1b' });
   const f = await until(async () => { const x = await statusOf(failing, 'ollama'); return /downloading failed/.test(x.problem || '') && x; }, 5000, 'the failure');
   assert.match(f.problem, /^Ollama has none of the models in OLLAMA_MODELS \(missing\/model:1b\): downloading failed — missing\/model:1b \(pull model manifest: file does not exist\)\. Run "ollama pull missing\/model:1b" on the server\.$/);
+});
+
+test('Reload .env: a new OLLAMA_BASE_URL counts at once; unchanged settings leave a download going', async () => {
+  const port = await closedPort();
+  const envFile = fileWith('.env', 'OLLAMA_BACKUP=on\nOLLAMA_AUTO_PULL=off\nOLLAMA_MODELS=tiny-a:0.5b\nOLLAMA_BASE_URL=http://127.0.0.1:' + port + '/v1\n');
+  ollama.have = ['tiny-a:0.5b'];
+  const svc = await start({ METACODE_ENV_FILE: envFile });
+  assert.match((await statusOf(svc, 'ollama')).problem, new RegExp('isn\'t answering at http://127\\.0\\.0\\.1:' + port));
+  fs.writeFileSync(envFile, 'OLLAMA_BACKUP=on\nOLLAMA_AUTO_PULL=off\nOLLAMA_MODELS=tiny-a:0.5b\nOLLAMA_BASE_URL=' + ollama.base + '/v1\n');
+  const r = await call(svc, 'POST', '/v1/reload');
+  const p = r.json.providers.find(x => x.id === 'ollama');
+  assert.equal(p.ready, true, JSON.stringify(p));
+  assert.ok((await models(svc)).data.some(e => e.id === 'ollama/tiny-a:0.5b'));
+
+  // a download going on: a reload that changes nothing for Ollama doesn't start it over
+  ollama.have = [];
+  ollama.pullDelayMs = 1200;
+  fs.writeFileSync(envFile, 'OLLAMA_BACKUP=on\nOLLAMA_MODELS=tiny-b:270m\nOLLAMA_BASE_URL=' + ollama.base + '/v1\n');
+  await call(svc, 'POST', '/v1/reload');
+  await until(async () => /Downloading/.test((await statusOf(svc, 'ollama')).problem || ''), 5000, 'downloading');
+  await call(svc, 'POST', '/v1/reload');
+  await until(async () => (await statusOf(svc, 'ollama')).ready, 8000, 'ready');
+  assert.deepEqual(ollama.pulls.map(x => x.model), ['tiny-b:270m'], 'downloaded once');
 });
 
 test('a proxy set for the internet (HTTPS_PROXY / HTTP_PROXY) doesn\'t get the requests for Ollama on this machine', async () => {

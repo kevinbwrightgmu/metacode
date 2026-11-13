@@ -524,14 +524,17 @@ function serviceTrouble(now, provider) {
 // The models that may answer for `target` right now: not tried yet, a chat model, not resting or
 // failing, its provider neither resting nor failing as a whole, offered, able to take the request —
 // and not a free model when `target` isn't one (free models' providers may use the prompts), unless
-// AI_FALLBACK_TO_FREE_MODELS=on (or allowFree). restingToo: also models whose provider (or whose provider's
+// AI_FALLBACK_TO_FREE_MODELS=on (or o.allowFree). o.restingToo: also models whose provider (or whose provider's
 // free models) rest, to know which could answer once that ends.
 // The local backup's models (Ollama on this server: small, slow, much weaker) are candidates only when no other
-// provider's model is, and none of those is back within LOCAL_BACKUP_AFTER_MS either — a short rate limit is
-// better waited out (an AI Coding batch tries the post again) than answered by a small local model.
+// provider's model is, and — unless o.noHoldBack (an AI Coding post that already waited once) — none of those is
+// back within LOCAL_BACKUP_AFTER_MS either: a short rate limit is better waited out (the batch tries the post
+// again) than answered by a small local model.
 // → { list, base, triedAlready(id), candidates, backupOnly (the candidates are the backup's), backSoon (held back
 //   for a model that is back then) } or null
-async function switchCandidates(target, chatRequest, tried, allowFree, restingToo) {
+async function switchCandidates(target, chatRequest, tried, o) {
+  o = o || {};
+  const allowFree = !!o.allowFree, restingToo = !!o.restingToo;
   const list = await getModelList(false);
   if (!list.ok) return null;
   const now = Date.now();
@@ -555,7 +558,7 @@ async function switchCandidates(target, chatRequest, tried, allowFree, restingTo
   // Only the backup's models are left. When is the first other model back from its rate limit or its
   // provider's pause? (Models failing — server errors, a provider failing as a whole — or that failed in
   // other ways have no such time: they don't hold the backup back.)
-  const back = restingToo ? [] : list.ids.filter(id => !isBackup(id) && fits(id) && !modelDownUntil(id, now) && !serviceTrouble(now, providerOf(id)))
+  const back = restingToo || o.noHoldBack ? [] : list.ids.filter(id => !isBackup(id) && fits(id) && !modelDownUntil(id, now) && !serviceTrouble(now, providerOf(id)))
     .map(id => Math.max(modelRestingUntil(id, now), providerRestingUntil(providerOf(id), now), isFree(id) ? freeModelsRestingUntil(providerOf(id), now) : 0))
     .filter(until => until > now);
   const soonest = back.length ? Math.min(...back) : 0;
@@ -567,8 +570,8 @@ function isBackupModel(id) {
   const info = modelList.result && modelList.result.info.get(splitVariant(id).base);
   return !!(info && info.backup);
 }
-async function closestModel(target, chatRequest, tried) {
-  const c = await switchCandidates(target, chatRequest, tried);
+async function closestModel(target, chatRequest, tried, o) {
+  const c = await switchCandidates(target, chatRequest, tried, o);
   if (!c) return null;
   // a different model first, other spellings of one already tried last; the local backup's models
   // in their own order (OLLAMA_MODELS: the best first), not by how alike their names are
@@ -577,8 +580,8 @@ async function closestModel(target, chatRequest, tried) {
 }
 // AI Coding's "keep going" (anyModel): any model that may answer, of any provider, picked at random —
 // the run's current pick while it still may (so a run doesn't hop from model to model)
-async function anyModel(target, chatRequest, tried, current) {
-  const c = await switchCandidates(target, chatRequest, tried);
+async function anyModel(target, chatRequest, tried, current, o) {
+  const c = await switchCandidates(target, chatRequest, tried, o);
   if (!c || !c.candidates.length) return null;
   if (current && c.candidates.includes(current)) return current;
   const fresh = c.candidates.filter(id => !c.triedAlready(id));
@@ -611,7 +614,8 @@ async function standInHint(target, chatRequest, prep, o) {
   const limited = prep.switchModels ? Array.from(o.tried || []).filter(m => providerOf(m) !== own && modelRestingUntil(m, now)) : [];
   const limitedToo = () => 'The most similar model' + (limited.length === 1 ? '' : 's') + ' of another AI provider (' + limited.map(m => '"' + modelName(m) + '"').join(', ') +
     ') ' + (limited.length === 1 ? 'is' : 'are') + ' rate-limited too.';
-  const paid = await switchCandidates(target, chatRequest, new Set([target]));
+  const hold = { noHoldBack: !!prep.retried };
+  const paid = await switchCandidates(target, chatRequest, new Set([target]), hold);
   // (the local backup held back for another model that is back within a minute: when switching would use
   // that one, an AI Coding run tries the post again then)
   const heldBack = paid && paid.backSoon && prep.switchModels ? paid.backSoon : null;
@@ -623,10 +627,10 @@ async function standInHint(target, chatRequest, prep, o) {
     return { text: !o.long ? '' : (elsewhere ? 'Models of another AI provider' : 'Other models') + ' can answer meanwhile: ' + (prep.ownPicker ? 'pick another model' : 'pick one in Settings → AI models') +
       orSwitch + '.' };
   }
-  const free = await switchCandidates(target, chatRequest, new Set([target]), true);
+  const free = await switchCandidates(target, chatRequest, new Set([target]), Object.assign({ allowFree: true }, hold));
   if (free && free.candidates.length && !free.backupOnly) {
     return { text: !o.long ? '' : 'Free models of another AI provider can answer meanwhile: ' + (prep.ownPicker ? 'pick one' : 'pick one in Settings → AI models') + ' (marked "· free"), or let them stand in ' +
-      'for paid ones with AI_FALLBACK_TO_FREE_MODELS=on in the server\'s .env (their providers may use the prompts to improve their models).', soon: heldBack };
+      'for paid ones with AI_FALLBACK_TO_FREE_MODELS=on in the server\'s .env (their providers may use the prompts to improve their models).', soon: heldBack, held: !!heldBack };
   }
   // (only the local backup could answer: with switching on it would have, so something else stopped it)
   if (paid && paid.backupOnly) {
@@ -639,7 +643,7 @@ async function standInHint(target, chatRequest, prep, o) {
   // models for a paid model, only when the wait is long)
   const others = restingProviders(now).filter(p => p.provider !== own);
   if (others.length) {
-    const later = await switchCandidates(target, chatRequest, new Set([target]), false, true);
+    const later = await switchCandidates(target, chatRequest, new Set([target]), { restingToo: true });
     const usable = new Set(later ? later.candidates.map(providerOf) : []);
     const named = others.filter(p => o.long || usable.has(p.provider));
     const ends = others.filter(p => usable.has(p.provider)).map(p => p.until);
@@ -648,13 +652,13 @@ async function standInHint(target, chatRequest, prep, o) {
       return {
         text: named.map(p => providerLabel(p.provider) + ' can\'t answer meanwhile either: ' + (p.reason === 'quota' ? 'its usage limit is used up' : 'it asked MetaCode to pause') +
           ' — it can be used again ' + describeWhen(p.until, now) + '.').join(' ') + (limited.length ? ' ' + limitedToo() : ''),
-        soon: soon && heldBack ? Math.min(soon, heldBack) : soon || heldBack
+        soon: soon && heldBack ? Math.min(soon, heldBack) : soon || heldBack, held: !!heldBack
       };
     }
   }
   // (every similar model of the other providers was tried, and each is rate-limited)
-  if (limited.length) return { text: limitedToo(), soon: heldBack };
-  if (heldBack) return { text: '', soon: heldBack };
+  if (limited.length) return { text: limitedToo(), soon: heldBack, held: !!heldBack };
+  if (heldBack) return { text: '', soon: heldBack, held: true };
   return { text: o.long ? 'No other AI provider can answer right now.' : '' };
 }
 // A failure of the model asked for (rate-limited, its provider or its free models resting) that nothing took
@@ -670,6 +674,10 @@ async function withStandInHint(result, target, chatRequest, prep, tried) {
   if (h.soon) {
     const seconds = Math.max(1, Math.ceil((h.soon - Date.now()) / 1000));
     if (!(out.retryAfterSeconds <= seconds)) out = Object.assign({}, out, { retryAfterSeconds: seconds, standInSoon: true });
+    // (the local backup was held back for a model that is back by then: an AI Coding run tries the post again
+    // then — even when that's when this model's own limit ends, a used-up quota included — and the backup
+    // answers if it has to after all)
+    else if (h.held) out = Object.assign({}, out, { standInSoon: true });
   }
   return out;
 }
@@ -1751,11 +1759,17 @@ function requestFor(chatRequest, model, prep) {
   if (prep && prep.jsonAnswer && isBackupModel(model) && out.response_format === undefined && !out.tools) out.response_format = { type: 'json_object' };
   return out;
 }
-async function completeChat(chatRequest, ctx, signal) {
+// recheck(): when the request's turn comes, the model to use instead of the local backup (one that is back
+// meanwhile), or null → { reroute: model } then
+async function completeChat(chatRequest, ctx, signal, recheck) {
   if (!isBackupModel(chatRequest.model)) return completeChatOnce(chatRequest, ctx, signal);
   const release = await acquireLocal(providerOf(chatRequest.model), signal);
   if (!release) return { aborted: true };
-  try { return await completeChatOnce(chatRequest, ctx, signal); } finally { release(); }
+  try {
+    const instead = recheck ? await recheck() : null;
+    if (instead) return { reroute: instead };
+    return await completeChatOnce(chatRequest, ctx, signal);
+  } finally { release(); }
 }
 async function completeChatOnce(chatRequest, ctx, signal, retriedLength) {
   const r = await aiRequest('POST', '/chat/completions', chatRequest, { timeoutMs: timeoutFor(chatRequest.model), signal });
@@ -2044,7 +2058,7 @@ async function streamChat(res, prep) {
       const out = await streamWith(res, Object.assign({}, chatRequest, { model }), Object.assign({}, ctx, { model }), client.signal);
       if (!out || !out.modelLimited) return;
       if (model === ctx.model) own = out.modelLimited;
-      const alt = prep.switchModels && switches < MAX_RATE_LIMIT_SWITCHES ? await closestModel(ctx.model, chatRequest, tried) : null;
+      const alt = prep.switchModels && switches < MAX_RATE_LIMIT_SWITCHES ? await closestModel(ctx.model, chatRequest, tried, { noHoldBack: !!prep.retried }) : null;
       if (!alt) {
         // (what happened to the model asked for, and why nothing stood in — as answerChat says it)
         clearFallbackHeaders(res);
@@ -2102,6 +2116,7 @@ async function prepareChat(body, formatName, opts) {
     pick: (opts && opts.pick) || null,                                 // { to }: the run's current random pick (anyModel)
     inBatch: !!(opts && opts.inBatch),                                 // (AI Coding: its messages can point at its own options)
     jsonAnswer: !!(opts && opts.jsonAnswer),                           // (AI Coding: the answer must be one JSON object; see requestFor)
+    retried: !!(opts && opts.retried),                                 // (AI Coding: a post tried again after waiting: the local backup isn't held back)
     ownPicker: !!(opts && opts.ownPicker)                              // (the Lab, the desktop app: models are picked there, not in Settings)
   };
 }
@@ -2130,10 +2145,24 @@ async function answerChat(prep, signal) {
   const any = !!prep.anyModel;
   const swapPicked = explicit && prep.switchModels && prep.pickedFallback;
   const tried = new Set();
-  const switchTo = () => (any ? anyModel(ctx.model, chatRequest, tried, prep.pick && prep.pick.to) : closestModel(ctx.model, chatRequest, tried));
+  const hold = { noHoldBack: !!prep.retried };
+  const switchTo = () => (any ? anyModel(ctx.model, chatRequest, tried, prep.pick && prep.pick.to, hold) : closestModel(ctx.model, chatRequest, tried, hold));
   let model = ctx.model, fallback = null, fallbackReason = null;
   let rateSwitches = 0, otherSwitches = 0, result;
   let own = null;               // how the model asked for failed (or was failing, when it was skipped)
+  // The local backup standing in waits for its turn (one request at a time): if the model asked for is back by
+  // then (its rate limit or its provider's pause over), or another provider's model is, that one answers
+  // instead — once per request
+  let rerouted = false;
+  const recheck = async () => {
+    if (rerouted) return null;
+    const now = Date.now(), p = providerOf(ctx.model);
+    const back = own && (isLimit(own) || own.type === 'upstream_error') && !modelRestingUntil(ctx.model, now) && !providerRestingUntil(p, now) &&
+      !(isFreeModel(ctx.model) && freeModelsRestingUntil(p, now)) && !modelDownUntil(ctx.model, now) && !serviceTrouble(now, p);
+    if (back) return ctx.model;
+    const alt = await switchTo();
+    return alt && !isBackupModel(alt) ? alt : null;
+  };
   for (;;) {
     tried.add(model);
     const now = Date.now();
@@ -2149,8 +2178,15 @@ async function answerChat(prep, signal) {
     result = resting ? modelLimitedFailure(model, resting, now)
       : providerResting ? providerRestFailure(providerOf(model), now)
       : freeResting ? freeModelsRestFailure(providerOf(model), model, now)
-      : await completeChat(requestFor(chatRequest, model, prep), Object.assign({}, ctx, { model, verified: ctx.verified || model !== ctx.model }), signal);
+      : await completeChat(requestFor(chatRequest, model, prep), Object.assign({}, ctx, { model, verified: ctx.verified || model !== ctx.model }), signal,
+        model !== ctx.model ? recheck : null);
     if (result.aborted) return { aborted: true };
+    if (result.reroute) {
+      rerouted = true;
+      model = result.reroute;
+      if (model === ctx.model) { fallback = null; fallbackReason = null; } else fallback = model;
+      continue;
+    }
     if (result.ok) { onModelAnswered(model); break; }
     if (result.type === 'upstream_error') onModelServerError(model, result.upstreamStatus, Date.now());
     if (model === ctx.model) own = result;
@@ -2329,7 +2365,7 @@ async function aiBatchRoute(req, res) {
     if (gaveUp) return send({ id: item.id, ok: false, status: 503, error: { message: gaveUp, type: 'service_unavailable' } });
     let out;
     try {
-      const prep = await prepareChat(item.body, 'openai', { switchModels, pickedFallback: false, anyModel, pick, inBatch: true, jsonAnswer: true });
+      const prep = await prepareChat(item.body, 'openai', { switchModels, pickedFallback: false, anyModel, pick, inBatch: true, jsonAnswer: true, retried: item.tries > 0 });
       out = prep.failure ? { failure: prep.failure } : await answerChat(prep, client.signal);
     } catch (err) {
       console.error('[ai] Unexpected error in /api/ai/batch: ' + redact(err && err.message));
@@ -2346,7 +2382,8 @@ async function aiBatchRoute(req, res) {
       item.tries++;
       if (parallel > 1) { parallel = Math.max(1, Math.floor(parallel / 2)); console.warn('[ai] Rate-limited during a batch; running ' + parallel + ' at once now.'); }
       ceiling = Math.min(ceiling, parallel);
-      pausedUntil = Math.max(pausedUntil, Date.now() + Math.min(30, out.failure.retryAfterSeconds || 2 * item.tries) * 1000);
+      // (a model that is back within the minute — standInSoon — is waited for until then, not tried again early)
+      pausedUntil = Math.max(pausedUntil, Date.now() + Math.min(out.failure.standInSoon ? BATCH_RETRY_WAIT_MAX_SECONDS : 30, out.failure.retryAfterSeconds || 2 * item.tries) * 1000);
       queue.unshift(item);
       return;
     }

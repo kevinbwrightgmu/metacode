@@ -821,9 +821,10 @@ export async function startService(opts) {
   if (envInfo && envInfo.error) warnOnce('The settings file ' + (envInfo.file || '.env') + ' couldn\'t be read: ' + envInfo.error);
   const first = await listModels({ deadlineMs: STATUS_DEADLINE_MS, waitMs: STATUS_WAIT_MS });
   const summary = first.slots.map((s, i) => {
+    if (first.statuses[i].hidden) return '';          // (the local backup while there's no Ollama: nothing to say)
     if (first.ready.has(s.id)) return s.name + ': ' + first.byProvider.get(s.id).length + ' model' + (first.byProvider.get(s.id).length === 1 ? '' : 's');
     return s.name + ': ' + (s.disabled ? 'switched off' : 'not ready' + (first.statuses[i].problem ? ' (' + first.statuses[i].problem.replace(/\.$/, '') + ')' : ''));
-  }).join('; ');
+  }).filter(Boolean).join('; ');
   log.info('MetaCode\'s OpenCode service (OpenCode ' + OPENCODE_AI_VERSION + ') is listening on ' + url.replace(/\/v1$/, '') + ' — ' + (summary || 'no AI providers') + '.');
 
   // Stops taking requests; running chats get graceMs to finish, then are cancelled with a failure that

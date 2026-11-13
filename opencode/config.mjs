@@ -19,7 +19,9 @@
 //
 // Provider kinds: the id "opencode" is OpenCode Zen (its models come from the
 // catalog, catalog.mjs); the id "ollama" is the local last-resort backup
-// (providers/ollama.mjs: Ollama on this server; left out with OLLAMA_BACKUP=off);
+// (providers/ollama.mjs: Ollama on this server; left out with OLLAMA_BACKUP=off,
+// or by an enabled_providers list without it; a provider.ollama of the
+// operator's own in OPENCODE_CONFIG is an ordinary provider instead);
 // any other id with npm "@ai-sdk/openai-compatible" is an OpenAI-compatible
 // provider (providers/openai-compatible.mjs); anything else is skipped with a
 // warning. enabled_providers is an allow-list and
@@ -225,10 +227,11 @@ export function loadConfig(opts) {
   else cfg = substitute(BUILT_IN, { env, dir: path.dirname(configPath), label: 'the built-in config', warnings });
 
   const operatorPath = String(env.OPENCODE_CONFIG || '').trim();
+  let operator = null;
   if (operatorPath) {
     const file = path.resolve(repoDir, expandHome(operatorPath));
     const over = readConfigFile(file, 'OPENCODE_CONFIG', env, warnings);
-    if (over) { cfg = mergeConfigs(cfg, over); files.push(file); }
+    if (over) { cfg = mergeConfigs(cfg, over); files.push(file); operator = over; }
   }
 
   for (const k of Object.keys(cfg)) if (!TOP_KEYS.has(k)) warn('"' + k + '" isn\'t supported by MetaCode\'s OpenCode service and is ignored.');
@@ -251,14 +254,20 @@ export function loadConfig(opts) {
   const providers = [];
   const entries = isObject(cfg.provider) ? Object.entries(cfg.provider) : [];
   if (cfg.provider !== undefined && !isObject(cfg.provider)) warn('"provider" in the config must be an object; it is ignored.');
-  for (const [id, raw] of entries) {
+  for (const [id, entry] of entries) {
+    // "ollama" is MetaCode's local backup (providers/ollama.mjs) — unless the operator set up a provider of that
+    // id themselves in OPENCODE_CONFIG (as OpenCode's own docs do): theirs stays an ordinary OpenAI-compatible
+    // provider, exactly as they wrote it, and there's no local backup
+    const ownOllama = id === 'ollama' && !!operator && isObject(operator.provider) && isObject(operator.provider.ollama);
+    const raw = ownOllama ? operator.provider.ollama : entry;
     if (!PROVIDER_ID.test(id)) { warn('The provider id "' + id.slice(0, 40) + '" can only use letters, digits, ".", "_" and "-"; it is skipped.'); continue; }
     if (!isObject(raw)) { warn('"provider.' + id + '" must be an object; it is skipped.'); continue; }
     const config = cleanProvider(id, raw, warn);
     let kind;
     if (id === 'opencode') kind = 'zen';
-    else if (id === 'ollama') {
+    else if (id === 'ollama' && !ownOllama) {
       if (shared.isOff(env.OLLAMA_BACKUP)) continue;          // (OLLAMA_BACKUP=off: no local backup at all)
+      if (enabled && !enabled.includes(id)) continue;        // (an allow-list that doesn't name it: no backup, and no row about it)
       kind = 'ollama';
     } else if (config.npm === OPENAI_COMPATIBLE_NPM) kind = 'openai-compatible';
     else {

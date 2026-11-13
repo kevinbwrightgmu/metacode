@@ -599,6 +599,11 @@ test('the local backup: listed as such, never the default, never standing in whi
   assert.deepEqual(list.json.models.filter(m => isLocal(m.id)).map(m => [m.id, m.backup, m.local]), [['local/tiny:1b', true, true], ['local/tiny:270m', true, true]]);
   assert.equal((await ask()).status, 200);
   assert.deepEqual(svc.seen, ['gw/claude-opus-5.5']);
+  // (a service that names no default and lists the backup's models first: still not one of them)
+  await configure({}, () => { withLocal(); svc.models = LOCAL_MODELS.concat(MODELS); svc.default = undefined; });
+  assert.equal((await request('GET', '/api/models')).json.models[0].id, 'gw/claude-opus-5.5');
+  await ask();
+  assert.deepEqual(svc.seen, ['gw/claude-opus-5.5']);
 
   // The gateway paused for hours: Zen's models answer for its models, never the backup
   await configure({}, () => { withLocal(); svc.chat = pausedFor('gw', 79200); });
@@ -611,8 +616,9 @@ test('the local backup: listed as such, never the default, never standing in whi
   assert.deepEqual(batchLines(b).map(l => l.ok && /^zen\//.test(l.fallback)), [true, true, true], b.text);
   assert.equal(svc.seen.some(isLocal), false, 'nothing went to the backup');
 
-  // Zen's pause ends within a minute: an AI Coding post waits for it rather than going to the backup
-  await configure({}, () => { withLocal(); const until = Date.now() + 2500; svc.chat = (body, send) => pausedFor('gw', 79200)(body, send) || pausedFor('zen', 2, until)(body, send); });
+  // Zen's pause ends within a minute: an AI Coding post waits for it rather than going to the backup (Zen is back
+  // when it said it would be)
+  await configure({}, () => { withLocal(); const until = Date.now() + 1500; svc.chat = (body, send) => pausedFor('gw', 79200)(body, send) || pausedFor('zen', 2, until)(body, send); });
   b = await request('POST', '/api/ai/batch', { parallel: 1, requests: [{ id: 'p1', body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post 1' }] } }] });
   const waited = batchLines(b);
   assert.deepEqual(waited.map(l => [l.ok, /^zen\//.test(l.fallback || '')]), [[true, true]], b.text);
@@ -679,13 +685,20 @@ test('the local backup answers one request at a time (AI_LOCAL_PARALLEL), the wa
     setTimeout(() => { active--; send(200, completion(body.model, 'ok from ' + body.model)); }, ms);
     return true;
   };
-  // 4 posts at once, each taking 0.6 s: one after the other, the last one waiting about 1.8 s — longer than AI_TIMEOUT_MS,
-  // which isn't the backup's limit
+  // 4 posts at once, each taking 0.6 s, one after the other: the backup's limit is AI_LOCAL_TIMEOUT_MS, not AI_TIMEOUT_MS
   await configure({ AI_TIMEOUT_MS: '1000' }, () => { withLocal(); svc.chat = slowLocal(600); });
   let b = await request('POST', '/api/ai/batch', { parallel: 4, requests: [1, 2, 3, 4].map(i => ({ id: 'p' + i, body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post ' + i }] } })) });
   assert.deepEqual(batchLines(b).map(l => [l.ok, l.fallback]), Array(4).fill([true, 'local/tiny:1b']), b.text);
   assert.equal(most, 1, 'one at a time');
   assert.ok(svc.limits.filter(([m]) => isLocal(m)).every(([, ms]) => ms === '300000'), 'AI_LOCAL_TIMEOUT_MS, not AI_TIMEOUT_MS: ' + JSON.stringify(svc.limits));
+
+  // 3 posts of 4.2 s each with a 10-second limit: the last one waits 8.4 s for its turn, then answers in 4.2 s —
+  // 12.6 s after it was sent, and still in time (the wait doesn't count)
+  most = 0;
+  await configure({ AI_LOCAL_TIMEOUT_MS: '10000' }, () => { withLocal(); svc.chat = slowLocal(4200); });
+  b = await request('POST', '/api/ai/batch', { parallel: 3, requests: [1, 2, 3].map(i => ({ id: 'p' + i, body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post ' + i }] } })) });
+  assert.deepEqual(batchLines(b).map(l => [l.ok, l.fallback]), Array(3).fill([true, 'local/tiny:1b']), b.text);
+  assert.equal(most, 1);
 
   most = 0;
   await configure({ AI_LOCAL_PARALLEL: '2', AI_LOCAL_TIMEOUT_MS: '20000' }, () => { withLocal(); svc.chat = slowLocal(300); });
@@ -701,6 +714,53 @@ test('the local backup answers one request at a time (AI_LOCAL_PARALLEL), the wa
   assert.equal(r.status, 504, r.text);
   assert.ok(Date.now() - t0 >= 9500, 'waited AI_LOCAL_TIMEOUT_MS (' + (Date.now() - t0) + ' ms)');
   assert.equal(r.json.error.message, 'The local backup model "tiny:1b" didn\'t answer within 10 seconds. This server\'s CPU may be too slow for it: pick a smaller model in OLLAMA_MODELS, or raise AI_LOCAL_TIMEOUT_MS in the server\'s .env file.');
+});
+
+test('the local backup held back for a model that is back soon: an AI Coding post waits for it once — then the backup answers if that model is out again; a quota that resets within the minute is waited for too', { timeout: 60000 }, async () => {
+  const post = model => ({ parallel: 1, requests: [{ id: 'p1', body: { model, messages: [{ role: 'user', content: 'post' }] } }] });
+  // Zen keeps asking for 2-second pauses, the gateway is out for hours: the post waits once, then the backup codes it
+  await configure({}, () => { withLocal(); svc.chat = (body, send) => pausedFor('gw', 79200)(body, send) || pausedFor('zen', 2)(body, send); });
+  let t0 = Date.now();
+  let lines = batchLines(await request('POST', '/api/ai/batch', post('gw/gpt-5.5')));
+  assert.deepEqual(lines.map(l => [l.ok, l.fallback]), [[true, 'local/tiny:1b']], JSON.stringify(lines));
+  assert.ok(Date.now() - t0 >= 1500, 'it waited for Zen once (' + (Date.now() - t0) + ' ms)');
+  assert.equal(svc.seen.filter(isLocal).length, 1);
+
+  // The gateway's quota is used up until 2 s from now (Zen out for hours): the post waits, then the gateway codes it
+  await configure({}, () => {
+    withLocal();
+    const until = Date.now() + 2000;
+    svc.chat = (body, send) => {
+      if (pausedFor('zen', 1800)(body, send)) return true;
+      if (!/^gw\//.test(body.model) || Date.now() >= until) return false;
+      send(429, { error: { type: 'quota_exceeded', scope: 'provider', provider: 'gw', retry_after_seconds: 2, message: 'Test gateway\'s usage quota is used up.' } }, { 'Retry-After': '2' });
+      return true;
+    };
+  });
+  t0 = Date.now();
+  lines = batchLines(await request('POST', '/api/ai/batch', post('gw/gpt-5.5')));
+  assert.deepEqual(lines.map(l => [l.ok, l.fallback || null]), [[true, null]], JSON.stringify(lines));
+  assert.equal(svc.seen.some(isLocal), false, 'the backup wasn\'t used');
+  assert.ok(Date.now() - t0 >= 1500, 'it waited for the quota (' + (Date.now() - t0) + ' ms)');
+});
+
+test('posts waiting for the local backup\'s turn go to the model asked for once it is back (here: Reload .env after the providers came back)', { timeout: 60000 }, async () => {
+  await configure({}, () => {
+    withLocal();
+    svc.chat = (body, send) => {
+      if (isLocal(body.model)) { setTimeout(() => send(200, completion(body.model, 'ok from ' + body.model)), 1500); return true; }
+      return bothOut()(body, send);
+    };
+  });
+  const run = request('POST', '/api/ai/batch', { parallel: 3, requests: [1, 2, 3].map(i => ({ id: 'p' + i, body: { model: 'gw/gpt-5.5', messages: [{ role: 'user', content: 'post ' + i }] } })) });
+  await until(async () => svc.seen.some(isLocal), 8000, 'the backup coding the first post');
+  await sleep(200);
+  svc.chat = null;                                                   // (both providers answer again)
+  assert.equal((await request('POST', '/api/settings/reload', {})).status, 200);
+  const lines = batchLines(await run);
+  assert.deepEqual(lines.map(l => l.ok), [true, true, true], JSON.stringify(lines));
+  assert.equal(lines.filter(l => l.fallback === 'local/tiny:1b').length, 1, 'only the post already with the backup: ' + JSON.stringify(lines));
+  assert.equal(svc.seen.filter(isLocal).length, 1);
 });
 
 test('one provider failing for every model: requests switch to another provider\'s model; the status page says degraded, not outage', { timeout: 30000 }, async () => {
