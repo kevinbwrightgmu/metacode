@@ -115,6 +115,7 @@ const App = (() => {
     }
     if (!VIEWS[view]) view = 'dashboard';
     currentView = view;
+    setNavOpen(false);
 
     // Sidebar active state
     document.querySelectorAll('.nav-item').forEach(el => {
@@ -1159,17 +1160,23 @@ const App = (() => {
   // "Can AI features run?" — the server's AI service is answering with at least one provider set up.
   function hasApiKeys() { return !!(serverStatus && serverStatus.ai && serverStatus.ai.ready); }
 
+  // false while the MetaCode server can't be reached (offline, or the server is down): the app keeps working
+  // with the data on this device, and the top bar says why AI isn't available instead of "not set up"
+  let serverReachable = null;
   async function refreshServerKeyInfo() {
     try {
       const res = await fetch('/api/settings/status');
-      if (!res.ok) return;
+      serverReachable = true;
+      if (!res.ok) { updateApiStatus(); return; }
       serverStatus = await res.json();
       updateApiStatus();
       renderEnvStatus();
       // The model names for notes and the assistant (the Settings page asks for the list itself)
       if (hasApiKeys() && !modelCache) requestModels().catch(() => {});
     } catch (e) {
-      // Server unreachable (e.g. app.html opened directly as a file)
+      // Server unreachable: offline, the server stopped, or app.html opened directly as a file
+      serverReachable = false;
+      updateApiStatus();
     }
   }
 
@@ -1177,8 +1184,22 @@ const App = (() => {
     if (connected === null) connected = hasApiKeys();
     const dot   = document.getElementById('status-dot');
     const label = document.getElementById('status-label');
-    if (dot)   dot.className   = 'status-dot' + (connected ? ' connected' : '');
-    if (label) label.textContent = connected ? 'AI ready' : 'AI not set up';
+    const status = document.getElementById('api-status');
+    const away = serverReachable === false;
+    const offline = away && navigator.onLine === false;
+    if (dot)   dot.className   = 'status-dot' + (connected && !away ? ' connected' : '');
+    if (label) label.textContent = offline ? 'Offline' : away ? 'Server unreachable' : connected ? 'AI ready' : 'AI not set up';
+    if (status) status.title = offline ? 'This device is offline. Your work is saved here; AI and other server features come back with the connection.'
+      : away ? 'The MetaCode server isn\'t answering. Your work is saved on this device; AI and other server features come back when the server does.' : '';
+  }
+  window.addEventListener('online', () => { if (serverReachable === false) refreshServerKeyInfo(); });
+  window.addEventListener('offline', () => { serverReachable = false; updateApiStatus(); });
+
+  // Phones and tablets (≤900px): the sidebar opens as a drawer from the ☰ button in the top bar
+  function setNavOpen(open) {
+    document.body.classList.toggle('nav-open', open);
+    const toggle = document.getElementById('nav-toggle');
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
   }
 
   /* ── Modal ───────────────────────────────────*/
@@ -1258,6 +1279,13 @@ const App = (() => {
         history.pushState(null, '', el.getAttribute('href'));
       });
     });
+
+    // The drawer on phones and tablets: ☰ opens it; a page, the backdrop or Escape closes it
+    const navToggle = document.getElementById('nav-toggle');
+    if (navToggle) navToggle.addEventListener('click', () => setNavOpen(!document.body.classList.contains('nav-open')));
+    const navBackdrop = document.getElementById('nav-backdrop');
+    if (navBackdrop) navBackdrop.addEventListener('click', () => setNavOpen(false));
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.body.classList.contains('nav-open')) setNavOpen(false); });
 
     // Modal close — X button, click-outside, and Escape key
     document.getElementById('modal-close').addEventListener('click', closeModal);

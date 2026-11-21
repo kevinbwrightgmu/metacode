@@ -11,6 +11,7 @@
 // CommonJS on purpose: server.js require()s it, the service import()s it.
 // Never logs or returns anything but the token itself (and only to the caller).
 
+const { defaultDataDir } = require('../lib/data-dir');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -65,7 +66,7 @@ function serviceSettings(env) {
   }
 
   const rawDir = String(env.OPENCODE_SERVICE_DATA_DIR || '').trim();
-  const dataDir = rawDir ? path.resolve(REPO_DIR, rawDir) : path.join(REPO_DIR, 'opencode-data');
+  const dataDir = rawDir ? path.resolve(REPO_DIR, rawDir) : defaultDataDir('opencode-data', env);
 
   let tokenFromEnv = null;
   const rawToken = String(env.OPENCODE_SERVICE_TOKEN || '').trim();

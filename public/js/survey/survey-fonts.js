@@ -130,6 +130,8 @@
   const cssUrl = (name, text) => 'https://fonts.googleapis.com/css2?family=' + encodeURIComponent(name).replace(/%20/g, '+') +
     (text ? '&text=' + encodeURIComponent(text) : ':wght@400;500;600;700&display=swap');
 
+  // MetaCode serves these itself (css/fonts.css): they work offline and need no Google Fonts request
+  const LOCAL = new Set(['Space Grotesk', 'Inter', 'JetBrains Mono']);
   const loaded = new Set();
   function addLink(href, id) {
     if (typeof document === 'undefined' || loaded.has(id)) return;
@@ -144,11 +146,11 @@
   function ensure(value) {
     const f = find(value) || BY_NAME.get(String(value || '').toLowerCase());
     if (!f || !f.google) return false;
-    addLink(cssUrl(f.name), 'full:' + f.name);
+    if (!LOCAL.has(f.name)) addLink(cssUrl(f.name), 'full:' + f.name);
     return true;
   }
   /** Loads just the glyphs of a font's name, for previews in the picker. */
-  function ensurePreview(f) { if (f && f.google) addLink(cssUrl(f.name, f.name), 'name:' + f.name); }
+  function ensurePreview(f) { if (f && f.google && !LOCAL.has(f.name)) addLink(cssUrl(f.name, f.name), 'name:' + f.name); }
 
   /** Every font-family value a survey uses. */
   function usedIn(doc) {

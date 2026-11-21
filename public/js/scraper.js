@@ -16,8 +16,8 @@ const RedditScraper = (() => {
   const API = '/api/scraper';
   const FORM_KEY = 'metacode_scraper_form_v1';   // per-browser form memory (not project data)
   const FINISHED = ['completed', 'failed', 'cancelled'];
-  const CM_VERSION = '5.65.21';
-  const CM_BASE = 'https://cdn.jsdelivr.net/npm/codemirror@' + CM_VERSION + '/';
+  // CodeMirror 5.65.21, served by MetaCode itself (public/vendor/codemirror5, scripts/vendor-web.js): it works offline
+  const CM_BASE = '/vendor/codemirror5/';
 
   const TARGETS = [
     { id: 'subreddit',       label: 'Subreddit' },
@@ -1166,13 +1166,13 @@ async function scrape(ctx: any): Promise<{ data: Row[] }> {
   function loadCodeMirror() {
     if (window.CodeMirror) return Promise.resolve(true);
     if (!cmPromise) {
-      loadCss(CM_BASE + 'lib/codemirror.min.css');
-      cmPromise = loadScriptOnce(CM_BASE + 'lib/codemirror.min.js')
+      loadCss(CM_BASE + 'lib/codemirror.css');
+      cmPromise = loadScriptOnce(CM_BASE + 'lib/codemirror.js')
         .then(() => Promise.all([
-          loadScriptOnce(CM_BASE + 'mode/javascript/javascript.min.js'),
-          loadScriptOnce(CM_BASE + 'mode/python/python.min.js'),
-          loadScriptOnce(CM_BASE + 'addon/edit/matchbrackets.min.js'),
-          loadScriptOnce(CM_BASE + 'addon/edit/closebrackets.min.js')
+          loadScriptOnce(CM_BASE + 'mode/javascript/javascript.js'),
+          loadScriptOnce(CM_BASE + 'mode/python/python.js'),
+          loadScriptOnce(CM_BASE + 'addon/edit/matchbrackets.js'),
+          loadScriptOnce(CM_BASE + 'addon/edit/closebrackets.js')
         ]))
         .then(() => true, () => false);
     }

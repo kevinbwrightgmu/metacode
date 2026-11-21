@@ -17,6 +17,7 @@ const { createSurveys } = require('./surveys');
 const { createAccounts } = require('./accounts');
 const { createProjects } = require('./projects');
 const { rankSimilar, renamedModel, sameModel, canonicalId, splitModel } = require('./model-match');
+const { createPwa } = require('./lib/pwa');
 const { keepAlive } = require('./lib/keepalive');
 const { createStatusMonitor, statusRoutes } = require('./status-page');
 
@@ -136,6 +137,10 @@ app.use('/api/collab', collab.router);
 const jsonBody = express.json({ limit: '10mb' });
 app.use((req, res, next) => (/^\/api\/lab(\/|$)/.test(req.path) ? next() : jsonBody(req, res, next)));
 app.get('/status', statusSite.page);   // the status page on the main site too
+// The installable, offline MetaCode (lib/pwa.js): its service worker (/sw.js) keeps the app working with no
+// server and no internet; /analytics.js is empty unless METACODE_ANALYTICS_ID is set
+const pwa = createPwa({ publicDir: path.join(__dirname, 'public') });
+pwa.mount(app);
 // Pages, scripts and styles are revalidated on every load, so an updated
 // MetaCode is never run with yesterday's cached JavaScript.
 app.use(express.static(path.join(__dirname, 'public'), {

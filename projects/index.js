@@ -12,6 +12,7 @@
 // from PROJECT_DATA_DIR (default project-data/ next to server.js) and never
 // changed.
 
+const { defaultDataDir } = require('../lib/data-dir');
 const express = require('express');
 const fs = require('fs');
 const fsp = fs.promises;
@@ -99,7 +100,7 @@ function summary(r) {
 
 function createProjects(opts) {
   opts = opts || {};
-  const dir = path.resolve(opts.dataDir || process.env.PROJECT_DATA_DIR || path.join(__dirname, '..', 'project-data'));
+  const dir = path.resolve(opts.dataDir || process.env.PROJECT_DATA_DIR || defaultDataDir('project-data'));
   const store = new ProjectStore(dir);
   const router = express.Router();
   router.use(sameOriginOnly);

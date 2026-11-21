@@ -19,10 +19,10 @@ const LabMarkdown = (() => {
       hljsLoading = new Promise(resolve => {
         const css = document.createElement('link');
         css.rel = 'stylesheet';
-        css.href = 'https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css';
+        css.href = '/vendor/highlight/github-dark.min.css';
         document.head.appendChild(css);
         const s = document.createElement('script');
-        s.src = 'https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js';
+        s.src = '/vendor/highlight/highlight.min.js';
         s.onload = () => resolve(window.hljs || null);
         s.onerror = () => resolve(null);
         document.head.appendChild(s);

@@ -1,28 +1,27 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <!-- Google tag (gtag.js) -->
-  <script async src="https://www.googletagmanager.com/gtag/js?id=G-VYEQCY48SX"></script>
-  <script>
-    window.dataLayer = window.dataLayer || [];
-    function gtag(){dataLayer.push(arguments);}
-    gtag('js', new Date());
-
-    gtag('config', 'G-VYEQCY48SX');
-  </script>
+  <!-- Analytics: only when the server sets METACODE_ANALYTICS_ID (an empty script otherwise) -->
+  <script async src="/analytics.js"></script>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>MetaCode — Social Media Coding Platform</title>
   <link rel="icon" type="image/png" href="img/metacode-mark.png">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/d3@7.8.5/dist/d3.min.js"></script>
+  <link rel="stylesheet" href="css/fonts.css">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#0F172A">
+  <link rel="apple-touch-icon" href="/img/icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="MetaCode">
+  <script src="vendor/papaparse/papaparse.min.js"></script>
+  <script src="vendor/chart.js/chart.umd.js"></script>
+  <script src="vendor/d3/d3.min.js"></script>
   <link rel="stylesheet" href="css/main.css">
   <link rel="stylesheet" href="css/tour.css">
   <link rel="stylesheet" href="css/account.css">
   <link rel="stylesheet" href="css/collab.css">
+  <script src="js/pwa.js" defer></script>
 </head>
 <body>
 <div class="app-shell">
@@ -145,6 +144,9 @@
   <main class="main-content">
     <header class="topbar">
       <div class="topbar-left">
+        <button type="button" class="nav-toggle" id="nav-toggle" aria-controls="sidebar" aria-expanded="false" aria-label="Menu" title="Menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
         <div class="topbar-title" id="topbar-title">Dashboard</div>
       </div>
       <div class="topbar-right">
@@ -166,6 +168,8 @@
     </div>
   </main>
 </div>
+
+<div class="nav-backdrop" id="nav-backdrop" aria-hidden="true"></div>
 
 <!-- MetaCode Assistant: right-side help chat (js/assistant.js) -->
 <aside class="asst-panel" id="asst-panel" aria-labelledby="asst-title">

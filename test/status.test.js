@@ -136,14 +136,29 @@ test('status.metac0.de (and any status.* host) serves the status page; other pag
   assert.doesNotMatch((await get('/', 'health.example.org')).body, /MetaCode Status<\/title>/);
 });
 
-test('the Google tag is on MetaCode\'s own pages, not on the pages survey respondents see', async () => {
+test('Google Analytics only when the operator sets METACODE_ANALYTICS_ID: MetaCode\'s own pages load /analytics.js (empty by default), the pages survey respondents see never do', async () => {
   for (const page of ['/', '/app.html', '/studio.html', '/status']) {
     const body = (await get(page)).body;
-    assert.match(body, /<head>\s*<!-- Google tag \(gtag\.js\) -->\s*<script async src="https:\/\/www\.googletagmanager\.com\/gtag\/js\?id=G-VYEQCY48SX"><\/script>/, page);
-    assert.match(body, /gtag\('config', 'G-VYEQCY48SX'\);/, page);
+    assert.match(body, /<head>\s*<!-- Analytics: only when the server sets METACODE_ANALYTICS_ID \(an empty script otherwise\) -->\s*<script async src="\/analytics\.js"><\/script>/, page);
+    assert.doesNotMatch(body, /googletagmanager|gtag\(/, page);
   }
-  assert.match((await get('/', 'status.metac0.de')).body, /G-VYEQCY48SX/);
-  assert.doesNotMatch((await get('/survey.html')).body, /googletagmanager|gtag\(/);
+  assert.match((await get('/', 'status.metac0.de')).body, /src="\/analytics\.js"/);
+  assert.doesNotMatch((await get('/survey.html')).body, /googletagmanager|gtag\(|analytics\.js/);
+  // Off by default: nothing is sent anywhere
+  const off = await get('/analytics.js');
+  assert.equal(off.status, 200);
+  assert.match(off.body, /^\/\* Analytics is off/);
+  // On with the site's id: Google's tag, configured with it
+  process.env.METACODE_ANALYTICS_ID = 'G-VYEQCY48SX';
+  try {
+    const on = (await get('/analytics.js')).body;
+    assert.match(on, /var id = "G-VYEQCY48SX";/);
+    assert.match(on, /https:\/\/www\.googletagmanager\.com\/gtag\/js\?id=' \+ id/);
+    assert.match(on, /window\.gtag\('config', id\);/);
+  } finally { delete process.env.METACODE_ANALYTICS_ID; }
+  // (an id that doesn't look like one is ignored)
+  process.env.METACODE_ANALYTICS_ID = '"); alert(1); ("';
+  try { assert.match((await get('/analytics.js')).body, /^\/\* Analytics is off/); } finally { delete process.env.METACODE_ANALYTICS_ID; }
 });
 
 function findChromium() {

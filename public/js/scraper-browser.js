@@ -17,7 +17,7 @@ const RedditBrowser = (() => {
 
   const PREFIX = '/scramjet/~/';
   const FILES = {
-    sw:         '/scramjet-sw.js',
+    sw:         '/sw.js',             // MetaCode's one service worker (lib/pwa-sw.js), which routes Scramjet's requests too
     scramjet:   '/scramjet/scramjet.js',
     controller: '/scramjet/controller.api.js',
     inject:     '/scramjet/controller.inject.js',

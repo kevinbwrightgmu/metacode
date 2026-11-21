@@ -1,22 +1,20 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<!-- Google tag (gtag.js) -->
-<script async src="https://www.googletagmanager.com/gtag/js?id=G-VYEQCY48SX"></script>
-<script>
-  window.dataLayer = window.dataLayer || [];
-  function gtag(){dataLayer.push(arguments);}
-  gtag('js', new Date());
-
-  gtag('config', 'G-VYEQCY48SX');
-</script>
+<!-- Analytics: only when the server sets METACODE_ANALYTICS_ID (an empty script otherwise) -->
+<script async src="/analytics.js"></script>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>MetaCode — Multi-Method Social Media Research Platform</title>
 <meta name="description" content="Collect Reddit discussions, code them with AI and independent human coders, map interaction networks and run your own surveys — one research platform, several complementary methods.">
 <link rel="icon" type="image/png" href="img/metacode-mark.png">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="css/fonts.css">
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#0F172A">
+<link rel="apple-touch-icon" href="/img/icons/apple-touch-icon.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="MetaCode">
 <style>
   /* ── Design tokens (shared palette with the app: violet = AI, teal = human, blue = brand) ── */
   :root {
@@ -255,6 +253,7 @@
   }
 </style>
 <link rel="stylesheet" href="css/account.css">
+<script src="js/pwa.js" defer></script>
 </head>
 <body>
 <a class="skip" href="#main">Skip to content</a>

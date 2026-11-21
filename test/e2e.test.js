@@ -257,6 +257,16 @@ test('scraper job controls: pause at a safe point → paused state with checkpoi
   }
 });
 
+// The custom-code editor: CodeMirror (served by MetaCode, public/vendor/codemirror5), or the plain textarea it
+// falls back to when it can't load
+async function setScraperCode(page, code) {
+  await page.waitForFunction(() => document.querySelector('#sc-custom .CodeMirror') || (document.getElementById('sc-code') && document.getElementById('sc-code').offsetParent));
+  await page.evaluate(text => {
+    const cm = document.querySelector('#sc-custom .CodeMirror');
+    if (cm && cm.CodeMirror) cm.CodeMirror.setValue(text); else document.getElementById('sc-code').value = text;
+  }, code);
+}
+
 test('custom code: write a scraper, run it in the sandbox, see results', { skip }, async () => {
   const { page, context } = await openApp('#scraper');
   await page.click('.sc-mode[data-mode="custom"]');
@@ -266,7 +276,7 @@ test('custom code: write a scraper, run it in the sandbox, see results', { skip 
   assert.match(await page.textContent('#modal-body'), /ctx\.reddit\.pages/);
   await page.click('#modal-close');
   assert.equal(await page.inputValue('#sc-language'), 'python');     // Python is the default
-  await page.fill('#sc-code', [
+  await setScraperCode(page, [
     'import statistics',
     '',
     'async def scrape(ctx):',
@@ -287,7 +297,7 @@ test('custom code: write a scraper, run it in the sandbox, see results', { skip 
 
   // JavaScript still works; a failing script shows the sandbox's error.
   await page.selectOption('#sc-language', 'javascript');
-  await page.fill('#sc-code', 'async function scrape(ctx) {\n  throw new Error("deliberate failure");\n}');
+  await setScraperCode(page, 'async function scrape(ctx) {\n  throw new Error("deliberate failure");\n}');
   await page.click('#sc-start');
   await page.waitForFunction(() => document.querySelector('#sc-job-status') && document.querySelector('#sc-job-status').textContent === 'Failed', null, { timeout: 30000 });
   assert.match(await page.textContent('.sc-error-box'), /deliberate failure/);
