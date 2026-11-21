@@ -19,7 +19,8 @@ always has (no sign-in, no plans, no limits, work kept in the browser).
 4. [Your work in your account](#your-work-in-your-account)
 5. [Security](#security)
 6. [Limitations](#limitations)
-7. [File map](#file-map)
+7. [Can't sign in?](#cant-sign-in)
+8. [File map](#file-map)
 
 ---
 
@@ -289,6 +290,40 @@ API keys typed into MetaCode (Reddit app keys, the RedditAPIs.com key) are never
 - **Email:** confirmation and reset emails depend on Supabase's email settings (custom SMTP for real use).
 - **Unenforceable features:** client-only features (human coding, the Network Graph's drawing, metrics)
   run entirely in the browser. Only their page gates restrict them.
+
+---
+
+## Can't sign in?
+
+Sign-in requests go from the browser straight to Supabase Auth, so when Supabase refuses one, the browser
+console shows only `Failed to load resource: the server responded with a status of 400`. The sign-in dialog
+says what happened and what to do, and the console adds a line naming Supabase's reason
+(`[account] Supabase Auth refused the request: <code>` or `[account] The email link couldn't sign you in: …`).
+The Network tab shows which request it was (`…supabase.co/auth/v1/token?grant_type=…`).
+
+| Reason (code) | What people see | What fixes it |
+|---|---|---|
+| `invalid_credentials` | "That email and password don't match an account" | The right password, *Forgot password?*, or *Create account* (there is no account yet). |
+| `email_not_confirmed` | "Confirm your email first" + **Send the confirmation email again** | Open the link in the email. **No email arrives?** See below. |
+| The link was opened in another browser or app | "That email link was opened in a different browser or app…" | Links work only in the browser that asked for them (PKCE). A confirmation link still confirms the email: sign in with the password. For a password reset, ask again and open the link in the same browser. |
+| `flow_state_not_found`, `otp_expired`, `bad_code_verifier` | "That email link was already used / has expired" | Ask for a new link. Email scanners that open links before the person does can use them up. |
+| `otp_disabled` | "There's no MetaCode account for that email yet" (sign-in link) | *Create account* first. |
+| `email_address_not_authorized` | "MetaCode can't send email to that address yet…" (creating an account) | Set up custom SMTP (below): the built-in sender refuses addresses outside your Supabase team. |
+| `over_email_send_rate_limit` | "Too many emails were sent just now" | Wait, or set up custom SMTP (below). |
+| `captcha_failed` | "…asks for a CAPTCHA, which these pages don't show" | Turn off bot protection: **Authentication → Attack Protection**. MetaCode's pages don't show a CAPTCHA. |
+| `email_provider_disabled`, `signup_disabled` | Says email sign-in / new accounts are off | **Authentication → Providers → Email** (and **Allow new users to sign up**). |
+
+**No confirmation email arrives.** Without custom SMTP, Supabase's built-in email service sends **only to the
+email addresses of your Supabase organization's team members**, and only a few emails an hour; for anyone
+else, creating an account fails (`email_address_not_authorized`) or the link never arrives and every sign-in
+then fails with `email_not_confirmed`. Fix it in
+**Authentication → Emails → SMTP Settings** (any SMTP provider: Resend, Postmark, SendGrid, Amazon SES, your mail
+host). Until then you can confirm someone by hand in **Authentication → Users** (the user's menu →
+*Confirm email*), or — only while testing — turn off **Confirm email** under **Providers → Email** (shared
+projects then trust whatever address people sign up with).
+
+**The link goes to the wrong site** (localhost, or an error page): **Authentication → URL Configuration** needs
+**Site URL** = your MetaCode address and `https://<your domain>/app.html` under **Redirect URLs**.
 
 ---
 
