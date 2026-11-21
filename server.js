@@ -565,9 +565,14 @@ async function switchCandidates(target, chatRequest, tried, o) {
   if (soonest && soonest - now <= LOCAL_BACKUP_AFTER_MS) return { list, base, triedAlready, candidates: [], backupOnly: false, backSoon: soonest };
   return { list, base, triedAlready, candidates, backupOnly: true, backSoon: null };
 }
-// A model of the local last-resort backup (Ollama on this server)
+// A model of the local last-resort backup (Ollama on this server). Until the model list is fetched again
+// after Reload .env, the backup's models as last listed: requests already on their way to the backup still
+// wait for its turn and get its time limit (AI_LOCAL_TIMEOUT_MS)
+let lastBackupModels = new Set();
 function isBackupModel(id) {
-  const info = modelList.result && modelList.result.info.get(splitVariant(id).base);
+  const base = splitVariant(id).base;
+  if (!modelList.result) return lastBackupModels.has(base);
+  const info = modelList.result.info.get(base);
   return !!(info && info.backup);
 }
 async function closestModel(target, chatRequest, tried, o) {
@@ -1331,6 +1336,7 @@ function getModelList(forceRefresh) {
             modelList.result = result;
             modelList.fetchedAt = Date.now();
             modelList.failure = null;
+            lastBackupModels = new Set(result.ids.filter(id => result.info.get(id) && result.info.get(id).backup));
           } else {
             modelList.failure = result;
             modelList.failedAt = Date.now();
@@ -1725,6 +1731,11 @@ function noteEmptyAnswer(completion, model) {
 // The local backup runs on this server's CPU: its requests wait here for their turn (AI_LOCAL_PARALLEL at
 // a time, 1 by default; the wait doesn't count toward any time limit), then get AI_LOCAL_TIMEOUT_MS
 const localGates = new Map();     // provider -> { active, waiting: [] }
+// Lets waiting requests in while there's room — also when AI_LOCAL_PARALLEL changed meanwhile (Reload .env):
+// more at once when it went up, none until fewer run when it went down
+function admitLocal(g) {
+  while (g.waiting.length && g.active < AI.localParallel) g.waiting.shift()();
+}
 function acquireLocal(provider, signal) {
   let g = localGates.get(provider);
   if (!g) { g = { active: 0, waiting: [] }; localGates.set(provider, g); }
@@ -1735,8 +1746,7 @@ function acquireLocal(provider, signal) {
       if (done) return;
       done = true;
       g.active--;
-      const next = g.waiting.shift();
-      if (next) next();
+      admitLocal(g);
     };
   };
   if (g.active < AI.localParallel && !g.waiting.length) return Promise.resolve(grant());
@@ -2970,6 +2980,7 @@ app.post('/api/settings/reload', async (req, res) => {
   envLoader.load();
   AI = loadAiConfig(process.env);
   resetAiState();
+  localGates.forEach(admitLocal);     // (a higher AI_LOCAL_PARALLEL lets waiting requests in now)
   try {
     if (JSON.stringify(serviceTarget()) !== serviceTargetKey || serviceForeign()) await startService();
     else if (!notConfigured()) {

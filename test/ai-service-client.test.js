@@ -763,6 +763,43 @@ test('posts waiting for the local backup\'s turn go to the model asked for once 
   assert.equal(svc.seen.filter(isLocal).length, 1);
 });
 
+test('Reload .env with another AI_LOCAL_PARALLEL while posts wait for the local backup\'s turn: they follow it at once — more at a time when it went up, one at a time once those running finish when it went down — and still get AI_LOCAL_TIMEOUT_MS', { timeout: 60000 }, async () => {
+  let active = 0, most = 0;
+  const slowLocal = (body, send) => {
+    if (!isLocal(body.model)) return false;
+    active++; most = Math.max(most, active);
+    setTimeout(() => { active--; send(200, completion(body.model, 'ok from ' + body.model)); }, 800);
+    return true;
+  };
+  const posts = n => request('POST', '/api/ai/batch', { parallel: n, requests: Array.from({ length: n }, (_, i) => ({ id: 'p' + i, body: { model: 'local/tiny:1b', messages: [{ role: 'user', content: 'post ' + i }] } })) });
+  const reloadWith = async parallel => {
+    process.env.AI_LOCAL_PARALLEL = parallel;
+    assert.equal((await request('POST', '/api/settings/reload', {})).status, 200);
+  };
+
+  // 1 → 3 with 5 posts waiting: two more start at once (not when the first is done), then three at a time
+  await configure({}, () => { withLocal(); svc.chat = slowLocal; });
+  let run = posts(6);
+  await until(async () => active === 1, 8000, 'the first post with the backup');
+  await reloadWith('3');
+  await until(async () => active === 3, 500, 'two more posts starting at once');
+  let lines = batchLines(await run);
+  assert.deepEqual(lines.map(l => l.ok), Array(6).fill(true), JSON.stringify(lines));
+  assert.equal(most, 3);
+  // (those let in right after the reload, before the model list was fetched again, too)
+  assert.deepEqual(svc.limits.filter(([m]) => isLocal(m)).map(([, ms]) => ms), Array(6).fill('300000'), JSON.stringify(svc.limits));
+
+  // 3 → 1 with 4 posts waiting: the three running finish, then one at a time
+  await configure({ AI_LOCAL_PARALLEL: '3' }, () => { withLocal(); svc.chat = slowLocal; });
+  run = posts(7);
+  await until(async () => active === 3, 8000, 'three posts with the backup');
+  await reloadWith('1');
+  most = 0;
+  lines = batchLines(await run);
+  assert.deepEqual(lines.map(l => l.ok), Array(7).fill(true), JSON.stringify(lines));
+  assert.equal(most, 1, 'one at a time after the reload');
+});
+
 test('one provider failing for every model: requests switch to another provider\'s model; the status page says degraded, not outage', { timeout: 30000 }, async () => {
   await configure({});
   // (upstream status 501: a server error that isn't retried, so the test is quick)
