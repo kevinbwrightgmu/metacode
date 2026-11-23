@@ -142,12 +142,19 @@ jobs:
         with: { name: linux-armv7l, path: artifacts }
       - uses: docker/setup-qemu-action@v3
         with: { platforms: arm }
-      - name: The portable folder in Raspberry Pi OS's base system (Debian, armhf)
+      - name: In Raspberry Pi OS's base system (Debian, armhf), the portable folder and the .deb
         run: |
           tar -xzf artifacts/MetaCode-*-linux-armv7l.tar.gz -C "$RUNNER_TEMP"
           dir=$(ls -d "$RUNNER_TEMP"/MetaCode-*-linux-armv7l)
-          docker run --rm --platform linux/arm/v7 -v "$dir:/app" -v "$PWD/scripts:/scripts:ro" debian:bookworm-slim \
-            /app/runtime/node /scripts/smoke-portable.js /app --timeout 900
+          docker run --rm --platform linux/arm/v7 -v "$dir:/app" -v "$PWD/scripts:/scripts:ro" -v "$PWD/artifacts:/artifacts:ro" debian:bookworm-slim sh -c '
+            set -e
+            # without libatomic (a minimal system): the launcher says what to install
+            if out=$(/app/metacode.sh 2>&1); then echo "started without libatomic?"; exit 1; fi
+            echo "$out"; echo "$out" | grep -q "apt install libatomic1"
+            # the .deb brings it (Depends: libatomic1)
+            apt-get update -qq && apt-get install -y -qq /artifacts/metacode_*_armhf.deb > /dev/null
+            /app/runtime/node /scripts/smoke-portable.js /opt/metacode --launcher /usr/bin/metacode --data "$HOME/.local/share/metacode" --data-default --timeout 900
+            /app/runtime/node /scripts/smoke-portable.js /app --timeout 900'
 
   windows:
     name: Windows ${{ matrix.arch }}
@@ -228,8 +235,9 @@ jobs:
           plutil -lint "$app/Contents/Info.plist"
           test -x "$app/Contents/MacOS/MetaCode"
           # its AppleScript compiles (running it needs a person to let MetaCode control Terminal)
-          sed -e 's#^exec /usr/bin/osascript#exec /usr/bin/osacompile -o "$RUNNER_TEMP/metacode.scpt"#' -e 's# "\$APP" "\$DATA"$##' "$app/Contents/MacOS/MetaCode" > "$RUNNER_TEMP/compile.sh"
-          sh "$RUNNER_TEMP/compile.sh" && test -s "$RUNNER_TEMP/metacode.scpt"
+          # (a copy next to the original, compiling instead of running)
+          sed -e 's#^exec /usr/bin/osascript#exec /usr/bin/osacompile -o "$RUNNER_TEMP/metacode.scpt"#' -e 's# "\$APP" "\$DATA"$##' "$app/Contents/MacOS/MetaCode" > "$app/Contents/MacOS/compile-check"
+          sh "$app/Contents/MacOS/compile-check" && test -s "$RUNNER_TEMP/metacode.scpt" && rm "$app/Contents/MacOS/compile-check"
           # what it has Terminal run: the server inside the app, its data in Application Support
           node scripts/smoke-portable.js "$app/Contents/Resources/app" --data "$HOME/Library/Application Support/MetaCode"
           spctl --assess --type execute -vv "$app" || echo "(not signed with an Apple certificate: Gatekeeper asks once)"

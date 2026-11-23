@@ -181,6 +181,12 @@ fi
 NODE="$DIR/runtime/node"
 [ -x "$NODE" ] || NODE="$(command -v node || true)"
 if [ -z "$NODE" ]; then echo "MetaCode needs Node.js (22.15 or newer), and this copy has none: https://nodejs.org" >&2; exit 1; fi
+# (Node.js for 32-bit ARM needs libatomic, which a minimal system may lack)
+case "$(uname -m)" in arm*)
+  if [ "$NODE" = "$DIR/runtime/node" ] && command -v ldd >/dev/null 2>&1 && ldd "$NODE" 2>/dev/null | grep -q 'libatomic.so.1 => not found'; then
+    echo "MetaCode's Node.js needs libatomic, which this system doesn't have: sudo apt install libatomic1" >&2; exit 1
+  fi ;;
+esac
 : "\${METACODE_DATA_DIR:=$DIR/data}"; : "\${METACODE_PROFILE:=lite}"; : "\${AI_MODE:=local-only}"; : "\${PORT:=3000}"; : "\${METACODE_HOST:=127.0.0.1}"
 [ "\${METACODE_NO_BROWSER:-0}" = 1 ] || : "\${METACODE_OPEN_BROWSER:=1}"
 mkdir -p "$METACODE_DATA_DIR" || exit 1
@@ -308,7 +314,9 @@ function deb(stage, target, out) {
   fs.mkdirSync(path.join(root, 'DEBIAN'), { recursive: true });
   fs.writeFileSync(path.join(root, 'DEBIAN', 'control'), [
     'Package: metacode', 'Version: ' + PKG.version, 'Architecture: ' + arch, 'Maintainer: MetaCode <noreply@metac0.de>',
-    'Installed-Size: ' + Math.ceil(dirSize(opt) / 1024), 'Section: science', 'Priority: optional', 'Recommends: python3',
+    'Installed-Size: ' + Math.ceil(dirSize(opt) / 1024), 'Section: science', 'Priority: optional',
+    // (Node.js for 32-bit ARM needs libatomic)
+    ...(arch === 'armhf' ? ['Depends: libatomic1'] : []), 'Recommends: python3',
     'Homepage: https://metac0.de', 'Description: Social media content analysis and intercoder reliability, offline',
     ' MetaCode with its own Node.js runtime: works without internet, installable as an app in the browser,',
     ' with an AI Model Store for models that run on this computer through Ollama.', ''].join('\n'));
