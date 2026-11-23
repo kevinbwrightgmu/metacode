@@ -30,3 +30,6 @@ deploy/vpn-gateway/gluetun/auth/*
 # MetaCode Sheets build output
 desktop/dist/
 desktop/build/.cache/
+
+# Portable bundles and packages (scripts/build-portable.js)
+dist/

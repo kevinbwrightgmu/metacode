@@ -3144,9 +3144,12 @@ app.use((err, req, res, next) => {
 // METACODE_PROFILE=lite: work starts when a feature needs it — the scraper's Python worker on the first scrape,
 // the status checks when the status page is opened, the AI Lab's sandbox probe on the first code run
 const liteProfile = () => String(process.env.METACODE_PROFILE || '').trim().toLowerCase() === 'lite';
+// METACODE_HOST: the address to listen on; the portable launchers use 127.0.0.1 (this computer only). Every
+// address when it's not set.
 function start(port) {
   return new Promise((resolve, reject) => {
-    const server = app.listen(port, async () => {
+    const host = String(process.env.METACODE_HOST || '').trim();
+    const listening = async () => {
       scraper.setPort(server.address().port);
       aiLab.start();                                         // AI Coding Lab: reloads saved evaluation runs
       // MetaCode's AI service: started here when nothing answers at its address (opencode/supervisor.js)
@@ -3156,7 +3159,8 @@ function start(port) {
       // checks when it's opened)
       if (!liteProfile()) statusMonitor.start();
       resolve(server);
-    });
+    };
+    const server = host ? app.listen(port, host, listening) : app.listen(port, listening);
     server.on('error', reject);
     server.on('upgrade', accounts.upgradeGuard(scraper.onUpgrade));
     const close = server.close.bind(server);
@@ -3230,10 +3234,31 @@ async function printBanner(PORT) {
   console.log('\n  Open http://localhost:' + PORT + ' in your browser.\n');
 }
 
+// METACODE_OPEN_BROWSER=1 (the portable launchers): MetaCode opens in the browser once it listens, and starting
+// it again while it runs opens the one that runs
+const wantsBrowser = () => /^(1|true|yes|on)$/i.test(String(process.env.METACODE_OPEN_BROWSER || '').trim());
+function openBrowser(url) {
+  const [cmd, argv, opts] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '""', url], { windowsVerbatimArguments: true }]
+    : process.platform === 'darwin' ? ['open', [url], {}] : ['xdg-open', [url], {}];
+  const say = () => console.log('  Open ' + url + ' in your browser.');
+  try {
+    const p = spawn(cmd, argv, Object.assign({ stdio: 'ignore', detached: true, windowsHide: true }, opts));
+    p.on('error', say);
+    p.unref();
+  } catch (e) { say(); }
+}
+async function answersAsMetaCode(port) {
+  try {
+    const res = await fetch('http://127.0.0.1:' + port + '/api/health', { signal: AbortSignal.timeout(3000) });
+    return res.ok && (await res.json()).status === 'ok';
+  } catch (e) { return false; }
+}
+
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
   start(PORT).then(server => {
     printBanner(server.address().port);
+    if (wantsBrowser()) openBrowser('http://localhost:' + server.address().port + '/app.html');
     // Ctrl+C / pm2 stop: the AI service MetaCode started stops with it
     const shutdown = () => {
       server.close();
@@ -3242,8 +3267,14 @@ if (require.main === module) {
     };
     process.once('SIGINT', shutdown);
     process.once('SIGTERM', shutdown);
-  }, err => {
-    console.error('[server] Couldn\'t start: ' + redact(err && err.message));
+  }, async err => {
+    if (err && err.code === 'EADDRINUSE' && wantsBrowser() && await answersAsMetaCode(PORT)) {
+      console.log('\n  MetaCode is already running at http://localhost:' + PORT + '/app.html: opening it.\n');
+      openBrowser('http://localhost:' + PORT + '/app.html');
+      return setTimeout(() => process.exit(0), 500);
+    }
+    console.error('[server] Couldn\'t start: ' + redact(err && err.message) +
+      (err && err.code === 'EADDRINUSE' ? ' (another program uses port ' + PORT + ': set another PORT in .env)' : ''));
     process.exit(1);
   });
 }

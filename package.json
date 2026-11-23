@@ -13,7 +13,8 @@
     "collector:install": "npm --prefix collector install",
     "collector:dev": "npm --prefix collector run dev",
     "collector:build": "npm --prefix collector run build",
-    "collector:test": "npm --prefix collector test"
+    "collector:test": "npm --prefix collector test",
+    "build:portable": "node scripts/build-portable.js"
   },
   "dependencies": {
     "@codemirror/lang-javascript": "6.2.5",
