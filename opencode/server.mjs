@@ -468,9 +468,15 @@ export async function startService(opts) {
 
   // A bare id (saved before providers): the OpenAI-compatible providers first (config order), then Zen;
   // the first provider that has the model under any spelling wins (its exact spelling before others)
+  // The ready providers whose models are on this machine (their entries say `local`): Ollama's first
+  function localSlots(list) {
+    const here = list.slots.filter(x => list.ready.has(x.id) && (list.byProvider.get(x.id) || []).some(e => e.local));
+    return here.filter(x => x.kind === 'ollama').concat(here.filter(x => x.kind !== 'ollama'));
+  }
+
   function findBare(list, model) {
-    const localFirst = /^local(-only)?$/i.test(String(env.AI_MODE || '').trim());
-    const order = (localFirst ? list.slots.filter(s => s.kind === 'ollama') : []).concat(list.slots.filter(s => s.kind !== 'zen' && !isBackupSlot(s) && !(localFirst && s.kind === 'ollama')), list.slots.filter(s => s.kind === 'zen'), list.slots.filter(isBackupSlot))
+    const local = /^local(-only)?$/i.test(String(env.AI_MODE || '').trim()) ? localSlots(list) : [];
+    const order = local.concat(list.slots.filter(s => s.kind !== 'zen' && !isBackupSlot(s) && !local.includes(s)), list.slots.filter(s => s.kind === 'zen' && !local.includes(s)), list.slots.filter(s => isBackupSlot(s) && !local.includes(s)))
       .filter(s => list.ready.has(s.id));
     for (const s of order) {
       const entries = list.byProvider.get(s.id);
@@ -555,10 +561,11 @@ export async function startService(opts) {
     }
     const usable = entries => (entries || []).find(e => e.available !== false);
     const pick = (slot, entry) => ({ target: { slot, entry, variant: null, fullId: entry.id }, id: entry.id, warnings });
-    // AI_MODE=local / local-only: a model on this device is the default whenever one is ready
+    // AI_MODE=local / local-only: a model on this device is the default whenever one is ready: Ollama's first,
+    // then an OpenAI-compatible server's on this machine (llama.cpp, LM Studio…); entries say `local`
     if (/^local(-only)?$/i.test(String(env.AI_MODE || '').trim())) {
-      for (const s of list.slots.filter(x => x.kind === 'ollama' && list.ready.has(x.id))) {
-        const e = usable(list.byProvider.get(s.id));
+      for (const s of localSlots(list)) {
+        const e = (list.byProvider.get(s.id) || []).find(x => x.available !== false && x.local);
         if (e) return pick(s, e);
       }
     }

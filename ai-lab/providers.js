@@ -285,6 +285,19 @@ class OpenAICompatibleProvider {
 }
 
 /**
+ * AI_MODE=local-only keeps every prompt on this machine: the Lab's own OpenAI-compatible provider then works only
+ * when it is a server on this machine (localhost, 127.x.x.x, [::1]). → why it's off, or null
+ * @param {{ baseUrl: string }} cfg
+ */
+function localOnlyBlock(cfg) {
+  if (String(process.env.AI_MODE || '').trim().toLowerCase() !== 'local-only') return null;
+  let host = '';
+  try { host = new URL(cfg.baseUrl).hostname.toLowerCase().replace(/^\[|\]$/g, ''); } catch (e) { host = ''; }
+  if (host === 'localhost' || host === '::1' || /^127(?:\.\d{1,3}){3}$/.test(host)) return null;
+  return 'The AI Coding Lab\'s own provider (AI_LAB_OPENAI_BASE_URL) is switched off: AI_MODE=local-only keeps every prompt on this machine. Use MetaCode\'s AI (its models on this device).';
+}
+
+/**
  * The providers available on this server.
  * @param {{ ai: any, config: ReturnType<typeof import('./config').labConfig> }} deps
  */
@@ -295,7 +308,7 @@ function createRegistry(deps) {
   function providers() {
     const cfg = deps.config.openai;
     const key = [cfg.key, cfg.baseUrl, cfg.models.join(','), cfg.fineTuning, cfg.fineTuneModels.join(',')].join('|');
-    if (!cfg.configured) openai = null;
+    if (!cfg.configured || localOnlyBlock(cfg)) openai = null;
     else if (!openai || openaiKey !== key) { openai = new OpenAICompatibleProvider(cfg); openaiKey = key; }
     /** @type {(MetaCodeProvider | OpenAICompatibleProvider)[]} */
     const list = [metacode];
@@ -304,6 +317,8 @@ function createRegistry(deps) {
   }
   /** @param {string} id */
   function get(id) {
+    const blocked = id === 'openai' && deps.config.openai.configured ? localOnlyBlock(deps.config.openai) : null;
+    if (blocked) throw new LabError('provider_unavailable', blocked, { status: 403 });
     const p = providers().find(x => x.id === id);
     if (!p) throw new LabError('provider_unavailable', 'The model provider "' + String(id).slice(0, 40) + '" isn\'t available on this server.', { status: 400 });
     return p;
@@ -336,4 +351,4 @@ function createRegistry(deps) {
   return { providers, get, catalog, resolve, metacode };
 }
 
-module.exports = { createRegistry, MetaCodeProvider, OpenAICompatibleProvider, estimateTokens, usageOf };
+module.exports = { createRegistry, MetaCodeProvider, OpenAICompatibleProvider, estimateTokens, usageOf, localOnlyBlock };

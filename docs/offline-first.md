@@ -461,6 +461,7 @@ portable folders), or in the data folder (`~/Library/Application Support/MetaCod
 | `METACODE_OPEN_BROWSER` | `1` opens MetaCode in the browser once it listens. Started again while it runs, it opens that one and exits. The launchers set it unless `METACODE_NO_BROWSER=1` |
 | `METACODE_DATA_DIR` | One folder for everything the server keeps |
 | `OLLAMA_BASE_URL` | Where Ollama answers (`http://127.0.0.1:11434/v1`) |
+| `AI_LOCAL_CONTEXT_TOKENS` | How much a model on this machine takes in, prompt and answer together: 4096, Ollama's default, unless set. Set it to Ollama's `OLLAMA_CONTEXT_LENGTH`. A prompt that doesn't fit is refused with what to change, and Ask MetaCode sends only the parts of its reference that fit |
 | `LOCAL_AI_ADMIN_TOKEN` | Lets other devices install and remove models |
 | `LOCAL_AI_LIBRARY_URL`, `LOCAL_AI_REGISTRY_URL` | A mirror of Ollama's library and registry |
 | `OLLAMA_PULL_IDLE_SECONDS` | How long a download may make no progress before it's stopped as interrupted (default 120 s); resuming continues |

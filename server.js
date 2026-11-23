@@ -222,7 +222,7 @@ function firstSet(env, names) {
 function loadAiConfig(env) {
   const settings = shared.serviceSettings(env);
   const config = { off: false, url: null, baseHost: null, custom: false, managed: 'auto', model: '', modelVar: null,
-    timeoutMs: DEFAULT_TIMEOUT_MS, switching: true, freeFallback: false, localTimeoutMs: DEFAULT_LOCAL_TIMEOUT_MS, localParallel: 1, localContextTokens: 8192, settings, problem: null, warnings: [] };
+    timeoutMs: DEFAULT_TIMEOUT_MS, switching: true, freeFallback: false, localTimeoutMs: DEFAULT_LOCAL_TIMEOUT_MS, localParallel: 1, localContextTokens: 4096, settings, problem: null, warnings: [] };
 
   const managed = String(env.OPENCODE_SERVICE_MANAGED || '').trim().toLowerCase();
   if (managed === 'on' || managed === 'always' || shared.isOn(managed)) config.managed = 'on';
@@ -266,7 +266,7 @@ function loadAiConfig(env) {
   if (contextVar) {
     const n = Number(String(env[contextVar]).trim());
     if (Number.isInteger(n) && n >= 2048 && n <= 262144) config.localContextTokens = n;
-    else config.warnings.push('AI_LOCAL_CONTEXT_TOKENS must be a whole number from 2048 to 262144; using 8192.');
+    else config.warnings.push('AI_LOCAL_CONTEXT_TOKENS must be a whole number from 2048 to 262144; using 4096.');
   }
   // AI_FALLBACK_TO_FREE_MODELS=on: a free model may answer for one that isn't free (see closestModel)
   const freeVar = firstSet(env, ['AI_FALLBACK_TO_FREE_MODELS']);
@@ -563,15 +563,23 @@ function serviceTrouble(now, provider) {
 // again) than answered by a small local model.
 // → { list, base, triedAlready(id), candidates, backupOnly (the candidates are the backup's), backSoon (held back
 //   for a model that is back then) } or null
-// A request's size in tokens, roughly (4 characters a token) with its answer's budget
-function estimatedTokens(chatRequest) {
-  let chars = 0;
+// The prompt's size in tokens for a model on this machine, on the safe side (3.5 characters a token, and the
+// messages' own markup), without the answer
+function promptTokens(chatRequest) {
+  let chars = 0, messages = 0;
   for (const m of (chatRequest && chatRequest.messages) || []) {
+    messages++;
     if (typeof m.content === 'string') chars += m.content.length;
     else if (Array.isArray(m.content)) m.content.forEach(part => { if (part && typeof part.text === 'string') chars += part.text.length; });
   }
-  return Math.ceil(chars / 4) + (Number(chatRequest && chatRequest.max_tokens) || 1000);
+  return Math.ceil(chars / 3.5) + 8 * messages;
 }
+// What a model on this machine needs left for its answer
+const MIN_LOCAL_ANSWER_TOKENS = 512;
+// A model on this machine takes in AI_LOCAL_CONTEXT_TOKENS (Ollama's context length) for prompt and answer
+// together: a prompt that leaves less than MIN_LOCAL_ANSWER_TOKENS of it can't go to one (Ollama would drop the
+// start of the prompt, the instructions, without a word)
+const fitsLocal = chatRequest => promptTokens(chatRequest) + MIN_LOCAL_ANSWER_TOKENS <= AI.localContextTokens;
 async function switchCandidates(target, chatRequest, tried, o) {
   o = o || {};
   const allowFree = !!o.allowFree, restingToo = !!o.restingToo;
@@ -587,10 +595,13 @@ async function switchCandidates(target, chatRequest, tried, o) {
   // (whatever the moment: a chat model, allowed for this request, offered, able to take it)
   // (a model on this machine whose context can't hold the request isn't switched to: Ollama would drop the start
   // of the prompt without a word — AI_LOCAL_CONTEXT_TOKENS, as OLLAMA_CONTEXT_LENGTH is set for Ollama)
-  const tooBigForLocal = estimatedTokens(chatRequest) > AI.localContextTokens;
+  const tooBigForLocal = !fitsLocal(chatRequest);
   const fits = id => (freeOk || !isFree(id)) && !NOT_A_CHAT_MODEL.test(splitModel(id).model) &&
     !(infoOf(id) && infoOf(id).available === false) && !capabilityProblem(chatRequest, infoOf(id)) &&
-    !(tooBigForLocal && infoOf(id) && (infoOf(id).backup || infoOf(id).local));
+    !(tooBigForLocal && infoOf(id) && (infoOf(id).backup || infoOf(id).local)) &&
+    // (AI_MODE=local-only: a switch, too, stays on this machine, whatever list the AI service gave — one started
+    // without AI_MODE, or the old list just after Reload .env)
+    (AI.mode !== 'local-only' || !!(infoOf(id) && (infoOf(id).local || infoOf(id).backup)));
   const candidates = list.ids.filter(id => !done.has(id) && fits(id) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
     (restingToo || (!providerRestingUntil(providerOf(id), now) && !(isFree(id) && freeModelsRestingUntil(providerOf(id), now)))) && !serviceTrouble(now, providerOf(id)));
   // The same model under another spelling of its id (claude-opus-4-8 / claude-opus-4.8) as one
@@ -1439,6 +1450,13 @@ function unknownVariant(info, variant) {
 }
 
 function noModelsFailure() {
+  // (AI_MODE=local / local-only: the models on this machine are what's missing, so their problem is said:
+  // "Ollama isn't answering at … Install and start Ollama")
+  if (AI.mode === 'local' || AI.mode === 'local-only') {
+    const providers = serviceState.status && Array.isArray(serviceState.status.providers) ? serviceState.status.providers : [];
+    const local = providers.find(p => p && typeof p === 'object' && p.local && p.problem) || providers.find(p => p && typeof p === 'object' && p.kind === 'ollama' && p.problem);
+    if (local) return fail(503, 'not_configured', 'No AI model on this computer is ready (AI_MODE=' + AI.mode + '): ' + plainText(local.problem, 400));
+  }
   return fail(503, 'not_configured', 'MetaCode\'s AI service has no AI provider set up yet, so there are no models to use. Settings → AI providers shows what each one needs.');
 }
 
@@ -1498,9 +1516,10 @@ async function resolveModel(requested) {
   const list = await getModelList(false);
   if (!list.ok) {
     if (FATAL_LIST_FAILURES.has(list.type)) return list;
-    // The list is unavailable for another reason (a hiccup): send the
-    // configured or requested model unverified and let the service decide.
-    const model = AI.model || wanted;
+    // The list is unavailable for another reason (a hiccup): send the requested model (else the configured one)
+    // unverified and let the service decide — never another model than the one asked for (AI Chat turns
+    // switching off: its prompt must go to the model on this device it names)
+    const model = wanted || AI.model;
     return model ? { ok: true, model, verified: false, source: 'opencode', info: null } : list;
   }
   const pick = (model, variant) => ({ ok: true, model: model + (variant ? '#' + variant : ''), verified: true, source: list.source, info: list.info.get(model) || null });
@@ -1848,6 +1867,10 @@ function requestFor(chatRequest, model, prep) {
     if (out.temperature === undefined && own.temperature !== undefined) out.temperature = own.temperature;
     if (own.maxTokens) out.max_tokens = Math.min(Number(out.max_tokens) || own.maxTokens, own.maxTokens);
   }
+  // (and the answer gets what is left of the model's context, AI_LOCAL_CONTEXT_TOKENS, at most: a longer budget
+  // would make Ollama drop the start of the prompt to make room)
+  const room = AI.localContextTokens - promptTokens(out);
+  if (room >= MIN_LOCAL_ANSWER_TOKENS) out.max_tokens = Math.min(Number(out.max_tokens) || room, room);
   return out;
 }
 // recheck(): when the request's turn comes, the model to use instead of the local backup (one that is back
@@ -1881,7 +1904,13 @@ async function completeChatOnce(chatRequest, ctx, signal, retriedLength) {
   // text: ask once more with a bigger budget.
   const c0 = completion.choices[0];
   if (!String(c0.message.content || '').trim() && c0.finish_reason === 'length' && !retriedLength) {
-    const bigger = Math.min(8192, Math.max(1024, (Number(chatRequest.max_tokens) || 256) * 4));
+    let bigger = Math.min(8192, Math.max(1024, (Number(chatRequest.max_tokens) || 256) * 4));
+    // (a model on this machine: within its own cap, Installed Models, and what its context leaves)
+    if (isLocalModel(chatRequest.model)) {
+      const own = localAi.modelSettings(splitModel(splitVariant(chatRequest.model).base).model);
+      bigger = Math.min(bigger, (own && own.maxTokens) || bigger, Math.max(MIN_LOCAL_ANSWER_TOKENS, AI.localContextTokens - promptTokens(chatRequest)));
+      if (bigger <= (Number(chatRequest.max_tokens) || 0)) { noteEmptyAnswer(completion, chatRequest.model); return { ok: true, completion }; }
+    }
     console.warn('[ai] ' + chatRequest.model + ' used all ' + (chatRequest.max_tokens || '?') + ' tokens without answering; retrying with ' + bigger + '.');
     return completeChatOnce(Object.assign({}, chatRequest, { max_tokens: bigger }), ctx, signal, true);
   }
@@ -2069,7 +2098,8 @@ async function relayStream(res, attempt, model) {
     const reason = attempt.controller.signal.reason;
     if (reason === CLIENT_GONE || res.destroyed) outcome = { gone: true };
     else if (reason === TIMED_OUT) {
-      outcome = { type: 'timeout', message: 'The AI service stopped sending the answer for ' + timeoutSeconds() + ' seconds, so the stream was ended.' };
+      outcome = isLocalModel(model) ? Object.assign({ type: 'timeout' }, { message: localTimeout(model).message })
+        : { type: 'timeout', message: 'The AI service stopped sending the answer for ' + timeoutSeconds() + ' seconds, so the stream was ended.' };
     } else {
       outcome = { type: 'network', message: 'The connection to the AI service dropped in the middle of the answer.' };
     }
@@ -2146,7 +2176,7 @@ async function streamChat(res, prep) {
     let model = ctx.model, switches = 0, own = null;
     for (;;) {
       tried.add(model);
-      const out = await streamWith(res, Object.assign({}, chatRequest, { model }), Object.assign({}, ctx, { model }), client.signal);
+      const out = await streamWith(res, requestFor(chatRequest, model, prep), Object.assign({}, ctx, { model }), client.signal);
       if (!out || !out.modelLimited) return;
       if (model === ctx.model) own = out.modelLimited;
       const alt = prep.switchModels && switches < MAX_RATE_LIMIT_SWITCHES ? await closestModel(ctx.model, chatRequest, tried, { noHoldBack: !!prep.retried }) : null;
@@ -2196,6 +2226,12 @@ async function prepareChat(body, formatName, opts) {
   // second lock)
   if (AI.mode === 'local-only' && !isLocalModel(resolved.model)) {
     return { failure: fail(403, 'local_only', 'This MetaCode keeps every prompt on this machine (AI_MODE=local-only), and "' + resolved.model + '" isn\'t a model here. Pick a model on this device in Settings → AI models, or install one in the AI Model Store.') };
+  }
+  // A model on this machine whose context can't hold the prompt and an answer: refused with what to change, rather
+  // than answered without the prompt's start (Ollama would drop it, the instructions, without a word)
+  if (isLocalModel(resolved.model) && !fitsLocal(chatRequest)) {
+    return { failure: fail(400, 'context_too_long', 'This request is about ' + promptTokens(chatRequest) + ' tokens, and "' + splitModel(splitVariant(resolved.model).base).model +
+      '" on this computer takes in ' + AI.localContextTokens + ' with its answer (AI_LOCAL_CONTEXT_TOKENS). Send less, or let Ollama take more: set OLLAMA_CONTEXT_LENGTH for Ollama (its default is 4096) and AI_LOCAL_CONTEXT_TOKENS in the server\'s .env to the same number, e.g. 16384.') };
   }
   chatRequest.model = resolved.model;
   const unsupported = capabilityProblem(chatRequest, resolved.info);
@@ -3037,6 +3073,7 @@ function aiSettings() {
     modelSwitch: switchingAllowed(),
     freeFallback: AI.freeFallback,
     aiMode: AI.mode,                                          // cloud | local | local-only (AI_MODE)
+    localContextTokens: AI.localContextTokens,                // what a model on this machine takes in (AI_LOCAL_CONTEXT_TOKENS)
     rateLimitedModels: restingModels(now).map(x => ({ model: x.model, until: new Date(x.until).toISOString() })),
     restingProviders: restingProviders(now).map(x => ({ provider: x.provider, until: new Date(x.until).toISOString(), reason: x.reason })),
     maxParallel: aiMaxParallel()

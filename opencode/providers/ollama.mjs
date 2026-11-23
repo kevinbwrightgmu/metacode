@@ -79,6 +79,9 @@ export function ollamaSettings(env, config) {
 const isCloud = m => !!(m.remote_host || m.remote_model) || /(^|[:-])cloud$/i.test(String(m.name || m.model || ''));
 const isEmbedding = m => /^(bert|nomic-bert)$/i.test(String((m.details && m.details.family) || '')) || /embed/i.test(String(m.name || m.model || ''));
 const tagged = name => (String(name).includes(':') ? String(name) : String(name) + ':latest');
+// localhost, 127.x.x.x, [::1]: Ollama on this machine
+const loopbackHost = host => { const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, ''); return h === 'localhost' || h === '::1' || /^127(?:\.\d{1,3}){3}$/.test(h); };
+export const ollamaOnThisMachine = url => { try { return loopbackHost(new URL(url).hostname); } catch (e) { return false; } };
 const sameModel = (a, b) => tagged(a).toLowerCase() === tagged(b).toLowerCase();
 
 export function createProvider(opts) {
@@ -90,9 +93,13 @@ export function createProvider(opts) {
   // what is known about Ollama: reachable (null = not checked yet), the models it has, downloads;
   // gen: the settings' generation (a look started under older settings doesn't count)
   const state = { reachable: null, checkedAt: 0, probing: null, have: [], problem: null, pulls: new Map(), gen: 0 };
+  // (an Ollama on another machine, OLLAMA_BASE_URL, isn't "on this device": its models aren't local, and
+  // AI_MODE=local-only switches it off in config.mjs)
+  const here = () => ollamaOnThisMachine(s.baseURL);
+  const hostName = () => { try { return new URL(s.baseURL).host; } catch (e) { return 'another machine'; } };
   const providerName = () => (typeof config.name === 'string' && config.name.trim() && (s.backup || config.name.trim() !== 'Local backup (Ollama)') ? config.name.trim() : null) ||
-    (s.backup ? 'Local backup (Ollama)' : 'On this device (Ollama)');
-  const suffix = () => (s.backup ? ' (local backup)' : ' (on this device)');
+    (s.backup ? 'Local backup (Ollama)' : here() ? 'On this device (Ollama)' : 'Ollama at ' + hostName());
+  const suffix = () => (s.backup ? ' (local backup)' : here() ? ' (on this device)' : ' (Ollama at ' + hostName() + ')');
 
   const nativeBase = () => s.baseURL.replace(/\/v1$/, '');
   // (messages from the OpenAI-compatible provider behind this one name the settings in .env, not the OpenCode config)
@@ -102,9 +109,7 @@ export function createProvider(opts) {
   });
   // (Ollama on this machine is reached directly: a proxy set for the internet must not get its requests)
   const baseEnv = () => {
-    let host = '';
-    try { host = new URL(s.baseURL).hostname; } catch (e) { host = ''; }
-    if (!['localhost', '127.0.0.1', '[::1]', '::1'].includes(host)) return env;
+    if (!here()) return env;
     const out = Object.assign({}, env);
     for (const k of ['HTTP_PROXY', 'http_proxy', 'HTTPS_PROXY', 'https_proxy']) delete out[k];
     return out;
@@ -254,11 +259,13 @@ export function createProvider(opts) {
     }
     const b = baseOf();
     if (!b) return [];
-    const list = (await b.models(o)).filter(e => !NOT_A_CHAT_MODEL.test(e.model));
+    // (only models Ollama has here: its /v1/models also lists its cloud models, which run on Ollama's servers,
+    // and its embedding models; neither is ever offered)
+    const list = (await b.models(o)).filter(e => !NOT_A_CHAT_MODEL.test(e.model) && state.have.some(h => sameModel(h, e.model)));
     const listed = s.all ? list : wanted().map(w => list.find(e => sameModel(e.model, w))).filter(Boolean);
     const chosen = s.extra ? listed.concat(list.filter(e => !listed.includes(e))) : listed;
     return chosen.map(e => Object.assign({}, e, {
-      name: e.model + suffix(), free: false, local: true, backup: s.backup,
+      name: e.model + suffix(), free: false, local: here(), backup: s.backup,
       reasoning: false, toolCall: false
     }));
   }
@@ -270,7 +277,9 @@ export function createProvider(opts) {
     // (the OpenAI-compatible provider's own state only while Ollama answers: asked otherwise, it would try
     // to fetch its model list from an Ollama that isn't there)
     const b = state.reachable === true && baseOf() ? baseOf().status() : { warnings: [], transport: 'Node.js' };
-    const hidden = s.mode === 'off' || (s.mode === 'auto' && state.reachable !== true);
+    // (the backup stays out of sight while Ollama isn't there; with AI_MODE=local / local-only it is the AI, so
+    // its problem shows: "Ollama isn't answering … Install and start Ollama")
+    const hidden = s.mode === 'off' || (s.mode === 'auto' && s.backup && state.reachable !== true);
     const downloading = [...state.pulls.entries()].filter(([, p]) => p.state === 'downloading').map(([m, p]) => m + (p.percent ? ' (' + p.percent + '%)' : ''));
     const failed = [...state.pulls.entries()].filter(([, p]) => p.state === 'failed').map(([m, p]) => m + ' (' + p.error + ')');
     const chat = state.have.filter(m => !NOT_A_CHAT_MODEL.test(m));
@@ -285,11 +294,12 @@ export function createProvider(opts) {
           '. Run "ollama pull ' + (wanted()[0] || DEFAULT_MODELS[0]) + '" on the server' + (s.autoPull ? '' : ' (OLLAMA_AUTO_PULL is off)') + ', or install a model in the AI Model Store.';
     }
     const notes = [s.backup ? 'Last-resort backup: answers only when no other provider\'s model can, one request at a time.'
-      : 'Models on this device: prompts stay here. One request at a time.'];
+      : here() ? 'Models on this device: prompts stay here. One request at a time.'
+      : 'Models on the Ollama at ' + hostName() + ': prompts go to that machine.'];
     if (offered.length) notes.push('Models: ' + offered.join(', ') + (downloading.length ? '; downloading ' + downloading.join(', ') : '') + '.');
     return Object.assign({}, b, {
       id, name: providerName(), kind: 'ollama', ready: !problem && state.reachable === true, problem,
-      hidden, backup: s.backup, local: true, keyCount: 0, keys: [], resting: null, free: null,
+      hidden, backup: s.backup, local: here(), keyCount: 0, keys: [], resting: null, free: null,
       models: { listed: offered.length, available: state.reachable === true ? offered.length : null, source: 'live' },
       note: notes.join(' '), baseHost: (() => { try { return new URL(s.baseURL).host; } catch (e) { return null; } })(),
       warnings: (b.warnings || []).concat(failed.length && offered.length ? ['Couldn\'t download ' + failed.join('; ') + '.'] : [])

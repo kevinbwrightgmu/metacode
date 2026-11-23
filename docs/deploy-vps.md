@@ -542,9 +542,10 @@ CONF
 sudo systemctl daemon-reload && sudo systemctl restart ollama
 ```
 
-(With a long codebook, or for **Ask MetaCode**, whose prompt is about 10,000 tokens, use `16384` and set
-`AI_LOCAL_CONTEXT_TOKENS=16384` in MetaCode's `.env` too: MetaCode doesn't hand the backup a request that won't fit
-its context. More context needs more memory and makes each answer slower.)
+Then tell MetaCode the same number: `AI_LOCAL_CONTEXT_TOKENS=8192` in its `.env` (its default is 4096, Ollama's own).
+MetaCode doesn't hand the backup a prompt that won't fit its context, and fits the answer into what's left. With a
+long codebook use `16384` in both places. **Ask MetaCode** sends a model on this machine only the parts of its
+reference that fit. More context needs more memory and makes each answer slower.
 
 **3. Update MetaCode** ([step 10](#10-updating)). Its AI service finds Ollama by itself and downloads the two
 default models one after the other: `gemma3:1b` (815 MB, the better one, used first) and `gemma3:270m` (292 MB,
@@ -573,7 +574,7 @@ unloads a model 5 minutes after its last answer). On a small VPS, offer only the
 | `OLLAMA_AUTO_PULL` | `on` | `off`: don't download the models Ollama doesn't have |
 | `AI_LOCAL_TIMEOUT_MS` | `300000` | How long one answer from the backup may take (10000–600000 ms) |
 | `AI_LOCAL_PARALLEL` | `1` | How many requests it answers at once (raise it only with `OLLAMA_NUM_PARALLEL` and spare CPU cores) |
-| `AI_LOCAL_CONTEXT_TOKENS` | `8192` | How much the backup can take in (match `OLLAMA_CONTEXT_LENGTH` from step 2): bigger requests aren't switched to it |
+| `AI_LOCAL_CONTEXT_TOKENS` | `4096` | How much the backup takes in, prompt and answer together (set it to `OLLAMA_CONTEXT_LENGTH` from step 2): a prompt that doesn't fit isn't sent to it |
 
 **Keep port 11434 closed.** Ollama has no password: anyone who reaches it can use, download and delete models.
 The firewall from [step 8](#8-firewall) keeps it closed; don't set `OLLAMA_HOST=0.0.0.0`. To remove the backup,

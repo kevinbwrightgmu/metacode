@@ -812,6 +812,14 @@ const App = (() => {
     return modelsPending;
   }
 
+  // A model's entry in the list (the default's for '', the server's choice) — null when the list doesn't have it
+  // or hasn't come yet (modelsReady() waits for it)
+  function modelInfo(id) {
+    const list = modelCache || [];
+    return (id ? list.find(m => m.id === id) : list.find(isDefaultEntry)) || null;
+  }
+  const modelsReady = () => (modelCache ? Promise.resolve() : requestModels().then(() => {}, () => {}));
+
   const providerOf = id => { const s = String(id || ''), i = s.indexOf('/'); return i > 0 ? s.slice(0, i) : ''; };
   const modelPart = id => { const s = String(id || ''), i = s.indexOf('/'); return i > 0 ? s.slice(i + 1) : s; };
   // "-" or "_" between two digits reads as "." and case doesn't count (claude-opus-5-5 = claude-opus-5.5), as on the server (model-match.js)
@@ -1403,6 +1411,7 @@ const App = (() => {
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
     getState, setState, save, reloadState, updateSidebarStats,
     callClaude, callClaudeBatch, tooLargeMessage: TOO_LARGE, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus, refreshServerStatus: refreshServerKeyInfo, modelName,
+    modelFor, modelInfo, modelsReady,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,
     saveProject, saveSettings, downloadBackup, restoreBackup, testApi, clearCodes, resetAll,

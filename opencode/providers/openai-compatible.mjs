@@ -114,6 +114,8 @@ function settingNames(id) {
 
 // What a keyless server on this machine is sent as its key (it ignores it)
 const LOCAL_PLACEHOLDER_KEY = 'local';
+// localhost, 127.x.x.x, [::1]: a server on this machine
+const loopbackHost = host => { const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, ''); return h === 'localhost' || h === '::1' || /^127(?:\.\d{1,3}){3}$/.test(h); };
 
 /**
  * Reads one provider's settings from its (already substituted) config entry,
@@ -141,7 +143,7 @@ export function loadSettings(id, config, env, repoDir) {
   } else {
     s.baseUrl = (url.origin + url.pathname).replace(/\/+$/, '');
     if (isEmis && !/\/v1$/.test(s.baseUrl)) s.warnings.push('EMIS_BASE_URL normally ends in /v1 (default: ' + EMIS_DEFAULT_BASE_URL + ').');
-    if (url.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) {
+    if (url.protocol === 'http:' && !loopbackHost(url.hostname)) {
       s.warnings.push(names.base + ' uses plain http, so the API key would travel unencrypted. Use https.');
     }
   }
@@ -191,10 +193,17 @@ export function loadSettings(id, config, env, repoDir) {
       s.pythonProxy = own;
       s.proxyHost = p.host;
     }
+  } else if (url && loopbackHost(url.hostname)) {
+    // (a server on this machine is reached directly: a proxy set for the internet must not get its requests,
+    // as for Ollama)
+    s.proxy = 'direct';
+    s.pythonProxy = '';
   } else {
     const envProxy = text(env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy);
     if (envProxy) { try { s.proxyHost = new URL(envProxy).host || 'set'; } catch (e) { s.proxyHost = 'set'; } }
   }
+  // (its models are on this machine: what AI_MODE=local / local-only count as local)
+  s.onThisMachine = !!(url && loopbackHost(url.hostname));
 
   const rawFile = text(options.models_file) || (isEmis ? text(env.EMIS_MODELS_FILE) || EMIS_MODELS_FILE : '');
   if (rawFile && !isOff(rawFile)) s.modelsFile = path.resolve(repoDir || REPO_DIR, rawFile.replace(/^~(?=$|[\\/])/, os.homedir()));
@@ -202,7 +211,7 @@ export function loadSettings(id, config, env, repoDir) {
   if (!s.problem && !s.keys.length) {
     // A server on this machine (llama.cpp's llama-server, LM Studio, Jan, LocalAI, Ollama…) usually takes no key:
     // a placeholder is sent, as OpenAI-compatible clients must send one
-    if (!isEmis && url && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) { s.keys.push(LOCAL_PLACEHOLDER_KEY); s.keyless = true; }
+    if (!isEmis && s.onThisMachine) { s.keys.push(LOCAL_PLACEHOLDER_KEY); s.keyless = true; }
     else s.problem = isEmis ? 'Add the gateway key to EMIS_API_KEY in .env, then Reload .env.'
       : 'Add an API key for this provider (' + names.key + ' in the OpenCode config), then Reload .env.';
   }
@@ -1001,7 +1010,7 @@ export function createProvider(opts) {
   }
 
   const toEntry = (m, available) => ({
-    id: id + '/' + m.id, provider: id, providerName: name, model: m.id, name: m.name || m.id, free: false, available,
+    id: id + '/' + m.id, provider: id, providerName: name, model: m.id, name: m.name || m.id, free: false, available, local: !!settings.onThisMachine,
     toolCall: m.toolCall, reasoning: m.reasoning, attachment: m.attachment, temperature: m.temperature,
     contextWindow: m.context, maxOutput: m.output, variants: [], releaseDate: m.releaseDate, protocol: 'chat'
   });
@@ -1102,7 +1111,7 @@ export function createProvider(opts) {
     // (with a models file the provider is ready without the live list, so why it couldn't be had is said here)
     if (fixed && !modelList.ids && modelList.failure) warnings.push('Couldn\'t check which models ' + name + ' offers right now (' + modelList.failure.message.replace(/\.$/, '') + ').');
     return {
-      id, name, kind: 'openai-compatible', ready: !settings.problem, problem: settings.problem, warnings,
+      id, name, kind: 'openai-compatible', ready: !settings.problem, problem: settings.problem, warnings, local: !!settings.onThisMachine,
       keyCount: settings.keyless ? 0 : settings.keys.length, baseHost, proxy: settings.proxyHost, transport: transportText(),
       models: Object.assign({ listed, available, source, checkedAt: modelList.fetchedAt ? new Date(modelList.fetchedAt).toISOString() : null },
         file && !file.ok && file.problem ? { problem: file.problem } : {}),

@@ -525,6 +525,28 @@ test('fine-tuning: unavailable without a provider that offers it; with one, a re
   }
 });
 
+test('AI_MODE=local-only: the Lab\'s own provider is switched off unless it is a server on this machine (no prompt or training data leaves it)', async () => {
+  const me = as('ultra');
+  Object.assign(process.env, { AI_MODE: 'local-only', AI_LAB_OPENAI_API_KEY: 'sk-test-lab-1234567890', AI_LAB_OPENAI_BASE_URL: 'https://api.openai.example/v1',
+    AI_LAB_FINE_TUNING: 'on', AI_LAB_FINE_TUNE_MODELS: 'gpt-test-mini' });
+  try {
+    const models = await me.get('/api/lab/models');
+    assert.equal(models.json.providers.find(p => p.provider === 'openai'), undefined);
+    const cap = await me.get('/api/lab/finetune/capabilities');
+    assert.equal(cap.json.available, false);
+    assert.match(cap.json.reason, /switched off: AI_MODE=local-only keeps every prompt on this machine/);
+    const conv = await me.post('/api/lab/conversations', { provider: 'openai', model: 'gpt-test-mini' });
+    assert.equal(conv.status, 403, conv.text);
+    assert.match(conv.json.error.message, /AI_MODE=local-only/);
+    // a server on this machine (llama.cpp, LM Studio…) still works
+    process.env.AI_LAB_OPENAI_BASE_URL = 'http://127.0.0.1:' + openai.address().port + '/v1';
+    assert.ok((await me.get('/api/lab/models')).json.providers.find(p => p.provider === 'openai'));
+    assert.equal((await me.get('/api/lab/finetune/capabilities')).json.available, true);
+  } finally {
+    ['AI_MODE', 'AI_LAB_OPENAI_API_KEY', 'AI_LAB_OPENAI_BASE_URL', 'AI_LAB_FINE_TUNING', 'AI_LAB_FINE_TUNE_MODELS'].forEach(k => { delete process.env[k]; });
+  }
+});
+
 test('your data: export everything, delete everything', async () => {
   const me = as('ultra2');
   await me.post('/api/lab/projects', { name: 'Temp' });

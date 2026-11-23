@@ -47,8 +47,9 @@ function startOllama() {
             res.end(JSON.stringify({ status: 'success' }) + '\n');
           }, ollama.pullDelayMs);
         }
+        // (like Ollama's: the same list as /api/tags, its cloud and embedding models too)
         if (req.method === 'GET' && req.url === '/v1/models') {
-          return send(200, { object: 'list', data: ollama.have.map(id => ({ id, object: 'model', created: 0, owned_by: 'library' })) });
+          return send(200, { object: 'list', data: ollama.have.concat(ollama.extraTags.map(t => t.name)).map(id => ({ id, object: 'model', created: 0, owned_by: 'library' })) });
         }
         if (req.method === 'POST' && req.url === '/v1/chat/completions') {
           const body = JSON.parse(b || '{}');
@@ -197,7 +198,8 @@ test('a provider.ollama of the operator\'s own (OPENCODE_CONFIG, as in OpenCode\
   const svc = await start({ OPENCODE_CONFIG: cfg, OPENCODE_DISABLED_PROVIDERS: 'opencode,emis' });
   const m = await models(svc);
   const own = m.data.filter(e => e.provider === 'ollama');
-  assert.deepEqual(own.map(e => [e.id, e.name, !!e.backup, !!e.local]), [['ollama/llama3:8b', 'llama3:8b', false, false], ['ollama/tiny-a:0.5b', 'tiny-a:0.5b', false, false]]);
+  // (not the backup; local, as any provider at 127.0.0.1 is: its models are on this machine)
+  assert.deepEqual(own.map(e => [e.id, e.name, !!e.backup, !!e.local]), [['ollama/llama3:8b', 'llama3:8b', false, true], ['ollama/tiny-a:0.5b', 'tiny-a:0.5b', false, true]]);
   assert.equal(m.default, 'ollama/llama3:8b');
   assert.equal(m.providers.find(p => p.id === 'ollama').name, 'My Ollama');
   const r = await call(svc, 'POST', '/v1/chat/completions', { model: 'ollama/llama3:8b', messages: [{ role: 'user', content: 'hi' }] });
@@ -376,10 +378,46 @@ test('Ollama\'s cloud models (they run on Ollama\'s servers: the prompts would l
     { name: 'kimi-k3:cloud', model: 'kimi-k3:cloud', size: 0 },
     { name: 'nomic-embed-text:latest', model: 'nomic-embed-text:latest', size: 274302450, details: { family: 'nomic-bert' } },
   ];
-  for (const env of [{}, { METACODE_OLLAMA_MODELS: 'all' }]) {
+  for (const env of [{}, { METACODE_OLLAMA_MODELS: 'all' }, { AI_MODE: 'local-only' }, { AI_MODE: 'local-only', METACODE_OLLAMA_MODELS: 'gemma3:270m,gpt-oss:120b-cloud' }]) {
     const svc = await start(Object.assign({ OLLAMA_AUTO_PULL: 'off' }, env));
-    assert.deepEqual((await models(svc)).data.filter(e => e.provider === 'ollama').map(e => e.id), ['ollama/gemma3:270m'], JSON.stringify(env));
+    const m = await models(svc);
+    assert.deepEqual(m.data.filter(e => e.provider === 'ollama').map(e => e.id), ['ollama/gemma3:270m'], JSON.stringify(env));
+    if (env.AI_MODE) assert.equal(m.default, 'ollama/gemma3:270m');
+    const cloud = await call(svc, 'POST', '/v1/chat/completions', { model: 'ollama/gpt-oss:120b-cloud', messages: [{ role: 'user', content: 'hi' }] });
+    assert.notEqual(cloud.status, 200, JSON.stringify(env));
+    assert.ok(!ollama.chats.includes('gpt-oss:120b-cloud'));
   }
+});
+
+test('an Ollama on another machine (OLLAMA_BASE_URL) isn\'t "on this device": AI_MODE=local-only switches it off; otherwise its models aren\'t local, and it says where they run', async () => {
+  // (192.0.2.1: a documentation address, never reached)
+  const off = await start({ AI_MODE: 'local-only', OLLAMA_BASE_URL: 'http://192.0.2.1:11434' });
+  const st = await statusOf(off, 'ollama');
+  assert.equal(st.ready, false);
+  assert.match(st.problem, /AI_MODE=local-only keeps every prompt on this machine, and OLLAMA_BASE_URL is another machine \(192\.0\.2\.1:11434\)/);
+  const away = await start({ AI_MODE: 'local', OLLAMA_BASE_URL: 'http://192.0.2.1:11434', OLLAMA_AUTO_PULL: 'off' });
+  const a = await statusOf(away, 'ollama');
+  assert.deepEqual([a.local, a.name], [false, 'Ollama at 192.0.2.1:11434']);
+  assert.match(a.note, /Models on the Ollama at 192\.0\.2\.1:11434: prompts go to that machine/);
+  // (and the one on this machine: local, and named so)
+  ollama.have = ['gemma3:270m'];
+  const here = await start({ AI_MODE: 'local', OLLAMA_AUTO_PULL: 'off' });
+  const h = await statusOf(here, 'ollama');
+  assert.deepEqual([h.local, h.name], [true, 'On this device (Ollama)']);
+  assert.ok((await models(here)).data.filter(e => e.provider === 'ollama').every(e => e.local === true));
+});
+
+test('an OpenAI-compatible server on this machine (llama.cpp, LM Studio…): its models are local, the default in the local modes when Ollama has none, and it\'s reached without the internet\'s proxy', async () => {
+  const cfg = fileWith('opencode.json', JSON.stringify({ provider: { llamacpp: { npm: '@ai-sdk/openai-compatible', name: 'llama.cpp', options: { baseURL: gatewayBase } } } }));
+  const svc = await start({ AI_MODE: 'local-only', OLLAMA_BACKUP: 'off', EMIS_BASE_URL: 'https://emis.example.invalid/v1', OPENCODE_CONFIG: cfg, HTTPS_PROXY: 'http://127.0.0.1:9', HTTP_PROXY: 'http://127.0.0.1:9' });
+  const st = await statusOf(svc, 'llamacpp');
+  assert.deepEqual([st.ready, st.local, st.keyCount], [true, true, 0]);
+  const m = await models(svc);
+  assert.deepEqual(m.data.filter(e => e.provider === 'llamacpp').map(e => [e.id, e.local]), [['llamacpp/gpt-small', true]]);
+  assert.equal(m.default, 'llamacpp/gpt-small');
+  const r = await call(svc, 'POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.choices[0].message.content, 'gateway gpt-small');
 });
 
 test('OLLAMA_MODELS set the way Ollama documents it (its models folder) isn\'t taken for a list; METACODE_OLLAMA_MODELS is MetaCode\'s; an address without /v1 works', async () => {

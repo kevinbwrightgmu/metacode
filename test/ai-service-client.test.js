@@ -110,7 +110,8 @@ const baseEnv = () => testEnv({
   ACCOUNT_DATA_DIR: path.join(tmp, 'a'), SURVEY_DATA_DIR: path.join(tmp, 's'), PROJECT_DATA_DIR: path.join(tmp, 'p'), AI_LAB_DATA_DIR: path.join(tmp, 'l'), COLLAB_DATA_DIR: path.join(tmp, 'c')
 });
 const VARIABLES = ['OPENCODE_SERVICE_URL', 'OPENCODE_SERVICE_PORT', 'OPENCODE_SERVICE_TOKEN', 'OPENCODE_SERVICE_MANAGED', 'OPENCODE_MODEL', 'EMIS_MODEL', 'AI_MODEL_SWITCH',
-  'AI_FALLBACK_TO_FREE_MODELS', 'AI_BATCH_PAUSE_SECONDS', 'AI_TIMEOUT_MS', 'AI_KEEPALIVE_SECONDS', 'DESKTOP_WITHOUT_ACCOUNTS', 'AI_LOCAL_TIMEOUT_MS', 'AI_LOCAL_PARALLEL'];
+  'AI_FALLBACK_TO_FREE_MODELS', 'AI_BATCH_PAUSE_SECONDS', 'AI_TIMEOUT_MS', 'AI_KEEPALIVE_SECONDS', 'DESKTOP_WITHOUT_ACCOUNTS', 'AI_LOCAL_TIMEOUT_MS', 'AI_LOCAL_PARALLEL',
+  'AI_MODE', 'AI_LOCAL_CONTEXT_TOKENS'];
 
 test.before(async () => {
   main = standIn(0);
@@ -984,6 +985,61 @@ test('a local model\'s own settings (AI Model Store → Installed models): its t
   await ask('gw/gpt-5.5', {}, { max_tokens: 500 });
   assert.deepEqual(svc.bodies.slice(-1).map(b => [b.temperature, b.max_tokens]), [[undefined, 500]], 'other models unchanged');
   await request('PUT', '/api/local-ai/models/settings', { model: 'tiny:1b', settings: {} });
+});
+
+test('AI_MODE=local-only: a switch stays on this machine too, whatever list the AI service gives (one started without AI_MODE)', { timeout: 60000 }, async () => {
+  await configure({ AI_MODE: 'local-only' }, () => {
+    withFirstClass();
+    // (the models on this machine fail; the service's list also has cloud models, as one without AI_MODE would)
+    svc.chat = (body, send) => {
+      if (!isLocal(body.model)) return false;
+      send(502, { error: { type: 'upstream_error', provider: 'local', model: body.model, upstream_status: 501, message: 'Test Ollama had a server problem.' } });
+      return true;
+    };
+  });
+  // (a request, a stream, and the server's default model)
+  for (const extra of [{}, { stream: true }]) {
+    const r = await ask('local/tiny:1b', {}, extra);
+    assert.notEqual(r.status, 200, r.text);
+    const d = await ask(undefined, {}, extra);
+    assert.notEqual(d.status, 200, d.text);
+  }
+  assert.ok(svc.seen.length > 0 && svc.seen.every(isLocal), 'no prompt went to ' + svc.seen.filter(m => !isLocal(m)).join(', '));
+});
+
+test('a model on this machine: a prompt its context can\'t hold is refused with what to change (Ollama would drop its start); the answer gets what\'s left', async () => {
+  let ai = await configure({ AI_MODE: 'local-only' }, withFirstClass);
+  assert.equal(ai.localContextTokens, 4096, 'Ollama\'s own default without a big GPU');
+  const big = await ask('local/tiny:1b', {}, { messages: [{ role: 'user', content: 'x'.repeat(14000) }] });
+  assert.equal(big.status, 400, big.text);
+  assert.equal(big.json.error.type, 'context_too_long');
+  assert.match(big.json.error.message, /takes in 4096 with its answer \(AI_LOCAL_CONTEXT_TOKENS\)\. .*OLLAMA_CONTEXT_LENGTH/);
+  assert.deepEqual(svc.seen, []);
+  // a prompt that fits, with a bigger answer budget than is left: shortened to what's left
+  const ok = await ask('local/tiny:1b', {}, { messages: [{ role: 'user', content: 'y'.repeat(7000) }], max_tokens: 4000 });
+  assert.equal(ok.status, 200, ok.text);
+  const sent = svc.bodies.slice(-1)[0].max_tokens;
+  assert.ok(sent >= 512 && sent <= 4096 - 2000, 'max_tokens ' + sent);
+  ai = await configure({ AI_MODE: 'local-only', AI_LOCAL_CONTEXT_TOKENS: '16384' }, withFirstClass);
+  assert.equal(ai.localContextTokens, 16384);
+  assert.equal((await ask('local/tiny:1b', {}, { messages: [{ role: 'user', content: 'x'.repeat(14000) }] })).status, 200);
+});
+
+test('streamed answers (AI Chat) get the model\'s own settings too', async () => {
+  await configure({}, withLocal);
+  await request('PUT', '/api/local-ai/models/settings', { model: 'tiny:1b', settings: { temperature: 0.4, maxTokens: 64 } });
+  const r = await ask('local/tiny:1b', {}, { stream: true, max_tokens: 500 });
+  assert.equal(r.status, 200, r.text);
+  assert.deepEqual(svc.bodies.slice(-1).map(b => [b.temperature, b.max_tokens]), [[0.4, 64]]);
+  await request('PUT', '/api/local-ai/models/settings', { model: 'tiny:1b', settings: {} });
+});
+
+test('AI_MODE=local-only with no model on this machine ready: the error says what the local provider needs, not "no provider set up"', async () => {
+  const ollama = { id: 'ollama', name: 'On this device (Ollama)', kind: 'ollama', ready: false, local: true, problem: 'Ollama isn\'t answering at http://127.0.0.1:11434 (ECONNREFUSED). Install and start Ollama on this server (ollama.com), or set OLLAMA_BASE_URL.' };
+  await configure({ AI_MODE: 'local-only' }, () => { svc.providers = [ollama]; svc.models = []; svc.default = null; });
+  const r = await ask();
+  assert.equal(r.status, 503, r.text);
+  assert.match(r.json.error.message, /^No AI model on this computer is ready \(AI_MODE=local-only\): Ollama isn't answering at http:\/\/127\.0\.0\.1:11434/);
 });
 
 test('one provider failing for every model: requests switch to another provider\'s model; the status page says degraded, not outage', { timeout: 30000 }, async () => {
