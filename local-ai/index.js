@@ -9,9 +9,9 @@
 //   GET  /recommendations   what this device can run, by tier
 //   GET  /models            installed models (size, details, loaded or not) and the space they use
 //   GET  /installs          downloads; GET /installs/events: their progress as server-sent events
-// Managing models needs this machine itself (a request from 127.0.0.1 that no proxy forwarded), or the
-// LOCAL_AI_ADMIN_TOKEN from .env (header X-MetaCode-Admin-Token). Visitors of a hosted MetaCode can browse
-// the store, never download or delete:
+// Managing models needs this machine itself (a request from 127.0.0.1 that no proxy forwarded, to this
+// machine's own name: localhost, 127.x.x.x or [::1]), or the LOCAL_AI_ADMIN_TOKEN from .env (header
+// X-MetaCode-Admin-Token). Visitors of a hosted MetaCode can browse the store, never download or delete:
 //   POST /installs {model}   POST /installs/pause|resume|cancel {model}
 //   POST /models/load|unload|delete|update {model}   PUT /models/settings {model, settings}
 //   POST /runtimes/scan      look for OpenAI-compatible servers on this machine
@@ -29,6 +29,14 @@ const { recommend, fit } = require('./recommend');
 const { defaultDataDir } = require('../lib/data-dir');
 
 const SETTING_LIMITS = { temperature: [0, 2], maxTokens: [16, 32768], keepAliveMinutes: [0, 1440] };
+
+// The name the browser used for this server is this machine's own. (Another website whose name is made to point
+// at 127.0.0.1, "DNS rebinding", reaches this server from this machine too, but under its own name; the raw Host
+// header is read, as a page can't change it, unlike X-Forwarded-Host.)
+function loopbackHost(req) {
+  const host = String((req.headers && req.headers.host) || '').trim().toLowerCase().replace(/:\d+$/, '');
+  return host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+}
 
 function createLocalAi(opts) {
   const env = opts.env || process.env;
@@ -71,7 +79,7 @@ function createLocalAi(opts) {
       const b = crypto.createHash('sha256').update(given).digest();
       if (crypto.timingSafeEqual(a, b)) return { allowed: true, how: 'token' };
     }
-    if (isLocal(req)) return { allowed: true, how: 'this-machine' };
+    if (isLocal(req) && loopbackHost(req)) return { allowed: true, how: 'this-machine' };
     return {
       allowed: false, how: null, tokenSet: token.length >= 12,
       reason: token.length >= 12 ? 'Enter this server\'s admin token (LOCAL_AI_ADMIN_TOKEN) to install or remove models.'

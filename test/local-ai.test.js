@@ -128,6 +128,7 @@ test.before(async () => {
     return { status: res.status, json, text };
   };
   api.close = () => new Promise(r => { server.closeAllConnections(); server.close(r); });
+  api.port = server.address().port;
   api.events = () => {
     const events = [];
     const ac = new AbortController();
@@ -344,6 +345,27 @@ test('managing models from another device needs the admin token; browsing doesn\
   const right = await api('POST', '/models/load', { model: 'gemma3:270m' }, Object.assign({ 'x-metacode-admin-token': 'admin-token-123456' }, remote));
   assert.equal(right.status, 200);
   assert.equal((await api('GET', '/status', undefined, Object.assign({ 'x-metacode-admin-token': 'admin-token-123456' }, remote))).json.manage.how, 'token');
+});
+
+test('another website whose name is pointed at 127.0.0.1 (DNS rebinding) can\'t manage models; this machine\'s own names can', async () => {
+  // (a request with any Host header: a page can't choose it, and fetch doesn't let this test either)
+  const raw = (method, p, host, body) => new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port: api.port, path: '/api/local-ai' + p, method, headers: { host, 'content-type': 'application/json' } }, res => {
+      let text = '';
+      res.on('data', d => { text += d; });
+      res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(text) }));
+    });
+    req.on('error', reject);
+    req.end(body === undefined ? undefined : JSON.stringify(body));
+  });
+  for (const host of ['evil.example:' + api.port, 'evil.example', '127.0.0.1.evil.example', 'localhost.evil.example:' + api.port]) {
+    assert.equal((await raw('GET', '/status', host)).json.manage.allowed, false, host);
+    const r = await raw('POST', '/models/load', host, { model: 'gemma3:270m' });
+    assert.deepEqual([r.status, r.json.error.code], [403, 'manage_locked'], host);
+  }
+  for (const host of ['localhost:' + api.port, '127.0.0.1:' + api.port, '127.1.2.3', '[::1]:' + api.port, 'metacode.localhost']) {
+    assert.equal((await raw('GET', '/status', host)).json.manage.allowed, true, host);
+  }
 });
 
 test('Ollama not running: the store still browses (catalog, recommendations), and says how to install Ollama', async () => {
