@@ -1,0 +1,266 @@
+# Portable MetaCode (scripts/build-portable.js): every bundle and package is built on Linux, then started on
+# the system it's for by scripts/smoke-portable.js: Linux x64 and arm64 (armv7l in emulated 32-bit Debian),
+# Windows x64 and arm64, macOS on Apple silicon and Intel (Rosetta 2). Each must answer with the app, its
+# service worker and the AI Model Store, keep its data where it should, open the running one when it's started
+# a second time, and stop with its AI service. The .deb, the AppImage, the Windows setup program and
+# MetaCode.app are tried too. A draft release with every file and SHA256SUMS.txt: a pushed tag metacode-v*, or
+# "Run workflow" with "create a draft release" ticked.
+name: Portable app
+
+on:
+  push:
+    branches: ['**']
+    tags: ['metacode-v*']
+    paths: ['scripts/build-portable.js', 'scripts/smoke-portable.js', 'packaging/**', '.github/workflows/portable.yml']
+  workflow_dispatch:
+    inputs:
+      release:
+        description: 'Also create a draft release (metacode-v<version in package.json>); publishing it creates the tag'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: Tools for the packages (NSIS for the Windows setup program, squashfs-tools for the AppImage)
+        run: sudo apt-get update && sudo apt-get install -y nsis squashfs-tools
+      - name: The AI Scraper (beta) page
+        run: npm run collector:install && npm run collector:build
+      - name: Bundles and packages for every system
+        run: node scripts/build-portable.js --all --packages
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-x64
+          path: |
+            dist/portable/MetaCode-*-linux-x64.tar.gz
+            dist/portable/metacode_*_amd64.deb
+            dist/portable/MetaCode-*-x86_64.AppImage
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-arm64
+          path: |
+            dist/portable/MetaCode-*-linux-arm64.tar.gz
+            dist/portable/metacode_*_arm64.deb
+            dist/portable/MetaCode-*-aarch64.AppImage
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-armv7l
+          path: |
+            dist/portable/MetaCode-*-linux-armv7l.tar.gz
+            dist/portable/metacode_*_armhf.deb
+            dist/portable/MetaCode-*-armhf.AppImage
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-x64
+          path: |
+            dist/portable/MetaCode-*-win-x64.zip
+            dist/portable/MetaCode-Setup-*-x64.exe
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-arm64
+          path: |
+            dist/portable/MetaCode-*-win-arm64.zip
+            dist/portable/MetaCode-Setup-*-arm64.exe
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-arm64
+          path: |
+            dist/portable/MetaCode-*-darwin-arm64.tar.gz
+            dist/portable/MetaCode-*-darwin-arm64-app.zip
+          if-no-files-found: error
+          compression-level: 0
+      - uses: actions/upload-artifact@v4
+        with:
+          name: darwin-x64
+          path: |
+            dist/portable/MetaCode-*-darwin-x64.tar.gz
+            dist/portable/MetaCode-*-darwin-x64-app.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  linux:
+    name: Linux ${{ matrix.arch }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, os: ubuntu-latest, target: linux-x64, deb: amd64, appimage: x86_64 }
+          - { arch: arm64, os: ubuntu-24.04-arm, target: linux-arm64, deb: arm64, appimage: aarch64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with: { name: '${{ matrix.target }}', path: artifacts }
+      - name: The portable folder
+        run: |
+          tar -xzf artifacts/MetaCode-*-${{ matrix.target }}.tar.gz -C "$RUNNER_TEMP"
+          dir=$(ls -d "$RUNNER_TEMP"/MetaCode-*-${{ matrix.target }})
+          file "$dir/runtime/node"
+          node scripts/smoke-portable.js "$dir"
+      - name: The .deb (install, start, remove)
+        run: |
+          sudo dpkg -i artifacts/metacode_*_${{ matrix.deb }}.deb
+          node scripts/smoke-portable.js /opt/metacode --launcher /usr/bin/metacode --data "$HOME/.local/share/metacode" --data-default
+          sudo dpkg -r metacode
+          test ! -e /opt/metacode && test ! -e /usr/bin/metacode
+      - name: The AppImage (without FUSE)
+        env: { APPIMAGE_EXTRACT_AND_RUN: '1' }
+        run: |
+          rm -rf "$HOME/.local/share/metacode"
+          image=$(ls "$PWD"/artifacts/MetaCode-*-${{ matrix.appimage }}.AppImage)
+          chmod +x "$image"
+          node scripts/smoke-portable.js "$PWD/artifacts" --launcher "$image" --data "$HOME/.local/share/metacode" --data-default
+
+  linux-armv7l:
+    name: Linux armv7l (32-bit Debian, emulated)
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: linux-armv7l, path: artifacts }
+      - uses: docker/setup-qemu-action@v3
+        with: { platforms: arm }
+      - name: The portable folder in Raspberry Pi OS's base system (Debian, armhf)
+        run: |
+          tar -xzf artifacts/MetaCode-*-linux-armv7l.tar.gz -C "$RUNNER_TEMP"
+          dir=$(ls -d "$RUNNER_TEMP"/MetaCode-*-linux-armv7l)
+          docker run --rm --platform linux/arm/v7 -v "$dir:/app" -v "$PWD/scripts:/scripts:ro" debian:bookworm-slim \
+            /app/runtime/node /scripts/smoke-portable.js /app --timeout 900
+
+  windows:
+    name: Windows ${{ matrix.arch }}
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, os: windows-latest, target: win-x64 }
+          - { arch: arm64, os: windows-11-arm, target: win-arm64 }
+    defaults:
+      run: { shell: pwsh }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with: { name: '${{ matrix.target }}', path: artifacts }
+      - name: The portable folder (MetaCode.cmd)
+        run: |
+          Expand-Archive -Path (Get-Item artifacts/MetaCode-*-${{ matrix.target }}.zip).FullName -DestinationPath $env:RUNNER_TEMP
+          $dir = (Get-Item "$env:RUNNER_TEMP/MetaCode-*-${{ matrix.target }}").FullName
+          node scripts/smoke-portable.js $dir
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: The portable folder (MetaCode.exe)
+        run: |
+          $dir = (Get-Item "$env:RUNNER_TEMP/MetaCode-*-${{ matrix.target }}").FullName
+          node scripts/smoke-portable.js $dir --launcher MetaCode.exe --port 3457
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: The setup program (install, start, uninstall)
+        run: |
+          Start-Process -FilePath (Get-Item artifacts/MetaCode-Setup-*.exe).FullName -ArgumentList '/S' -Wait
+          $dir = Join-Path $env:LOCALAPPDATA 'Programs\MetaCode'
+          foreach ($f in 'MetaCode.exe', 'MetaCode.cmd', 'server.js', 'runtime\node.exe', 'Uninstall.exe') { if (-not (Test-Path (Join-Path $dir $f))) { throw "not installed: $f" } }
+          if (-not (Test-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\MetaCode.lnk'))) { throw 'no Start menu shortcut' }
+          if (-not (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MetaCode')) { throw 'not in Settings → Apps' }
+          node scripts/smoke-portable.js $dir --port 3458
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Start-Process -FilePath (Join-Path $dir 'Uninstall.exe') -ArgumentList '/S' -Wait
+          Start-Sleep -Seconds 20
+          if (Test-Path (Join-Path $dir 'server.js')) { throw 'still installed after uninstalling' }
+          if (-not (Test-Path (Join-Path $dir 'data'))) { throw 'uninstalling removed the data folder' }
+          if (Test-Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\MetaCode') { throw 'still in Settings → Apps' }
+          if (Test-Path (Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\MetaCode.lnk')) { throw 'the Start menu shortcut stayed' }
+
+  macos:
+    name: macOS ${{ matrix.arch }}
+    needs: build
+    runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: Apple silicon, target: darwin-arm64 }
+          - { arch: Intel (Rosetta 2), target: darwin-x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - uses: actions/download-artifact@v4
+        with: { name: '${{ matrix.target }}', path: artifacts }
+      - name: Rosetta 2 (for the Intel build)
+        if: matrix.target == 'darwin-x64'
+        run: /usr/bin/pgrep -q oahd || sudo softwareupdate --install-rosetta --agree-to-license
+      - name: The portable folder (MetaCode.command)
+        run: |
+          tar -xzf artifacts/MetaCode-*-${{ matrix.target }}.tar.gz -C "$RUNNER_TEMP"
+          dir=$(ls -d "$RUNNER_TEMP"/MetaCode-*-${{ matrix.target }})
+          file "$dir/runtime/node"
+          codesign --verify --verbose "$dir/runtime/node"
+          node scripts/smoke-portable.js "$dir" --launcher MetaCode.command
+      - name: MetaCode.app
+        run: |
+          mkdir -p "$RUNNER_TEMP/app"
+          (cd "$RUNNER_TEMP/app" && unzip -q "$GITHUB_WORKSPACE"/artifacts/MetaCode-*-${{ matrix.target }}-app.zip)
+          app="$RUNNER_TEMP/app/MetaCode.app"
+          plutil -lint "$app/Contents/Info.plist"
+          test -x "$app/Contents/MacOS/MetaCode"
+          # its AppleScript compiles (running it needs a person to let MetaCode control Terminal)
+          sed -e 's#^exec /usr/bin/osascript#exec /usr/bin/osacompile -o "$RUNNER_TEMP/metacode.scpt"#' -e 's# "\$APP" "\$DATA"$##' "$app/Contents/MacOS/MetaCode" > "$RUNNER_TEMP/compile.sh"
+          sh "$RUNNER_TEMP/compile.sh" && test -s "$RUNNER_TEMP/metacode.scpt"
+          # what it has Terminal run: the server inside the app, its data in Application Support
+          node scripts/smoke-portable.js "$app/Contents/Resources/app" --data "$HOME/Library/Application Support/MetaCode"
+          spctl --assess --type execute -vv "$app" || echo "(not signed with an Apple certificate: Gatekeeper asks once)"
+
+  release:
+    name: Draft release
+    needs: [linux, linux-armv7l, windows, macos]
+    # a pushed metacode-v* tag, or "Run workflow" with "create a draft release" ticked
+    if: startsWith(github.ref, 'refs/tags/metacode-v') || (github.event_name == 'workflow_dispatch' && inputs.release)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with: { sparse-checkout: package.json, sparse-checkout-cone-mode: false }
+      - name: Release tag
+        id: tag
+        run: |
+          # from the pushed tag, or metacode-v<version> for a run started by hand
+          if [ "$GITHUB_REF_TYPE" = tag ]; then tag="$GITHUB_REF_NAME"; else tag="metacode-v$(node -p "require('./package.json').version")"; fi
+          if ! printf '%s' "$tag" | grep -Eq '^metacode-v[0-9]+\.[0-9]+\.[0-9]+$'; then echo "::error::Not a release tag: $tag"; exit 1; fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with: { path: artifacts, merge-multiple: true }
+      - name: Checksums
+        run: cd artifacts && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Create a draft release (published by a person after checking it)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        # --target: for a run started by hand the tag doesn't exist yet; publishing the draft creates it on this commit
+        run: |
+          gh release create "$TAG" artifacts/* --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --draft --title "MetaCode ${TAG#metacode-v} (portable)" \
+            --notes "Portable MetaCode for Windows, macOS, Linux and Raspberry Pi, with its packages. No AI model is included: the AI Model Store downloads them. See docs/offline-first.md."
