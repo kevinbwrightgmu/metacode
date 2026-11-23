@@ -181,9 +181,9 @@ fi
 NODE="$DIR/runtime/node"
 [ -x "$NODE" ] || NODE="$(command -v node || true)"
 if [ -z "$NODE" ]; then echo "MetaCode needs Node.js (22.15 or newer), and this copy has none: https://nodejs.org" >&2; exit 1; fi
-# (Node.js for 32-bit ARM needs libatomic, which a minimal system may lack: when it isn't in the usual places,
-# a try says whether Node.js starts)
-case "$(uname -m)" in arm*)
+# (Node.js for 32-bit ARM, armv6l/armv7l/armv8l, needs libatomic, which a minimal system may lack: when it isn't in
+# the usual places, a try says whether Node.js starts)
+case "$(uname -m)" in armv*)
   if [ "$NODE" = "$DIR/runtime/node" ]; then
     atomic=0
     for f in /usr/lib/arm-linux-gnueabihf/libatomic.so.1 /lib/arm-linux-gnueabihf/libatomic.so.1 /usr/lib/libatomic.so.1 /lib/libatomic.so.1; do [ -e "$f" ] && atomic=1; done
