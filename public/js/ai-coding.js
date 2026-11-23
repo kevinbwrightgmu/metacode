@@ -325,7 +325,7 @@ const AICoder = (() => {
     let toCode = filterPosts(posts).filter(p => !Object.keys(p.aiCodes || {}).length);
 
     if (!toCode.length) { App.notify('All visible posts are already coded', 'info'); return; }
-    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up on this server — Settings → AI connection shows why', 'error'); return; }
+    if (!App.hasApiKeys()) { App.notify(App.aiUnavailable(), 'error'); return; }
     // Accounts on: sign in first, and say so up front when the plan has fewer posts left than this run needs
     if (window.Account && Account.enabled()) {
       if (!Account.signedIn()) { Account.openSignIn({ reason: 'Sign in to use AI coding — free accounts include ' + MetaPlans.get('free').limits.aiPostsPerWeek.toLocaleString() + ' posts a week.' }); return; }
@@ -498,7 +498,7 @@ const AICoder = (() => {
 
   /* ── Single-post coding ──────────────────────*/
   async function codeOne(postId) {
-    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up on this server — Settings → AI connection shows why', 'error'); return; }
+    if (!App.hasApiKeys()) { App.notify(App.aiUnavailable(), 'error'); return; }
     const post = App.getState().posts.find(p => p.id === postId);
     if (!post) return;
 

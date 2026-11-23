@@ -209,7 +209,7 @@ export function createProvider(opts) {
     const controller = new AbortController();
     pullAbort = controller;
     let idle = null;
-    const quiet = () => { clearTimeout(idle); idle = setTimeout(() => controller.abort(Object.assign(new Error('idle'), { name: 'TimeoutError' })), s.pullIdleMs); };
+    const quiet = extraMs => { clearTimeout(idle); idle = setTimeout(() => controller.abort(Object.assign(new Error('idle'), { name: 'TimeoutError' })), s.pullIdleMs + (extraMs || 0)); };
     quiet();
     try {
       const res = await fetch(nativeBase() + '/api/pull', {
@@ -223,14 +223,23 @@ export function createProvider(opts) {
       }
       const decoder = new TextDecoder();
       let buffer = '', last = null, biggest = 0, mark = null;
+      const layers = new Map();                       // digest → size
       const take = line => {
         if (!line.trim()) return;
         let j = null;
         try { j = JSON.parse(line); } catch (e) { return; }
         if (j && j.error) throw new Error(String(j.error));
-        // (while stalled, Ollama keeps sending the same line: only progress counts as not idle)
+        if (j && j.digest && j.total > 0) layers.set(j.digest, j.total);
+        // (while stalled, Ollama keeps sending the same line: only progress counts as not idle. After "verifying
+        // sha256 digest" it hashes what arrived and sends nothing until that's done: it gets time for that too,
+        // at about 20 MB a second)
         const now = j && (j.status + '|' + (j.digest || '') + '|' + (j.completed || 0));
-        if (now !== mark) { mark = now; quiet(); }
+        if (now !== mark) {
+          mark = now;
+          let bytes = 0;
+          if (/verifying/i.test(String(j.status || ''))) layers.forEach(t => { bytes += t; });
+          quiet(Math.ceil(bytes / 20e6) * 1000);
+        }
         last = j;
         if (j && j.total > 0 && j.total >= biggest) { biggest = j.total; p.percent = Math.min(100, Math.floor(100 * (j.completed || 0) / j.total)); }
       };

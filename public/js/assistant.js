@@ -128,6 +128,10 @@ const Assistant = (() => {
   function refreshPanel() {
     els.sub.textContent = 'Using ' + (App.modelName(App.modelFor('assistant')) || 'the default model');
     els.notice.hidden = App.hasApiKeys();
+    // (the server can't be reached: that's why, not its AI settings)
+    const why = document.getElementById('asst-notice-text');
+    if (why) why.textContent = App.serverAway() ? 'The MetaCode server can\'t be reached, so the assistant can\'t answer right now. Your work is saved on this device.'
+      : 'MetaCode\'s AI isn\'t set up on this server yet, so the assistant can\'t answer. Settings → AI connection shows why.';
     renderSuggestions();
     updateEmptyState();
   }

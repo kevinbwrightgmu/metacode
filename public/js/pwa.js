@@ -15,6 +15,8 @@
   const MetaPWA = window.MetaPWA = {
     supported: 'serviceWorker' in navigator && window.isSecureContext,
     version: null,
+    // (a new version took over this page: the files it loads from now on are the new version's)
+    updated: false,
     ready: null,
     offline: () => navigator.onLine === false,
     installed: () => (window.matchMedia && window.matchMedia('(display-mode: standalone)').matches) || window.navigator.standalone === true,
@@ -70,7 +72,7 @@
     const d = event.data || {};
     if (d.type === 'metacode-sw-version' && !firstVersion) firstVersion = d.version;
     if (d.type === 'metacode-sw-version' || d.type === 'metacode-sw-active') MetaPWA.version = d.version;
-    if (d.type === 'metacode-sw-active' && startedControlled && firstVersion && d.version !== firstVersion) notifyUpdate();
+    if (d.type === 'metacode-sw-active' && startedControlled && firstVersion && d.version !== firstVersion) { MetaPWA.updated = true; notifyUpdate(); }
   });
   MetaPWA.ready = new Promise(resolve => {
     const register = () => navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })

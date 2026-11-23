@@ -123,7 +123,8 @@ const CSVAnalyzer = (() => {
     }
 
     if (!App.hasApiKeys()) {
-      lastMapping = blankMapping('AI isn\'t set up on this server — pick the source/target columns manually below (Settings → AI connection shows why AI-assisted detection isn\'t available).');
+      lastMapping = blankMapping(App.serverAway() ? 'The MetaCode server can\'t be reached, so AI can\'t detect the columns: pick the source/target columns manually below.'
+        : 'AI isn\'t set up on this server — pick the source/target columns manually below (Settings → AI connection shows why AI-assisted detection isn\'t available).');
       renderMappingConfirm(lastMapping, 'manual');
       return;
     }

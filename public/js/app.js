@@ -64,6 +64,9 @@ const App = (() => {
   // AI Chat and System). The service worker keeps the script, so they open offline too.
   const lazyScripts = new Map();
   function loadScript(src) {
+    // (MetaCode was updated while this page ran: a script loaded now would be the new version's, running with
+    // this page's older ones — the page reloads instead, onto the same view)
+    if (!lazyScripts.has(src) && window.MetaPWA && window.MetaPWA.updated) { location.reload(); return new Promise(() => {}); }
     if (!lazyScripts.has(src)) {
       lazyScripts.set(src, new Promise((resolve, reject) => {
         const s = document.createElement('script');
@@ -1077,7 +1080,17 @@ const App = (() => {
     const allMsgs = system ? [{ role: 'system', content: system }, ...messages] : [...messages];
     const body = { messages: allMsgs, max_tokens, temperature: 0.1 };
     if (model) body.model = model;
-    const res  = await fetch('/api/ai', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', 'x-provider': 'openai', 'X-MetaCode-Feature': feature || 'other' }, switchHeader()), body: JSON.stringify(body) });
+    let res;
+    try {
+      res = await fetch('/api/ai', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', 'x-provider': 'openai', 'X-MetaCode-Feature': feature || 'other' }, switchHeader()), body: JSON.stringify(body) });
+    } catch (e) {
+      // (no answer at all: the server stopped, or this device went offline — the top bar says so, and the
+      // page looks again for the server)
+      serverReachable = false;
+      updateApiStatus();
+      scheduleRecheck();
+      throw Object.assign(new Error(aiUnavailable()), { status: 0, type: 'unreachable' });
+    }
     let data = null;
     try { data = await res.json(); } catch (e) { data = null; }
     if (!res.ok) {
@@ -1257,6 +1270,7 @@ const App = (() => {
       // Server unreachable: offline, the server stopped, or app.html opened directly as a file
       serverReachable = false;
       updateApiStatus();
+      scheduleRecheck();
     }
   }
 
@@ -1274,6 +1288,24 @@ const App = (() => {
   }
   window.addEventListener('online', () => { if (serverReachable === false) refreshServerKeyInfo(); });
   window.addEventListener('offline', () => { serverReachable = false; updateApiStatus(); });
+  // While the server can't be reached, look again now and then (a portable MetaCode opened from its icon before
+  // its server started, a server restarting), and whenever the page comes back into view
+  let recheckTimer = null, recheckDelay = 5000;
+  function scheduleRecheck() {
+    if (recheckTimer || serverReachable !== false) return;
+    recheckTimer = setTimeout(async () => {
+      recheckTimer = null;
+      await refreshServerKeyInfo();
+      if (serverReachable === false) { recheckDelay = Math.min(recheckDelay * 2, 60000); scheduleRecheck(); } else recheckDelay = 5000;
+    }, recheckDelay);
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && serverReachable === false) refreshServerKeyInfo(); });
+  window.addEventListener('focus', () => { if (serverReachable === false) refreshServerKeyInfo(); });
+  // Why an AI feature can't run now, for its message: the server can't be reached, or AI isn't set up on it
+  function aiUnavailable() {
+    return serverReachable === false ? (navigator.onLine === false ? 'This device is offline' : 'The MetaCode server can\'t be reached') + ': your work is saved here, and AI comes back with the server.'
+      : 'AI isn\'t set up on this server — Settings → AI connection shows why';
+  }
 
   // Phones and tablets (≤900px): the sidebar opens as a drawer from the ☰ button in the top bar
   function setNavOpen(open) {
@@ -1411,7 +1443,7 @@ const App = (() => {
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
     getState, setState, save, reloadState, updateSidebarStats,
     callClaude, callClaudeBatch, tooLargeMessage: TOO_LARGE, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus, refreshServerStatus: refreshServerKeyInfo, modelName,
-    modelFor, modelInfo, modelsReady,
+    modelInfo, modelsReady, aiUnavailable, serverAway: () => serverReachable === false,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,
     saveProject, saveSettings, downloadBackup, restoreBackup, testApi, clearCodes, resetAll,

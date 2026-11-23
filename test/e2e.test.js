@@ -340,6 +340,28 @@ test('in-app Reddit browser (Scramjet) loads pages through Wisp and sets the tar
   await context.close();
 });
 
+test('in-app Reddit browser: a new MetaCode version\'s service worker takes the tab over, and the browser keeps working', { skip }, async () => {
+  const { page, context } = await openApp('#scraper');
+  await page.waitForFunction(() => /RedditAPIs\.com|This browser|Public pages|Reddit Data API/.test(document.querySelector('#sc-status').textContent));
+  await page.click('#sc-browser-toggle');
+  const redditBase = 'http://localhost:' + mock.server.address().port;
+  await page.fill('#sc-browser-url', redditBase + '/r/test/');
+  const frame = page.frameLocator('#sc-browser-frame');
+  await frame.locator('#mock-title').waitFor({ timeout: 30000 });
+  // (the same service worker under a new address installs like an update: it activates and claims this tab)
+  const changed = await page.evaluate(() => new Promise(resolve => {
+    const before = navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => resolve(navigator.serviceWorker.controller !== before), { once: true });
+    navigator.serviceWorker.register('/sw.js?update=1', { scope: '/', updateViaCache: 'none' });
+    setTimeout(() => resolve(false), 20000);
+  }));
+  assert.ok(changed, 'a new service worker took the tab over');
+  await page.click('.sc-browser-bar button[type=submit]');
+  await frame.locator('#mock-link').click();
+  await frame.locator('#mock-title:has-text("/comments/abc123/")').waitFor({ timeout: 15000 });
+  await context.close();
+});
+
 test('browser mode: the tab fetches Reddit through Scramjet', { skip }, async () => {
   const prev = mock.state.robots;
   mock.state.robots = 'User-agent: *\nDisallow: /\n';     // irrelevant in browser mode
