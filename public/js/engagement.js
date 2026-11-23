@@ -25,7 +25,13 @@ const EngagementViz = (() => {
   const numOf = (p, key) => { const v = p.engagement?.[key]; return typeof v === 'number' && isFinite(v) ? v : null; };
   const hasNumbers = p => METRICS.some(m => numOf(p, m.key) !== null);
 
+  let chartAnimation = null;          // Chart.js's default animation settings, kept when Potato turns them off
   function render() {
+    // (Potato, js/perf.js: charts drawn at once, without animation; Chart.js's own animation otherwise)
+    if (typeof Chart !== 'undefined') {
+      if (chartAnimation === null) chartAnimation = Chart.defaults.animation;
+      Chart.defaults.animation = window.MetaPerf && MetaPerf.is('potato') ? false : chartAnimation;
+    }
     const { posts, codebook } = App.getState();
     const container = document.getElementById('view-container');
 

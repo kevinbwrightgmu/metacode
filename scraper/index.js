@@ -817,7 +817,8 @@ function createScraper(opts) {
     },
     setPort(p) {
       port = p;
-      transport.choose().catch(() => {});
+      // (warmed up now, so the first scrape doesn't wait; METACODE_PROFILE=lite: started by the first request)
+      if (!config.lazyWorker) transport.choose().catch(() => {});
       transport.startHealthChecks();
       // Jobs saved before a restart continue once the server can make requests
       if (!recovered) {

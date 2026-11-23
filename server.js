@@ -3141,6 +3141,9 @@ app.use((err, req, res, next) => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 // start(port) is also used by the test suite (port 0 = any free port).
+// METACODE_PROFILE=lite: work starts when a feature needs it — the scraper's Python worker on the first scrape,
+// the status checks when the status page is opened, the AI Lab's sandbox probe on the first code run
+const liteProfile = () => String(process.env.METACODE_PROFILE || '').trim().toLowerCase() === 'lite';
 function start(port) {
   return new Promise((resolve, reject) => {
     const server = app.listen(port, async () => {
@@ -3149,7 +3152,9 @@ function start(port) {
       // MetaCode's AI service: started here when nothing answers at its address (opencode/supervisor.js)
       try { await startService(); } catch (err) { console.error('[ai] Couldn\'t start the AI service: ' + redact(err && err.message)); }
       if (!serviceStarting()) startupProbe();
-      statusMonitor.start();
+      // (METACODE_PROFILE=lite — portable installs, small devices: nothing runs until it's needed; the status page
+      // checks when it's opened)
+      if (!liteProfile()) statusMonitor.start();
       resolve(server);
     });
     server.on('error', reject);

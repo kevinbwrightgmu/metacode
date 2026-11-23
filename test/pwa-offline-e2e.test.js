@@ -77,7 +77,12 @@ test('nothing loads from another site: no CDN, no Google Fonts, no analytics unl
   assert.deepEqual(outside, []);
   // The libraries and fonts come from this server
   const { page } = await open(context, '/app.html#dashboard');
-  assert.deepEqual(await page.evaluate(() => [typeof Papa, typeof Chart, typeof d3]), ['object', 'function', 'object']);
+  // (PapaParse at once; Chart.js and D3 with the pages that use them)
+  assert.deepEqual(await page.evaluate(() => [typeof Papa, typeof Chart, typeof d3]), ['object', 'undefined', 'undefined']);
+  await page.evaluate(() => { location.hash = '#metrics'; });
+  await page.waitForFunction(() => typeof Chart === 'function');
+  await page.evaluate(() => { location.hash = '#network'; });
+  await page.waitForFunction(() => typeof d3 === 'object');
   assert.ok(await page.evaluate(async () => { await document.fonts.ready; return document.fonts.check('600 16px "Space Grotesk"') && document.fonts.check('16px Inter'); }));
   // Analytics: an empty script by default; Google's tag only when the operator sets METACODE_ANALYTICS_ID
   assert.match(await (await fetch(baseUrl + '/analytics.js')).text(), /^\/\* Analytics is off/);
@@ -126,7 +131,7 @@ test('offline: the app and Survey Studio open from the service worker with their
   await context.setOffline(true);
   await page.reload();
   await page.waitForFunction(() => typeof App !== 'undefined' && document.getElementById('topbar-project').textContent === 'Field study, offline');
-  assert.deepEqual(await page.evaluate(() => [typeof Papa, typeof Chart, typeof d3]), ['object', 'function', 'object']);
+  assert.equal(await page.evaluate(() => typeof Papa), 'object');
   await page.waitForFunction(() => document.getElementById('status-label').textContent === 'Offline');
   assert.ok(await page.locator('.offline-banner').isVisible());
   // The views that need no server work
@@ -134,6 +139,8 @@ test('offline: the app and Survey Studio open from the service worker with their
     await page.evaluate(v => { location.hash = '#' + v; }, view);
     await page.waitForFunction(v => document.getElementById('topbar-title').textContent && location.hash === '#' + v, view);
   }
+  // (Chart.js and D3 came from the offline copy with Metrics and Network Graph)
+  assert.deepEqual(await page.evaluate(() => [typeof Chart, typeof d3]), ['function', 'object']);
   // /api isn't answered from a cache
   assert.equal(await page.evaluate(() => fetch('/api/settings/status').then(() => 'answered', () => 'failed')), 'failed');
   // Survey Studio opens too
@@ -158,6 +165,43 @@ test('offline: the app and Survey Studio open from the service worker with their
   await context.close();
 });
 
+test('performance profiles: Auto picks one; Potato turns off animations, transitions and shadows; the choice in Settings applies at once and is kept', { skip, timeout: 60000 }, async () => {
+  const context = await browser.newContext();
+  await context.addInitScript(noTours);
+  const { page, errors } = await open(context, '/app.html#settings');
+  await page.waitForSelector('#s-perf');
+  const auto = await page.evaluate(() => [MetaPerf.setting(), document.documentElement.dataset.perf, MetaPerf.detect()]);
+  assert.equal(auto[0], 'auto');
+  assert.equal(auto[1], auto[2], 'Auto uses what this device is');
+  const styleOf = () => page.evaluate(() => {
+    const el = document.querySelector('#s-perf-card');
+    const cs = getComputedStyle(el);
+    const btn = getComputedStyle(document.querySelector('.btn'));
+    return { shadow: cs.boxShadow, transition: btn.transitionDuration };
+  });
+  await page.selectOption('#s-perf', 'potato');
+  assert.equal(await page.evaluate(() => document.documentElement.dataset.perf), 'potato');
+  const potato = await styleOf();
+  assert.equal(potato.shadow, 'none');
+  assert.match(potato.transition, /^0s/);
+  await page.reload();
+  await page.waitForSelector('#s-perf');
+  assert.deepEqual(await page.evaluate(() => [document.documentElement.dataset.perf, document.getElementById('s-perf').value]), ['potato', 'potato'], 'kept');
+  // a Potato network graph still draws (a quicker layout, no collision step)
+  await page.evaluate(() => App.setState({ network: { nodes: [{ id: 'a' }, { id: 'b' }, { id: 'c' }], edges: [{ source: 'a', target: 'b' }, { source: 'b', target: 'c' }] } }));
+  await page.evaluate(() => { location.hash = '#network'; });
+  await page.waitForFunction(() => document.querySelectorAll('#network-svg circle').length === 3);
+  assert.equal(await page.evaluate(() => !!window._netRefs.simulation.force('collision')), false);
+  await page.evaluate(() => { location.hash = '#settings'; });
+  await page.waitForSelector('#s-perf');
+  await page.selectOption('#s-perf', 'performance');
+  assert.notEqual((await styleOf()).shadow, 'none', 'shadows are back');
+  await page.selectOption('#s-perf', 'auto');
+  assert.equal(await page.evaluate(() => localStorage.getItem('metacode_perf')), null);
+  assert.deepEqual(errors, []);
+  await context.close();
+});
+
 test('the MetaCode server stopped: the app still opens with its data (everything from the service worker); the top bar says "Server unreachable"', { skip, timeout: 90000 }, async () => {
   const context = await browser.newContext();
   await context.addInitScript(noTours);
@@ -169,8 +213,10 @@ test('the MetaCode server stopped: the app still opens with its data (everything
   await page.reload();
   await page.waitForFunction(() => typeof App !== 'undefined' && document.getElementById('topbar-project').textContent === 'Kept on this device');
   await page.waitForFunction(() => document.getElementById('status-label').textContent === 'Server unreachable');
-  assert.deepEqual(await page.evaluate(() => [typeof Papa, typeof Chart, typeof d3]), ['object', 'function', 'object']);
+  assert.equal(await page.evaluate(() => typeof Papa), 'object');
   await page.evaluate(() => { location.hash = '#codebook'; });
   await page.waitForFunction(() => document.getElementById('topbar-title').textContent === 'Codebook');
+  await page.evaluate(() => { location.hash = '#network'; });
+  await page.waitForFunction(() => typeof d3 === 'object' && document.getElementById('topbar-title').textContent === 'Network Graph');
   await context.close();
 });

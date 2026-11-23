@@ -75,6 +75,15 @@ const App = (() => {
     }
     return lazyScripts.get(src);
   }
+  // A page that needs a big library: rendered at once when it's there, else once it has loaded
+  const withLibrary = (src, ready, render) => param => {
+    if (ready()) return render(param);
+    const view = currentView;
+    const box = document.getElementById('view-container');
+    box.innerHTML = '<div class="loading-state">Loading…</div>';
+    loadScript(src).then(() => { if (currentView === view) { box.innerHTML = ''; render(param); } },
+      err => { if (currentView === view) box.innerHTML = '<div class="card"><p>' + esc(err.message) + ' Reload the page to try again.</p></div>'; });
+  };
   const localAiView = name => () => {
     const view = currentView;
     const box = document.getElementById('view-container');
@@ -100,8 +109,8 @@ const App = (() => {
     'human-coding': param => HumanCoder.render(param),           // tabs: coder1, coder2, ai, reliability
     'reliability':  () => ReliabilityAnalyzer.render(),           // the Reliability Analysis tab
     'csv-analyzer': () => CSVAnalyzer.render(),
-    'network':      () => NetworkViz.render(),
-    'metrics':      () => EngagementViz.render(),
+    'network':      withLibrary('vendor/d3/d3.min.js', () => typeof d3 !== 'undefined', () => NetworkViz.render()),       // (D3 and Chart.js load with their page:
+    'metrics':      withLibrary('vendor/chart.js/chart.umd.js', () => typeof Chart !== 'undefined', () => EngagementViz.render()),   //  ~480 KB not parsed on every load)
     'export':       renderExport,
     'account':      param => Account.renderPage(document.getElementById('view-container'), param),
     'invite':       param => Collab.renderInvite(document.getElementById('view-container'), param),   // an invitation to a shared project
@@ -282,7 +291,14 @@ const App = (() => {
   }
 
   /* ── Settings ────────────────────────────────*/
+  function wirePerformance() {
+    const sel = document.getElementById('s-perf');
+    if (!sel || !window.MetaPerf) return;
+    sel.value = MetaPerf.setting();
+    sel.addEventListener('change', () => { MetaPerf.set(sel.value); notify('Performance: ' + MetaPerf.describe() + '.', 'success'); });
+  }
   function renderSettings() {
+    setTimeout(wirePerformance, 0);
     const { project, settings } = state;
     const container = document.getElementById('view-container');
     container.innerHTML = `
@@ -376,6 +392,23 @@ const App = (() => {
           </div>
           <div id="key-status-list" style="display:flex;flex-direction:column;gap:6px">
             <div class="text-muted" style="font-size:12.5px">Loading…</div>
+          </div>
+        </div>
+
+        <div class="card" style="grid-column:1/-1" id="s-perf-card">
+          <div class="card-title">Performance</div>
+          <p class="form-hint" style="margin:0 0 12px">How much of the computer MetaCode may use in this browser. Every feature works in every profile.</p>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+            <select class="form-select" id="s-perf" style="max-width:260px" aria-label="Performance profile">
+              <option value="auto">Auto${window.MetaPerf ? ' (' + esc(MetaPerf.NAMES[MetaPerf.detect()]) + ' for this device)' : ''}</option>
+              <option value="potato">Potato: very old or low-memory devices</option>
+              <option value="balanced">Balanced</option>
+              <option value="performance">Performance: capable computers</option>
+            </select>
+            <div class="form-hint" style="flex:1;min-width:240px;margin:0">
+              <b>Potato</b> turns off animations, transitions, shadows and blur, draws charts at once, lays out big network graphs faster and syncs in the background every 5 minutes.
+              <b>Balanced</b> is the usual MetaCode. <b>Performance</b> always runs the full network-graph layout, however big the graph.
+            </div>
           </div>
         </div>
 

@@ -175,11 +175,17 @@ const NetworkViz = (() => {
       .text(d => d.label || d.id);
 
     // Simulation
+    // (performance profiles, js/perf.js: Potato settles fast and skips the collision step, Balanced skips it for
+    // very big graphs, Performance always does everything)
+    const perf = window.MetaPerf ? MetaPerf.profile() : 'balanced';
+    const collide = perf === 'performance' || (perf === 'balanced' && nodes.length <= 800);
     simulation = d3.forceSimulation(nodes)
       .force('link', d3.forceLink(edges).id(d=>d.id).strength(0.5).distance(80))
       .force('charge', d3.forceManyBody().strength(-280))
-      .force('center', d3.forceCenter(W/2, H/2))
-      .force('collision', d3.forceCollide().radius(d=>rScale(d.degree)+6))
+      .force('center', d3.forceCenter(W/2, H/2));
+    if (collide) simulation.force('collision', d3.forceCollide().radius(d=>rScale(d.degree)+6));
+    if (perf === 'potato') simulation.alphaDecay(0.08);
+    simulation
       .on('tick', () => {
         link.attr('x1',d=>d.source.x).attr('y1',d=>d.source.y)
             .attr('x2',d=>d.target.x).attr('y2',d=>d.target.y);

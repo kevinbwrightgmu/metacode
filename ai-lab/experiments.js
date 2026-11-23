@@ -1561,7 +1561,8 @@ function createExperiments(deps) {
       stopping = false;
       recover();
       // Probe the OS isolation once at start (cached), so the first run doesn't wait for it
-      if (settings().mode === 'sandbox') sandbox.isolation('javascript').catch(() => null);
+      // (METACODE_PROFILE=lite: on the first run instead)
+      if (settings().mode === 'sandbox' && String(process.env.METACODE_PROFILE || '').trim().toLowerCase() !== 'lite') sandbox.isolation('javascript').catch(() => null);
     },
     shutdown() {
       stopping = true;

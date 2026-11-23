@@ -1287,3 +1287,10 @@ svg { flex-shrink: 0; }
 .cr-problems { margin: 4px 0 0 18px; font-size: 13px; color: var(--error); display: flex; flex-direction: column; gap: 3px; }
 .cr-prompts { margin-top: 8px; font-size: 13px; }
 .cr-prompts summary { cursor: pointer; color: var(--tx-second); }
+
+/* ── Performance profiles (js/perf.js) ───────────
+   Potato: no animations, transitions, shadows or blur — for very old or low-memory devices */
+html[data-perf="potato"] *, html[data-perf="potato"] *::before, html[data-perf="potato"] *::after {
+  animation: none !important; transition: none !important; scroll-behavior: auto !important;
+  box-shadow: none !important; text-shadow: none !important; backdrop-filter: none !important;
+}
