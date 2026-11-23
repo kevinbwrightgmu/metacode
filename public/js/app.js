@@ -60,9 +60,36 @@ const App = (() => {
   }
   function setState(patch) { Object.assign(state, patch); save(); }
 
+  // Pages whose script loads when one is first opened: js/local-ai.js (the AI Model Store, Installed Models,
+  // AI Chat and System). The service worker keeps the script, so they open offline too.
+  const lazyScripts = new Map();
+  function loadScript(src) {
+    if (!lazyScripts.has(src)) {
+      lazyScripts.set(src, new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = resolve;
+        s.onerror = () => { lazyScripts.delete(src); reject(new Error('The page\'s script (' + src + ') couldn\'t be loaded.')); };
+        document.head.appendChild(s);
+      }));
+    }
+    return lazyScripts.get(src);
+  }
+  const localAiView = name => () => {
+    const view = currentView;
+    const box = document.getElementById('view-container');
+    box.innerHTML = '<div class="loading-state">Loading…</div>';
+    loadScript('js/local-ai.js').then(() => { if (currentView === view) LocalAI.render(name, box); },
+      err => { if (currentView === view) box.innerHTML = '<div class="card"><p>' + esc(err.message) + ' Reload the page to try again.</p></div>'; });
+  };
+
   /* ── Routing ─────────────────────────────────*/
   const VIEWS = {
     'dashboard':    renderDashboard,
+    'model-store':  localAiView('store'),               // AI on this device (js/local-ai.js)
+    'installed-models': localAiView('installed'),
+    'ai-chat':      localAiView('chat'),
+    'system':       localAiView('system'),
     'projects':     () => ProjectsView.render(),
     'settings':     renderSettings,
     'import':       () => DataManager.render(),
@@ -87,7 +114,8 @@ const App = (() => {
     'codebook':'Codebook','ai-coding':'AI Coding','human-coding':'Human Coding',
     'reliability':'Reliability Analysis','csv-analyzer':'Analyze CSV (NetworkX)',
     'network':'Network Graph',
-    'metrics':'Metrics','export':'Export Data','surveys':'Survey Studio','account':'Account & plan','invite':'Invitation'
+    'metrics':'Metrics','export':'Export Data','surveys':'Survey Studio','account':'Account & plan','invite':'Invitation',
+    'model-store':'AI Model Store','installed-models':'Installed Models','ai-chat':'AI Chat','system':'System'
   };
 
   // Former route ids that must keep working (bookmarks, browser history).

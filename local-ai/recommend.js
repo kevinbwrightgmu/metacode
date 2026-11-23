@@ -57,6 +57,8 @@ function recommend(catalogModels, hw, opts) {
   const tiers = TIERS.map(t => Object.assign({ models: [] }, t)).concat([{ id: 'experimental', name: 'Experimental', note: 'New or rarely used models: interesting, but less tested.', models: [] }]);
   let tooBig = 0;
   for (const m of catalogModels) {
+    // (embedding models can't chat, and no MetaCode feature uses them: they're under "All models")
+    if ((m.capabilities || []).includes('embedding') || (m.categories && !m.categories.includes('general'))) continue;
     const { pick } = pickTag(m, b.budget);
     if (!pick) { tooBig++; continue; }
     const entry = {

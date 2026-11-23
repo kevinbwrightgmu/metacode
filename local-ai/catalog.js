@@ -188,8 +188,9 @@ function createCatalog(opts) {
         const r = await get(libraryUrl, 20000);
         if (r.status !== 200) return { ok: false, problem: 'ollama.com answered HTTP ' + r.status + '.' };
         const models = parseLibrary(r.body);
-        // (a page that reads as far fewer models than the catalog has is a page that changed, not a smaller library)
-        const floor = opts.minModels !== undefined ? opts.minModels : Math.max(1, Math.floor(cat.models.length / 3));
+        // (ollama.com's page reading as far fewer models than the catalog has is a page that changed, not a smaller
+        // library; a mirror of the operator's own may list just a few)
+        const floor = opts.minModels !== undefined ? opts.minModels : libraryUrl === LIBRARY_URL ? Math.max(1, Math.floor(cat.models.length / 3)) : 1;
         if (models.length < floor) return { ok: false, problem: 'ollama.com\'s library page couldn\'t be read (it may have changed); the saved catalog is shown.' };
         mem = { source: 'live', fetchedAt: new Date().toISOString(), models, tags: cat.tags || {} };
         save();

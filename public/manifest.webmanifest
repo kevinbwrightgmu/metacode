@@ -20,7 +20,8 @@
   "shortcuts": [
     { "name": "Dashboard", "url": "/app.html#dashboard", "icons": [{ "src": "/img/icons/icon-192.png", "sizes": "192x192" }] },
     { "name": "AI Coding", "url": "/app.html#ai-coding", "icons": [{ "src": "/img/icons/icon-192.png", "sizes": "192x192" }] },
-    { "name": "Codebook", "url": "/app.html#codebook", "icons": [{ "src": "/img/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "AI Chat", "url": "/app.html#ai-chat", "icons": [{ "src": "/img/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "AI Model Store", "url": "/app.html#model-store", "icons": [{ "src": "/img/icons/icon-192.png", "sizes": "192x192" }] },
     { "name": "Survey Studio", "url": "/studio.html", "icons": [{ "src": "/img/icons/icon-192.png", "sizes": "192x192" }] }
   ]
 }

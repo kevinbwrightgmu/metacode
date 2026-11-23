@@ -62,18 +62,22 @@
     // (App is a script-level const in app.js: a global name, not a property of window)
     if (typeof App !== 'undefined' && typeof App.notify === 'function') App.notify(msg, 'info');
   }
-  let hadController = !!navigator.serviceWorker.controller;
+  // (a first visit is taken over by the service worker too: that isn't an update. A new version is one that
+  // starts while this page already ran under another)
+  const startedControlled = !!navigator.serviceWorker.controller;
+  let firstVersion = null;
   navigator.serviceWorker.addEventListener('message', event => {
     const d = event.data || {};
+    if (d.type === 'metacode-sw-version' && !firstVersion) firstVersion = d.version;
     if (d.type === 'metacode-sw-version' || d.type === 'metacode-sw-active') MetaPWA.version = d.version;
-    if (d.type === 'metacode-sw-active' && hadController) notifyUpdate();
+    if (d.type === 'metacode-sw-active' && startedControlled && firstVersion && d.version !== firstVersion) notifyUpdate();
   });
-  navigator.serviceWorker.addEventListener('controllerchange', () => { hadController = true; });
   MetaPWA.ready = new Promise(resolve => {
     const register = () => navigator.serviceWorker.register('/sw.js', { scope: '/', updateViaCache: 'none' })
       .then(() => navigator.serviceWorker.ready)
       .then(reg => {
-        if (reg.active) reg.active.postMessage({ type: 'metacode-sw-version' });
+        if (navigator.serviceWorker.controller) navigator.serviceWorker.controller.postMessage({ type: 'metacode-sw-version' });
+        else if (reg.active) reg.active.postMessage({ type: 'metacode-sw-version' });
         persistStorage();
         resolve(reg);
       }, err => {

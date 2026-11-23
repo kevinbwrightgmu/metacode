@@ -36,7 +36,9 @@ function createLocalAi(opts) {
   const isLocal = opts.isLoopback || (() => false);
   const onModelsChanged = opts.onModelsChanged || (() => {});
   const ollama = createOllama({ env, fetch: opts.fetch });
-  const catalog = createCatalog({ dataDir, fetch: opts.fetch, libraryUrl: opts.libraryUrl, registry: opts.registry, minModels: opts.minLibraryModels });
+  // (LOCAL_AI_LIBRARY_URL / LOCAL_AI_REGISTRY_URL: a mirror of ollama.com's library and of Ollama's registry)
+  const catalog = createCatalog({ dataDir, fetch: opts.fetch, libraryUrl: opts.libraryUrl || String(env.LOCAL_AI_LIBRARY_URL || '').trim() || undefined,
+    registry: opts.registry || String(env.LOCAL_AI_REGISTRY_URL || '').trim() || undefined, minModels: opts.minLibraryModels });
   const hardware = opts.hardware || createHardware({ env, dataDir });
   const runtimes = createRuntimes({ ollama, fetch: opts.fetch });
   const installs = createInstalls({ ollama, catalog, hardware, onInstalled: model => onModelsChanged('installed', model) });
