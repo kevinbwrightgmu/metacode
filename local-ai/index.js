@@ -49,7 +49,11 @@ function createLocalAi(opts) {
     registry: opts.registry || String(env.LOCAL_AI_REGISTRY_URL || '').trim() || undefined, minModels: opts.minLibraryModels });
   const hardware = opts.hardware || createHardware({ env, dataDir });
   const runtimes = createRuntimes({ ollama, fetch: opts.fetch });
-  const installs = createInstalls({ ollama, catalog, hardware, onInstalled: model => onModelsChanged('installed', model) });
+  // (OLLAMA_PULL_IDLE_SECONDS, as for the AI service's own downloads: a download that makes no progress for this
+  // long is stopped, and counts as interrupted; default 120)
+  const idle = Number(String(env.OLLAMA_PULL_IDLE_SECONDS || '').trim());
+  const installs = createInstalls({ ollama, catalog, hardware, idleMs: Number.isFinite(idle) && idle >= 1 && idle <= 3600 ? idle * 1000 : undefined,
+    onInstalled: model => onModelsChanged('installed', model) });
   const settingsFile = path.join(dataDir, 'settings.json');
   let settings = null;
 

@@ -300,6 +300,40 @@ test('problems: no such model, not enough disk, an interrupted download (resumab
   assert.equal((await api('POST', '/installs', { model: '../../etc/passwd' })).status, 400);
 });
 
+test('a download that makes no progress for OLLAMA_PULL_IDLE_SECONDS is stopped as interrupted, and resuming continues', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-local-ai-idle-'));
+  const quick = createLocalAi({
+    env: { OLLAMA_BASE_URL: si.base + '/v1', LOCAL_AI_DATA_DIR: dir, OLLAMA_PULL_IDLE_SECONDS: '1' },
+    libraryUrl: si.base + '/library', registry: si.base + '/v2/library/', minLibraryModels: 1, isLoopback: () => true,
+    hardware: { detect: async () => ({ os: { platform: 'linux' }, arch: 'x64', cpu: { threads: 4 }, memory: { total: 16 * GB, available: 12 * GB }, gpus: [], disk: { path: dir, free: 100 * GB, total: 200 * GB } }) },
+  });
+  const app = express();
+  app.use(express.json());
+  app.use('/api/local-ai', quick.router);
+  const server = http.createServer(app);
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const call = async (method, p, body) => (await fetch('http://127.0.0.1:' + server.address().port + '/api/local-ai' + p, { method, headers: { 'content-type': 'application/json' }, body: body && JSON.stringify(body) })).json();
+  const state = async () => (await call('GET', '/installs')).installs.find(j => j.model === 'deepseek-r1:1.5b');
+  const delay = si.st.pullDelayMs;
+  try {
+    si.st.pullDelayMs = 2500;                  // (Ollama goes quiet: nothing for 2.5 s between steps)
+    await call('POST', '/installs', { model: 'deepseek-r1:1.5b' });
+    await until(async () => { const j = await state(); return j && j.state === 'failed'; }, 8000, 'the stalled download to stop');
+    const j = await state();
+    assert.equal(j.code, 'interrupted');
+    assert.match(j.error, /nothing arrived for 1 s.*Resume to continue/);
+    si.st.pullDelayMs = delay;
+    await call('POST', '/installs/resume', { model: 'deepseek-r1:1.5b' });
+    await until(async () => (await state()).state === 'done', 8000, 'the resumed download');
+  } finally {
+    si.st.pullDelayMs = delay;
+    quick.close();
+    server.closeAllConnections();
+    await new Promise(r => server.close(r));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('installed models: load, unload with keep-alive from the model\'s settings, delete (not while downloading), update', async () => {
   const bad = await api('PUT', '/models/settings', { model: 'gemma3:1b', settings: { temperature: 7 } });
   assert.equal(bad.status, 400);

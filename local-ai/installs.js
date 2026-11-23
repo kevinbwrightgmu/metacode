@@ -101,7 +101,7 @@ function createInstalls(opts) {
         else if (/writing manifest|removing/i.test(line.status)) j.status = 'Finishing';
         else if (/pulling manifest/i.test(line.status)) j.status = 'Asking Ollama\'s library';
         emit(j, j.state === 'verifying');
-      }, j.controller.signal);
+      }, j.controller.signal, opts.idleMs);
     } catch (e) {
       if (j.stopping === 'pause') return finish(j, 'paused', { status: 'Paused: what arrived is kept, and resuming continues from there', speed: null, stopping: null });
       if (j.stopping === 'cancel') { jobs.delete(j.model); return finish(j, 'cancelled', { status: 'Cancelled', speed: null, stopping: null }); }
