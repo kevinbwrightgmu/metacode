@@ -27,6 +27,8 @@ The front page (`index.html`) introduces the four research methods — Reddit da
 | **Metrics** | Engagement averages, every post's engagement (sortable list — posts from the Scraper bring theirs), code distributions, engagement by code, AI–human agreement and completion charts |
 | **Export** | Download coded data, reliability reports, and codebook as CSV |
 | **MetaCode Assistant** | Built-in help chat — click **Ask MetaCode** (top right) to ask how to use any feature, what a number means, or how to fix an error; answers come from the same AI as AI Coding and use a summary of your project's current state |
+| **Works offline, on any device** | Install MetaCode from the browser (**Install**, or **Add to Home Screen** on phones): it opens and works without a connection, your data stays in the browser, and nothing is loaded from other sites (libraries and fonts come from MetaCode itself; analytics only if the operator turns it on). Phones get a navigation drawer. **Settings → Performance**: Potato, Balanced or Performance, or Auto for this device. Portable bundles and packages run MetaCode on Windows, macOS, Linux and Raspberry Pi with its own Node.js. See [docs/offline-first.md](docs/offline-first.md) |
+| **AI Model Store (local AI)** | Sidebar → **Local AI**. Ollama's library (kept for offline use), what fits this computer in tiers from Ultra lightweight to High performance (never more than its memory holds), downloads with progress, pause, resume and a check of what arrived; **Installed Models** (load, stop, update, delete, settings, a model for each AI task), **AI Chat** with a model on this computer, and **System** (this device and which AI runtimes work on it). With `AI_MODE=local-only` no prompt leaves the computer. See [docs/offline-first.md](docs/offline-first.md#5-local-ai-and-the-ai-model-store) |
 
 ---
 
@@ -84,6 +86,17 @@ step, Python 3 and MetaCode's AI — see [AI Scraper (beta)](#ai-scraper-beta) b
 **Running MetaCode on a server** (a VPS with pm2, nginx and HTTPS): follow **[docs/deploy-vps.md](docs/deploy-vps.md)**.
 It includes `ecosystem.config.cjs` for pm2 (MetaCode and its AI service as two apps) and an nginx config that
 forwards the Reddit Scraper browser's WebSocket.
+
+**On your own computer, without installing anything** (Windows, macOS, Linux, Raspberry Pi, a USB stick):
+```bash
+npm run build:portable                       # a folder for this computer: MetaCode, its own Node.js, a launcher
+npm run build:portable -- --all --packages   # every system, plus a Windows setup program, MetaCode.app, a .deb, an AppImage
+```
+They start MetaCode on this computer only (`127.0.0.1`), in its lite profile, with AI on this computer only
+(`AI_MODE=local-only`, models from the **AI Model Store** through [Ollama](https://ollama.com)), and open it in the
+browser. CI builds them too and starts each on its own system (`.github/workflows/portable.yml`); a `metacode-v*`
+tag makes a draft release with all of them. [docs/offline-first.md](docs/offline-first.md) covers each platform and
+how it was tested, installing, offline use, local AI, performance and the limits.
 
 ### Tests
 ```bash
@@ -708,6 +721,13 @@ metacode/
 │                               datasets, checks, evaluations, optimisation, fine-tuning, code experiments
 │                               (experiments*.js, code-policy.js, code-sandbox.js + sandbox/ preludes) — see docs/ai-lab.md
 ├── lib/log.js                  Structured logging with secret redaction
+├── lib/pwa.js · pwa-sw.js      The installable app: /sw.js (works offline), /analytics.js (only with METACODE_ANALYTICS_ID)
+├── lib/data-dir.js             METACODE_DATA_DIR: one folder for everything the server keeps
+├── local-ai/                   AI Model Store (server side, /api/local-ai): Ollama's catalog, this device's hardware,
+│                               recommendations, downloads, installed models, runtimes — see docs/offline-first.md
+├── scripts/build-portable.js   Portable bundles and packages (npm run build:portable); scripts/smoke-portable.js checks one
+├── scripts/vendor-web.js       Copies the browser libraries and fonts into public/vendor (pinned, with checksums)
+├── packaging/                  The Windows and macOS packages' icons
 ├── types/                      Shared type definitions (scraper, AI Lab) for `npm run typecheck`
 ├── scraper/                    Scraper (server side) — see docs/reddit-scraper.md, docs/platforms.md
 │   ├── platforms/              YouTube (Data API v3) and X (API v2) jobs, through the same network route
@@ -733,6 +753,7 @@ metacode/
 ├── ecosystem.config.cjs        pm2 process file (MetaCode and its AI service: two apps, fork mode)
 ├── docs/opencode-service.md    MetaCode's AI service: running it, providers, settings, API, troubleshooting
 ├── docs/free-ai-options.md     Free, cheap and self-hosted AI models MetaCode can use (research, Nov 2026)
+├── docs/offline-first.md       Offline, on any device, with local AI: platforms, install, the AI Model Store, limits
 ├── docs/survey-studio.md       Survey Studio guide
 ├── docs/accounts.md            Accounts, plans and limits: setup and how it works
 ├── test/                       node:test suites (+ Playwright browser tests) and a mock Reddit
@@ -743,7 +764,9 @@ metacode/
 │   └── emis_fetch.py           The AI gateway's Python transport (used by the AI service)
 ├── public/
 │   ├── index.html                Landing page — explains MetaCode, links to app.html
-│   ├── scramjet-sw.js            Service worker for the Scraper's in-app Reddit browser (Scramjet)
+│   ├── scramjet-sw.js            The Reddit browser's former service worker (/sw.js routes Scramjet now)
+│   ├── manifest.webmanifest      The installable app: name, icons (img/icons/), shortcuts
+│   ├── vendor/                   Browser libraries and fonts served by MetaCode (scripts/vendor-web.js; VENDOR.json: checksums)
 │   ├── app.html                  The actual application shell (dashboard, sidebar, etc.)
 │   ├── studio.html               Survey Studio (its own page, linked from the front page)
 │   ├── status.html               Status page (served for status.metac0.de and at /status); css/status.css, js/status.js
@@ -755,6 +778,9 @@ metacode/
 │   ├── css/survey.css            Survey rendering; css/survey-studio.css + survey-blocks.css  Survey Studio editor
 │   └── js/
 │       ├── app.js               Router, state, modals, notifications, Settings, AI requests (via the server)
+│       ├── pwa.js               The installable app: its service worker, the offline banner, updates
+│       ├── perf.js              Performance profiles (Potato, Balanced, Performance; Auto picks one)
+│       ├── local-ai.js          Local AI pages: AI Model Store, Installed Models, AI Chat, System
 │       ├── local-db.js          Your data in this browser (IndexedDB), browser identity, backup/restore
 │       ├── tour.js · app-tour.js  Guided tours and hands-on tutorials (spotlight + card); the coding app's tour
 │       ├── projects.js          Projects page: saved projects (in the browser), autosave
