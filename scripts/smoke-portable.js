@@ -36,7 +36,8 @@ function check(ok, what, detail) {
 }
 async function get(p) {
   try {
-    const res = await fetch(base + p, { signal: AbortSignal.timeout(15000) });
+    // (the Store waits up to 20 s for ollama.com before it answers from its copy; emulated, all of it is slower)
+    const res = await fetch(base + p, { signal: AbortSignal.timeout(Math.max(30, opt.timeout / 6) * 1000) });
     const text = await res.text();
     let json = null;
     try { json = JSON.parse(text); } catch (e) { /* not JSON */ }

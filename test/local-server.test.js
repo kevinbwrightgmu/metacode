@@ -71,14 +71,29 @@ test('METACODE_HOST=127.0.0.1: this computer only; METACODE_OPEN_BROWSER: opened
     assert.equal(await again.exited, 0, again.output());
     assert.match(again.output(), /already running at http:\/\/localhost:\d+\/app\.html/);
     assert.deepEqual(opened(dir), [url, url]);
-    // …while without METACODE_OPEN_BROWSER a busy port is an error that says what to do
+    // …and without METACODE_OPEN_BROWSER (METACODE_NO_BROWSER=1) it says so, and opens nothing
     const third = startServer(dir, port, {});
-    assert.equal(await third.exited, 1);
-    assert.match(third.output(), /another program uses port \d+: set another PORT in \.env/);
+    assert.equal(await third.exited, 0, third.output());
+    assert.match(third.output(), /already running at http:\/\/localhost:\d+\/app\.html\./);
     assert.equal(opened(dir).length, 2);
   } finally {
     child.kill();
     await child.exited;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a busy port that isn\'t MetaCode\'s (another program answering {"status":"ok"} too): the error says to set another PORT, and nothing opens', { skip, timeout: 60000 }, async () => {
+  const dir = tempDir();
+  const other = http.createServer((req, res) => { res.writeHead(200, { 'content-type': 'application/json' }); res.end(JSON.stringify({ status: 'ok' })); });
+  await new Promise(r => other.listen(0, '127.0.0.1', r));
+  try {
+    const child = startServer(dir, other.address().port, { METACODE_OPEN_BROWSER: '1' });
+    assert.equal(await child.exited, 1, child.output());
+    assert.match(child.output(), /another program uses port \d+: set another PORT in \.env/);
+    assert.deepEqual(opened(dir), []);
+  } finally {
+    await new Promise(r => other.close(r));
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

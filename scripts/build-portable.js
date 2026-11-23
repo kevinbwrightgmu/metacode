@@ -30,10 +30,12 @@ const { execFileSync } = require('child_process');
 
 const ROOT = path.join(__dirname, '..');
 const PKG = require(path.join(ROOT, 'package.json'));
+// appimageSha256: the AppImage project's type2 runtime as it was checked for this MetaCode (its "continuous"
+// release is rebuilt now and then: a runtime that differs stops the build until it's checked and updated here)
 const TARGETS = {
-  'linux-x64': { os: 'linux', deb: 'amd64', appimage: 'x86_64', elf: 0x3e },
-  'linux-arm64': { os: 'linux', deb: 'arm64', appimage: 'aarch64', elf: 0xb7 },
-  'linux-armv7l': { os: 'linux', deb: 'armhf', appimage: 'armhf', elf: 0x28 },
+  'linux-x64': { os: 'linux', deb: 'amd64', appimage: 'x86_64', elf: 0x3e, appimageSha256: '617aa77314d57c8b8e4fae9c3f0b35af7b30d5529cb69e98f64f92510ed98a46' },
+  'linux-arm64': { os: 'linux', deb: 'arm64', appimage: 'aarch64', elf: 0xb7, appimageSha256: '9a72a744d221576c9347ec074243acc5c3c7568896b12714e0e82e9f0bf47900' },
+  'linux-armv7l': { os: 'linux', deb: 'armhf', appimage: 'armhf', elf: 0x28, appimageSha256: 'acc940e0b091453490861ca7341135c7cbe6182d4aa7336c67fa5f51b0e77fcc' },
   'win-x64': { os: 'win' },
   'win-arm64': { os: 'win' },
   'darwin-x64': { os: 'darwin' },
@@ -90,6 +92,16 @@ function dirSize(dir) {
 }
 const mb = n => (n / 1e6).toFixed(1) + ' MB';
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+// tar's options to pack files as root's (GNU tar on Linux, bsdtar on macOS)
+let tarFlags = null;
+function tarOwner() {
+  if (!tarFlags) {
+    let gnu = false;
+    try { gnu = /GNU tar/.test(execFileSync('tar', ['--version'], { encoding: 'utf8' })); } catch (e) { gnu = false; }
+    tarFlags = gnu ? ['--owner=0', '--group=0', '--numeric-owner'] : ['--uid', '0', '--gid', '0'];
+  }
+  return tarFlags;
+}
 async function download(url, dest) {
   if (fs.existsSync(dest)) return dest;
   console.log('  downloading ' + url);
@@ -120,7 +132,14 @@ function appFiles() {
 function productionModules(cache) {
   const dir = path.join(cache, 'modules');
   const nm = path.join(dir, 'node_modules');
-  if (!fs.existsSync(nm)) {
+  // (installed for this package-lock.json, to the end: a changed lock file, or an install that stopped half-way,
+  // installs again)
+  const lock = sha256(path.join(ROOT, 'package-lock.json'));
+  const marker = path.join(dir, 'installed-for.txt');
+  let done = '';
+  try { done = fs.readFileSync(marker, 'utf8').trim(); } catch (e) { done = ''; }
+  if (done !== lock || !fs.existsSync(nm)) {
+    fs.rmSync(dir, { recursive: true, force: true });
     fs.mkdirSync(dir, { recursive: true });
     copyFile(path.join(ROOT, 'package.json'), path.join(dir, 'package.json'));
     copyFile(path.join(ROOT, 'package-lock.json'), path.join(dir, 'package-lock.json'));
@@ -135,6 +154,7 @@ function productionModules(cache) {
       }
     })(nm, 0);
     console.log('  node_modules: ' + mb(before) + ' → ' + mb(dirSize(nm)) + ' after removing maps, type declarations and docs');
+    fs.writeFileSync(marker, lock + '\n');
   }
   // (the command-line links in .bin are symbolic links, which zip files and Windows don't keep; nothing uses them)
   fs.rmSync(path.join(nm, '.bin'), { recursive: true, force: true });
@@ -154,7 +174,11 @@ async function nodeRuntime(target, version, cache) {
   if (!want || want !== got) { fs.rmSync(dest, { force: true }); throw new Error(file + ': its sha256 doesn\'t match nodejs.org\'s SHASUMS256.txt'); }
   const x = path.join(cache, name);
   if (!fs.existsSync(x)) {
-    if (win) sh('unzip', ['-q', dest, '-d', cache]); else sh('tar', ['-xJf', dest, '-C', cache]);
+    // (unpacked beside, then moved into place: an unpacking that stopped half-way is never used)
+    const tmp = fs.mkdtempSync(path.join(cache, 'unpack-'));
+    if (win) sh('unzip', ['-q', dest, '-d', tmp]); else sh('tar', ['-xJf', dest, '-C', tmp]);
+    fs.renameSync(path.join(tmp, name), x);
+    fs.rmSync(tmp, { recursive: true, force: true });
   }
   return { binary: win ? path.join(x, 'node.exe') : path.join(x, 'bin', 'node'), license: path.join(x, 'LICENSE'), sha256: got };
 }
@@ -162,6 +186,19 @@ async function nodeRuntime(target, version, cache) {
 // ── Launchers ────────────────────────────────────────────────────────────────────────────────────────────────
 // server.js does the rest: METACODE_OPEN_BROWSER opens the browser once it listens (or, when MetaCode already runs,
 // opens that one), METACODE_HOST=127.0.0.1 keeps it to this computer
+// The launcher for a Linux or macOS target. linux-armv7l's also checks for libatomic, which its Node.js needs and
+// a minimal system may lack (whatever the kernel says: a Pi 4 or 5 runs 32-bit Raspberry Pi OS on a 64-bit kernel)
+const ARM32_CHECK = `# (this folder's Node.js, for 32-bit ARM, needs libatomic: when it isn't in the usual places, a try says whether
+# Node.js starts)
+if [ "$NODE" = "$DIR/runtime/node" ]; then
+  atomic=0
+  for f in /usr/lib/arm-linux-gnueabihf/libatomic.so.1 /lib/arm-linux-gnueabihf/libatomic.so.1 /usr/lib/libatomic.so.1 /lib/libatomic.so.1; do [ -e "$f" ] && atomic=1; done
+  if [ $atomic = 0 ] && "$NODE" -e '' 2>&1 | grep -q 'libatomic'; then
+    echo "MetaCode's Node.js needs libatomic, which this system doesn't have: sudo apt install libatomic1" >&2; exit 1
+  fi
+fi
+`;
+const launchSh = target => LAUNCH_SH.replace('__ARM32__', target === 'linux-armv7l' ? ARM32_CHECK : '');
 const LAUNCH_SH = `#!/bin/sh
 # MetaCode, portable. Everything stays in this folder: data/ holds what the server keeps (your projects live in
 # your browser). Settings: a .env file here or in data/ (copy .env.example); it overrides the defaults below.
@@ -181,18 +218,7 @@ fi
 NODE="$DIR/runtime/node"
 [ -x "$NODE" ] || NODE="$(command -v node || true)"
 if [ -z "$NODE" ]; then echo "MetaCode needs Node.js (22.15 or newer), and this copy has none: https://nodejs.org" >&2; exit 1; fi
-# (Node.js for 32-bit ARM, armv6l/armv7l/armv8l, needs libatomic, which a minimal system may lack: when it isn't in
-# the usual places, a try says whether Node.js starts)
-case "$(uname -m)" in armv*)
-  if [ "$NODE" = "$DIR/runtime/node" ]; then
-    atomic=0
-    for f in /usr/lib/arm-linux-gnueabihf/libatomic.so.1 /lib/arm-linux-gnueabihf/libatomic.so.1 /usr/lib/libatomic.so.1 /lib/libatomic.so.1; do [ -e "$f" ] && atomic=1; done
-    if [ $atomic = 0 ] && "$NODE" -e '' 2>&1 | grep -q 'libatomic'; then
-      echo "MetaCode's Node.js needs libatomic, which this system doesn't have: sudo apt install libatomic1" >&2; exit 1
-    fi
-  fi ;;
-esac
-: "\${METACODE_DATA_DIR:=$DIR/data}"; : "\${METACODE_PROFILE:=lite}"; : "\${AI_MODE:=local-only}"; : "\${PORT:=3000}"; : "\${METACODE_HOST:=127.0.0.1}"
+__ARM32__: "\${METACODE_DATA_DIR:=$DIR/data}"; : "\${METACODE_PROFILE:=lite}"; : "\${AI_MODE:=local-only}"; : "\${PORT:=3000}"; : "\${METACODE_HOST:=127.0.0.1}"
 [ "\${METACODE_NO_BROWSER:-0}" = 1 ] || : "\${METACODE_OPEN_BROWSER:=1}"
 mkdir -p "$METACODE_DATA_DIR" || exit 1
 if [ -z "\${METACODE_ENV_FILE:-}" ] && [ ! -f "$DIR/.env" ] && [ -f "$METACODE_DATA_DIR/.env" ]; then METACODE_ENV_FILE="$METACODE_DATA_DIR/.env"; export METACODE_ENV_FILE; fi
@@ -282,16 +308,25 @@ function macApp(stage, target, out) {
 # Your data: ~/Library/Application Support/MetaCode (settings: a .env file there).
 APP="$(cd "$(dirname "$0")/../Resources/app" && pwd)"
 DATA="$HOME/Library/Application Support/MetaCode"
+alert() { /usr/bin/osascript -e 'on run argv' -e 'display alert "MetaCode" message (item 1 of argv) as warning' -e 'end run' "$1" >/dev/null 2>&1; }
+# (opened where it was unpacked, macOS runs a temporary copy of it, which may be gone by the time Terminal starts)
+case "$APP" in */AppTranslocation/*) alert "Move MetaCode to the Applications folder (or any other folder), then open it from there."; exit 1 ;; esac
 mkdir -p "$DATA"
-# (already running: open it)
-if /usr/bin/curl -fsS -m 2 http://127.0.0.1:3000/api/health >/dev/null 2>&1; then exec /usr/bin/open "http://localhost:3000/app.html"; fi
-# (Terminal opens a window when it starts: the server runs in that one then)
+# (already running: open it. Its port is PORT in the .env there, else 3000)
+PORT=$(sed -n 's/^[[:space:]]*PORT[[:space:]]*=[[:space:]]*["'"'"']\\{0,1\\}\\([0-9][0-9]*\\).*/\\1/p' "$DATA/.env" 2>/dev/null | tail -n 1)
+[ -n "$PORT" ] || PORT=3000
+if /usr/bin/curl -s -m 2 "http://127.0.0.1:$PORT/api/health" 2>/dev/null | grep -q '"app":"metacode"'; then exec /usr/bin/open "http://localhost:$PORT/app.html"; fi
+# (Terminal opens a window when it starts: the server runs in that one then. Refused the permission to control
+# Terminal, the app says where to give it)
 exec /usr/bin/osascript -e 'on run argv' \\
   -e 'set cmd to "cd " & quoted form of (item 1 of argv) & " && export METACODE_DATA_DIR=" & quoted form of (item 2 of argv) & " && exec ./metacode.sh"' \\
   -e 'set wasRunning to application "Terminal" is running' \\
-  -e 'tell application "Terminal"' \\
+  -e 'try' -e 'tell application "Terminal"' \\
   -e 'if wasRunning then' -e 'do script cmd' -e 'else' -e 'try' -e 'do script cmd in window 1' -e 'on error' -e 'do script cmd' -e 'end try' -e 'end if' \\
-  -e 'activate' -e 'end tell' -e 'end run' "$APP" "$DATA"
+  -e 'activate' -e 'end tell' \\
+  -e 'on error m' \\
+  -e 'display alert "MetaCode couldn’t start" message "It runs its server in Terminal. Let MetaCode control Terminal: System Settings → Privacy & Security → Automation → MetaCode → Terminal. (" & m & ")" as warning' \\
+  -e 'end try' -e 'end run' "$APP" "$DATA"
 `, { mode: 0o755 });
   const file = path.join(out, 'MetaCode-' + PKG.version + '-' + target + '-app.zip');
   fs.rmSync(file, { force: true });
@@ -341,7 +376,14 @@ async function appImageRuntime(target, o, cache) {
     if (!o.appimageRuntime) fs.rmSync(file, { force: true });
     throw new Error(file + ' isn\'t an AppImage runtime for ' + t.appimage);
   }
-  return { file, sha256: sha256(file) };
+  const got = sha256(file);
+  // (a runtime given with --appimage-runtime is the builder's own choice)
+  if (!o.appimageRuntime && got !== t.appimageSha256) {
+    fs.rmSync(file, { force: true });
+    throw new Error('The AppImage runtime for ' + t.appimage + ' (' + APPIMAGE_RUNTIME + t.appimage + ') isn\'t the one checked for this MetaCode: its sha256 is ' + got +
+      ', not ' + t.appimageSha256 + '. The AppImage project may have rebuilt it: check it, then update appimageSha256 in scripts/build-portable.js, or give one with --appimage-runtime <file>.');
+  }
+  return { file, sha256: got };
 }
 
 async function appImage(stage, target, out, o, cache) {
@@ -413,7 +455,10 @@ function windowsInstaller(stage, target, out, cache) {
     '!insertmacro MUI_PAGE_INSTFILES', '!insertmacro MUI_PAGE_FINISH', '!insertmacro MUI_UNPAGE_CONFIRM', '!insertmacro MUI_UNPAGE_INSTFILES',
     '!insertmacro MUI_LANGUAGE "English"',
     // (a folder given with /D= gets a MetaCode folder inside it, so uninstalling never touches anything else)
-    'Function .onInit', '  ${GetFileName} "$INSTDIR" $0', '  StrCmp $0 "MetaCode" +2 0', '  StrCpy $INSTDIR "$INSTDIR\\MetaCode"', 'FunctionEnd',
+    // (a folder named MetaCode is used as it is only when it's empty or already holds MetaCode: one that holds
+    // other things gets a MetaCode folder inside it too)
+    'Function .onInit', '  ${GetFileName} "$INSTDIR" $0', '  StrCmp $0 "MetaCode" 0 add', '  IfFileExists "$INSTDIR\\portable.json" done 0',
+    '  ${DirState} "$INSTDIR" $1', '  IntCmp $1 1 add done done', '  add:', '  StrCpy $INSTDIR "$INSTDIR\\MetaCode"', '  done:', 'FunctionEnd',
     'Section "MetaCode"', '  SetOutPath "$INSTDIR"',
     '  ; an earlier version\'s files go first (data\\ and .env stay)', ...removeDirs,
     '  File /r "' + nsisPath(path.join(stage, '*')) + '"',
@@ -448,6 +493,15 @@ function windowsInstaller(stage, target, out, cache) {
     const name = 'MetaCode-' + PKG.version + '-' + target;
     const stage = path.join(o.out, name);
     console.log('▸ ' + name);
+    // (a folder built before may be in use: what it keeps, data/, and its settings, .env, stay)
+    const kept = path.join(o.out, '.kept-' + target);
+    fs.rmSync(kept, { recursive: true, force: true });
+    const keep = ['data', '.env'].filter(f => fs.existsSync(path.join(stage, f)));
+    if (keep.length) {
+      fs.mkdirSync(kept, { recursive: true });
+      keep.forEach(f => fs.renameSync(path.join(stage, f), path.join(kept, f)));
+      console.log('  kept ' + keep.join(' and ') + ' from the folder built before');
+    }
     fs.rmSync(stage, { recursive: true, force: true });
     for (const f of files) copyFile(path.join(ROOT, f), path.join(stage, f));
     sh('cp', ['-a', modules, path.join(stage, 'node_modules')]);
@@ -460,7 +514,7 @@ function windowsInstaller(stage, target, out, cache) {
     if (t.os === 'win') {
       fs.writeFileSync(path.join(stage, 'MetaCode.cmd'), LAUNCH_CMD);
       if (o.installer) windowsLauncher(stage, cache);
-    } else fs.writeFileSync(path.join(stage, 'metacode.sh'), LAUNCH_SH, { mode: 0o755 });
+    } else fs.writeFileSync(path.join(stage, 'metacode.sh'), launchSh(target), { mode: 0o755 });
     if (t.os === 'darwin') copyFile(path.join(stage, 'metacode.sh'), path.join(stage, 'MetaCode.command'), 0o755);
     fs.writeFileSync(path.join(stage, 'README-PORTABLE.txt'), readme(target, o));
     fs.writeFileSync(path.join(stage, 'portable.json'), JSON.stringify({ name: 'MetaCode', version: PKG.version, target, node: runtime ? o.nodeVersion : null, nodeSha256: runtime ? runtime.sha256 : null, builtAt: new Date().toISOString() }, null, 2) + '\n');
@@ -469,7 +523,10 @@ function windowsInstaller(stage, target, out, cache) {
     if (o.archive) {
       const archive = path.join(o.out, name + (t.os === 'win' ? '.zip' : '.tar.gz'));
       fs.rmSync(archive, { force: true });
-      if (t.os === 'win') sh('zip', ['-qr9', archive, name], { cwd: o.out }); else sh('tar', ['-czf', archive, '-C', o.out, name]);
+      // (a folder in use isn't packed with its data/ and .env: they're put back afterwards. Files are packed as
+      // root's, not the builder's: unpacked by root, they'd belong to whoever has the builder's user id there)
+      if (t.os === 'win') sh('zip', ['-qr9', archive, name, '-x', name + '/data/*', name + '/.env'], { cwd: o.out });
+      else sh('tar', tarOwner().concat(['--exclude', name + '/data', '--exclude', name + '/.env', '-czf', archive, '-C', o.out, name]));
       note(archive);
     }
     if (t.os === 'darwin') note(macApp(stage, target, o.out));
@@ -480,6 +537,11 @@ function windowsInstaller(stage, target, out, cache) {
       made.push('AppImage runtime sha256 ' + ai.runtimeSha256);
     }
     if (o.installer && t.os === 'win') note(windowsInstaller(stage, target, o.out, cache));
+    // (what was kept goes back into the folder, now that the packages are made without it)
+    if (fs.existsSync(kept)) {
+      for (const f of fs.readdirSync(kept)) fs.renameSync(path.join(kept, f), path.join(stage, f));
+      fs.rmSync(kept, { recursive: true, force: true });
+    }
     console.log('  ' + made.join(', '));
   }
 })().catch(e => { console.error('build-portable: ' + e.message); process.exit(1); });

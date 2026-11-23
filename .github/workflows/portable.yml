@@ -237,7 +237,10 @@ jobs:
           # its AppleScript compiles (running it needs a person to let MetaCode control Terminal)
           # (a copy next to the original, compiling instead of running)
           sed -e 's#^exec /usr/bin/osascript#exec /usr/bin/osacompile -o "$RUNNER_TEMP/metacode.scpt"#' -e 's# "\$APP" "\$DATA"$##' "$app/Contents/MacOS/MetaCode" > "$app/Contents/MacOS/compile-check"
-          sh "$app/Contents/MacOS/compile-check" && test -s "$RUNNER_TEMP/metacode.scpt" && rm "$app/Contents/MacOS/compile-check"
+          # (one command a line: bash -e stops at a failing one, not at one inside an && list)
+          sh "$app/Contents/MacOS/compile-check"
+          test -s "$RUNNER_TEMP/metacode.scpt"
+          rm "$app/Contents/MacOS/compile-check"
           # what it has Terminal run: the server inside the app, its data in Application Support
           node scripts/smoke-portable.js "$app/Contents/Resources/app" --data "$HOME/Library/Application Support/MetaCode"
           spctl --assess --type execute -vv "$app" || echo "(not signed with an Apple certificate: Gatekeeper asks once)"

@@ -3154,6 +3154,7 @@ app.post('/api/settings/reload', async (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     status:       'ok',
+    app:          'metacode',            // (a launcher started again tells MetaCode from another program by it)
     provider:     'opencode',
     aiConfigured: !notConfigured(),
     aiReady:      aiReady(),
@@ -3285,18 +3286,36 @@ function openBrowser(url) {
     p.unref();
   } catch (e) { say(); }
 }
+// (MetaCode's address on this computer: METACODE_HOST when it names one address, else 127.0.0.1)
+const ownHost = () => { const h = String(process.env.METACODE_HOST || '').trim(); return h && !['0.0.0.0', '::', 'localhost'].includes(h) ? h : '127.0.0.1'; };
+const hostUrl = h => (h.includes(':') ? '[' + h + ']' : h);
 async function answersAsMetaCode(port) {
   try {
-    const res = await fetch('http://127.0.0.1:' + port + '/api/health', { signal: AbortSignal.timeout(3000) });
-    return res.ok && (await res.json()).status === 'ok';
+    const res = await fetch('http://' + hostUrl(ownHost()) + ':' + port + '/api/health', { signal: AbortSignal.timeout(3000) });
+    return res.ok && (await res.json()).app === 'metacode';
   } catch (e) { return false; }
+}
+// The address the browser opens: localhost, unless MetaCode listens on one other address only (that one), or on
+// 127.0.0.1 only while another program answers at [::1] on the same port (browsers try localhost's IPv6 first)
+async function browserUrl(port) {
+  const h = ownHost();
+  if (h !== '127.0.0.1' && h !== '::1') return 'http://' + hostUrl(h) + ':' + port + '/app.html';
+  if (h === '127.0.0.1' && String(process.env.METACODE_HOST || '').trim() === '127.0.0.1') {
+    const other = await fetch('http://[::1]:' + port + '/api/health', { signal: AbortSignal.timeout(1500) })
+      .then(async r => { try { return (await r.json()).app !== 'metacode'; } catch (e) { return true; } }, () => false);
+    if (other) {
+      console.warn('  ⚠ Another program answers at localhost:' + port + ' over IPv6 ([::1]), so MetaCode opens at http://127.0.0.1:' + port + '. Set another PORT in .env to keep them apart.');
+      return 'http://127.0.0.1:' + port + '/app.html';
+    }
+  }
+  return 'http://localhost:' + port + '/app.html';
 }
 
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
   start(PORT).then(server => {
     printBanner(server.address().port);
-    if (wantsBrowser()) openBrowser('http://localhost:' + server.address().port + '/app.html');
+    if (wantsBrowser()) browserUrl(server.address().port).then(openBrowser);
     // Ctrl+C / pm2 stop: the AI service MetaCode started stops with it
     const shutdown = () => {
       server.close();
@@ -3306,9 +3325,11 @@ if (require.main === module) {
     process.once('SIGINT', shutdown);
     process.once('SIGTERM', shutdown);
   }, async err => {
-    if (err && err.code === 'EADDRINUSE' && wantsBrowser() && await answersAsMetaCode(PORT)) {
-      console.log('\n  MetaCode is already running at http://localhost:' + PORT + '/app.html: opening it.\n');
-      openBrowser('http://localhost:' + PORT + '/app.html');
+    // (started again while it runs — a second double-click: the one that runs is opened, nothing else starts)
+    if (err && err.code === 'EADDRINUSE' && await answersAsMetaCode(PORT)) {
+      const url = await browserUrl(PORT);
+      console.log('\n  MetaCode is already running at ' + url + (wantsBrowser() ? ': opening it.' : '.') + '\n');
+      if (wantsBrowser()) openBrowser(url);
       return setTimeout(() => process.exit(0), 500);
     }
     console.error('[server] Couldn\'t start: ' + redact(err && err.message) +

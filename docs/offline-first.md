@@ -137,7 +137,9 @@ Apple certificate, so Windows and macOS ask once before the first start.
 - **MetaCode.app.** Unzip `MetaCode-<version>-darwin-arm64-app.zip`, move `MetaCode.app` to Applications and
   open it.
   - It runs the server in a Terminal window; closing the window stops it.
-  - The first time, macOS asks whether MetaCode may control Terminal.
+  - The first time, macOS asks whether MetaCode may control Terminal. If that was refused, the app says where to
+    allow it.
+  - Opened where it was unzipped, macOS runs a temporary copy of it, so the app asks to be moved first.
   - Data and settings (`.env`) go to `~/Library/Application Support/MetaCode`.
 - **Portable.** Unpack the `.tar.gz` anywhere and double-click `MetaCode.command`.
 - **The first open.** On macOS 14 and older, right-click → Open. On macOS 15 and newer, open it once, then
@@ -363,7 +365,8 @@ system. The launchers start `server.js` and leave the rest to it: `METACODE_OPEN
 - **Downloads are checked.**
   - Models: the installed digest must match the registry's manifest.
   - Node.js runtimes: against nodejs.org's `SHASUMS256.txt`.
-  - The AppImage runtime: checked to be a program for the target's processor, with its sha256 printed.
+  - The AppImage runtime: its sha256 must be the one recorded in `scripts/build-portable.js` (the AppImage project
+    rebuilds its runtime now and then; a different one stops the build until it's checked).
   - The browser libraries: sha256 for each file in `public/vendor/VENDOR.json`, checked by
     `node scripts/vendor-web.js --check`.
   - MetaCode runs nothing it downloads. Models are data, and only Ollama reads them.
@@ -386,6 +389,8 @@ npm run build:portable -- --target win-x64 --target linux-arm64 --deb
 - **Other options:**
   - `--no-node` leaves the runtime out, and the launcher uses the device's Node.js.
   - `--no-archive` leaves only the folder.
+  - Building again keeps a folder's `data/` and `.env` (it may be in use), and leaves them out of the archives and
+    packages.
   - `--node <version>` picks the bundled Node.js.
 - The AI Scraper (beta) page is included when `collector/dist` was built (`npm run collector:build`).
 
