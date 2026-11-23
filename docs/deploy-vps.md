@@ -515,8 +515,9 @@ When every AI provider is out — the gateway paused for the day and OpenCode Ze
 still answer with a small model that runs on the VPS itself, through [Ollama](https://ollama.com). It is a last
 resort: MetaCode uses it only when no other provider's model can answer and none is back within a minute (a short
 rate limit is waited out instead), one request at a time. It runs on the server's CPU, so it is much slower than
-the providers, and a model this small makes many more mistakes: AI Coding says which posts it coded (*"answered
-by gemma3:1b (local backup)"*), so check those before you rely on them.
+the providers, and a model this small makes many more mistakes. AI Coding's summary counts the posts it coded
+(*"37 by “gemma3:1b (local backup)” — the local backup on this server…"*), and **Export Data** marks each of them in
+its `ai_coded_by` column, so check those before you rely on them.
 
 **1. Install Ollama.** Its installer sets it up as the systemd service `ollama`, listening on `127.0.0.1:11434`
 only. *"No NVIDIA/AMD GPU detected. Ollama will run in CPU-only mode."* is expected on a VPS.
@@ -541,7 +542,9 @@ CONF
 sudo systemctl daemon-reload && sudo systemctl restart ollama
 ```
 
-(With a long codebook, use `16384`: more context needs more memory and makes each answer slower.)
+(With a long codebook, or for **Ask MetaCode**, whose prompt is about 10,000 tokens, use `16384` and set
+`AI_LOCAL_CONTEXT_TOKENS=16384` in MetaCode's `.env` too: MetaCode doesn't hand the backup a request that won't fit
+its context. More context needs more memory and makes each answer slower.)
 
 **3. Update MetaCode** ([step 10](#10-updating)). Its AI service finds Ollama by itself and downloads the two
 default models one after the other: `gemma3:1b` (815 MB, the better one, used first) and `gemma3:270m` (292 MB,
@@ -554,23 +557,29 @@ gemma3:270m`.
 ```bash
 curl -s http://127.0.0.1:11434/api/tags; echo        # Ollama answers and lists gemma3:1b and gemma3:270m
 ollama run gemma3:1b "Answer in three words: what is a codebook?"     # the first answer also loads the model
-pm2 logs metacode-opencode --lines 20 | grep ollama  # ollama.found, ollama.pull … done
+pm2 logs metacode-opencode --nostream --lines 500 | grep ollama   # ollama.found, ollama.pull … done
 ```
 
 Memory: while it answers, `gemma3:1b` needs roughly 1.5 GB of free RAM and `gemma3:270m` about 0.5 GB (Ollama
 unloads a model 5 minutes after its last answer). On a small VPS, offer only the small one with
-`OLLAMA_MODELS=gemma3:270m` in `.env`, then **Reload .env**. Ollama answers *"model requires more system memory
+`METACODE_OLLAMA_MODELS=gemma3:270m` in `.env`, then **Reload .env**. Ollama answers *"model requires more system memory
 … than is available"* when it doesn't fit.
 
 | Variable (`.env`) | Default | What it does |
 |---|---|---|
 | `OLLAMA_BACKUP` | `auto` | `auto`: offered while Ollama answers, invisible otherwise; `on`: always listed, with what's wrong; `off`: never |
-| `OLLAMA_MODELS` | `gemma3:1b,gemma3:270m` | The models to offer, best first; `all`: every model Ollama has |
+| `METACODE_OLLAMA_MODELS` | `gemma3:1b,gemma3:270m`, then the others Ollama has | The models to offer, best first; `all`: every chat model Ollama has. (`OLLAMA_MODELS` works too when it lists models, as it used to, but it is Ollama's own setting for its models folder: don't put that in MetaCode's `.env`.) Cloud models are never offered. |
 | `OLLAMA_BASE_URL` | `http://127.0.0.1:11434/v1` | Where Ollama answers |
 | `OLLAMA_AUTO_PULL` | `on` | `off`: don't download the models Ollama doesn't have |
 | `AI_LOCAL_TIMEOUT_MS` | `300000` | How long one answer from the backup may take (10000–600000 ms) |
 | `AI_LOCAL_PARALLEL` | `1` | How many requests it answers at once (raise it only with `OLLAMA_NUM_PARALLEL` and spare CPU cores) |
+| `AI_LOCAL_CONTEXT_TOKENS` | `8192` | How much the backup can take in (match `OLLAMA_CONTEXT_LENGTH` from step 2): bigger requests aren't switched to it |
 
 **Keep port 11434 closed.** Ollama has no password: anyone who reaches it can use, download and delete models.
 The firewall from [step 8](#8-firewall) keeps it closed; don't set `OLLAMA_HOST=0.0.0.0`. To remove the backup,
 set `OLLAMA_BACKUP=off` (or `sudo systemctl disable --now ollama`).
+
+On a server shared with other user accounts, `auto` uses whatever answers at `OLLAMA_BASE_URL`: install Ollama
+yourself so it holds port 11434, or set `OLLAMA_BACKUP=off`. If you set up Ollama as a provider of your own under
+another id in `OPENCODE_CONFIG`, the backup still uses the same Ollama and downloads its default models into it:
+set `OLLAMA_AUTO_PULL=off` to stop the downloads, or `OLLAMA_BACKUP=off` for no backup.

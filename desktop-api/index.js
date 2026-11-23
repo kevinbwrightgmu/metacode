@@ -25,6 +25,8 @@
 // DESKTOP_WITHOUT_ACCOUNTS=true (then anyone who can reach the server can use
 // the app and its AI quota).
 
+// The desktop app gives up on an AI request after 180 s: the server answers a little before that
+const APP_WAIT_MS = 170 * 1000;
 const express = require('express');
 const Plans = require('../public/js/plans.js');
 const { loadLeaseKey, signLease } = require('./lease');
@@ -166,8 +168,16 @@ function createDesktopApi(deps) {
       const gone = new AbortController();
       const onClose = () => { if (!res.writableFinished) gone.abort(); };
       res.on('close', onClose);
+      if (res.destroyed && !res.writableFinished) gone.abort();          // (gone already, while the request was read)
+      // The app stops waiting at 180 s: the server answers before that, with what happened, instead of the app
+      // seeing a dropped connection (a slow local backup, or one busy with other requests, can take longer)
+      let timedOut = false;
+      const limit = setTimeout(() => { timedOut = true; gone.abort(); }, APP_WAIT_MS);
       let out;
-      try { out = await deps.ai.chat(body, { switchModels: true, signal: gone.signal }); } finally { res.off('close', onClose); }
+      try { out = await deps.ai.chat(body, { switchModels: true, signal: gone.signal }); } finally { clearTimeout(limit); res.off('close', onClose); }
+      if (out.aborted && timedOut && !res.headersSent) {
+        return send(res, fail(504, 'ai_timeout', 'The AI didn\'t answer within ' + Math.round(APP_WAIT_MS / 1000) + ' seconds. When the other providers are out, the local backup on the server answers, and it can be slow or busy with other requests: try again in a few minutes.'));
+      }
       if (out.aborted) return;
       if (out.failure) return send(res, fail(out.failure.status || 502, out.failure.type || 'ai_error', out.failure.message || 'The AI service failed.', out.failure.retryAfterSeconds ? { retryAfterSeconds: out.failure.retryAfterSeconds } : null));
       const choice = out.completion && out.completion.choices && out.completion.choices[0];

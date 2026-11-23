@@ -112,6 +112,9 @@ function settingNames(id) {
   return { base: at + 'baseURL', key: at + 'apiKey', proxy: 'HTTPS_PROXY', transport: at + 'transport', where: 'in the OpenCode config' };
 }
 
+// What a keyless server on this machine is sent as its key (it ignores it)
+const LOCAL_PLACEHOLDER_KEY = 'local';
+
 /**
  * Reads one provider's settings from its (already substituted) config entry,
  * with EMIS's defaults for the provider "emis". Same checks and warnings as
@@ -197,7 +200,10 @@ export function loadSettings(id, config, env, repoDir) {
   if (rawFile && !isOff(rawFile)) s.modelsFile = path.resolve(repoDir || REPO_DIR, rawFile.replace(/^~(?=$|[\\/])/, os.homedir()));
 
   if (!s.problem && !s.keys.length) {
-    s.problem = isEmis ? 'Add the gateway key to EMIS_API_KEY in .env, then Reload .env.'
+    // A server on this machine (llama.cpp's llama-server, LM Studio, Jan, LocalAI, Ollama…) usually takes no key:
+    // a placeholder is sent, as OpenAI-compatible clients must send one
+    if (!isEmis && url && ['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)) { s.keys.push(LOCAL_PLACEHOLDER_KEY); s.keyless = true; }
+    else s.problem = isEmis ? 'Add the gateway key to EMIS_API_KEY in .env, then Reload .env.'
       : 'Add an API key for this provider (' + names.key + ' in the OpenCode config), then Reload .env.';
   }
   return s;
@@ -392,7 +398,7 @@ export function createProvider(opts) {
   let config = opts.config || {};
   let env = opts.env || process.env;
   let name = text(config.name) || (isEmis ? 'AI gateway' : id);
-  let names = settingNames(id);
+  let names = opts.settingNames || settingNames(id);        // (a provider built on this one may name its own settings)
   let settings = loadSettings(id, config, env, repoDir);
   let closed = false;
 
@@ -1097,7 +1103,7 @@ export function createProvider(opts) {
     if (fixed && !modelList.ids && modelList.failure) warnings.push('Couldn\'t check which models ' + name + ' offers right now (' + modelList.failure.message.replace(/\.$/, '') + ').');
     return {
       id, name, kind: 'openai-compatible', ready: !settings.problem, problem: settings.problem, warnings,
-      keyCount: settings.keys.length, baseHost, proxy: settings.proxyHost, transport: transportText(),
+      keyCount: settings.keyless ? 0 : settings.keys.length, baseHost, proxy: settings.proxyHost, transport: transportText(),
       models: Object.assign({ listed, available, source, checkedAt: modelList.fetchedAt ? new Date(modelList.fetchedAt).toISOString() : null },
         file && !file.ok && file.problem ? { problem: file.problem } : {}),
       resting, keys
@@ -1164,7 +1170,7 @@ export function createProvider(opts) {
     if (newEnv) env = newEnv;
     if (newConfig) config = newConfig;
     name = text(config.name) || (isEmis ? 'AI gateway' : id);
-    names = settingNames(id);
+    names = opts.settingNames || settingNames(id);
     settings = loadSettings(id, config, env, repoDir);
     for (const w of settings.warnings) log.warn('provider.warning', { provider: id, warning: w });
     keyState = new Map();

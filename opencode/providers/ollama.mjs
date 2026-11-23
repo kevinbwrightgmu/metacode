@@ -12,14 +12,17 @@
 //   - auto-detection: with OLLAMA_BACKUP=auto (the default) it is offered when
 //     Ollama answers, and stays out of every list while it doesn't, so a server
 //     without Ollama shows nothing about it;
-//   - the models to offer (OLLAMA_MODELS) are downloaded when Ollama doesn't
-//     have them yet (POST /api/pull), unless OLLAMA_AUTO_PULL=off.
+//   - the default models to offer are downloaded when Ollama doesn't have them
+//     yet (POST /api/pull), unless OLLAMA_AUTO_PULL=off; with AI_MODE=local or
+//     local-only, only with OLLAMA_AUTO_PULL=on (the AI Model Store asks first).
 //
 // Settings (.env):
 //   OLLAMA_BACKUP      auto (default) | on (always listed; its problem shown when Ollama isn't running) | off
-//   OLLAMA_BASE_URL    Ollama's OpenAI-compatible address (default http://127.0.0.1:11434/v1)
-//   OLLAMA_MODELS      the models to offer, comma-separated (default DEFAULT_MODELS); "all": every chat
-//                      model Ollama has
+//   OLLAMA_BASE_URL    Ollama's address (default http://127.0.0.1:11434/v1; /v1 is added when missing)
+//   METACODE_OLLAMA_MODELS  the models to offer, best first, comma-separated; "all": every chat model Ollama
+//                      has. Unset: DEFAULT_MODELS, then every other chat model Ollama has (those installed in
+//                      the AI Model Store). (OLLAMA_MODELS is read too when it's a list: it used to be the name,
+//                      but it's Ollama's own setting for its models folder.) Cloud models are never offered.
 //   OLLAMA_AUTO_PULL   on (default) | off
 // A provider.ollama of the operator's own in OPENCODE_CONFIG isn't this: it stays an ordinary OpenAI-compatible
 // provider (config.mjs), and there's no local backup then.
@@ -48,15 +51,33 @@ export function ollamaSettings(env, config) {
   const opts = (config && config.options) || {};
   const rawMode = String(e.OLLAMA_BACKUP || '').trim().toLowerCase();
   const mode = isOffText(rawMode) ? 'off' : isOnText(rawMode) ? 'on' : 'auto';
-  const baseURL = String(opts.baseURL || e.OLLAMA_BASE_URL || '').trim().replace(/\/+$/, '') || DEFAULT_BASE_URL;
-  const rawModels = String(e.OLLAMA_MODELS || '').trim();
+  let baseURL = String(opts.baseURL || e.OLLAMA_BASE_URL || '').trim().replace(/\/+$/, '') || DEFAULT_BASE_URL;
+  if (!/\/v1$/.test(baseURL)) baseURL += '/v1';        // (http://127.0.0.1:11434, as Ollama's docs write it, is accepted)
+  // METACODE_OLLAMA_MODELS: the models to offer, best first. (OLLAMA_MODELS is Ollama's own setting for its models
+  // folder; MetaCode still reads a list there, as it used to, but never a folder)
+  const legacy = String(e.OLLAMA_MODELS || '').trim();
+  const rawModels = String(e.METACODE_OLLAMA_MODELS || '').trim() || (/^[\\/~.]|^[A-Za-z]:[\\/]/.test(legacy) ? '' : legacy);
+  const modelsVar = String(e.METACODE_OLLAMA_MODELS || '').trim() ? 'METACODE_OLLAMA_MODELS' : rawModels ? 'OLLAMA_MODELS' : 'METACODE_OLLAMA_MODELS';
   const all = /^all$/i.test(rawModels);
   const models = all ? null : (rawModels ? rawModels.split(',').map(s => s.trim()).filter(Boolean) : DEFAULT_MODELS.slice());
-  const autoPull = !isOffText(e.OLLAMA_AUTO_PULL);
-  return { mode, baseURL, models, all, autoPull };
+  // Unset: the defaults first, then every other chat model Ollama has (those installed from
+  // MetaCode's AI Model Store); a list names exactly the models to offer
+  const extra = !all && !rawModels;
+  // AI_MODE=local / local-only (config.mjs): Ollama's models are first-class (they may be the default) instead of
+  // the last-resort backup, and nothing is downloaded unless OLLAMA_AUTO_PULL=on: the Model Store asks first
+  const aiMode = String(e.AI_MODE || '').trim().toLowerCase();
+  const backup = !(aiMode === 'local' || aiMode === 'local-only');
+  const autoPull = backup ? !isOffText(e.OLLAMA_AUTO_PULL) : isOnText(e.OLLAMA_AUTO_PULL);
+  // OLLAMA_PULL_IDLE_SECONDS: a download that makes no progress for this long is stopped (and tried again later)
+  const idle = Number(String(e.OLLAMA_PULL_IDLE_SECONDS || '').trim());
+  const pullIdleMs = Number.isFinite(idle) && idle >= 1 && idle <= 3600 ? idle * 1000 : PULL_IDLE_MS;
+  return { mode, baseURL, models, all, extra, autoPull, backup, modelsVar, pullIdleMs };
 }
 
 // "gemma3:270m" and "gemma3:270m" are one model; a name without a tag is ":latest"
+// An Ollama cloud model (its entry names a remote host or model, or its tag says cloud), or an embedding model
+const isCloud = m => !!(m.remote_host || m.remote_model) || /(^|[:-])cloud$/i.test(String(m.name || m.model || ''));
+const isEmbedding = m => /^(bert|nomic-bert)$/i.test(String((m.details && m.details.family) || '')) || /embed/i.test(String(m.name || m.model || ''));
 const tagged = name => (String(name).includes(':') ? String(name) : String(name) + ':latest');
 const sameModel = (a, b) => tagged(a).toLowerCase() === tagged(b).toLowerCase();
 
@@ -69,9 +90,13 @@ export function createProvider(opts) {
   // what is known about Ollama: reachable (null = not checked yet), the models it has, downloads;
   // gen: the settings' generation (a look started under older settings doesn't count)
   const state = { reachable: null, checkedAt: 0, probing: null, have: [], problem: null, pulls: new Map(), gen: 0 };
-  const providerName = () => (typeof config.name === 'string' && config.name.trim()) || 'Local backup (Ollama)';
+  const providerName = () => (typeof config.name === 'string' && config.name.trim() && (s.backup || config.name.trim() !== 'Local backup (Ollama)') ? config.name.trim() : null) ||
+    (s.backup ? 'Local backup (Ollama)' : 'On this device (Ollama)');
+  const suffix = () => (s.backup ? ' (local backup)' : ' (on this device)');
 
   const nativeBase = () => s.baseURL.replace(/\/v1$/, '');
+  // (messages from the OpenAI-compatible provider behind this one name the settings in .env, not the OpenCode config)
+  const SETTING_NAMES = { base: 'OLLAMA_BASE_URL', key: 'OLLAMA_BASE_URL', proxy: 'HTTPS_PROXY', transport: 'OLLAMA_BASE_URL', where: 'in the server\'s .env file' };
   const baseConfig = () => Object.assign({}, config, {
     options: Object.assign({}, config.options, { baseURL: s.baseURL, apiKey: PLACEHOLDER_KEY, transport: 'node' })
   });
@@ -88,7 +113,7 @@ export function createProvider(opts) {
   // without Ollama makes no requests and logs nothing for it (that provider fetches its model list at once)
   let base = null;
   const baseOf = () => {
-    if (!base && !closed) base = createOpenAICompatible(Object.assign({}, opts, { env: baseEnv(), config: baseConfig() }));
+    if (!base && !closed) base = createOpenAICompatible(Object.assign({}, opts, { env: baseEnv(), config: baseConfig(), settingNames: SETTING_NAMES }));
     return base;
   };
 
@@ -117,8 +142,11 @@ export function createProvider(opts) {
         const before = state.have.join('\n');
         state.reachable = true;
         state.problem = null;
-        state.have = r.json.models.map(m => m && (m.name || m.model)).filter(n => typeof n === 'string');
+        // (Ollama's cloud models run on Ollama's servers, so the prompts would leave this one: never offered)
+        state.have = r.json.models.filter(m => m && !isCloud(m) && !isEmbedding(m)).map(m => m.name || m.model).filter(n => typeof n === 'string');
         if (was !== true) log.info('ollama.found', { url: nativeBase(), models: state.have.length });
+        // (downloads that failed while Ollama was away most likely failed because it was away)
+        if (was === false) for (const [m, p] of state.pulls) if (p.state === 'failed') state.pulls.delete(m);
         // (a model pulled or removed by hand: the list of models to offer is fetched again at once)
         else if (state.have.join('\n') !== before && base) base.models({ refresh: true }).catch(() => {});
         pullMissing();
@@ -158,7 +186,7 @@ export function createProvider(opts) {
           pulls.set(model, { state: 'done', at: Date.now() });
           log.info('ollama.pull', { model, state: 'done' });
         } catch (e) {
-          const error = String(e && e.name === 'AbortError' ? 'stopped' : e && e.name === 'TimeoutError' ? 'no progress for ' + (PULL_IDLE_MS / 60000) + ' minutes' : (e && e.message) || e).slice(0, 200);
+          const error = String(e && e.name === 'AbortError' ? 'stopped' : e && e.name === 'TimeoutError' ? 'no progress for ' + Math.round(s.pullIdleMs / 1000) + ' s' : (e && e.message) || e).slice(0, 200);
           pulls.set(model, { state: 'failed', at: Date.now(), error });
           log.warn('ollama.pull', { model, state: 'failed', detail: error });
         }
@@ -176,7 +204,7 @@ export function createProvider(opts) {
     const controller = new AbortController();
     pullAbort = controller;
     let idle = null;
-    const quiet = () => { clearTimeout(idle); idle = setTimeout(() => controller.abort(Object.assign(new Error('idle'), { name: 'TimeoutError' })), PULL_IDLE_MS); };
+    const quiet = () => { clearTimeout(idle); idle = setTimeout(() => controller.abort(Object.assign(new Error('idle'), { name: 'TimeoutError' })), s.pullIdleMs); };
     quiet();
     try {
       const res = await fetch(nativeBase() + '/api/pull', {
@@ -189,17 +217,19 @@ export function createProvider(opts) {
         throw new Error((json && json.error) || 'HTTP ' + res.status);
       }
       const decoder = new TextDecoder();
-      let buffer = '', last = null, biggest = 0;
+      let buffer = '', last = null, biggest = 0, mark = null;
       const take = line => {
         if (!line.trim()) return;
         let j = null;
         try { j = JSON.parse(line); } catch (e) { return; }
         if (j && j.error) throw new Error(String(j.error));
+        // (while stalled, Ollama keeps sending the same line: only progress counts as not idle)
+        const now = j && (j.status + '|' + (j.digest || '') + '|' + (j.completed || 0));
+        if (now !== mark) { mark = now; quiet(); }
         last = j;
         if (j && j.total > 0 && j.total >= biggest) { biggest = j.total; p.percent = Math.min(100, Math.floor(100 * (j.completed || 0) / j.total)); }
       };
       for await (const chunk of res.body) {
-        quiet();
         buffer += decoder.decode(chunk, { stream: true });
         let i;
         while ((i = buffer.indexOf('\n')) >= 0) { take(buffer.slice(0, i)); buffer = buffer.slice(i + 1); }
@@ -214,7 +244,7 @@ export function createProvider(opts) {
     }
   }
 
-  // Ollama's models as this provider offers them: the OLLAMA_MODELS it has (in that order), or all of them
+  // Ollama's models as this provider offers them: the models named (in that order), or all of them
   async function models(o) {
     probeIfDue();
     if (state.reachable === null) await probe();
@@ -225,9 +255,10 @@ export function createProvider(opts) {
     const b = baseOf();
     if (!b) return [];
     const list = (await b.models(o)).filter(e => !NOT_A_CHAT_MODEL.test(e.model));
-    const chosen = s.all ? list : wanted().map(w => list.find(e => sameModel(e.model, w))).filter(Boolean);
+    const listed = s.all ? list : wanted().map(w => list.find(e => sameModel(e.model, w))).filter(Boolean);
+    const chosen = s.extra ? listed.concat(list.filter(e => !listed.includes(e))) : listed;
     return chosen.map(e => Object.assign({}, e, {
-      name: e.model + ' (local backup)', free: false, local: true, backup: true,
+      name: e.model + suffix(), free: false, local: true, backup: s.backup,
       reasoning: false, toolCall: false
     }));
   }
@@ -242,19 +273,23 @@ export function createProvider(opts) {
     const hidden = s.mode === 'off' || (s.mode === 'auto' && state.reachable !== true);
     const downloading = [...state.pulls.entries()].filter(([, p]) => p.state === 'downloading').map(([m, p]) => m + (p.percent ? ' (' + p.percent + '%)' : ''));
     const failed = [...state.pulls.entries()].filter(([, p]) => p.state === 'failed').map(([m, p]) => m + ' (' + p.error + ')');
-    const offered = s.all ? state.have.filter(m => !NOT_A_CHAT_MODEL.test(m)) : wanted().filter(m => state.have.some(h => sameModel(h, m)));
+    const chat = state.have.filter(m => !NOT_A_CHAT_MODEL.test(m));
+    const named = s.all ? chat : wanted().filter(m => state.have.some(h => sameModel(h, m)));
+    const offered = s.extra ? named.concat(chat.filter(h => !named.some(m => sameModel(h, m)))) : named;
     let problem = null;
     if (state.reachable === false) problem = state.problem;
     else if (state.reachable === true && !offered.length) {
-      problem = downloading.length ? 'Downloading ' + downloading.join(', ') + ' — the local backup is ready when that\'s done.'
-        : 'Ollama has none of the models in OLLAMA_MODELS (' + wanted().join(', ') + ')' + (failed.length ? ': downloading failed — ' + failed.join('; ') : '') +
-          '. Run "ollama pull ' + (wanted()[0] || DEFAULT_MODELS[0]) + '" on the server' + (s.autoPull ? '' : ' (OLLAMA_AUTO_PULL is off)') + '.';
+      problem = downloading.length ? 'Downloading ' + downloading.join(', ') + ' — ' + (s.backup ? 'the local backup' : 'it') + ' is ready when that\'s done.'
+        : s.extra && !s.autoPull ? 'Ollama has no chat model yet. Install one in the AI Model Store (sidebar → AI Model Store), or run "ollama pull ' + DEFAULT_MODELS[0] + '" on the server.'
+        : 'Ollama has none of the models in ' + s.modelsVar + ' (' + wanted().join(', ') + ')' + (failed.length ? ': downloading failed — ' + failed.join('; ') : '') +
+          '. Run "ollama pull ' + (wanted()[0] || DEFAULT_MODELS[0]) + '" on the server' + (s.autoPull ? '' : ' (OLLAMA_AUTO_PULL is off)') + ', or install a model in the AI Model Store.';
     }
-    const notes = ['Last-resort backup: answers only when no other provider\'s model can, one request at a time.'];
+    const notes = [s.backup ? 'Last-resort backup: answers only when no other provider\'s model can, one request at a time.'
+      : 'Models on this device: prompts stay here. One request at a time.'];
     if (offered.length) notes.push('Models: ' + offered.join(', ') + (downloading.length ? '; downloading ' + downloading.join(', ') : '') + '.');
     return Object.assign({}, b, {
       id, name: providerName(), kind: 'ollama', ready: !problem && state.reachable === true, problem,
-      hidden, backup: true, local: true, keyCount: 0, keys: [], resting: null, free: null,
+      hidden, backup: s.backup, local: true, keyCount: 0, keys: [], resting: null, free: null,
       models: { listed: offered.length, available: state.reachable === true ? offered.length : null, source: 'live' },
       note: notes.join(' '), baseHost: (() => { try { return new URL(s.baseURL).host; } catch (e) { return null; } })(),
       warnings: (b.warnings || []).concat(failed.length && offered.length ? ['Couldn\'t download ' + failed.join('; ') + '.'] : [])
@@ -262,8 +297,8 @@ export function createProvider(opts) {
   }
 
   function unlisted(model) {
-    if (!s.all && state.have.some(h => sameModel(h, model)) && !wanted().some(w => sameModel(w, model))) {
-      return new ServiceError(404, 'model_not_found', 'The local model "' + id + '/' + model + '" isn\'t one of MetaCode\'s local backup models (OLLAMA_MODELS). Add it there, or pick another model.', { provider: id, model: id + '/' + model });
+    if (!s.all && !s.extra && state.have.some(h => sameModel(h, model)) && !wanted().some(w => sameModel(w, model))) {
+      return new ServiceError(404, 'model_not_found', 'The local model "' + id + '/' + model + '" isn\'t one of the local models MetaCode offers (' + s.modelsVar + '). Add it there, or pick another model.', { provider: id, model: id + '/' + model });
     }
     return null;
   }
@@ -283,9 +318,21 @@ export function createProvider(opts) {
       state.have = [];
       state.pulls = new Map();
       if (pullAbort) pullAbort.abort();
+    } else {
+      // (Reload .env tries failed downloads again)
+      for (const [m, p] of state.pulls) if (p.state === 'failed') state.pulls.delete(m);
     }
     if (base) await base.reload(baseEnv(), baseConfig());
     if (s.mode !== 'off') await probe();
+  }
+
+  // MetaCode's Model Store installed or deleted a model: look at Ollama now instead of within 30 s
+  async function refresh() {
+    if (s.mode === 'off' || closed) return;
+    state.checkedAt = 0;
+    await probe();
+    // (and the list offered: probe() only starts that refresh, and the next /v1/models must have the new model)
+    if (base && state.reachable === true) await base.models({ refresh: true }).catch(() => {});
   }
 
   async function close() {
@@ -309,6 +356,9 @@ export function createProvider(opts) {
     },
     unlisted,
     reload,
+    refresh,
+    // (server.mjs: the last-resort backup, or first-class with AI_MODE=local / local-only)
+    isBackup: () => s.backup,
     close
   };
 }

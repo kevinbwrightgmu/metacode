@@ -19,6 +19,8 @@ const TEST_REDDITAPIS_KEY_FILE = path.join(os.tmpdir(), 'metacode-test-redditapi
 const TEST_SCRAPER_DATA_DIR = path.join(os.tmpdir(), 'metacode-test-scraper-' + process.pid + '-' + Date.now().toString(36));
 // …and so is the AI service's token file, never in the repository's opencode-data
 const TEST_OPENCODE_DATA_DIR = path.join(os.tmpdir(), 'metacode-test-opencode-' + process.pid + '-' + Date.now().toString(36));
+// …and the AI Model Store's catalog copy and model settings (local-ai/)
+const TEST_LOCAL_AI_DATA_DIR = path.join(os.tmpdir(), 'metacode-test-local-ai-' + process.pid + '-' + Date.now().toString(36));
 
 function testEnv(extra) {
   return Object.assign({
@@ -36,7 +38,10 @@ function testEnv(extra) {
     // (OPENCODE_SERVICE_URL: <mock>/v1), and MetaCode never starts the real service itself
     OPENCODE_SERVICE_URL: 'off',
     OPENCODE_SERVICE_MANAGED: 'off',
-    OPENCODE_SERVICE_DATA_DIR: TEST_OPENCODE_DATA_DIR
+    OPENCODE_SERVICE_DATA_DIR: TEST_OPENCODE_DATA_DIR,
+    LOCAL_AI_DATA_DIR: TEST_LOCAL_AI_DATA_DIR,
+    // (the Model Store talks to no Ollama a developer runs, unless a test says so)
+    OLLAMA_BASE_URL: 'http://127.0.0.1:9/v1'
   }, extra || {});
 }
 

@@ -451,7 +451,7 @@ same server and AI service. Each question sends the AI model:
 - the last few messages of the conversation.
 
 The conversation lives in memory only: it's cleared when you reload the page or click the clear button.
-Each question uses one prompt and roughly 3,000 tokens of the provider's budget.
+Each question uses one prompt and roughly 10,000 tokens of the provider's budget (the assistant's reference is sent with every question).
 
 ---
 
@@ -508,8 +508,11 @@ Configuration lives only in the server's `.env` file, which MetaCode and the AI 
 | `AI_KEEPALIVE_SECONDS` | no | The longest a streamed AI response (an AI Coding run, a Lab answer) stays silent while the model works: MetaCode sends a blank line or an SSE comment that every reader skips, so a proxy in front (Cloudflare, nginx) doesn't close it (default 15, 1–60) |
 | `AI_TIMEOUT_MS` | no | How long to wait for an AI answer (default 120000 ms). Older name: `EMIS_TIMEOUT_MS` |
 | `OLLAMA_BACKUP` | no | The local backup (Ollama on the server): `auto` (default — used when Ollama answers), `on` (always listed, with what's wrong) or `off` |
-| `OLLAMA_MODELS` | no | The local backup's models, best first (default `gemma3:1b,gemma3:270m`; downloaded by themselves unless `OLLAMA_AUTO_PULL=off`). `OLLAMA_BASE_URL`: where Ollama answers (default `http://127.0.0.1:11434/v1`) |
-| `AI_LOCAL_TIMEOUT_MS`, `AI_LOCAL_PARALLEL` | no | How long one answer from the local backup may take (default 300000 ms) and how many it gets at once (default 1) |
+| `METACODE_OLLAMA_MODELS` | no | The local models to offer, best first (default `gemma3:1b,gemma3:270m`, downloaded by themselves unless `OLLAMA_AUTO_PULL=off`, then every other model installed in the AI Model Store). `OLLAMA_MODELS` is read too when it's a list, as it used to be, but it is Ollama's own setting for its models folder. `OLLAMA_BASE_URL`: where Ollama answers (default `http://127.0.0.1:11434/v1`) |
+| `AI_LOCAL_TIMEOUT_MS`, `AI_LOCAL_PARALLEL` | no | How long one answer from a model on this machine may take (default 300000 ms) and how many it gets at once (default 1) |
+| `AI_LOCAL_CONTEXT_TOKENS` | no | How much a model on this machine can take in (default 8192; match Ollama's `OLLAMA_CONTEXT_LENGTH`): bigger requests aren't switched to it |
+| `AI_MODE` | no | `cloud` (default: the providers first, Ollama the last-resort backup), `local` (models on this machine first, and the default) or `local-only` (only them: no prompt leaves this machine) |
+| `LOCAL_AI_ADMIN_TOKEN` | no | Lets another device install and remove models in the AI Model Store (at least 12 characters); on the computer MetaCode runs on, no token is needed |
 | `OPENCODE_SERVICE_URL`, `OPENCODE_SERVICE_PORT`, `OPENCODE_SERVICE_MANAGED`, … | no | Where the AI service runs and who starts it (default: `127.0.0.1:4097`, started by MetaCode unless pm2 runs it). `OPENCODE_SERVICE_URL=off` switches MetaCode's AI off. See [docs/opencode-service.md](docs/opencode-service.md#4-settings) |
 
 After changing `.env`, click **Settings → Reload .env** (AI settings apply at once, in the AI service too; scraper,

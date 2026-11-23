@@ -121,7 +121,8 @@ const DEFAULT_UPSTREAM_TIMEOUT_MS = 115000;   // without X-Request-Timeout-Ms (M
 const MAX_UPSTREAM_TIMEOUT_MS = 600000;
 const PROVIDER_MODULES = { zen: './providers/zen.mjs', 'openai-compatible': './providers/openai-compatible.mjs', ollama: './providers/ollama.mjs' };
 // (the local last-resort backup: its models answer only when no other provider's can — never the default)
-const isBackupSlot = slot => slot.kind === 'ollama';
+// (Ollama is the last-resort backup unless AI_MODE=local / local-only makes its models first-class)
+const isBackupSlot = slot => slot.kind === 'ollama' && !(slot.impl && typeof slot.impl.isBackup === 'function' && !slot.impl.isBackup());
 const LEGACY_DEFAULT = 'claude-opus-5.5';     // the gateway's default model before the service
 // How long the routes wait for a provider's model list (MetaCode waits 3 s for /v1/status, 20 s for /v1/models)
 const STATUS_DEADLINE_MS = 2000;
@@ -468,7 +469,8 @@ export async function startService(opts) {
   // A bare id (saved before providers): the OpenAI-compatible providers first (config order), then Zen;
   // the first provider that has the model under any spelling wins (its exact spelling before others)
   function findBare(list, model) {
-    const order = list.slots.filter(s => s.kind !== 'zen' && !isBackupSlot(s)).concat(list.slots.filter(s => s.kind === 'zen'), list.slots.filter(isBackupSlot))
+    const localFirst = /^local(-only)?$/i.test(String(env.AI_MODE || '').trim());
+    const order = (localFirst ? list.slots.filter(s => s.kind === 'ollama') : []).concat(list.slots.filter(s => s.kind !== 'zen' && !isBackupSlot(s) && !(localFirst && s.kind === 'ollama')), list.slots.filter(s => s.kind === 'zen'), list.slots.filter(isBackupSlot))
       .filter(s => list.ready.has(s.id));
     for (const s of order) {
       const entries = list.byProvider.get(s.id);
@@ -553,6 +555,13 @@ export async function startService(opts) {
     }
     const usable = entries => (entries || []).find(e => e.available !== false);
     const pick = (slot, entry) => ({ target: { slot, entry, variant: null, fullId: entry.id }, id: entry.id, warnings });
+    // AI_MODE=local / local-only: a model on this device is the default whenever one is ready
+    if (/^local(-only)?$/i.test(String(env.AI_MODE || '').trim())) {
+      for (const s of list.slots.filter(x => x.kind === 'ollama' && list.ready.has(x.id))) {
+        const e = usable(list.byProvider.get(s.id));
+        if (e) return pick(s, e);
+      }
+    }
     const emis = list.slots.find(s => s.id === 'emis');
     const legacyEntry = emis && list.ready.has('emis') ? (list.byProvider.get('emis') || []).find(e => e.model === LEGACY_DEFAULT && e.available !== false) : null;
     if (legacyEntry) return pick(emis, legacyEntry);
@@ -619,6 +628,17 @@ export async function startService(opts) {
       warnings: [...new Set(warnings)],
       providers: list.slots.map((s, i) => Object.assign({}, list.statuses[i], { ready: list.ready.has(s.id) })).filter(p => !p.hidden)
     };
+  }
+
+  // The local providers (Ollama) look at what's installed now, without a whole reload
+  async function refreshLocal() {
+    const done = [];
+    for (const slot of slots.values()) {
+      if (slot.impl && typeof slot.impl.refresh === 'function') {
+        try { await slot.impl.refresh(); done.push(slot.id); } catch (e) { log.warn(slot.name + ' couldn\'t look at its models: ' + redact(e && e.message, [], 200)); }
+      }
+    }
+    return { ok: true, refreshed: done };
   }
 
   async function reload() {
@@ -760,6 +780,8 @@ export async function startService(opts) {
       if (route === 'GET /v1/models') { req.resume(); await modelsRoute(req, res); return; }
       if (route === 'GET /v1/status') { req.resume(); sendJson(res, 200, await status()); return; }
       if (route === 'POST /v1/reload') { req.resume(); sendJson(res, 200, await reload()); return; }
+      // MetaCode's AI Model Store installed or deleted a model: the local providers look at it now
+      if (route === 'POST /v1/local/refresh') { req.resume(); sendJson(res, 200, await refreshLocal()); return; }
       if (route === 'POST /v1/chat/completions') {
         let body;
         try { body = await readBody(req); }

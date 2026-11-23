@@ -456,14 +456,18 @@ INCEPTION_API_KEY=...
 OPENROUTER_API_KEY=...
 ```
 
+(The `"local"` entry uses the same Ollama as MetaCode's built-in local backup, which also downloads its default
+models, `gemma3:1b` and `gemma3:270m`, into it. Set `OLLAMA_AUTO_PULL=off` to stop those downloads, or
+`OLLAMA_BACKUP=off` to have no backup besides your own entry.)
+
 Then click **Reload .env** in Settings; the new providers appear in Settings →
 AI providers and their models in Settings → AI models.
 
-- **Local servers need a key too:** MetaCode refuses a provider without one,
-  so give Ollama any placeholder (`"local"`); start vLLM or llama-server with
-  `--api-key` and use that value. OVHcloud's keyless mode expects no key at
-  all — try it, and if a placeholder is refused, create an OVHcloud key (then
-  it's paid per token).
+- **Local servers need no key:** a server on this machine (`127.0.0.1` or `localhost`:
+  Ollama, llama-server, LM Studio, Jan, vLLM) is sent a placeholder key, as OpenAI-compatible clients must send
+  one. If you start vLLM or llama-server with `--api-key`, put that value in `apiKey`. A server elsewhere on the
+  network still needs a key. OVHcloud's keyless mode expects no key at all: try it, and if a placeholder is
+  refused, create an OVHcloud key (then it's paid per token).
 - **The model must be reachable from the server running MetaCode's AI
   service** — `127.0.0.1` only when it runs on the same machine; a campus GPU
   behind a VPN needs a tunnel, or use the offline batch route.

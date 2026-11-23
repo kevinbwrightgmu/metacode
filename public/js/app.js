@@ -516,7 +516,7 @@ const App = (() => {
 
     const headers = ['id','text','author','timestamp',
       'eng_likes','eng_shares','eng_comments','eng_views',
-      ...aiDims, ...humanDims, ...coder2Dims, ...finalDims, ...confDims, 'agree_all'];
+      ...aiDims, ...humanDims, ...coder2Dims, ...finalDims, ...confDims, 'agree_all', 'ai_coded_by'];
 
     const rows = posts.map(p => {
       const agree = codebook.length > 0 && codebook.every(d => {
@@ -533,7 +533,8 @@ const App = (() => {
         ...codebook.map(d => (p.coder2Codes || {})[d.id] || ''),
         ...codebook.map(d => HumanCoder.finalCode(p, d.id) || ''),
         ...codebook.map(d => ((p.aiCodes || {})[d.id]||{}).confidence || ''),
-        agree ? '1' : '0'
+        agree ? '1' : '0',
+        p.aiModel || ''           // (a model other than the one picked coded this post, e.g. the local backup)
       ];
     });
     downloadCSV('metacode_coded_posts.csv', headers, rows);
@@ -660,11 +661,15 @@ const App = (() => {
   // Every ready provider rests until a usage limit resets (or it asked to pause):
   // "until 14:05 (OpenCode Zen's usage limit is used up)", else ''
   function restingSummary(ai) {
-    const ready = (Array.isArray(ai.providers) ? ai.providers : []).filter(p => p && p.ready);
+    const all = (Array.isArray(ai.providers) ? ai.providers : []).filter(p => p && p.ready);
+    // (the local backup doesn't count: while it alone answers, AI is resting, with the backup standing in)
+    const real = all.filter(p => !p.backup);
+    const ready = real.length ? real : all;
     const rests = (Array.isArray(ai.restingProviders) ? ai.restingProviders : []).filter(r => r && Date.parse(r.until) > Date.now());
     if (!ready.length || !ready.every(p => rests.some(r => r.provider === p.id))) return '';
     const soonest = Math.min(...rests.map(r => Date.parse(r.until)));
-    return 'until ' + esc(whenText(soonest)) + ' (' + rests.map(r => esc(providerTitle(r.provider)) + (r.reason === 'paused' ? ' asked to pause' : '\'s usage limit is used up')).join('; ') + ')';
+    return 'until ' + esc(whenText(soonest)) + ' (' + rests.map(r => esc(providerTitle(r.provider)) + (r.reason === 'paused' ? ' asked to pause' : '\'s usage limit is used up')).join('; ') + ')' +
+      (real.length && real.length < all.length ? '; the local backup on this server answers meanwhile' : '');
   }
 
   // Shows what the server read from .env and whether AI is ready — names of
@@ -980,6 +985,12 @@ const App = (() => {
     if (now - (fallbackNoted.get(k) || 0) < 10 * 60 * 1000) return;
     fallbackNoted.set(k, now);
     const asked = modelName(requested), answered = modelName(used);
+    const backup = pick === 'backup' || (Array.isArray(modelCache) && modelCache.some(m => m && m.id === used && m.backup));
+    if (backup) {
+      notify('“' + asked + '” can\'t answer, and no other provider\'s model can right now, so the local backup on this server, “' + answered +
+        '”, is answering. It\'s small and slower: check what it codes.', 'warning', 9000);
+      return;
+    }
     if (pick === 'random') {
       notify((reason === 'rate_limited' ? '“' + asked + '” has run out for now (a usage or rate limit)' : '“' + asked + '” isn\'t working at the AI service right now') +
         ', so “' + answered + '”, picked at random from the available models, is coding instead.', 'warning', 7000);

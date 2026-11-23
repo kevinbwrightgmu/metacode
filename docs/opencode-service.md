@@ -262,11 +262,11 @@ server's CPU) and much weaker. Setting it up on a VPS:
   start Ollama on this server (ollama.com), or set OLLAMA_BASE_URL."*);
   `OLLAMA_BACKUP=off` leaves it out altogether. Ollama takes no key; requests
   to it on this machine never go through `HTTPS_PROXY`.
-- **Models.** `OLLAMA_MODELS`, comma-separated, best first (default
+- **Models.** `METACODE_OLLAMA_MODELS` (formerly `OLLAMA_MODELS`, still read when it lists models; it is Ollama's own name for its models folder), comma-separated, best first (default
   `gemma3:1b,gemma3:270m`: an 815 MB and a 292 MB download, neither of which
   "thinks" before answering); `all` offers every chat model Ollama has. They're
   listed as `ollama/gemma3:1b` … with *"(local backup)"* after their names, in
-  that order. A model Ollama has but `OLLAMA_MODELS` doesn't name is refused
+  that order. With a list set, a model Ollama has but the list doesn't name is refused
   (404). The models Ollama doesn't have yet are **downloaded** one after the
   other (`POST /api/pull`), unless `OLLAMA_AUTO_PULL=off`; meanwhile its row
   says *"Downloading gemma3:1b — the local backup is ready when that's done."*
@@ -277,7 +277,7 @@ server's CPU) and much weaker. Setting it up on a VPS:
   provider has a model, and gives a model id without a provider to another
   provider first. MetaCode answers with them only when no other provider's
   model can answer, and none is back within a minute: then the first of
-  `OLLAMA_MODELS` that can answer. A short rate limit or pause (a quota that
+  `METACODE_OLLAMA_MODELS` that can answer. A short rate limit or pause (a quota that
   resets within the minute too) is waited out instead — an AI Coding run waits
   for it and tries the post again, once; if that model is out again then, the
   backup codes the post. That includes a paid model whose only stand-ins
@@ -290,12 +290,16 @@ server's CPU) and much weaker. Setting it up on a VPS:
   toward their time limit. Each then gets `AI_LOCAL_TIMEOUT_MS` (default 5
   minutes) instead of `AI_TIMEOUT_MS`; when that runs out the message says
   *"The local backup model "gemma3:1b" didn't answer within 300 seconds. This
-  server's CPU may be too slow for it: pick a smaller model in OLLAMA_MODELS, or
+  server's CPU may be too slow for it: pick a smaller model (AI Model Store), or
   raise AI_LOCAL_TIMEOUT_MS in the server's .env file."*
-- **Config file.** A `provider.ollama` of your own in `OPENCODE_CONFIG` (as in
-  OpenCode's docs) stays an ordinary OpenAI-compatible provider, exactly as
-  you wrote it — its models answer like any provider's, nothing is downloaded,
-  and there's no local backup; the backup's own address is `OLLAMA_BASE_URL`.
+- **Config file.** A `provider.ollama` of your own in `OPENCODE_CONFIG` with
+  its own `"npm"` (as in OpenCode's docs) stays an ordinary OpenAI-compatible
+  provider, exactly as you wrote it — its models answer like any provider's,
+  nothing is downloaded, and there's no local backup. Without `"npm"`, its keys
+  (`name`, `options.baseURL`, a `whitelist`) adjust the backup instead. The
+  backup's own address is `OLLAMA_BASE_URL`. On a server shared with other user
+  accounts, `auto` uses whatever answers there: hold port 11434 with your own
+  Ollama, or set `OLLAMA_BACKUP=off`.
   An `enabled_providers` list without `ollama` leaves the backup out (no row);
   `OPENCODE_DISABLED_PROVIDERS=ollama` switches it off like `OLLAMA_BACKUP=off`
   but keeps its row in Settings.
@@ -373,7 +377,7 @@ All in MetaCode's `.env` ([.env.example](../.env.example)).
 | `HTTPS_PROXY` / `HTTP_PROXY` / `NO_PROXY` | Proxy for both providers; `EMIS_PROXY` replaces it for the gateway |
 | `OLLAMA_BACKUP` | The local backup ([section 2](#the-local-backup-ollama-ollama-on-this-server)): `auto` (default: offered while Ollama answers) / `on` / `off` |
 | `OLLAMA_BASE_URL` | Ollama's address, default `http://127.0.0.1:11434/v1` |
-| `OLLAMA_MODELS` | The backup's models, comma-separated, best first; default `gemma3:1b,gemma3:270m`; `all`: every chat model Ollama has |
+| `METACODE_OLLAMA_MODELS` | The local models, comma-separated, best first; unset: `gemma3:1b,gemma3:270m`, then every other model installed; `all`: every chat model Ollama has; cloud models never |
 | `OLLAMA_AUTO_PULL` | `off`: don't download the models Ollama doesn't have (default `on`) |
 
 **Read by MetaCode:**
@@ -748,7 +752,7 @@ No row: nothing answers at `OLLAMA_BASE_URL` (`systemctl status ollama`;
 `OLLAMA_BACKUP=on` and **Reload .env** to see why. *"Downloading gemma3:1b"*
 lasts a minute or two on a VPS; the service log shows `ollama.pull` lines.
 Answers taking minutes, or *"didn't answer within 300 seconds"*: the server's
-CPU is busy or small for the model — set `OLLAMA_MODELS=gemma3:270m`, or raise
+CPU is busy or small for the model — set `METACODE_OLLAMA_MODELS=gemma3:270m`, or raise
 `AI_LOCAL_TIMEOUT_MS`. A prompt longer than Ollama's context (4096 tokens unless
 `OLLAMA_CONTEXT_LENGTH` is set for its service) is cut silently: see
 [deploy-vps.md](deploy-vps.md#12-optional-a-local-backup-model-ollama).
