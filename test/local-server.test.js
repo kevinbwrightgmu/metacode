@@ -101,7 +101,10 @@ test('a busy port that isn\'t MetaCode\'s (another program answering {"status":"
 test('the AI Model Store answers MetaCode\'s own pages only: no CORS, cross-site requests refused, another site\'s name for 127.0.0.1 can\'t manage models', { skip, timeout: 90000 }, async () => {
   const dir = tempDir();
   const port = await freePort();
-  const child = startServer(dir, port, {});
+  // (a computer the network named: the server's os.hostname() says so, and the refusal must not repeat it)
+  const preload = path.join(dir, 'fake-hostname.js');
+  fs.writeFileSync(preload, "require('os').hostname = () => 'Johns-MacBook-Pro.local';\n");
+  const child = startServer(dir, port, { NODE_OPTIONS: '--require ' + preload });
   try {
     assert.ok(await answers(port), child.output());
     const own = 'localhost:' + port;
@@ -135,7 +138,7 @@ test('the AI Model Store answers MetaCode\'s own pages only: no CORS, cross-site
     const me = os.hostname().toLowerCase();
     const refused = await raw(port, 'GET', '/api/local-ai/status', { host: evil });
     assert.equal(refused.status, 403);
-    if (me.length > 2) assert.ok(!JSON.stringify(refused.json).toLowerCase().includes(me), 'the refusal names this computer');
+    assert.doesNotMatch(JSON.stringify(refused.json), /johns/i, 'the refusal names this computer');
     // this computer's own name reads when its hosts file maps it to a loopback address (Debian and Raspberry Pi OS
     // do, at 127.0.1.1); a name the network gave it doesn't; managing needs localhost either way
     const hosts = (() => { try { return fs.readFileSync('/etc/hosts', 'utf8'); } catch (e) { return ''; } })();

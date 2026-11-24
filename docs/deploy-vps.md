@@ -502,7 +502,9 @@ receives. Use `proxy_set_header Host $http_host;` (which keeps the port) instead
 **The AI Model Store says "The AI Model Store answers MetaCode's own pages only…" (`foreign_host`)**
 MetaCode sees the requests come from this machine (nginx) under the site's name, and nothing tells it nginx is
 a proxy. Set `TRUST_PROXY=loopback` in `.env` and keep nginx's `X-Forwarded-For` line from step 6 (without that
-line, also set `PUBLIC_URL=https://metac0.de`), then `pm2 reload metacode`.
+line, also set `PUBLIC_URL=https://metac0.de`), then `pm2 reload metacode`. If your `proxy_pass` goes to this
+server's network address rather than `127.0.0.1`, `loopback` doesn't name it: use that address,
+`TRUST_PROXY=<the address>`, or point `proxy_pass` at `http://127.0.0.1:3000`.
 
 **502 Bad Gateway from nginx**
 MetaCode isn't running: `pm2 status`, then `pm2 logs metacode --lines 50` for the reason (a missing

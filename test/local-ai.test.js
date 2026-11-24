@@ -343,7 +343,8 @@ test.before(async () => {
   localEnv = { OLLAMA_BASE_URL: si.base + '/v1', LOCAL_AI_DATA_DIR: tmp, LOCAL_AI_ADMIN_TOKEN: 'admin-token-123456' };
   // (a Debian-style hosts file: the computer's own name at 127.0.1.1; a name mapped elsewhere, or commented out, isn't its own)
   hostsFile = path.join(tmp, 'hosts');
-  fs.writeFileSync(hostsFile, '127.0.0.1 localhost\n127.0.1.1 myhost.lan myhost # this computer\n::1 localhost ip6-localhost\n203.0.113.5 outside.example\n# 127.0.0.1 commented.example\n');
+  // (a trailing comment's words aren't names, names are read in any case, ::1 lines count, CRLF and tabs are fine)
+  fs.writeFileSync(hostsFile, '127.0.0.1 localhost # trailing.example\n127.0.1.1 myhost.lan myhost # this computer\n::1 localhost ip6-localhost\r\n127.0.1.2\tMixedHost.Lan\r\n203.0.113.5 outside.example\n# 127.0.0.1 commented.example\n');
   local = createLocalAi({
     env: localEnv, hostsFile,
     libraryUrl: si.base + '/library', registry: si.base + '/v2/library/', minLibraryModels: 1,
@@ -636,7 +637,7 @@ test('another website whose name is pointed at 127.0.0.1 (DNS rebinding) gets no
     }
   }
   const refusal = await raw('GET', '/hardware', 'evil.example');
-  assert.match(refusal.json.error.message, /answers MetaCode's own pages only: open MetaCode at localhost, 127\.0\.0\.1 or this computer's host name, not "evil\.example"\. .*X-Forwarded-For.*PUBLIC_URL.*TRUST_PROXY/);
+  assert.match(refusal.json.error.message, /answers MetaCode's own pages only: open MetaCode at localhost, 127\.0\.0\.1 or this computer's address \(http:\/\/192\.168\.x\.y:3000\), not "evil\.example"\. A name this computer got from DHCP, DNS or mDNS \(raspberrypi\.local\) isn't accepted: put it in PUBLIC_URL.*X-Forwarded-For.*PUBLIC_URL.*TRUST_PROXY=loopback, or the address the proxy connects from/);
   // (the page it answers may be the other website's: this computer's name isn't in it, nor the home folder's)
   const realHostname = os.hostname;
   os.hostname = () => 'Johns-MacBook-Pro.local';
@@ -658,7 +659,7 @@ test('another website whose name is pointed at 127.0.0.1 (DNS rebinding) gets no
   // this computer's own names: what its hosts file maps to a loopback address (Debian and Raspberry Pi OS: its host
   // name, at 127.0.1.1), and 0.0.0.0. No other site can have a browser send them, so they read; managing needs
   // localhost (a proxy on this computer may send them too)
-  for (const host of ['myhost', 'myhost:' + api.port, 'MYHOST.LAN', '0.0.0.0:' + api.port]) {
+  for (const host of ['myhost', 'myhost:' + api.port, 'MYHOST.LAN', '0.0.0.0:' + api.port, 'ip6-localhost', 'mixedhost.lan', 'MIXEDHOST.LAN']) {
     const s = await raw('GET', '/status', host);
     assert.deepEqual([s.status, s.json.manage.allowed], [200, false], host);
     assert.equal((await raw('GET', '/hardware', host)).status, 200, host);
@@ -667,7 +668,7 @@ test('another website whose name is pointed at 127.0.0.1 (DNS rebinding) gets no
   }
   // not those the hosts file doesn't give to a loopback address, or only in a comment, or a name that merely
   // contains one: and not what os.hostname() says, which a network can set (a Mac takes it from DHCP or reverse DNS)
-  for (const host of ['outside.example', 'commented.example', 'myhost.evil.example', 'evil.myhost', 'xmyhost', 'myhost.lan.evil.example']) assert.equal((await raw('GET', '/hardware', host)).status, 403, host);
+  for (const host of ['outside.example', 'commented.example', 'trailing.example', 'this', 'computer', '#', 'myhost.evil.example', 'evil.myhost', 'xmyhost', 'myhost.lan.evil.example', 'raspberrypi.local']) assert.equal((await raw('GET', '/hardware', host)).status, 403, host);
   if (process.platform !== 'win32') {
     os.hostname = () => 'rebind.attacker.example';
     try { assert.equal((await raw('GET', '/hardware', 'rebind.attacker.example')).status, 403, 'a name the network gave this computer'); } finally { os.hostname = realHostname; }
@@ -733,8 +734,9 @@ test('a browser on this computer that reaches MetaCode at one of its own network
     const server = http.createServer(app);
     try { await new Promise((resolve, reject) => { server.once('error', reject); server.listen(0, where, resolve); }); listeners.push(server); } catch (e) { server.close(); }
   }
-  const viaLan = (port, host, p, remote) => new Promise((resolve, reject) => {
-    const req = http.request({ host: lan.address, port, localAddress: remote ? undefined : lan.address, path: '/api/local-ai' + p, headers: { host } }, res => {
+  // (a browser doesn't choose the address its connection starts from: the kernel does)
+  const viaLan = (port, host, p) => new Promise((resolve, reject) => {
+    const req = http.request({ host: lan.address, port, agent: false, path: '/api/local-ai' + p, headers: { host } }, res => {
       let text = '';
       res.on('data', d => { text += d; });
       res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(text) }));
@@ -757,6 +759,43 @@ test('a browser on this computer that reaches MetaCode at one of its own network
   } finally {
     for (const server of listeners) { server.closeAllConnections(); await new Promise(r => server.close(r)); }
   }
+});
+
+test('a connection from any of this computer\'s own addresses is from this computer, not only one to the address it started from (a secondary address: the kernel starts the connection from the first); another device reads under any name', async () => {
+  const lan = Object.values(os.networkInterfaces()).flat().find(i => i && i.family === 'IPv4' && !i.internal);
+  if (!lan) return;                                             // (no network address on this machine)
+  // (the addresses a connection to a secondary address has: the first one as its start, the secondary one as its end.
+  // Set from outside, as a test can't add an address to this machine.)
+  const app = express();
+  app.use((req, res, next) => {
+    const set = req.headers['x-test-socket'];
+    if (set) {
+      const [remote, local] = set.split('>');
+      Object.defineProperty(req.socket, 'remoteAddress', { value: remote, configurable: true });
+      Object.defineProperty(req.socket, 'localAddress', { value: local, configurable: true });
+    }
+    next();
+  });
+  app.use('/api/local-ai', local.router);
+  const server = http.createServer(app);
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const port = server.address().port;
+  try {
+    const as = (socket, host, p) => raw('GET', p || '/hardware', host, undefined, { 'x-test-socket': socket, connection: 'close' }, port);
+    const secondary = '192.0.2.250';                            // (not an address of this computer)
+    for (const [socket, what] of [[lan.address + '>' + secondary, 'a secondary address'], ['::ffff:' + lan.address + '>::ffff:' + secondary, 'the same on a dual-stack socket'], [lan.address + '>' + lan.address, 'its own address to itself']]) {
+      for (const p of ['/hardware', '/status', '/models']) {
+        const r = await as(socket, 'secondary.evil.example:' + port, p);
+        assert.deepEqual([r.status, r.json.error.code], [403, 'foreign_host'], what + ' ' + p);
+      }
+      assert.equal((await as(socket, lan.address + ':' + port)).status, 200, what);
+      assert.equal((await as(socket, 'myhost')).status, 200, what);
+    }
+    // another device (a phone on the network): any name reads, managing needs the token
+    const phone = await as('203.0.113.77>' + lan.address, 'evil.example:' + port);
+    assert.equal(phone.status, 200);
+    assert.equal((await as('203.0.113.77>' + lan.address, 'evil.example:' + port, '/status')).json.manage.allowed, false);
+  } finally { server.closeAllConnections(); await new Promise(r => server.close(r)); }
 });
 
 test('Ollama not running: the store still browses (catalog, recommendations), and says how to install Ollama', async () => {

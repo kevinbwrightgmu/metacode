@@ -55,6 +55,7 @@ function publicHost(req, env) {
 // The names this computer's hosts file gives to a loopback address: Debian, Ubuntu and Raspberry Pi OS put the
 // computer's own name there, at 127.0.1.1. → a Set, read again when the file changes
 const HOSTS_FILE = process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts') : '/etc/hosts';
+const HOSTS_MAX = 1024 * 1024;          // (a hosts file with an ad blocklist can be many MB; the system's own lines are first)
 const hostsCache = new Map();
 function loopbackNames(file) {
   let st;
@@ -62,31 +63,51 @@ function loopbackNames(file) {
   const hit = hostsCache.get(file);
   if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.names;
   const names = new Set();
+  let fd = null;
   try {
-    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(Math.min(st.size, HOSTS_MAX));
+    let text = buf.toString('utf8', 0, fs.readSync(fd, buf, 0, buf.length, 0)).replace(/^\uFEFF/, '');
+    if (st.size > HOSTS_MAX) text = text.slice(0, Math.max(0, text.lastIndexOf('\n')));      // (no half line at the end)
+    for (const line of text.split(/\r?\n/)) {
       const [addr, ...list] = line.replace(/#.*/, '').trim().split(/\s+/);
       if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(addr) || addr === '::1') for (const n of list) names.add(n.toLowerCase());
     }
-  } catch (e) { /* unreadable: no names */ }
+  } catch (e) { /* unreadable: no names */ } finally { if (fd !== null) { try { fs.closeSync(fd); } catch (e) { /* closed */ } } }
   hostsCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, names });
   return names;
 }
-// This computer's own names besides localhost: 0.0.0.0, and what its hosts file maps to a loopback address (its
-// own name on Debian, Ubuntu and Raspberry Pi OS). Not os.hostname(): on a Mac or a laptop the network can name
-// the computer (DHCP, reverse DNS), and then another website could be served under that name. On Windows the
+// This computer's own names besides localhost: what its hosts file maps to a loopback address (its own name on
+// Debian, Ubuntu and Raspberry Pi OS). Not os.hostname(): on a Mac or a laptop the network can name the computer
+// (DHCP, reverse DNS), and then another website could be served under that name; and not a name from DNS or mDNS
+// (raspberrypi.local), which any device on the network can answer: those go in PUBLIC_URL. On Windows the
 // computer's name is its own. For reading only: a proxy on this computer may send such a name too.
 const ownName = (req, hostsFile) => {
   const host = hostOf(req);
-  return !!host && (host === '0.0.0.0' || loopbackNames(hostsFile).has(host) || (process.platform === 'win32' && host === String(os.hostname() || '').trim().toLowerCase()));
+  return !!host && (loopbackNames(hostsFile).has(host) || (process.platform === 'win32' && host === String(os.hostname() || '').trim().toLowerCase()));
 };
-// An address as the name (http://192.168.1.20:3000): no other website's name is an address
+// An address as the name (http://192.168.1.20:3000, 0.0.0.0): no other website's name is an address
 const addressHost = req => { const host = hostOf(req); return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /^\[[0-9a-f:.]+\]$/.test(host); };
-// The connection itself came from this computer: from 127.0.0.1, or from one of its own addresses to itself (a
-// browser here that opened http://<this computer's address>:3000). That is MetaCode's own pages in a browser here,
-// a proxy here, or another website's page whose name was made to point at this computer.
+// This computer's own network addresses (every interface, IPv4 and IPv6), looked up again after a few seconds
+const bareAddress = a => String(a || '').toLowerCase().replace(/^::ffff:/, '').replace(/%.*$/, '');
+let ownAddresses = { at: 0, set: new Set() };
+function isOwnAddress(a) {
+  const addr = bareAddress(a);
+  if (!addr) return false;
+  if (Date.now() - ownAddresses.at > 5000) {
+    const set = new Set();
+    try { for (const list of Object.values(os.networkInterfaces())) for (const i of list || []) if (i && i.address) set.add(bareAddress(i.address)); } catch (e) { /* none */ }
+    ownAddresses = { at: Date.now(), set };
+  }
+  return ownAddresses.set.has(addr);
+}
+// The connection itself came from this computer: from 127.0.0.1, or from one of its own network addresses (a
+// browser here that opened http://<this computer's address>:3000: the kernel may pick another of its addresses as
+// the source, as it does for a secondary address, so the destination isn't the test). That is MetaCode's own pages
+// in a browser here, a proxy here, or another website's page whose name was made to point at this computer.
 const fromThisComputer = req => {
   const s = req.socket || {}, a = String(s.remoteAddress || '');
-  return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1' || (!!a && a === String(s.localAddress || ''));
+  return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1' || (!!a && (a === String(s.localAddress || '') || isOwnAddress(a)));
 };
 // It came from a proxy that TRUST_PROXY names (server.js: "loopback", a number of hops or addresses), so it may
 // be passing a visitor on, with X-Forwarded-For or without (nginx with only proxy_pass sends none)
@@ -213,8 +234,8 @@ function createLocalAi(opts) {
   // (The refusal doesn't give this computer's name: the page it answers may be the other website's.)
   router.use((req, res, next) => {
     if (!fromThisComputer(req) || (forwarded(req) && trustedProxy(req)) || loopbackHost(req) || addressHost(req) || ownName(req, hostsFile) || publicHost(req, env)) return next();
-    res.status(403).json({ error: { type: 'forbidden', code: 'foreign_host', message: 'The AI Model Store answers MetaCode\'s own pages only: open MetaCode at localhost, 127.0.0.1 or this computer\'s host name, not "' +
-      hostOf(req).slice(0, 100) + '". Behind a reverse proxy on this computer, make the proxy send X-Forwarded-For and set PUBLIC_URL to the site\'s address in .env (or, on a server no one browses from, TRUST_PROXY=loopback).' } });
+    res.status(403).json({ error: { type: 'forbidden', code: 'foreign_host', message: 'The AI Model Store answers MetaCode\'s own pages only: open MetaCode at localhost, 127.0.0.1 or this computer\'s address (http://192.168.x.y:3000), not "' +
+      hostOf(req).slice(0, 100) + '". A name this computer got from DHCP, DNS or mDNS (raspberrypi.local) isn\'t accepted: put it in PUBLIC_URL in .env. Behind a reverse proxy on this computer, make the proxy send X-Forwarded-For and set PUBLIC_URL to the site\'s address (or, on a server no one browses from, TRUST_PROXY=loopback, or the address the proxy connects from).' } });
   });
   router.use(express.json({ limit: '64kb' }));
 
