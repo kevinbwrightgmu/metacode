@@ -13,9 +13,13 @@ const crypto = require('crypto');
 const LIBRARY_URL = 'https://ollama.com/library';
 const REGISTRY = 'https://registry.ollama.ai/v2/library/';
 const SNAPSHOT = path.join(__dirname, 'catalog-snapshot.json');
-const MANIFEST_TYPES = 'application/vnd.docker.distribution.manifest.v2+json, application/vnd.oci.image.manifest.v1+json';
+// (asked for as Ollama asks: a tag with variants for several runners, llama.cpp and MLX, is a list of manifests)
+const MANIFEST = 'application/vnd.docker.distribution.manifest.v2+json';
+const MANIFEST_LIST = 'application/vnd.ollama.manifest.list.v2+json';
+const MANIFEST_TYPES = MANIFEST_LIST + ', ' + MANIFEST;
 const LIBRARY_MAX_AGE_MS = 24 * 3600 * 1000;      // the library is looked at again after a day (when online)
 const TAGS_MAX_AGE_MS = 7 * 24 * 3600 * 1000;     // a model's tags after a week
+const RETRY_MS = 5 * 60 * 1000;                   // after ollama.com didn't answer, the saved catalog for 5 minutes
 
 // Requests to ollama.com and its registry go out like the AI service's: through HTTPS_PROXY / HTTP_PROXY when set
 // (NO_PROXY respected). Node's own fetch ignores those variables.
@@ -103,7 +107,10 @@ function parseTags(html, name) {
     if (seen.has(tag) || /:.*cloud/i.test(tag)) continue;
     const line = text(m[2]);                    // "gemma3:270m e7d36fb2c3b3 • 292MB • 32K context window • Text input • 1 year ago"
     const digest = (/\b([0-9a-f]{12})\b/.exec(line) || [])[1] || null;
-    const size = bytes((/•\s*([\d.]+\s*(?:B|KB|MB|GB|TB))\s*•/i.exec(line) || [])[1]);
+    // (a tag with variants for several runners shows a range, "16GB - 19GB": the bigger, so the estimates of
+    // memory and disk stay on the safe side)
+    const sizes = /•\s*([\d.]+\s*(?:B|KB|MB|GB|TB))(?:\s*[-–]\s*([\d.]+\s*(?:B|KB|MB|GB|TB)))?\s*•/i.exec(line);
+    const size = sizes && bytes(sizes[2] || sizes[1]);
     const context = tokens((/•\s*([\d.]+\s*[KM]?)\s*context window/i.exec(line) || [])[1]);
     const inputs = ((/•\s*([A-Za-z, ]+?)\s*input/i.exec(line) || [])[1] || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
     if (!size) continue;
@@ -119,6 +126,27 @@ function mainTags(model, tags) {
   const main = tags.filter(t => { const v = t.tag.split(':')[1]; return v === 'latest' || sizes.has(v); });
   return main.length ? main : tags.slice(0, 6);
 }
+
+// ── Ollama's registry ──────────────────────────────────────────────────────
+// The variant Ollama pulls from a manifest list (manifest/manifest.go, runnerPreferences): MLX first on a Mac
+// with Apple Silicon, llama.cpp first everywhere else. → the list's entry, or null when none fits
+function pickVariant(list, appleSilicon) {
+  const variants = Array.isArray(list && list.manifests) ? list.manifests : [];
+  for (const runner of appleSilicon ? ['mlx', 'llamacpp', 'ggml'] : ['llamacpp', 'ggml', 'mlx']) {
+    const v = variants.find(c => c && (!c.mediaType || c.mediaType === MANIFEST) && String(c.runner || '').trim().toLowerCase() === runner);
+    if (v) return v;
+  }
+  return null;
+}
+// A manifest's layers (its config included), each digest once: → [{ digest, size }]
+function layersOf(m) {
+  const out = new Map();
+  for (const l of (Array.isArray(m.layers) ? m.layers : []).concat(m.config ? [m.config] : [])) {
+    if (l && typeof l.digest === 'string' && !out.has(l.digest)) out.set(l.digest, Number(l.size) || 0);
+  }
+  return [...out].map(([digest, size]) => ({ digest, size }));
+}
+const sha256 = s => crypto.createHash('sha256').update(s).digest('hex');
 
 // ── Categories ─────────────────────────────────────────────────────────────
 const CATEGORY = [
@@ -143,11 +171,14 @@ function categories(model) {
 // ── The catalog: live, cached, or the snapshot ─────────────────────────────
 function createCatalog(opts) {
   const fetchImpl = opts.fetch || internetFetch;
+  const now = opts.now || Date.now;
   const file = path.join(opts.dataDir, 'catalog.json');
   const libraryUrl = opts.libraryUrl || LIBRARY_URL;
-  const registry = opts.registry || REGISTRY;
+  // (the library's namespace, …/v2/library/; models of other namespaces are beside it, …/v2/<user>/<model>)
+  const root = String(opts.registry || REGISTRY).replace(/\/*$/, '/').replace(/\/library\/$/, '/');
   let mem = null;              // { source, fetchedAt, models: [...], tags: { name: { fetchedAt, tags } } }
   let refreshing = null;
+  let failed = null;           // { at, problem }: ollama.com didn't answer (it isn't asked again for a while)
 
   function readJson(f) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return null; } }
   function load() {
@@ -168,20 +199,30 @@ function createCatalog(opts) {
       fs.renameSync(tmp, file);
     } catch (e) { /* a read-only install keeps the catalog in memory */ }
   }
-  async function get(url, ms, headers) {
+  // (`signal`: the caller's, to stop it early)
+  async function get(url, ms, headers, signal) {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), ms || 15000);
+    const stop = () => ac.abort();
+    if (signal) { if (signal.aborted) stop(); else signal.addEventListener('abort', stop, { once: true }); }
     try {
       const res = await fetchImpl(url, { signal: ac.signal, headers: Object.assign({ 'User-Agent': 'MetaCode-ModelStore', Accept: 'text/html' }, headers || {}) });
       const body = await res.text();
       return { status: res.status, body };
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', stop);
+    }
   }
+  const unreachable = e => 'The library at ollama.com can\'t be reached (' + (e && e.name === 'AbortError' ? 'no answer' : 'offline?') + '); the saved catalog is shown.';
+  // (ollama.com didn't answer a moment ago: the saved catalog at once, rather than another wait of up to 20 s)
+  const resting = () => failed && now() - failed.at < RETRY_MS;
 
   // The library, fetched again when older than a day (or when asked): → { ok, problem? }
   async function refresh(force) {
     const cat = load();
-    if (!force && cat.source !== 'snapshot' && cat.fetchedAt && Date.now() - Date.parse(cat.fetchedAt) < LIBRARY_MAX_AGE_MS) return { ok: true };
+    if (!force && cat.source !== 'snapshot' && cat.fetchedAt && now() - Date.parse(cat.fetchedAt) < LIBRARY_MAX_AGE_MS) return { ok: true };
+    if (!force && resting()) return { ok: false, problem: failed.problem };
     if (refreshing) return refreshing;
     refreshing = (async () => {
       try {
@@ -192,13 +233,13 @@ function createCatalog(opts) {
         // library; a mirror of the operator's own may list just a few)
         const floor = opts.minModels !== undefined ? opts.minModels : libraryUrl === LIBRARY_URL ? Math.max(1, Math.floor(cat.models.length / 3)) : 1;
         if (models.length < floor) return { ok: false, problem: 'ollama.com\'s library page couldn\'t be read (it may have changed); the saved catalog is shown.' };
-        mem = { source: 'live', fetchedAt: new Date().toISOString(), models, tags: cat.tags || {} };
+        mem = { source: 'live', fetchedAt: new Date(now()).toISOString(), models, tags: cat.tags || {} };
         save();
         return { ok: true };
       } catch (e) {
-        return { ok: false, problem: 'The library at ollama.com can\'t be reached (' + (e && e.name === 'AbortError' ? 'no answer' : 'offline?') + '); the saved catalog is shown.' };
-      } finally { refreshing = null; }
-    })();
+        return { ok: false, problem: unreachable(e) };
+      }
+    })().then(r => { failed = r.ok ? null : { at: now(), problem: r.problem }; refreshing = null; return r; });
     return refreshing;
   }
 
@@ -206,32 +247,58 @@ function createCatalog(opts) {
   async function tagsOf(name, force) {
     const cat = load();
     const known = cat.tags[name];
-    if (known && !force && Date.now() - Date.parse(known.fetchedAt || 0) < TAGS_MAX_AGE_MS) return { tags: known.tags, fetchedAt: known.fetchedAt };
+    if (known && !force && now() - Date.parse(known.fetchedAt || 0) < TAGS_MAX_AGE_MS) return { tags: known.tags, fetchedAt: known.fetchedAt };
+    if (!force && resting()) return known ? { tags: known.tags, fetchedAt: known.fetchedAt, stale: true } : { tags: [], fetchedAt: null, offline: true };
     try {
       const r = await get(libraryUrl + '/' + encodeURIComponent(name) + '/tags', 15000);
       if (r.status === 200) {
         const tags = parseTags(r.body, name);
         if (tags.length) {
-          cat.tags[name] = { fetchedAt: new Date().toISOString(), tags };
+          cat.tags[name] = { fetchedAt: new Date(now()).toISOString(), tags };
           save();
           return { tags, fetchedAt: cat.tags[name].fetchedAt };
         }
       }
-    } catch (e) { /* offline: what's known, if anything */ }
+    } catch (e) { failed = { at: now(), problem: unreachable(e) }; }     // (offline: what's known, if anything)
     return known ? { tags: known.tags, fetchedAt: known.fetchedAt, stale: true } : { tags: [], fetchedAt: null, offline: true };
   }
 
-  // The registry's manifest for "name:tag": its exact download size and the digest Ollama will report
-  async function manifest(model) {
+  // The registry's manifest for "name:tag", as Ollama pulls it: its layers with their exact sizes, their total,
+  // and the digest Ollama will report once it's installed. A tag with variants for several runners is a list of
+  // manifests: Ollama pulls the variant for this computer and reports that one's digest.
+  // (o.appleSilicon: what the hardware module found; otherwise this process's own platform and architecture.
+  // o.signal: stops it early.)
+  async function manifest(model, o) {
+    o = o || {};
     const [name, tag] = String(model).split(':');
-    const r = await get(registry + encodeURIComponent(name) + '/manifests/' + encodeURIComponent(tag || 'latest'), 15000, { Accept: MANIFEST_TYPES });
+    const repo = root + (name.includes('/') ? name : 'library/' + name).split('/').map(encodeURIComponent).join('/');
+    const unreadable = { ok: false, problem: 'Ollama\'s registry sent something unreadable.' };
+    const r = await get(repo + '/manifests/' + encodeURIComponent(tag || 'latest'), 15000, { Accept: MANIFEST_TYPES }, o.signal);
     if (r.status === 404) return { ok: false, missing: true };
     if (r.status !== 200) return { ok: false, problem: 'Ollama\'s registry answered HTTP ' + r.status + '.' };
     let m;
-    try { m = JSON.parse(r.body); } catch (e) { return { ok: false, problem: 'Ollama\'s registry sent something unreadable.' }; }
-    const layers = Array.isArray(m.layers) ? m.layers : [];
-    const size = layers.reduce((n, l) => n + (Number(l.size) || 0), 0) + (m.config && Number(m.config.size) || 0);
-    return { ok: true, size, digest: crypto.createHash('sha256').update(r.body).digest('hex') };
+    try { m = JSON.parse(r.body); } catch (e) { return unreadable; }
+    let digest = sha256(r.body);
+    if (m && m.mediaType === MANIFEST_LIST) {
+      const apple = typeof o.appleSilicon === 'boolean' ? o.appleSilicon : process.platform === 'darwin' && process.arch === 'arm64';
+      const v = pickVariant(m, apple);
+      if (!v) return { ok: false, problem: 'Ollama\'s registry has no variant of ' + model + ' that Ollama runs on this computer.' };
+      const want = String(v.digest || '').toLowerCase().replace(/^sha256:/, '');
+      if (!/^[0-9a-f]{64}$/.test(want)) {
+        // (a variant written out in the list: its digest is Ollama's own encoding of it, so it isn't compared)
+        m = v; digest = null;
+      } else {
+        // (each variant is a blob of the model's repository, fetched as Ollama fetches it)
+        const b = await get(repo + '/blobs/sha256:' + want, 15000, { Accept: '*/*' }, o.signal);
+        if (b.status !== 200) return { ok: false, problem: 'Ollama\'s registry answered HTTP ' + b.status + ' for a variant of ' + model + '.' };
+        if (sha256(b.body) !== want) return unreadable;
+        try { m = JSON.parse(b.body); } catch (e) { return unreadable; }
+        digest = want;
+      }
+    }
+    if (!m || typeof m !== 'object') return unreadable;
+    const blobs = layersOf(m);
+    return { ok: true, size: blobs.reduce((n, l) => n + l.size, 0), digest, blobs };
   }
 
   // The catalog for the browser: each model with its categories and the tags known so far
@@ -250,4 +317,4 @@ function createCatalog(opts) {
   return { refresh, tagsOf, manifest, list, find, mainTags };
 }
 
-module.exports = { createCatalog, internetFetch, parseLibrary, parseTags, mainTags, categories, params, bytes, tokens, count, LIBRARY_URL, SNAPSHOT };
+module.exports = { createCatalog, internetFetch, parseLibrary, parseTags, mainTags, categories, pickVariant, params, bytes, tokens, count, LIBRARY_URL, SNAPSHOT };

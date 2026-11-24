@@ -23,7 +23,7 @@ const express = require('express');
 const { createOllama } = require('./ollama');
 const { createCatalog } = require('./catalog');
 const { createHardware } = require('./hardware');
-const { createInstalls, normalize } = require('./installs');
+const { createInstalls, normalize, keyOf } = require('./installs');
 const { createRuntimes, MATRIX } = require('./runtimes');
 const { recommend, fit } = require('./recommend');
 const { defaultDataDir } = require('../lib/data-dir');
@@ -69,11 +69,14 @@ function createLocalAi(opts) {
     fs.writeFileSync(tmp, JSON.stringify(settings, null, 2), { mode: 0o600 });
     fs.renameSync(tmp, settingsFile);
   }
-  // A model's settings, as MetaCode uses them for its requests (server.js): { temperature?, maxTokens?, keepAliveMinutes? }
-  function modelSettings(model) {
-    const name = normalize(String(model || '').replace(/^ollama\//, ''));      // MetaCode's ids are "ollama/<model>"
-    return (name && loadSettings().models[name]) || null;
+  // A model's settings: { temperature?, maxTokens?, keepAliveMinutes? }, kept under keyOf(name) (Ollama's names
+  // don't depend on case)
+  function settingsOf(model) {
+    const all = loadSettings().models, key = keyOf(model);
+    return Object.prototype.hasOwnProperty.call(all, key) ? all[key] : null;
   }
+  // …as MetaCode uses them for its requests (server.js; its ids are "ollama/<model>")
+  const modelSettings = model => settingsOf(String(model || '').replace(/^ollama\//, ''));
 
   function manageCheck(req) {
     const token = String(env.LOCAL_AI_ADMIN_TOKEN || '').trim();
@@ -101,7 +104,6 @@ function createLocalAi(opts) {
 
   async function installed() {
     const [list, running] = await Promise.all([ollama.tags(), ollama.ps().catch(() => [])]);
-    const s = loadSettings();
     const models = list.map(m => {
       const r = running.find(x => x.name === m.name);
       const d = m.details || {};
@@ -110,7 +112,7 @@ function createLocalAi(opts) {
         family: d.family || null, parameterSize: d.parameter_size || null, quantization: d.quantization_level || null,
         contextLength: d.context_length || null, capabilities: Array.isArray(m.capabilities) ? m.capabilities : null,
         loaded: r ? { size: r.size, sizeVram: r.size_vram || 0, expiresAt: r.expires_at || null, contextLength: r.context_length || null } : null,
-        settings: s.models[m.name] || null,
+        settings: settingsOf(m.name),
       };
     }).sort((a, b) => a.name.localeCompare(b.name));
     return { models, totalSize: models.reduce((n, m) => n + (m.size || 0), 0) };
@@ -161,7 +163,7 @@ function createLocalAi(opts) {
   router.post('/models/load', manage, async (req, res) => {
     const model = modelOf(req);
     if (!model) return fail(res, 400, 'invalid_model', 'Name a model.');
-    const s = loadSettings().models[model] || {};
+    const s = settingsOf(model) || {};
     const minutes = Number.isFinite(s.keepAliveMinutes) ? s.keepAliveMinutes : 10;
     try { await ollama.load(model, minutes ? minutes + 'm' : -1); res.json(await installed()); } catch (e) { ollamaFail(res, e); }
   });
@@ -177,7 +179,7 @@ function createLocalAi(opts) {
     try {
       await ollama.remove(model);
       const s = loadSettings();
-      if (s.models[model]) { delete s.models[model]; saveSettings(); }
+      if (settingsOf(model)) { delete s.models[keyOf(model)]; saveSettings(); }
       onModelsChanged('deleted', model);
       res.json(await installed());
     } catch (e) { ollamaFail(res, e); }
@@ -200,9 +202,9 @@ function createLocalAi(opts) {
       clean[k] = k === 'temperature' ? Math.round(n * 100) / 100 : Math.round(n);
     }
     const s = loadSettings();
-    if (Object.keys(clean).length) s.models[model] = clean; else delete s.models[model];
+    if (Object.keys(clean).length) s.models[keyOf(model)] = clean; else delete s.models[keyOf(model)];
     try { saveSettings(); } catch (e) { return fail(res, 500, 'not_saved', 'The settings couldn\'t be saved (' + e.code + ').'); }
-    res.json({ model, settings: s.models[model] || null });
+    res.json({ model, settings: settingsOf(model) });
   });
 
   router.get('/installs', (req, res) => res.json({ installs: installs.list() }));

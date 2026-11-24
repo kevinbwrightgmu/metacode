@@ -3,20 +3,31 @@
 // - pause = stop the download, keeping what arrived; resume = pull again, and Ollama continues from there
 //   (checked with a real Ollama); cancel = stop and forget it (Ollama tidies the parts up when it restarts);
 // - the same model is never downloaded twice at once;
-// - before a download: the registry's exact size against the free disk space;
-// - after it: the installed model's digest against the registry's (the sha256 of its manifest).
+// - before a download: what it still has to fetch (the registry's layers Ollama doesn't have yet) against the
+//   free disk space;
+// - after it: the installed model's digest against the registry's (the sha256 of its manifest, or of the variant
+//   Ollama pulled when a tag has variants for several runners).
 'use strict';
 const { EventEmitter } = require('events');
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,80}(\/[a-z0-9][a-z0-9._-]{0,80})?(:[a-z0-9][a-z0-9._-]{0,60})?$/i;
 const DISK_MARGIN = 512e6;                // left free after a download
 
-// "gemma3" → "gemma3:latest"; null when it isn't a model name Ollama could pull from its library
+// "gemma3" → "gemma3:latest"; null when it isn't a model name Ollama could pull from its library. The name is
+// lowercase; a tag keeps its case (ollama.com lists gemma4:e2b-it-q4_K_M), as Ollama keeps it.
 function normalize(model) {
-  const m = String(model || '').trim().toLowerCase();
-  if (!NAME.test(m) || /cloud/.test(m.split(':')[1] || '')) return null;
-  return m.includes(':') ? m : m + ':latest';
+  const m = String(model || '').trim();
+  if (!NAME.test(m) || /cloud/i.test(m.split(':')[1] || '')) return null;
+  const [name, tag] = m.split(':');
+  return name.toLowerCase() + ':' + (tag || 'latest');
 }
+// Ollama keeps a model under the case it was first pulled with, and a pull in another case updates that one:
+// downloads and settings are kept under this key, so names that differ only in case are one model
+function keyOf(model) {
+  const m = String(model || '').trim().toLowerCase();
+  return /:[^:/]*$/.test(m) ? m : m + ':latest';
+}
+const size = n => (n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : Math.ceil(n / 1e6) + ' MB');
 
 function createInstalls(opts) {
   const { ollama, catalog, hardware } = opts;
@@ -24,7 +35,7 @@ function createInstalls(opts) {
   const now = opts.now || Date.now;
   const events = new EventEmitter();
   events.setMaxListeners(100);
-  const jobs = new Map();               // model → job
+  const jobs = new Map();               // keyOf(model) → job
   let running = null;
 
   const pub = j => ({
@@ -43,11 +54,22 @@ function createInstalls(opts) {
     events.emit('job', pub(j));
   }
   function finish(j, state, extra) {
-    Object.assign(j, { state }, extra || {});
+    Object.assign(j, { state, stopping: null }, extra || {});
     if (j.controller) j.controller = null;
     emit(j, true);
     if (running === j) running = null;
     next();
+  }
+  // Paused (what arrived is kept, and resuming continues from there) or cancelled (forgotten)
+  function stopped(j) {
+    if (j.stopping === 'cancel') { jobs.delete(keyOf(j.model)); return finish(j, 'cancelled', { status: 'Cancelled', speed: null }); }
+    return finish(j, 'paused', { status: 'Paused: what arrived is kept, and resuming continues from there', speed: null });
+  }
+  // What a download still has to fetch: the layers Ollama doesn't have yet (an update, or a tag that shares them
+  // with an installed model, needs only the rest), less what arrived of them before a pause or an interruption
+  async function toFetch(j) {
+    const have = await Promise.all(j.blobs.map(b => ollama.hasBlob(b.digest)));
+    return j.blobs.reduce((n, b, i) => (have[i] ? n : n + Math.max(0, b.size - (j.arrived[b.digest] || 0))), 0);
   }
 
   function next() {
@@ -60,23 +82,28 @@ function createInstalls(opts) {
 
   async function run(j) {
     j.state = 'checking'; j.status = 'Checking the model and the free disk space'; j.error = null; j.code = null;
+    j.controller = new AbortController();          // (pause and cancel work from here on)
     emit(j, true);
-    // The registry's exact size and digest (needs the internet, as the download itself does)
-    let man = null;
-    try { man = await catalog.manifest(j.model); } catch (e) { man = null; }
-    if (man && man.missing) return finish(j, 'failed', { error: 'Ollama\'s library has no model called "' + j.model + '".', code: 'not_in_library' });
-    if (man && man.ok) { j.expected = man.size; j.digest = man.digest; j.total = Math.max(j.total || 0, man.size); }
     const hw = await hardware.detect(true);
-    if (j.expected && hw.disk.free !== null && hw.disk.free < j.expected + DISK_MARGIN) {
-      const gb = n => (n / 1e9).toFixed(1) + ' GB';
-      return finish(j, 'failed', { error: 'Not enough disk space: ' + j.model + ' needs ' + gb(j.expected) + ' (and ' + gb(DISK_MARGIN) + ' to spare), and ' +
-        (hw.disk.path || 'the disk') + ' has ' + gb(hw.disk.free) + ' free. Delete a model you don\'t use, or free some space.', code: 'insufficient_disk' });
+    if (j.stopping) return stopped(j);
+    // The registry's exact layers, sizes and digest, of the variant Ollama pulls on this computer (needs the
+    // internet, as the download itself does)
+    let man = null;
+    try { man = await catalog.manifest(j.model, { signal: j.controller.signal, appleSilicon: hw.appleSilicon }); } catch (e) { man = null; }
+    if (j.stopping) return stopped(j);
+    if (man && man.missing) return finish(j, 'failed', { error: 'Ollama\'s library has no model called "' + j.model + '".', code: 'not_in_library' });
+    if (man && man.ok) { j.expected = man.size; j.digest = man.digest; j.blobs = man.blobs; j.total = Math.max(j.total || 0, man.size); }
+    const free = hw.disk && Number.isFinite(hw.disk.free) ? hw.disk.free : null;
+    const need = j.blobs && free !== null ? await toFetch(j) : 0;
+    if (j.stopping) return stopped(j);
+    if (need && free < need + DISK_MARGIN) {
+      return finish(j, 'failed', { error: 'Not enough disk space: ' + j.model + ' needs ' + size(need) + (need < j.expected ? ' more' : '') + ' (and ' + size(DISK_MARGIN) + ' to spare), and ' +
+        (hw.disk.path || 'the disk') + ' has ' + size(free) + ' free. Delete a model you don\'t use, or free some space.', code: 'insufficient_disk' });
     }
     j.state = 'downloading'; j.status = 'Starting the download';
     emit(j, true);
     const layers = new Map();             // digest → { total, completed }
     let sample = null;
-    j.controller = new AbortController();
     try {
       await ollama.pull(j.model, line => {
         if (line.digest && line.total) {
@@ -85,6 +112,7 @@ function createInstalls(opts) {
           layer.total = line.total;
           if (typeof line.completed === 'number') layer.completed = line.completed;
           layers.set(line.digest, layer);
+          j.arrived[line.digest] = layer.completed;                                   // (kept for the disk check of a resume)
           let total = 0, done = 0;
           for (const l of layers.values()) { total += l.total; done += l.completed; }
           j.completed = done;
@@ -103,20 +131,20 @@ function createInstalls(opts) {
         emit(j, j.state === 'verifying');
       }, j.controller.signal, opts.idleMs);
     } catch (e) {
-      if (j.stopping === 'pause') return finish(j, 'paused', { status: 'Paused: what arrived is kept, and resuming continues from there', speed: null, stopping: null });
-      if (j.stopping === 'cancel') { jobs.delete(j.model); return finish(j, 'cancelled', { status: 'Cancelled', speed: null, stopping: null }); }
+      if (j.stopping) return stopped(j);
       const code = e && e.code || 'pull_failed';
       const resumable = code === 'interrupted' || code === 'unreachable';
       return finish(j, 'failed', { error: String(e && e.message || e) + (resumable ? ' Resume to continue from where it stopped.' : ''), code, speed: null });
     }
-    // Installed: is it the model the registry has?
+    // Installed: is it the model the registry has? (Ollama may list it in the case of an earlier pull)
     j.state = 'verifying'; j.status = 'Checking the installed model'; j.completed = j.total;
     emit(j, true);
     let verified = null;
     try {
-      const installed = (await ollama.tags()).find(m => m.name === j.model || m.model === j.model);
+      const key = keyOf(j.model);
+      const installed = (await ollama.tags()).find(m => keyOf(m.name) === key || (m.model && keyOf(m.model) === key));
       if (!installed) return finish(j, 'failed', { error: 'Ollama said the download finished, but doesn\'t list ' + j.model + '.', code: 'not_installed' });
-      if (j.digest) verified = installed.digest === j.digest;
+      if (j.digest) verified = String(installed.digest || '').toLowerCase().replace(/^sha256:/, '') === j.digest;
     } catch (e) { verified = null; }
     if (verified === false) {
       return finish(j, 'done', { status: 'Installed, but its digest doesn\'t match Ollama\'s library: delete it and install it again if in doubt', verified: false });
@@ -129,24 +157,26 @@ function createInstalls(opts) {
   function start(model, o) {
     const name = normalize(model);
     if (!name) return { status: 400, error: 'That isn\'t a model name from Ollama\'s library (like gemma3:1b).', code: 'invalid_model' };
-    const existing = jobs.get(name);
+    const existing = jobs.get(keyOf(name));
     if (existing && !['done', 'failed', 'cancelled'].includes(existing.state)) {
       if (existing.state === 'paused') return resume(name);
       return { job: pub(existing), already: true };
     }
     const j = { model: name, state: 'queued', status: 'Waiting for the download before it', completed: 0, total: 0, speed: null, resumed: false, verified: null,
-      update: !!(o && o.update), startedAt: new Date(now()).toISOString(), updatedAt: null, controller: null, stopping: null, error: null, code: null };
-    jobs.set(name, j);
+      update: !!(o && o.update), startedAt: new Date(now()).toISOString(), updatedAt: null, controller: null, stopping: null, error: null, code: null,
+      // (what arrived per layer: an interrupted download installed again continues, as a resume does)
+      arrived: existing && existing.state === 'failed' ? existing.arrived : {} };
+    jobs.set(keyOf(name), j);
     emit(j, true);
     next();
     return { job: pub(j) };
   }
   function stop(model, how) {
     const name = normalize(model);
-    const j = name && jobs.get(name);
+    const j = name && jobs.get(keyOf(name));
     if (!j) return { status: 404, error: 'No download of that model.', code: 'not_found' };
     if (j.state === 'queued' || (j.state === 'paused' && how === 'cancel') || (j.state === 'failed' && how === 'cancel')) {
-      if (how === 'cancel') { jobs.delete(name); Object.assign(j, { state: 'cancelled', status: 'Cancelled' }); emit(j, true); return { job: pub(j) }; }
+      if (how === 'cancel') { jobs.delete(keyOf(name)); Object.assign(j, { state: 'cancelled', status: 'Cancelled' }); emit(j, true); return { job: pub(j) }; }
       Object.assign(j, { state: 'paused', status: 'Paused' }); emit(j, true); return { job: pub(j) };
     }
     if (!j.controller) return { job: pub(j) };
@@ -156,7 +186,7 @@ function createInstalls(opts) {
   }
   function resume(model) {
     const name = normalize(model);
-    const j = name && jobs.get(name);
+    const j = name && jobs.get(keyOf(name));
     if (!j) return { status: 404, error: 'No download of that model.', code: 'not_found' };
     if (!['paused', 'failed'].includes(j.state)) return { job: pub(j) };
     Object.assign(j, { state: 'queued', status: 'Waiting to resume', error: null, code: null });
@@ -168,10 +198,10 @@ function createInstalls(opts) {
   return {
     start, resume, pause: m => stop(m, 'pause'), cancel: m => stop(m, 'cancel'),
     list: () => [...jobs.values()].map(pub),
-    busy: model => { const j = jobs.get(normalize(model)); return !!j && !['done', 'failed', 'cancelled', 'paused'].includes(j.state); },
+    busy: model => { const j = jobs.get(keyOf(model)); return !!j && !['done', 'failed', 'cancelled', 'paused'].includes(j.state); },
     events, normalize,
     close: () => { for (const j of jobs.values()) if (j.controller) { j.stopping = 'pause'; j.controller.abort(); } },
   };
 }
 
-module.exports = { createInstalls, normalize };
+module.exports = { createInstalls, normalize, keyOf };

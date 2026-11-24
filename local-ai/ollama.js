@@ -3,7 +3,10 @@
 // deleting, loading and unloading. Checked against a real Ollama 0.40:
 // - /api/pull streams NDJSON lines: {"status":"pulling <digest>","digest","total","completed"} per layer, then
 //   "verifying sha256 digest", "writing manifest", {"status":"success"}. A missing model is HTTP 200 with an
-//   {"error":…} line in the stream.
+//   {"error":…} line in the stream. After "verifying sha256 digest" Ollama hashes every layer it downloaded and
+//   sends nothing until that's done.
+// - HEAD /api/blobs/<digest>: 200 when a layer is complete on disk, 404 when it isn't (a part-downloaded one
+//   isn't).
 // - A download stopped half-way leaves its parts on disk: pulling again continues where it stopped.
 // - /api/generate with keep_alive loads a model ("done_reason":"load"); keep_alive 0 unloads it ("unload").
 // - DELETE /api/delete: 200 empty, then 404 {"error":"model '…' not found"}.
@@ -60,13 +63,25 @@ function createOllama(opts) {
   // (loading a big model from a slow disk takes a while)
   const load = (model, keepAlive) => call('POST', '/api/generate', { model, keep_alive: keepAlive === undefined ? '10m' : keepAlive }, 5 * 60 * 1000);
   const unload = model => call('POST', '/api/generate', { model, keep_alive: 0 }, 60000);
+  // Whether Ollama has a layer complete on disk. Anything but a clear yes counts as no, so the disk check
+  // before a download stays on the safe side.
+  async function hasBlob(digest) {
+    if (!/^sha256:[0-9a-f]{64}$/i.test(String(digest || ''))) return false;
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 5000);
+    try {
+      const res = await fetchImpl(base() + '/api/blobs/' + digest, { method: 'HEAD', signal: ac.signal });
+      return res.status === 200;
+    } catch (e) { return false; } finally { clearTimeout(timer); }
+  }
 
   // A download: onLine(line) for every progress line; → resolves on {"status":"success"}, throws otherwise.
   // Aborting `signal` stops it; Ollama keeps what was downloaded, and pulling again continues.
   async function pull(model, onLine, signal, idleMs) {
     const ac = new AbortController();
-    let idle = null;
-    const arm = () => { clearTimeout(idle); idle = setTimeout(() => ac.abort(new Error('stalled')), idleMs || 120000); };
+    const quiet = idleMs || 120000;       // (how long Ollama may send nothing new)
+    let idle = null, limit = quiet, verifying = false;
+    const arm = ms => { clearTimeout(idle); limit = ms || quiet; idle = setTimeout(() => ac.abort(new Error('stalled')), limit); };
     const onAbort = () => ac.abort(signal.reason);
     if (signal) { if (signal.aborted) throw new OllamaError('Cancelled.', 499, 'aborted'); signal.addEventListener('abort', onAbort, { once: true }); }
     let ok = false;
@@ -87,14 +102,24 @@ function createOllama(opts) {
       }
       const decoder = new TextDecoder();
       let buf = '', mark = null;
+      const layers = new Map();             // digest → size
       const handle = line => {
         if (!line.trim()) return;
         let j;
         try { j = JSON.parse(line); } catch (e) { return; }
         if (j.error) throw new OllamaError(String(j.error), 502, /file does not exist|not found/i.test(j.error) ? 'not_in_library' : 'pull_failed');
-        // (a stalled download keeps sending the same line: only progress counts as not idle)
+        if (j.digest && j.total > 0) layers.set(j.digest, j.total);
+        // (a stalled download keeps sending the same line: only progress counts as not idle. After "verifying
+        // sha256 digest" Ollama hashes what arrived and sends nothing until that's done: it gets time for that
+        // too, at about 20 MB a second)
         const now = j.status + '|' + (j.digest || '') + '|' + (j.completed || 0);
-        if (now !== mark) { mark = now; arm(); }
+        if (now !== mark) {
+          mark = now;
+          verifying = /verifying/i.test(String(j.status || ''));
+          let bytes = 0;
+          if (verifying) layers.forEach(n => { bytes += n; });
+          arm(Math.max(quiet, Math.ceil(bytes / 20e6) * 1000));
+        }
         if (j.status === 'success') ok = true;
         onLine(j);
       };
@@ -109,7 +134,9 @@ function createOllama(opts) {
         if (e instanceof OllamaError) throw e;
         if (signal && signal.aborted) throw new OllamaError('Cancelled.', 499, 'aborted');
         const stalled = ac.signal.aborted && ac.signal.reason && ac.signal.reason.message === 'stalled';
-        throw new OllamaError(stalled ? 'The download stalled (nothing arrived for ' + Math.round((idleMs || 120000) / 1000) + ' s).' : 'The download was interrupted (' + (e && e.message || 'connection lost') + ').', 502, 'interrupted');
+        const secs = Math.round(limit / 1000);
+        throw new OllamaError(!stalled ? 'The download was interrupted (' + (e && e.message || 'connection lost') + ').'
+          : verifying ? 'Ollama\'s check of the download (sha256) took longer than ' + secs + ' s.' : 'The download stalled (nothing arrived for ' + secs + ' s).', 502, 'interrupted');
       }
       if (!ok) throw new OllamaError('The download ended before Ollama said it was complete.', 502, 'interrupted');
     } finally {
@@ -118,7 +145,7 @@ function createOllama(opts) {
     }
   }
 
-  return { base, version, tags, ps, show, remove, load, unload, pull };
+  return { base, version, tags, ps, show, remove, load, unload, hasBlob, pull };
 }
 
 module.exports = { createOllama, nativeUrl, OllamaError, DEFAULT_URL };

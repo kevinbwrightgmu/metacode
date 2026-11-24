@@ -10,15 +10,17 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
-const { parseLibrary, parseTags, mainTags, categories, createCatalog } = require('../local-ai/catalog');
+const { parseLibrary, parseTags, mainTags, categories, createCatalog, pickVariant } = require('../local-ai/catalog');
 const { recommend, ramNeeded } = require('../local-ai/recommend');
 const { createLocalAi } = require('../local-ai');
-const { normalize } = require('../local-ai/installs');
-const { standIns, manifestFor, MODEL_BYTES } = require('./helpers/ollama-standin');
+const { createOllama } = require('../local-ai/ollama');
+const { normalize, keyOf } = require('../local-ai/installs');
+const { standIns, manifestFor, listFor, MODEL_BYTES } = require('./helpers/ollama-standin');
 
 const FIXTURES = path.join(__dirname, 'fixtures', 'ollama');
 const LIBRARY_HTML = fs.readFileSync(path.join(FIXTURES, 'library.html'), 'utf8');
 const TAGS_HTML = fs.readFileSync(path.join(FIXTURES, 'gemma3-tags.html'), 'utf8');
+const GEMMA4_TAGS_HTML = fs.readFileSync(path.join(FIXTURES, 'gemma4-tags.html'), 'utf8');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const GB = 1e9;
 
@@ -49,6 +51,35 @@ test('a model\'s tags page: size, context window, inputs and digest per tag; the
   assert.deepEqual(mainTags(model, tags).map(t => t.tag), ['gemma3:latest', 'gemma3:270m', 'gemma3:1b', 'gemma3:4b']);
 });
 
+test('tags with variants for several runners show a size range: read as its upper bound, so a model\'s size tags (and :latest) are its main tags', () => {
+  const tags = parseTags(GEMMA4_TAGS_HTML, 'gemma4');
+  assert.deepEqual(tags.map(t => [t.tag, t.size]), [['gemma4:latest', 9.5e9], ['gemma4:e2b', 7.5e9], ['gemma4:e4b', 9.5e9], ['gemma4:12b', 8e9], ['gemma4:26b', 19e9],
+    ['gemma4:31b', 20e9], ['gemma4:e2b-it-q4_K_M', 4.6e9], ['gemma4:e2b-mlx', 7.5e9]]);
+  assert.deepEqual(tags.find(t => t.tag === 'gemma4:26b'), { tag: 'gemma4:26b', digest: 'ed3c4359df98', size: 19e9, context: 262144, inputs: ['text', 'image'] });
+  const model = { name: 'gemma4', capabilities: ['vision', 'tools', 'thinking'], sizes: ['e2b', 'e4b', '12b', '26b', '31b'], pulls: 29600000, description: 'Gemma 4 models.' };
+  const main = mainTags(model, tags);
+  assert.deepEqual(main.map(t => t.tag), ['gemma4:latest', 'gemma4:e2b', 'gemma4:e4b', 'gemma4:12b', 'gemma4:26b', 'gemma4:31b']);
+  // (a size tag is recommended, not one of the first quantizations on the page)
+  const pick = gb => recommend([Object.assign({}, model, { categories: categories(model), tags: main })], hw(gb)).tiers.flatMap(t => t.models)[0];
+  assert.equal(pick(16).tag, 'gemma4:e4b');
+  assert.equal(pick(30).tag, 'gemma4:26b');
+  assert.equal(pick(32).tag, 'gemma4:31b');
+});
+
+test('a manifest list: the variant Ollama pulls, as Ollama picks it (MLX first on Apple Silicon, llama.cpp first elsewhere)', () => {
+  const d = n => 'sha256:' + String(n).repeat(64);
+  const list = { manifests: [
+    { mediaType: 'application/vnd.oci.image.manifest.v1+json', digest: d(1), runner: 'llamacpp' },          // (not a plain manifest: passed over)
+    { digest: d(2), runner: ' LlamaCpp ' },
+    { mediaType: 'application/vnd.docker.distribution.manifest.v2+json', digest: d(3), runner: 'mlx' },
+  ] };
+  assert.equal(pickVariant(list, false).digest, d(2));
+  assert.equal(pickVariant(list, true).digest, d(3));
+  assert.equal(pickVariant({ manifests: [{ digest: d(4), runner: 'ggml' }, { digest: d(5), runner: 'other' }] }, true).digest, d(4));
+  assert.equal(pickVariant({ manifests: [{ digest: d(5), runner: 'other' }] }, false), null);
+  assert.equal(pickVariant({}, false), null);
+});
+
 test('the shipped snapshot: hundreds of local models with their tags, for a first start offline', () => {
   const snap = require('../local-ai/catalog-snapshot.json');
   assert.ok(snap.models.length >= 150, snap.models.length);
@@ -57,11 +88,17 @@ test('the shipped snapshot: hundreds of local models with their tags, for a firs
   assert.ok(!snap.models.some(m => m.capabilities.includes('cloud')));
 });
 
-test('model names: library names only, ":latest" when there is no tag, never a cloud tag', () => {
+test('model names: library names only, ":latest" when there is no tag, never a cloud tag; a tag keeps its case, and names that differ only in case are one model', () => {
   assert.equal(normalize('gemma3'), 'gemma3:latest');
-  assert.equal(normalize('Gemma3:1B'), 'gemma3:1b');
+  assert.equal(normalize('Gemma3:1B'), 'gemma3:1B');
+  assert.equal(normalize('gemma4:e2b-it-q4_K_M'), 'gemma4:e2b-it-q4_K_M');        // (as ollama.com lists it)
   assert.equal(normalize('someone/model:q4'), 'someone/model:q4');
-  for (const bad of ['', '../etc', 'a b', 'gpt-oss:120b-cloud', 'x;rm -rf', 'http://x/y']) assert.equal(normalize(bad), null, bad);
+  for (const bad of ['', '../etc', 'a b', 'gpt-oss:120b-cloud', 'gpt-oss:120b-CLOUD', 'x;rm -rf', 'http://x/y', 'hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M']) assert.equal(normalize(bad), null, bad);
+  // (the key of a download and of a model's settings)
+  assert.equal(keyOf('Gemma3:1B'), 'gemma3:1b');
+  assert.equal(keyOf('gemma3'), 'gemma3:latest');
+  assert.equal(keyOf('hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M'), 'hf.co/bartowski/llama-3.2-1b-instruct-gguf:q4_k_m');
+  assert.equal(keyOf('localhost:5000/someone/model'), 'localhost:5000/someone/model:latest');
 });
 
 // ── Recommendations ─────────────────────────────────────────────────────────
@@ -104,6 +141,7 @@ test('recommendations never exceed what the device can hold; the best tag that f
 
 let si, api, local, tmp, changed;
 const disk = { free: 100 * GB };
+const machine = { appleSilicon: false };
 test.before(async () => {
   si = await standIns();
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-local-ai-'));
@@ -113,7 +151,7 @@ test.before(async () => {
     libraryUrl: si.base + '/library', registry: si.base + '/v2/library/', minLibraryModels: 1,
     // (a request from "this machine" unless the test says it came through a proxy)
     isLoopback: req => req.get('x-test-remote') !== '1',
-    hardware: { detect: async () => ({ os: { platform: 'linux', name: 'Test Linux' }, arch: 'x64', cpu: { model: 'Test CPU', threads: 4 }, memory: { total: 16 * GB, available: 12 * GB }, gpus: [], disk: { path: tmp, free: disk.free, total: 200 * GB } }) },
+    hardware: { detect: async () => ({ os: { platform: 'linux', name: 'Test Linux' }, arch: 'x64', appleSilicon: machine.appleSilicon, cpu: { model: 'Test CPU', threads: 4 }, memory: { total: 16 * GB, available: 12 * GB }, gpus: [], disk: { path: tmp, free: disk.free, total: 200 * GB } }) },
     onModelsChanged: (what, model) => changed.push([what, model]),
   });
   const app = express();
@@ -424,4 +462,200 @@ test('Ollama not running: the store still browses (catalog, recommendations), an
     await new Promise(r => { server.closeAllConnections(); server.close(r); });
     fs.rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ── Fixes from the review ───────────────────────────────────────────────────
+
+test('the disk check counts only what a download still needs: a resume what didn\'t arrive, an update only the layers that changed', async () => {
+  try {
+    // an interrupted download: 4.5 of the 6 MB arrived, and Ollama keeps them
+    si.st.breakAt = MODEL_BYTES * 0.75;
+    await api('POST', '/installs', { model: 'deepseek-r1:8b' });
+    await until(async () => { const j = await job('deepseek-r1:8b'); return j && j.state === 'failed'; }, 8000, 'the interrupted download');
+    // room for the rest and the margin, not for all of it: resuming works
+    disk.free = MODEL_BYTES * 0.25 + 800 + 512e6 + 1e6;
+    await api('POST', '/installs/resume', { model: 'deepseek-r1:8b' });
+    await until(async () => (await job('deepseek-r1:8b')).state === 'done', 8000, 'the resumed download');
+    assert.equal((await job('deepseek-r1:8b')).verified, true);
+    // an update when nothing changed in the library: nothing to download, however full the disk
+    disk.free = 100e6;
+    assert.equal((await api('POST', '/models/update', { model: 'deepseek-r1:8b' })).status, 202);
+    await until(async () => { const j = await job('deepseek-r1:8b'); return j && j.update && j.state === 'done'; }, 8000, 'the update');
+    // new weights in the library: those are needed (Ollama keeps the old ones until the new manifest is written)
+    si.st.revisions.set('deepseek-r1:8b', 2);
+    await api('POST', '/models/update', { model: 'deepseek-r1:8b' });
+    await until(async () => { const j = await job('deepseek-r1:8b'); return j && j.update && j.state === 'failed'; }, 8000, 'the update without room');
+    const j = await job('deepseek-r1:8b');
+    assert.equal(j.code, 'insufficient_disk');
+    assert.match(j.error, /^Not enough disk space: deepseek-r1:8b needs 6 MB more \(and 512 MB to spare\), and .* has 100 MB free\./);
+  } finally {
+    disk.free = 100 * GB;
+    si.st.breakAt = null;
+    si.st.revisions.clear();
+    si.st.installed.delete('deepseek-r1:8b');
+  }
+});
+
+test('Ollama\'s sha256 check after a download isn\'t a stall: it gets time for what it hashes (about 20 MB a second)', async () => {
+  const ollama = createOllama({ env: { OLLAMA_BASE_URL: si.base + '/v1' } });
+  try {
+    si.st.pullDelayMs = 5;
+    si.st.verifyDelayMs = 600;                 // (quiet for 0.6 s: 6 MB to hash may take 1 s)
+    const lines = [];
+    await ollama.pull('verify-test:1b', l => lines.push(l.status), null, 200);
+    assert.deepEqual(lines.slice(-3), ['verifying sha256 digest', 'writing manifest', 'success']);
+    // a check that takes much longer is stopped, and says what took long
+    si.st.verifyDelayMs = 1600;
+    await assert.rejects(ollama.pull('verify-test:2b', () => {}, null, 200), e => e.code === 'interrupted' && /^Ollama's check of the download \(sha256\) took longer than 1 s\.$/.test(e.message));
+    // (while downloading, the quiet time is still the setting's)
+    si.st.verifyDelayMs = 0;
+    si.st.pullDelayMs = 400;
+    await assert.rejects(ollama.pull('verify-test:3b', () => {}, null, 200), e => e.code === 'interrupted' && /stalled \(nothing arrived for 0 s\)/.test(e.message));
+  } finally {
+    si.st.verifyDelayMs = 0;
+    si.st.pullDelayMs = 25;
+    for (const m of ['verify-test:1b', 'verify-test:2b', 'verify-test:3b']) si.st.installed.delete(m);
+  }
+});
+
+test('pause and cancel while the model and the disk are being checked: the job stops there, and nothing is downloaded', async () => {
+  const pulls = si.st.pulls.length;
+  try {
+    si.st.registryDelayMs = 1500;              // (the registry takes its time)
+    assert.equal((await api('POST', '/installs', { model: 'qwen2.5-coder:1.5b' })).json.job.state, 'checking');
+    assert.equal((await api('POST', '/installs/cancel', { model: 'qwen2.5-coder:1.5b' })).status, 200);
+    await until(async () => !(await job('qwen2.5-coder:1.5b')), 1000, 'cancelled while checking');
+    assert.equal((await api('POST', '/installs', { model: 'qwen2.5-coder:3b' })).json.job.state, 'checking');
+    await api('POST', '/installs/pause', { model: 'qwen2.5-coder:3b' });
+    await until(async () => (await job('qwen2.5-coder:3b')).state === 'paused', 1000, 'paused while checking');
+    assert.equal(si.st.pulls.length, pulls, 'nothing downloaded');
+    si.st.registryDelayMs = 0;
+    await api('POST', '/installs/resume', { model: 'qwen2.5-coder:3b' });
+    await until(async () => (await job('qwen2.5-coder:3b')).state === 'done', 8000, 'the resumed install');
+    assert.deepEqual(si.st.pulls.slice(pulls), ['qwen2.5-coder:3b']);
+  } finally {
+    si.st.registryDelayMs = 0;
+    si.st.installed.delete('qwen2.5-coder:3b');
+  }
+});
+
+test('Ollama\'s registry: library models, models of other namespaces, and a registry URL with or without its trailing slash', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-registry-'));
+  try {
+    for (const registry of [si.base + '/v2/library/', si.base + '/v2/library']) {
+      const c = createCatalog({ dataDir: dir, fetch: (u, i) => fetch(u, i), registry });
+      const lib = await c.manifest('gemma3:1b');
+      assert.deepEqual([lib.ok, lib.digest, lib.size], [true, manifestFor('gemma3:1b').digest, MODEL_BYTES + 800], registry);
+      assert.deepEqual(lib.blobs, manifestFor('gemma3:1b').layers.map(l => ({ digest: l.digest, size: l.size })));
+      const other = await c.manifest('huihui_ai/deepseek-r1-abliterated:latest');
+      assert.deepEqual([other.ok, other.digest], [true, manifestFor('huihui_ai/deepseek-r1-abliterated:latest').digest], registry);
+      assert.deepEqual(await c.manifest('missing-model:1b'), { ok: false, missing: true });
+    }
+    assert.ok(si.st.registry.some(r => r.startsWith('/v2/huihui_ai/deepseek-r1-abliterated/manifests/latest ')));
+    assert.ok(!si.st.registry.some(r => /librarygemma3|%2F/i.test(r)));
+    // installed and verified, as Ollama pulls it
+    await api('POST', '/installs', { model: 'someone/model:q4' });
+    await until(async () => { const j = await job('someone/model:q4'); return j && j.state === 'done'; }, 8000, 'the install');
+    assert.equal((await job('someone/model:q4')).verified, true);
+  } finally {
+    si.st.installed.delete('someone/model:q4');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a tag with variants for several runners (a manifest list): the variant Ollama pulls here, its layers, sizes and digest; installs verified against it, MLX on Apple Silicon', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-variants-'));
+  try {
+    const c = createCatalog({ dataDir: dir, fetch: (u, i) => fetch(u, i), registry: si.base + '/v2/library/' });
+    const [llama, mlx] = listFor('gemma4:26b').variants;
+    const here = await c.manifest('gemma4:26b', { appleSilicon: false });
+    assert.deepEqual([here.ok, here.digest, here.size], [true, llama.digest, MODEL_BYTES + 800]);
+    assert.deepEqual(here.blobs.map(b => b.digest), llama.layers.map(l => l.digest));
+    const mac = await c.manifest('gemma4:26b', { appleSilicon: true });
+    assert.deepEqual([mac.digest, mac.size], [mlx.digest, MODEL_BYTES + 1e6 + 800]);
+    // (asked for as Ollama asks; each variant is a blob of the model's repository)
+    assert.ok(si.st.registry.some(r => r === '/v2/library/gemma4/manifests/26b application/vnd.ollama.manifest.list.v2+json, application/vnd.docker.distribution.manifest.v2+json'));
+    assert.ok(si.st.registry.some(r => r.startsWith('/v2/library/gemma4/blobs/sha256:' + mlx.digest + ' ')));
+    // installs: llama.cpp on this computer, MLX on a Mac with Apple Silicon
+    await api('POST', '/installs', { model: 'gemma4:26b' });
+    await until(async () => { const j = await job('gemma4:26b'); return j && j.state === 'done'; }, 8000, 'the install');
+    assert.deepEqual([(await job('gemma4:26b')).verified, si.st.installed.get('gemma4:26b').digest], [true, llama.digest]);
+    machine.appleSilicon = true;
+    si.st.runner = 'mlx';
+    await api('POST', '/installs', { model: 'gemma4:e2b' });
+    await until(async () => { const j = await job('gemma4:e2b'); return j && j.state === 'done'; }, 8000, 'the install on a Mac');
+    const j = await job('gemma4:e2b');
+    assert.deepEqual([j.verified, j.total], [true, MODEL_BYTES + 1e6 + 800]);
+    assert.equal(si.st.installed.get('gemma4:e2b').digest, listFor('gemma4:e2b').variants[1].digest);
+  } finally {
+    machine.appleSilicon = false;
+    si.st.runner = 'llamacpp';
+    si.st.installed.delete('gemma4:26b');
+    si.st.installed.delete('gemma4:e2b');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a tag in ollama.com\'s spelling (gemma4:e2b-it-q4_K_M): the download and the model go by it; names that differ only in case are one model', async () => {
+  try {
+    const r = await api('POST', '/installs', { model: 'gemma4:e2b-it-q4_K_M' });
+    assert.equal(r.json.job.model, 'gemma4:e2b-it-q4_K_M');
+    const again = await api('POST', '/installs', { model: 'GEMMA4:E2B-IT-Q4_K_M' });
+    assert.deepEqual([again.status, again.json.already, again.json.job.model], [200, true, 'gemma4:e2b-it-q4_K_M']);
+    await until(async () => { const j = await job('gemma4:e2b-it-q4_K_M'); return j && j.state === 'done'; }, 8000, 'the install');
+    assert.equal((await job('gemma4:e2b-it-q4_K_M')).verified, true);
+    assert.deepEqual([...si.st.installed.keys()].filter(n => /^gemma4:e2b-it/i.test(n)), ['gemma4:e2b-it-q4_K_M']);
+    // pulled before in another case (by the command line): Ollama updates that one, and it's found
+    const cli = 'gemma3:1b-it-q4_k_m';
+    si.st.installed.set(cli, { digest: manifestFor(cli).digest, size: manifestFor(cli).size, blobs: [] });
+    await api('POST', '/installs', { model: 'gemma3:1b-it-q4_K_M' });
+    await until(async () => { const j = await job('gemma3:1b-it-q4_K_M'); return j && j.state === 'done'; }, 8000, 'the install over the other spelling');
+    assert.equal((await job('gemma3:1b-it-q4_K_M')).verified, true);
+    assert.ok(si.st.installed.has(cli) && !si.st.installed.has('gemma3:1b-it-q4_K_M'));
+  } finally {
+    si.st.installed.delete('gemma4:e2b-it-q4_K_M');
+    si.st.installed.delete('gemma3:1b-it-q4_k_m');
+  }
+});
+
+test('a model\'s settings don\'t depend on the case of its name: saved, shown in Installed Models, used for MetaCode\'s requests', async () => {
+  const name = 'llama3.1:8b-instruct-q4_K_M';                // (pulled with the command line, as ollama.com spells it)
+  si.st.installed.set(name, { digest: manifestFor(name).digest, size: manifestFor(name).size, blobs: [] });
+  try {
+    const put = await api('PUT', '/models/settings', { model: name, settings: { temperature: 0.5 } });
+    assert.deepEqual([put.status, put.json.settings], [200, { temperature: 0.5 }]);
+    assert.deepEqual((await api('GET', '/models')).json.models.find(m => m.name === name).settings, { temperature: 0.5 });
+    assert.deepEqual(local.modelSettings('ollama/' + name), { temperature: 0.5 });
+    assert.deepEqual(local.modelSettings('ollama/llama3.1:8b-instruct-q4_k_m'), { temperature: 0.5 });
+    await api('PUT', '/models/settings', { model: 'LLAMA3.1:8B-INSTRUCT-Q4_K_M', settings: {} });
+    assert.equal(local.modelSettings('ollama/' + name), null);
+  } finally { si.st.installed.delete(name); }
+});
+
+test('a look at ollama.com that failed: for 5 minutes the saved catalog answers at once, with the problem; then (or when asked) the network again', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-catalog-retry-'));
+  try {
+    let calls = 0, t = Date.parse('2027-01-01T00:00:00Z');     // (the snapshot's tags are more than a week old by then)
+    const c = createCatalog({ dataDir: dir, now: () => t, fetch: () => { calls++; return Promise.reject(new TypeError('fetch failed')); } });
+    const first = await c.refresh(false);
+    assert.match(first.problem, /can't be reached \(offline\?\); the saved catalog is shown/);
+    assert.equal(calls, 1);
+    t += 60 * 1000;
+    assert.deepEqual(await c.refresh(false), { ok: false, problem: first.problem });
+    const tags = await c.tagsOf('gemma3');
+    assert.deepEqual([tags.stale, tags.tags.length > 0], [true, true]);
+    assert.equal(c.list().source, 'snapshot');
+    assert.equal(calls, 1, 'nothing asked of the network meanwhile');
+    t += 5 * 60 * 1000;
+    await c.refresh(false);
+    assert.equal(calls, 2);
+    await c.refresh(true);                     // (the Refresh button)
+    assert.equal(calls, 3);
+    // (a model's tags page that couldn't be reached counts too)
+    t += 10 * 60 * 1000;
+    await c.tagsOf('gemma3');
+    assert.equal(calls, 4);
+    await c.refresh(false);
+    assert.equal(calls, 4);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
