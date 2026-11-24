@@ -16,7 +16,7 @@ const { createLocalAi } = require('../local-ai');
 const { createOllama } = require('../local-ai/ollama');
 const { createHardware, vmStatAvailable } = require('../local-ai/hardware');
 const { createRuntimes, platformId } = require('../local-ai/runtimes');
-const { normalize, keyOf } = require('../local-ai/installs');
+const { normalize, keyOf, createInstalls } = require('../local-ai/installs');
 const { standIns, manifestFor, listFor, MODEL_BYTES } = require('./helpers/ollama-standin');
 
 const FIXTURES = path.join(__dirname, 'fixtures', 'ollama');
@@ -624,6 +624,20 @@ test('the disk check counts only what a download still needs: a resume what didn
   }
 });
 
+test('the disk check asks Ollama about the layers 16 at a time (an MLX variant has a thousand and more)', async () => {
+  let active = 0, most = 0, asked = 0;
+  const blobs = Array.from({ length: 1200 }, (_, i) => ({ digest: 'sha256:' + String(i).padStart(64, '0'), size: 1e6 }));
+  const ollama = { hasBlob: async d => { asked++; active++; most = Math.max(most, active); await sleep(1); active--; return Number(d.slice(-4)) % 2 === 0; } };
+  const installs = createInstalls({ ollama, catalog: { manifest: async () => ({ ok: true, size: 1200e6, digest: 'f'.repeat(64), blobs }) },
+    hardware: { detect: async () => ({ disk: { path: '/models', free: 1e9 } }) } });
+  installs.start('gemma4:e2b-mlx');
+  await until(() => installs.list()[0].state === 'failed', 8000, 'the disk check');
+  const j = installs.list()[0];
+  assert.equal(j.code, 'insufficient_disk');
+  assert.match(j.error, /^Not enough disk space: gemma4:e2b-mlx needs 600 MB more \(and 512 MB to spare\), and \/models has 1\.0 GB free\./);
+  assert.deepEqual([asked, most], [1200, 16]);
+});
+
 test('Ollama\'s sha256 check after a download isn\'t a stall: it gets time for what it hashes (about 20 MB a second)', async () => {
   const ollama = createOllama({ env: { OLLAMA_BASE_URL: si.base + '/v1' } });
   try {
@@ -808,6 +822,13 @@ test('a model from another registry (hf.co/…), as Ollama lists it: loaded, sto
     assert.ok(!si.st.installed.has(hf) && !d.json.models.some(x => x.name === hf));
     assert.deepEqual(changed.pop(), ['deleted', hf]);
     assert.equal(local.modelSettings('ollama/' + hf), null, 'its settings went with it');
+    // a cloud model Ollama lists runs on Ollama's servers: nothing to load (it can be deleted)
+    si.st.installed.set('gpt-oss:120b-cloud', { digest: 'd'.repeat(64), size: 384, blobs: [], remote_host: 'https://ollama.com:443' });
+    const cloud = await api('POST', '/models/load', { model: 'gpt-oss:120b-cloud' });
+    assert.deepEqual([cloud.status, cloud.json.error.code], [400, 'cloud_model']);
+    assert.match(cloud.json.error.message, /^gpt-oss:120b-cloud runs on Ollama's servers, not on this computer/);
+    assert.ok(!si.st.loads.some(([name]) => /cloud/.test(name)));
+    assert.equal((await api('POST', '/models/delete', { model: 'gpt-oss:120b-cloud' })).status, 200);
     // a model Ollama doesn't have, and what isn't a name
     for (const [method, p] of [['POST', '/models/load'], ['POST', '/models/unload'], ['POST', '/models/delete'], ['PUT', '/models/settings']]) {
       const gone = await api(method, p, { model: hf, settings: {} });
@@ -816,7 +837,7 @@ test('a model from another registry (hf.co/…), as Ollama lists it: loaded, sto
       const bad = await api(method, p, { model: 'x;rm -rf /', settings: {} });
       assert.deepEqual([bad.status, bad.json.error.code], [400, 'invalid_model'], p);
     }
-  } finally { si.st.installed.delete(hf); }
+  } finally { si.st.installed.delete(hf); si.st.installed.delete('gpt-oss:120b-cloud'); }
 });
 
 test('Installed Models: names that share a digest are one model, counted once, and each says which other names use its files', async () => {

@@ -114,7 +114,7 @@ function createLocalAi(opts) {
   };
   const fail = (res, status, code, message) => res.status(status).json({ error: { type: status >= 500 ? 'service_unavailable' : 'invalid_request', code, message } });
   const ollamaFail = (res, e) => fail(res, e.status === 404 ? 404 : e.status === 503 ? 503 : 502, e.code || 'ollama_error', e.message);
-  // The installed model a request names, as Ollama lists it: → its name, or null once the request is answered
+  // The installed model a request names: → its entry in Ollama's list, or null once the request is answered
   async function installedModel(req, res) {
     const name = String((req.body && req.body.model) || '').trim();
     if (!LISTED_NAME.test(name)) { fail(res, 400, 'invalid_model', 'Name a model.'); return null; }
@@ -122,7 +122,7 @@ function createLocalAi(opts) {
     try { list = await ollama.tags(); } catch (e) { ollamaFail(res, e); return null; }
     const m = list.find(x => keyOf(x.name) === keyOf(name) || (x.model && keyOf(x.model) === keyOf(name)));
     if (!m) { fail(res, 404, 'not_found', 'Ollama has no model called "' + name.slice(0, 120) + '".'); return null; }
-    return m.name;
+    return m;
   }
 
   async function installed() {
@@ -200,23 +200,27 @@ function createLocalAi(opts) {
     try { res.json(await installed()); } catch (e) { ollamaFail(res, e); }
   });
   router.post('/models/load', manage, async (req, res) => {
-    const model = await installedModel(req, res);
-    if (!model) return;
+    const m = await installedModel(req, res);
+    if (!m) return;
+    const model = m.name;
+    // (a cloud model runs on Ollama's servers: loading it would reach them, and MetaCode never uses one)
+    if (m.remote_host || /cloud/i.test(model.split(':').pop())) return fail(res, 400, 'cloud_model', model + ' runs on Ollama\'s servers, not on this computer: there is nothing to load here.');
     const s = settingsOf(model) || {};
     const minutes = Number.isFinite(s.keepAliveMinutes) ? s.keepAliveMinutes : 10;
     try { await ollama.load(model, minutes ? minutes + 'm' : -1); res.json(await installed()); } catch (e) { ollamaFail(res, e); }
   });
   router.post('/models/unload', manage, async (req, res) => {
-    const model = await installedModel(req, res);
-    if (!model) return;
-    try { await ollama.unload(model); res.json(await installed()); } catch (e) { ollamaFail(res, e); }
+    const m = await installedModel(req, res);
+    if (!m) return;
+    try { await ollama.unload(m.name); res.json(await installed()); } catch (e) { ollamaFail(res, e); }
   });
   router.post('/models/delete', manage, async (req, res) => {
     // (not while it downloads: also the first time, when Ollama doesn't list it yet)
     const busy = name => installs.busy(name) && (fail(res, 409, 'busy', name + ' is downloading: cancel the download first.'), true);
     if (busy(String((req.body && req.body.model) || '').trim())) return;
-    const model = await installedModel(req, res);
-    if (!model || busy(model)) return;
+    const m = await installedModel(req, res);
+    if (!m || busy(m.name)) return;
+    const model = m.name;
     try {
       await ollama.remove(model);
       const s = loadSettings();
@@ -232,8 +236,9 @@ function createLocalAi(opts) {
     res.status(202).json(r);
   });
   router.put('/models/settings', manage, async (req, res) => {
-    const model = await installedModel(req, res);
-    if (!model) return;
+    const m = await installedModel(req, res);
+    if (!m) return;
+    const model = m.name;
     const given = (req.body && req.body.settings) || {};
     const clean = {};
     for (const [k, [lo, hi]] of Object.entries(SETTING_LIMITS)) {

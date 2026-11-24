@@ -68,8 +68,14 @@ function createInstalls(opts) {
   // What a download still has to fetch: the layers Ollama doesn't have yet (an update, or a tag that shares them
   // with an installed model, needs only the rest), less what arrived of them before a pause or an interruption
   async function toFetch(j) {
-    const have = await Promise.all(j.blobs.map(b => ollama.hasBlob(b.digest)));
-    return j.blobs.reduce((n, b, i) => (have[i] ? n : n + Math.max(0, b.size - (j.arrived[b.digest] || 0))), 0);
+    let need = 0;
+    // (16 at a time: an MLX variant has a thousand layers and more)
+    for (let i = 0; i < j.blobs.length && !j.stopping; i += 16) {
+      const part = j.blobs.slice(i, i + 16);
+      const have = await Promise.all(part.map(b => ollama.hasBlob(b.digest)));
+      part.forEach((b, k) => { if (!have[k]) need += Math.max(0, b.size - (j.arrived[b.digest] || 0)); });
+    }
+    return need;
   }
 
   function next() {

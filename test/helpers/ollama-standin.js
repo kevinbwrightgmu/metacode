@@ -70,7 +70,8 @@ function standIns(opts) {
   app.use(express.json());
   // Ollama
   app.get('/api/version', (req, res) => res.json({ version: '0.40.17' }));
-  app.get('/api/tags', (req, res) => res.json({ models: [...st.installed.entries()].map(([name, m]) => ({ name, model: name, size: m.size, digest: m.digest, modified_at: '2026-11-21T00:00:00Z', details: { family: 'gemma3', parameter_size: '268M', quantization_level: 'Q8_0', context_length: 32768 }, capabilities: ['completion'] })) }));
+  // (a cloud model, pulled with the command line, has its remote_host)
+  app.get('/api/tags', (req, res) => res.json({ models: [...st.installed.entries()].map(([name, m]) => Object.assign({ name, model: name, size: m.size, digest: m.digest, modified_at: '2026-11-21T00:00:00Z', details: { family: 'gemma3', parameter_size: '268M', quantization_level: 'Q8_0', context_length: 32768 }, capabilities: ['completion'] }, m.remote_host ? { remote_host: m.remote_host, remote_model: name.replace(/-?cloud$/, '') } : {})) }));
   app.get('/api/ps', (req, res) => res.json({ models: [...st.loaded].map(name => ({ name, model: name, size: 326201507, size_vram: 0, expires_at: '2026-11-21T01:00:00Z', context_length: 4096 })) }));
   app.head('/api/blobs/:digest', (req, res) => res.status(st.blobs.has(req.params.digest) ? 200 : 404).end());
   app.post('/api/generate', (req, res) => {
