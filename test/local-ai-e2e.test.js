@@ -624,13 +624,17 @@ test('Installed Models shows Ollama\'s list at once while MetaCode\'s AI service
     const { page, context, errors } = await open('/app.html#dashboard', { setup: c => c.route(u => new URL(u).pathname === '/api/models', async route => { await held; await route.continue().catch(() => {}); }) });
     await page.evaluate(() => { location.hash = '#installed-models'; });
     await page.waitForSelector('#lai-installed tbody tr', { timeout: 5000 });
-    assert.match(await page.textContent('#lai-installed tbody'), /Checking whether MetaCode's AI service offers it…/);
+    // ("Use as default" is there, off, where it will be: the buttons after it don't move when the service answers)
+    assert.match(await page.getAttribute('#lai-installed tbody tr button[disabled][title]', 'title'), /Checking whether MetaCode's AI service offers it…/);
     assert.ok(await page.$('[data-act="load"][data-model="gemma3:270m"]'), 'Load, Stop, Settings and Delete need only Ollama');
+    const spots = () => page.$$eval('#lai-installed [data-act]:not([data-act="default"])', bs => bs.map(b => { const r = b.getBoundingClientRect(); return [b.dataset.act, Math.round(r.x), Math.round(r.y)]; }));
+    const before = await spots();
     assert.equal(await has(page, '[data-act="default"][data-model="gemma3:270m"]'), false);
     assert.equal(await page.$$eval('select[data-feature="coding"] option', os => os.length), 1, 'no model offered for a feature yet');
     // once it answers: offered
     release();
     await page.waitForSelector('#lai-installed[data-offered="known"] [data-act="default"][data-model="gemma3:270m"]');
+    assert.deepEqual(await spots(), before, 'no button moved when the service answered (a click aimed at one would land on another)');
     assert.deepEqual(errors, []);
     await context.close();
   } finally {

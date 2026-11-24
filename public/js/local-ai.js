@@ -461,6 +461,8 @@ const LocalAI = (() => {
             same.length ? 'the same files as ' + same.join(', ') : ''].filter(Boolean).join(' · ')) + '</td>' +
           '<td>' + (m.loaded ? '<span class="badge badge-green">loaded</span> <span class="form-hint">' + size(m.loaded.size) + (m.loaded.sizeVram ? ' (GPU)' : '') + '</span>' : '<span class="form-hint">no</span>') + '</td>' +
           '<td class="lai-actions">' + (id ? '<button class="btn btn-secondary btn-sm" data-act="default" data-model="' + esc(m.name) + '" data-id="' + esc(id) + '"' + (def === lc(id) ? ' disabled' : '') + '>Use as default</button>'
+            // (while MetaCode's AI service hasn't answered: the button's place, so the buttons after it don't move when it does)
+            : !embedding(m) && offerUnknown(m) ? '<button class="btn btn-secondary btn-sm" disabled title="' + esc(notOffered(m)) + '" aria-label="' + esc(notOffered(m)) + '">Use as default</button>'
             : '<span class="form-hint">' + esc(notOffered(m)) + '</span>') +
           (canManage() ? (m.loaded ? '<button class="btn btn-ghost btn-sm" data-act="unload" data-model="' + esc(m.name) + '">Stop</button>' : '<button class="btn btn-ghost btn-sm" data-act="load" data-model="' + esc(m.name) + '">Load</button>') +
             '<button class="btn btn-ghost btn-sm" data-act="settings" data-model="' + esc(m.name) + '">Settings</button>' +
