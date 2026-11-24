@@ -935,13 +935,19 @@ test('the disk check doesn\'t hang on a models folder that stopped answering (a 
     assert.ok(Date.now() - t1 < 1000, (Date.now() - t1) + ' ms');
     await until(() => ['done', 'failed'].includes(jobOf('mistral:7b').state), 8000, 'mistral:7b');
     assert.deepEqual([jobOf('mistral:7b').state, jobOf('mistral:7b').verified], ['done', true], jobOf('mistral:7b').error);
-    // the folder answers again: the look waiting on it ends, and the next one waits only its 1.5 s at most
+    // the folder answers again: the look that waited on it reads the answer and ends, so the next install looks
+    // again, and waits on the folder (its FIFO, here) for its 1.5 s at most. (A look that never ended would make
+    // every later install go on at once, as for a folder that can't be read, and the disk check would never read
+    // Ollama's folder again.)
     answer();
+    await sleep(200);
     const t2 = Date.now();
     installs.start('llama3.2:3b');
-    await until(() => ['done', 'failed'].includes((jobOf('llama3.2:3b') || {}).state), 8000, 'llama3.2:3b');
+    await until(() => (jobOf('llama3.2:3b') || {}).state === 'downloading' || ['done', 'failed'].includes((jobOf('llama3.2:3b') || {}).state), 5000, 'llama3.2:3b past the check');
+    const ms = Date.now() - t2;
+    assert.ok(ms >= 1400 && ms < 2500, 'past the check after ' + ms + ' ms');
+    await until(() => ['done', 'failed'].includes(jobOf('llama3.2:3b').state), 8000, 'llama3.2:3b');
     assert.equal(jobOf('llama3.2:3b').state, 'done', jobOf('llama3.2:3b').error);
-    assert.ok(Date.now() - t2 < 4000, (Date.now() - t2) + ' ms');
   } finally {
     installs.close();
     answer();
