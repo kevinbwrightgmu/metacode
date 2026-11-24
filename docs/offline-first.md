@@ -106,10 +106,12 @@ Store downloads them.
      source:
      ```bash
      npm ci --omit=dev
-     METACODE_PROFILE=lite AI_MODE=local-only node server.js
+     METACODE_PROFILE=lite AI_MODE=local-only METACODE_HOST=127.0.0.1 node server.js
      ```
-     Termux's `ollama` package provides local models. Chrome then opens `http://localhost:3000`, which counts
-     as a secure origin, so the PWA works offline there too.
+     `METACODE_HOST=127.0.0.1` keeps it to the phone, not its Wi-Fi network. Termux's `ollama` package provides
+     local models (`pkg install ollama`, then `ollama serve`), and the Store says so when it sees Termux.
+     Chrome then opens `http://localhost:3000`, which counts as a secure origin, so the PWA works offline
+     there too.
 
 ## 3. Install
 
@@ -211,21 +213,28 @@ Run `npm install`, then `METACODE_PROFILE=lite AI_MODE=local-only npm start` (RE
      High performance and Experimental.
    - A model the device can't hold is never recommended. The memory a model needs is estimated as 1.12 × its
      file plus room for a 4K context, from the size of the files.
-   - **Library** is Ollama's whole library: search, categories (general, coding, reasoning, vision,
+   - **All models** is Ollama's whole library: search, categories (general, coding, reasoning, vision,
      embeddings, small, multilingual), capabilities, and sorting by popularity, date or size.
    - Each model lists its tags. For each tag it gives the download size, the memory needed, the context
      window and the inputs, and whether it fits this device.
 3. **Install.** Downloads show progress, speed and time left.
    - They can be paused, resumed (Ollama continues where it stopped) and cancelled.
    - One downloads at a time, the others queue, and the same model is never downloaded twice at once.
-   - Before a download starts, free disk space is checked against the download's exact size, keeping 512 MB
-     spare.
-   - After it, the installed model's digest is compared with the registry's. An interrupted download says so
-     and can be resumed.
+   - Before a download starts, free disk space is checked against what it still has to fetch: the files
+     Ollama doesn't have yet, less what arrived before a pause, keeping 512 MB spare. A resume, or an update
+     that changes little, doesn't ask for the whole model again.
+   - After it, the installed model's digest is compared with the registry's. For a tag with variants for
+     several runners, that is the variant Ollama pulls on this device (MLX on Apple silicon, llama.cpp
+     elsewhere). A mismatch is reported, and the model stays installed. An interrupted download says so and
+     can be resumed.
 4. **Installed Models.**
-   - Load a model into memory or stop it, update it, or delete it; each shows the space it uses.
+   - Load a model into memory or stop it, update it, or delete it; each shows the space it uses. This works
+     for any model Ollama lists, also one pulled from another registry (`hf.co/…`).
+   - Names that share one model's files (`gemma3:latest` and `gemma3:4b`) say so, and their files are counted
+     once. Deleting one of them frees nothing while another stays.
    - **Use as default** makes a model MetaCode's default in this browser. Each AI task can have its own:
-     AI Coding, Ask MetaCode, Import Data, Analyze CSV and the AI Scraper (beta).
+     AI Coding, Ask MetaCode, Import Data, Analyze CSV and the AI Scraper (beta). Only the models MetaCode's
+     AI service offers are listed there, never an embedding model.
    - Each model has its own settings: temperature, maximum answer length, and how long it stays in memory.
 5. **AI Chat** talks to one model on this device, streamed. It is never switched to another model.
 6. **System** shows this browser, the MetaCode server (operating system, CPU, memory, GPU, disk), which AI
@@ -334,8 +343,8 @@ Node.js, which is 87–125 MB of it:
 
 | File | What it does |
 |---|---|
-| `catalog.js` | Ollama's library and its tags pages (sizes, context windows, inputs). The registry's manifests give exact download sizes and digests. Cached on disk for 24 hours, tags for 7 days, with the snapshot for a first start offline |
-| `hardware.js` | Memory, CPU, GPU (NVIDIA, AMD, Intel, Apple silicon), free disk, operating system (Raspberry Pi, WSL and Termux included) |
+| `catalog.js` | Ollama's library and its tags pages (sizes, context windows, inputs). The registry's manifests give exact download sizes and digests, for a tag with several variants the one Ollama pulls here. Cached on disk for 24 hours, tags for 7 days, with the snapshot for a first start offline. When ollama.com doesn't answer, the saved catalog answers at once for 5 minutes before it's tried again |
+| `hardware.js` | Memory, CPU, GPU (NVIDIA, AMD, Intel, Apple silicon, also under Rosetta), free disk, operating system (Raspberry Pi, WSL and Termux included). On macOS, the version from `sw_vers` and the available memory from `vm_stat`. A models folder on a network drive that stops answering gives "free space unknown" after 2 s instead of holding the server up |
 | `recommend.js` | The tiers and the fit of each tag on this device |
 | `installs.js` | Downloads through Ollama's `/api/pull`: queue, progress, pause, resume, cancel, disk check, digest check |
 | `runtimes.js` | The runtimes and where each works (the compatibility matrix) |
@@ -359,11 +368,14 @@ system. The launchers start `server.js` and leave the rest to it: `METACODE_OPEN
 - **This computer only.** The packages listen on `127.0.0.1`. To let a phone or tablet on the same network
   in, set `METACODE_HOST=0.0.0.0`.
 - **The AI Model Store answers MetaCode's own pages only.** It sends no CORS headers, and cross-site requests
-  are refused. Managing models as "this computer" also needs the browser to have used this computer's own
-  name (localhost, 127.x.x.x, [::1]), so another site whose name points at 127.0.0.1 (DNS rebinding) can't.
-  Ollama itself stays on 127.0.0.1, because it has no authentication.
+  are refused. A request from this computer must also use this computer's own name (localhost, 127.x.x.x,
+  [::1]). So another site whose name points at 127.0.0.1 (DNS rebinding) gets nothing, not even what it could
+  read (this computer's hardware, its models). The one other name allowed is the site in `PUBLIC_URL`, for a
+  reverse proxy on the same machine that forwards no client address; it may read, and managing models still
+  needs the admin token. Ollama itself stays on 127.0.0.1, because it has no authentication.
 - **Downloads are checked.**
-  - Models: the installed digest must match the registry's manifest.
+  - Models: Ollama checks each file's sha256 as it downloads. MetaCode then compares the installed model's
+    digest with the registry's manifest, and reports a mismatch.
   - Node.js runtimes: against nodejs.org's `SHASUMS256.txt`.
   - The AppImage runtime: its sha256 must be the one recorded in `scripts/build-portable.js` (the AppImage project
     rebuilds its runtime now and then; a different one stops the build until it's checked).
@@ -404,7 +416,7 @@ release with every file and `SHA256SUMS.txt`), and by hand.
   | Test file | What it covers |
   |---|---|
   | `test/pwa-offline-e2e.test.js` | Chromium: no request to other sites; offline, with the server stopped; the phone drawer; the performance profiles |
-  | `test/local-ai.test.js` | The Store's server against a stand-in Ollama that behaves like the real one: downloads, pause and resume, problems, management, who may manage, DNS rebinding |
+  | `test/local-ai.test.js` | The Store's server against a stand-in Ollama that behaves like the real one: downloads, pause and resume, the disk check, manifest lists, names in any case, problems, management, who may manage, DNS rebinding, macOS, Apple silicon and Termux |
   | `test/local-ai-e2e.test.js` | Chromium: the Store, Installed Models, AI Chat and System pages |
   | `test/opencode-ollama.test.js`, `test/ai-service-client.test.js` | Ollama as a provider, and `AI_MODE` |
   | `test/lite-profile.test.js` | The lite profile |

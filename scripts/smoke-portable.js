@@ -109,6 +109,23 @@ async function answers(child) {
     check(hw.json && hw.json.memory && hw.json.memory.total > 0 && hw.json.cpu && hw.json.cpu.threads > 0, 'AI Model Store: this device (' + (hw.json ? [hw.json.os && hw.json.os.name, hw.json.arch, Math.round(((hw.json.memory && hw.json.memory.total) || 0) / 1e9) + ' GB'].join(', ') : '?') + ')', hw.text);
     const rec = await get('/api/local-ai/recommendations');
     check(rec.status === 200 && rec.json && Array.isArray(rec.json.tiers), 'AI Model Store: recommendations', rec.text);
+    // (what the Store's advice rests on, read each system's own way)
+    const h = hw.json || {};
+    check(h.disk && typeof h.disk.free === 'number' && h.disk.free > 0, 'AI Model Store: the free disk space (' + (h.disk && typeof h.disk.free === 'number' ? Math.round(h.disk.free / 1e9) + ' GB at ' + h.disk.path : '?') + ')', JSON.stringify(h.disk));
+    if (process.platform === 'darwin') {
+      let version = null;
+      try { version = execFileSync('sw_vers', ['-productVersion'], { encoding: 'utf8' }).trim(); } catch (e) { /* none */ }
+      check(!!version && h.os && h.os.name === 'macOS ' + version, 'AI Model Store: the macOS version (' + (h.os && h.os.name) + '; sw_vers says ' + version + ')', JSON.stringify(h.os));
+      check(h.memory && typeof h.memory.available === 'number' && h.memory.available > 0 && h.memory.available <= h.memory.total, 'AI Model Store: the memory available, from vm_stat (' + Math.round(((h.memory && h.memory.available) || 0) / 1e9) + ' GB)', JSON.stringify(h.memory));
+      // Apple silicon, also for the Intel build under Rosetta: its GPU (Metal) runs the models
+      let arm = false;
+      try { arm = execFileSync('sysctl', ['-n', 'hw.optional.arm64'], { encoding: 'utf8' }).trim() === '1'; } catch (e) { /* an Intel Mac */ }
+      if (arm) {
+        check(h.appleSilicon === true && (h.gpus || []).some(g => g.vendor === 'apple' && g.shared && g.usable), 'AI Model Store: Apple silicon and its GPU' + (h.arch === 'x64' ? ' (MetaCode under Rosetta)' : ''), JSON.stringify({ appleSilicon: h.appleSilicon, arch: h.arch, gpus: h.gpus }));
+        const picks = ((rec.json && rec.json.tiers) || []).flatMap(t => t.models || []);
+        check(picks.length > 0 && picks.every(p => p.runsOn === 'gpu'), 'AI Model Store: recommended models run on the GPU (' + picks.length + ')', JSON.stringify(picks.slice(0, 3)));
+      }
+    }
     let kept = [];
     try { kept = fs.readdirSync(dataDir); } catch (e) { /* none */ }
     check(kept.length > 0, 'the data is in ' + dataDir + ' (' + kept.join(', ') + ')');

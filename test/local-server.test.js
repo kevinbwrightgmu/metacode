@@ -114,12 +114,16 @@ test('the AI Model Store answers MetaCode\'s own pages only: no CORS, cross-site
       assert.equal(r.status, 403, JSON.stringify(headers));
       assert.equal(r.json.error.type, 'forbidden_origin');
     }
-    // DNS rebinding: to the browser it's the other site's own origin, so it passes the same-origin check
+    // DNS rebinding: to the browser it's the other site's own origin, so it passes the same-origin check. That
+    // site gets nothing, reads included (this computer's hardware, its models)
     const evil = 'evil.example:' + port;
     const rebound = await raw(port, 'POST', '/api/local-ai/models/load', { host: evil, origin: 'http://' + evil, 'sec-fetch-site': 'same-origin' }, { model: 'gemma3:270m' });
     assert.equal(rebound.status, 403);
-    assert.equal(rebound.json.error.code, 'manage_locked');
-    assert.equal((await raw(port, 'GET', '/api/local-ai/status', { host: evil })).json.manage.allowed, false);
+    assert.equal(rebound.json.error.code, 'foreign_host');
+    for (const p of ['/api/local-ai/status', '/api/local-ai/hardware']) {
+      const read = await raw(port, 'GET', p, { host: evil });
+      assert.deepEqual([read.status, read.json.error.code], [403, 'foreign_host'], p);
+    }
     for (const host of ['127.0.0.1:' + port, '[::1]:' + port, 'metacode.localhost:' + port]) {
       assert.equal((await raw(port, 'GET', '/api/local-ai/status', { host })).json.manage.allowed, true, host);
     }

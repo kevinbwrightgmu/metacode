@@ -135,6 +135,16 @@ async function request(method, p, body, headers) {
   try { json = JSON.parse(text); } catch (e) { json = null; }
   return { status: r.status, headers: r.headers, text, json };
 }
+// An Ollama that lists these models (the AI Model Store keeps settings only for models Ollama has): its
+// OLLAMA_BASE_URL. The next configure() goes back to the tests' own (nothing answers there).
+let listing = null;
+async function ollamaListing(...names) {
+  if (listing) listing.close();
+  listing = http.createServer((req, res) => res.end(JSON.stringify({ models: names.map(name => ({ name, model: name, size: 1, digest: '0' })) })));
+  await new Promise(r => listing.listen(0, '127.0.0.1', r));
+  listing.unref();
+  return 'http://127.0.0.1:' + listing.address().port + '/v1';
+}
 const ask = (model, headers, extra) => request('POST', '/api/ai', Object.assign(model ? { model } : {}, { messages: [{ role: 'user', content: 'hi' }] }, extra), headers);
 const SWITCH_OFF = { 'x-metacode-model-switch': 'off' };
 // MetaCode's settings: the test defaults with `env` over them (undefined removes one), then Reload .env
@@ -976,7 +986,7 @@ test('models on this machine that aren\'t the backup (AI_MODE=local) still take 
 });
 
 test('a local model\'s own settings (AI Model Store → Installed models): its temperature when the request sets none, its cap on the answer\'s length', async () => {
-  await configure({}, withLocal);
+  await configure({ OLLAMA_BASE_URL: await ollamaListing('tiny:1b') }, withLocal);
   const put = await request('PUT', '/api/local-ai/models/settings', { model: 'tiny:1b', settings: { temperature: 0.4, maxTokens: 64 } });
   assert.equal(put.status, 200, put.text);
   await ask('local/tiny:1b', {}, { max_tokens: 500 });
@@ -1026,7 +1036,7 @@ test('a model on this machine: a prompt its context can\'t hold is refused with 
 });
 
 test('streamed answers (AI Chat) get the model\'s own settings too', async () => {
-  await configure({}, withLocal);
+  await configure({ OLLAMA_BASE_URL: await ollamaListing('tiny:1b') }, withLocal);
   await request('PUT', '/api/local-ai/models/settings', { model: 'tiny:1b', settings: { temperature: 0.4, maxTokens: 64 } });
   const r = await ask('local/tiny:1b', {}, { stream: true, max_tokens: 500 });
   assert.equal(r.status, 200, r.text);
