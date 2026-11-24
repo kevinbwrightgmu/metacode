@@ -126,8 +126,24 @@ async function press(page, selector) {
   await sleep(500);
   await page.mouse.up();
 }
-// The server's own state of a download (null: it has none)
-const jobOf = async model => ((await (await fetch(baseUrl + '/api/local-ai/installs')).json()).installs || []).find(j => j.model === model) || null;
+// The server's own state of a download (null: it has none). (Names are compared whatever their case: the server may
+// keep a tag's, as ollama.com spells it.)
+const jobOf = async model => ((await (await fetch(baseUrl + '/api/local-ai/installs')).json()).installs || []).find(j => j.model.toLowerCase() === model.toLowerCase()) || null;
+const installedHas = name => [...si.st.installed.keys()].some(n => n.toLowerCase() === name.toLowerCase());
+// Takes a model off the stand-in Ollama as if it had never been pulled: not installed, nothing kept of a download,
+// none of its layers on disk (a stand-in that keeps them finishes the next download at once)
+function forget(name) {
+  const key = name.toLowerCase();
+  for (const [n, m] of [...si.st.installed]) {
+    if (n.toLowerCase() !== key) continue;
+    si.st.installed.delete(n);
+    if (si.st.blobs && m.blobs) m.blobs.forEach(d => si.st.blobs.delete(d));
+  }
+  si.st.partial.delete(name); si.st.partial.delete(key);
+}
+// Whether the page has such an element (a boolean: a failed assertion on an element handle would print all of
+// Playwright's connection, gigabytes of it)
+const has = async (page, selector) => !!(await page.$(selector));
 // Leaves the page for the Dashboard and comes back (the module keeps its state, as when people click around)
 async function revisit(page, hash, selector) {
   await page.evaluate(() => { location.hash = '#dashboard'; });
@@ -226,7 +242,7 @@ test('AI Chat streams the answer of a model on this device; System shows this br
 });
 
 test('Downloads: Pause, Resume and Cancel in the Downloads card reach the server, and Install buttons keep working while a download runs', { skip, timeout: 120000 }, async () => {
-  for (const m of ['gemma3:270m', 'gemma3:1b']) { si.st.installed.delete(m); si.st.partial.delete(m); }
+  for (const m of ['gemma3:270m', 'gemma3:1b']) forget(m);
   si.st.pullDelayMs = 400;        // 20 steps: 8 s for a download, its progress repainting the page every 400 ms
   const { page, context, errors } = await open('/app.html#model-store');
   await page.waitForSelector('.lai-tier .lai-card');
@@ -243,10 +259,10 @@ test('Downloads: Pause, Resume and Cancel in the Downloads card reach the server
   const other = await page.$$eval('.lai-tier [data-act="install"]', els => els.map(e => e.dataset.model).find(m => !/^gemma3:/.test(m)));
   assert.ok(other, 'a model to install from the grid');
   await press(page, '.lai-tier [data-act="install"][data-model="' + other + '"]');
-  assert.equal((await until(() => jobOf(other.toLowerCase()), 5000, 'the install from the grid')).state, 'queued');
-  await press(page, '#lai-jobs [data-act="cancel"][data-model="' + other.toLowerCase() + '"]');
-  await until(async () => !(await jobOf(other.toLowerCase())), 5000, 'Cancel while it waits');
-  await page.waitForFunction(m => !document.querySelector('#lai-jobs [data-model="' + m + '"]'), other.toLowerCase());
+  assert.equal((await until(() => jobOf(other), 5000, 'the install from the grid')).state, 'queued');
+  await press(page, '#lai-jobs [data-act="cancel"][data-model="' + other + '" i]');
+  await until(async () => !(await jobOf(other)), 5000, 'Cancel while it waits');
+  await page.waitForFunction(m => !document.querySelector('#lai-jobs [data-model="' + m + '" i]'), other);
   // Pause the running download: the next in the queue starts
   await press(page, '#lai-jobs [data-act="pause"][data-model="gemma3:270m"]');
   await until(async () => (await jobOf('gemma3:270m')).state === 'paused', 5000, 'Pause');
@@ -262,13 +278,13 @@ test('Downloads: Pause, Resume and Cancel in the Downloads card reach the server
   assert.equal(done.resumed, true, 'it continued where it stopped');
   await page.waitForFunction(() => /gemma3:270m is installed and verified/.test(document.getElementById('notif-stack').textContent));
   await page.waitForFunction(() => !document.querySelector('#lai-jobs .lai-job'));
-  assert.equal(si.st.installed.has('gemma3:1b'), false);
+  assert.equal(installedHas('gemma3:1b'), false);
   assert.deepEqual(errors, []);
   await context.close();
 });
 
 test('Live progress comes back after the event stream fails for good (an HTTP error when it reconnects)', { skip, timeout: 90000 }, async () => {
-  si.st.installed.delete('gemma3:1b'); si.st.partial.delete('gemma3:1b');
+  forget('gemma3:1b');
   si.st.pullDelayMs = 500;
   let calls = 0;
   const { page, context, errors } = await open('/app.html#model-store', {
@@ -294,6 +310,32 @@ test('Live progress comes back after the event stream fails for good (an HTTP er
   si.st.pullDelayMs = 25;
 });
 
+test('Downloads on Installed Models: an interrupted download continues from its Resume button', { skip, timeout: 90000 }, async () => {
+  const model = 'qwen2.5-coder:0.5b';
+  forget(model);
+  si.st.pullDelayMs = 25;
+  si.st.breakAt = 3000000;           // (the connection breaks half-way)
+  try {
+    const { page, context, errors } = await open('/app.html#installed-models');
+    await page.waitForSelector('#lai-installed .card');
+    const r = await fetch(baseUrl + '/api/local-ai/installs', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }) });
+    assert.equal(r.status, 202);
+    assert.equal((await until(async () => { const j = await jobOf(model); return j && j.state === 'failed' && j; }, 10000, 'the interruption')).code, 'interrupted');
+    await page.waitForSelector('#lai-jobs .lai-job[data-model="' + model + '" i] [data-act="resume"]');
+    assert.match(await page.textContent('#lai-jobs'), /Resume to continue from where it stopped/);
+    await press(page, '#lai-jobs [data-act="resume"][data-model="' + model + '" i]');
+    const done = await until(async () => { const j = await jobOf(model); return j && j.state === 'done' && j; }, 15000, 'the download');
+    assert.equal(done.resumed, true, 'it continued where it stopped');
+    await page.waitForFunction(m => ((document.querySelector('#lai-installed tbody') || {}).textContent || '').includes(m), model);
+    await page.waitForFunction(() => !document.querySelector('#lai-jobs .lai-job'));
+    assert.deepEqual(errors, []);
+    await context.close();
+  } finally {
+    si.st.breakAt = null;
+    forget(model);
+  }
+});
+
 test('Another device: the admin token is checked before it is kept, a refused one is said so, and it can be forgotten', { skip, timeout: 90000 }, async () => {
   process.env.LOCAL_AI_ADMIN_TOKEN = 'store-admin-token-2026';
   try {
@@ -308,7 +350,7 @@ test('Another device: the admin token is checked before it is kept, a refused on
     await page.evaluate(() => { location.hash = '#model-store'; });
     await page.waitForSelector('.lai-locked #lai-token', { timeout: 15000 });
     assert.equal(await saved(), null);
-    assert.equal(await page.$('.lai-problem'), null);
+    assert.equal(await has(page, '.lai-problem'), false);
     assert.match(await notes(), /so it was forgotten/);
     // Typed again with the dash: not kept, and said why; one too short, the same
     await clearNotes();
@@ -504,20 +546,33 @@ test('AI Model Store: the catalog\'s age, sorting by size, a late Details answer
   assert.ok(await page.$('.lai-table [data-install-for="gemma3:270m"]'), 'gemma3\'s sizes are still shown');
   assert.doesNotMatch(await page.textContent('#modal-body'), /Code-Specific Qwen/);
   await page.keyboard.press('Escape');
-  // 32-bit ARM: Ollama has no build for it. The pages say what the server says about it (as System does: here its
-  // own answer for such a machine), not to install it
+  // Ollama not running: the pages say what the server says about it, as System does (here the server's own answers
+  // for a 64-bit Linux machine, where it says how to install it, and for 32-bit ARM, which has none)
   const { createRuntimes, MATRIX } = require('../local-ai/runtimes');
-  const arm = await createRuntimes({ ollama: { version: async () => null, base: () => 'http://127.0.0.1:11434' } }).list({ os: { platform: 'linux', name: 'Raspberry Pi OS' }, arch: 'arm' });
+  const runtimesOf = (os, arch) => createRuntimes({ ollama: { version: async () => null, base: () => 'http://127.0.0.1:11434' } }).list({ os, arch });
+  const x64 = await runtimesOf({ platform: 'linux', name: 'Ubuntu 24.04' }, 'x64');
+  const arm = await runtimesOf({ platform: 'linux', name: 'Raspberry Pi OS' }, 'arm');
+  assert.equal(x64.runtimes[0].status, 'not-running');
   assert.equal(arm.runtimes[0].status, 'unsupported');
+  let runtimes = x64;
   const edit = (pathname, fn) => page.route(u => new URL(u).pathname === pathname, async route => { const r = await route.fetch(); const j = await r.json(); fn(j); return route.fulfill({ response: r, json: j }); });
-  await edit('/api/local-ai/hardware', j => { j.arch = 'arm'; });
   await edit('/api/local-ai/status', j => { j.ollama.running = false; j.ollama.version = null; });
-  await page.route(u => new URL(u).pathname === '/api/local-ai/runtimes', route => route.fulfill({ json: Object.assign({}, arm, { matrix: MATRIX }) }));
+  await page.route(u => new URL(u).pathname === '/api/local-ai/runtimes', route => route.fulfill({ json: Object.assign({}, runtimes, { matrix: MATRIX }) }));
+  await revisit(page, '#model-store', '.lai-head');
+  assert.match(await page.textContent('.lai-head'), /Ollama isn't running/);
+  assert.ok((await page.textContent('.lai-head')).includes(x64.runtimes[0].detail), await page.textContent('.lai-head'));
+  // 32-bit ARM (and the memory free now not known, as on a Mac whose vm_stat didn't answer)
+  runtimes = arm;
+  await edit('/api/local-ai/hardware', j => { j.arch = 'arm'; j.memory.available = null; });
   await revisit(page, '#model-store', '.lai-head');
   const head = await page.textContent('.lai-head');
   assert.match(head, /No Ollama for this system/);
   assert.match(head, /There is no Ollama for this system \(32-bit ARM Linux/);
   assert.doesNotMatch(head, /Install it from ollama\.com/);
+  assert.match(await page.textContent('.lai-chips'), / RAM\d+ CPU threads, arm/);
+  assert.doesNotMatch(await page.textContent('.lai-chips'), /\?/);
+  await revisit(page, '#system', '.lai-sys');
+  assert.match(await page.textContent('.lai-sys'), /Memory\d+ (GB|MB)GPU/);       // (no "(? available)")
   await revisit(page, '#installed-models', '#lai-installed .card');
   assert.match(await page.textContent('#lai-installed'), /There is no Ollama for this system/);
   assert.doesNotMatch(await page.textContent('.lai-head'), /Install it from ollama\.com/);
@@ -539,22 +594,26 @@ test('Installed Models: a model the AI service doesn\'t offer (an embedding mode
     await page.waitForFunction(() => /nomic-embed-text/.test((document.querySelector('#lai-installed tbody') || {}).textContent || ''));
     const rowOf = name => page.$$eval('#lai-installed tbody tr', (trs, n) => trs.map(t => t.textContent).find(t => t.startsWith(n)), name);
     assert.ok(await page.$('[data-act="default"][data-model="gemma3:270m"]'));
-    assert.equal(await page.$('[data-act="default"][data-model="nomic-embed-text:latest"]'), null);
+    assert.equal(await has(page, '[data-act="default"][data-model="nomic-embed-text:latest"]'), false);
     assert.match(await rowOf('nomic-embed-text'), /Not offered for AI features: an embedding model/);
     const options = await page.$$eval('select[data-feature="coding"] option', os => os.map(o => o.value));
     assert.ok(options.includes('ollama/gemma3:270m'));
     assert.ok(!options.includes('ollama/nomic-embed-text:latest'), JSON.stringify(options));
-    // A model the AI service doesn't list (METACODE_OLLAMA_MODELS can leave models out): not offered either
+    // A model the AI service doesn't list (METACODE_OLLAMA_MODELS can leave models out): not offered either. An
+    // embedding model never is, even when a service set up by hand lists it.
     await page.route(u => new URL(u).pathname === '/api/models', async route => {
       const r = await route.fetch();
       const j = await r.json();
-      j.models = j.models.filter(m => m.id !== 'ollama/gemma3:270m');
+      j.models = j.models.filter(m => m.id !== 'ollama/gemma3:270m').concat([{ id: 'ollama/nomic-embed-text:latest', name: 'nomic-embed-text:latest (on this device)', provider: 'ollama', local: true }]);
       return route.fulfill({ response: r, json: j });
     });
     await revisit(page, '#installed-models', '#lai-installed tbody');
-    assert.equal(await page.$('[data-act="default"][data-model="gemma3:270m"]'), null);
+    assert.equal(await has(page, '[data-act="default"][data-model="gemma3:270m"]'), false);
     assert.match(await rowOf('gemma3:270m'), /Not offered for AI features: MetaCode's AI service doesn't list it/);
-    assert.ok(!(await page.$$eval('select[data-feature="coding"] option', os => os.map(o => o.value))).includes('ollama/gemma3:270m'));
+    const offered = await page.$$eval('select[data-feature="coding"] option', os => os.map(o => o.value));
+    assert.ok(!offered.includes('ollama/gemma3:270m') && !offered.includes('ollama/nomic-embed-text:latest'), JSON.stringify(offered));
+    assert.equal(await has(page, '[data-act="default"][data-model="nomic-embed-text:latest"]'), false);
+    assert.match(await rowOf('nomic-embed-text'), /Not offered for AI features: an embedding model/);
     assert.ok(await page.$('[data-act="default"][data-model="gemma3:4b"]'));
     // The same files under two names: each row says so, and so does Delete (it would free nothing)
     assert.match(await rowOf('gemma3:4b'), /the same files as gemma3:latest/);
@@ -578,7 +637,7 @@ test('Names in another case: a tag the catalog spells with capitals shows its do
   const had = si.st.installed.get('gemma3:270m');
   si.st.installed.delete('gemma3:270m');
   si.st.installed.set('Gemma3:270M', { digest: 'e'.repeat(64), size: 291554930 });   // (pulled as "Gemma3:270M")
-  si.st.installed.delete('gemma3:1b'); si.st.partial.delete('gemma3:1b');
+  forget('gemma3:1b');
   si.st.pullDelayMs = 150;
   try {
     const { page, context, errors } = await open('/app.html#model-store', {
@@ -595,11 +654,11 @@ test('Names in another case: a tag the catalog spells with capitals shows its do
     await page.waitForSelector('.lai-table [data-install-for="gemma3:1B"]');
     assert.equal(await page.textContent('.lai-table [data-install-for="gemma3:270m"]'), 'Installed');
     await page.click('.lai-table [data-act="install"][data-model="gemma3:1B"]');
-    // (the server keys the download in lowercase)
+    // (the server's name for the download may differ in case: it keys downloads in lowercase)
     assert.ok(await until(() => jobOf('gemma3:1b'), 5000, 'the download'));
     await page.waitForFunction(() => /\d+%/.test(document.querySelector('.lai-table [data-install-for="gemma3:1B"]').textContent));
     await page.waitForFunction(() => document.querySelector('.lai-table [data-install-for="gemma3:1B"]').textContent === 'Installed', null, { timeout: 15000 });
-    assert.ok(si.st.installed.has('gemma3:1b'));
+    assert.ok(installedHas('gemma3:1b'));
     assert.deepEqual(errors, []);
     await context.close();
   } finally {

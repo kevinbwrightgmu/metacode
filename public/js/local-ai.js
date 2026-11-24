@@ -74,8 +74,13 @@ const LocalAI = (() => {
   const ollamaUp = () => !!(st.status && st.status.ollama && st.status.ollama.running);
   const installedNames = () => new Set(((st.installed && st.installed.models) || []).map(m => lc(m.name)));
   const tagged = n => (String(n).includes(':') ? String(n) : n + ':latest');
-  // The server's word on Ollama (as System shows it): on some systems there is none at all
-  const noOllamaHere = () => { const r = ((st.runtimes && st.runtimes.runtimes) || []).find(x => x.id === 'ollama'); return r && r.status === 'unsupported' ? r : null; };
+  // Ollama isn't answering: the server's word on it, as System shows it (some systems have none at all, and Termux
+  // has its own), else where to get it
+  function noOllama() {
+    const r = ((st.runtimes && st.runtimes.runtimes) || []).find(x => x.id === 'ollama');
+    if (r && r.status === 'unsupported') return { none: true, detail: r.detail };
+    return { none: false, detail: r && r.status === 'not-running' && r.detail ? r.detail : 'Install it from ollama.com on the computer MetaCode runs on (a separate download), and start it.' };
+  }
   // A model's size badge as a parameter count: "270m" → 2.7e8, "1.5b" → 1.5e9, "8x7b" → 5.6e10, "e2b" → 2e9
   const paramsOf = s => { const m = /^(?:(\d+)x)?e?([\d.]+)([mbt])$/i.exec(String(s || '').trim()); return m ? (m[1] ? Number(m[1]) : 1) * Number(m[2]) * { m: 1e6, b: 1e9, t: 1e12 }[m[3].toLowerCase()] : null; };
   // A model's smallest download: its tags' sizes when known, else from its smallest size at about 0.6 bytes per
@@ -187,7 +192,8 @@ const LocalAI = (() => {
     const h = st.hw;
     if (!h) return '';
     const gpu = (h.gpus || []).filter(g => g.usable)[0];
-    return '<span class="lai-chip" title="Memory on the MetaCode server">' + size(h.memory.total) + ' RAM (' + size(h.memory.available) + ' free)</span>' +
+    // (the memory free now isn't always known, as on a Mac whose vm_stat didn't answer)
+    return '<span class="lai-chip" title="Memory on the MetaCode server">' + size(h.memory.total) + ' RAM' + (h.memory.available != null ? ' (' + size(h.memory.available) + ' free)' : '') + '</span>' +
       '<span class="lai-chip">' + esc(h.cpu.threads + ' CPU threads, ' + h.arch) + '</span>' +
       '<span class="lai-chip">' + (gpu ? esc(gpu.name) + (gpu.memory && !gpu.shared ? ' · ' + size(gpu.memory) : '') : 'No GPU: models run on the CPU') + '</span>' +
       (h.disk && h.disk.free != null ? '<span class="lai-chip" title="' + esc(h.disk.path || '') + '">' + size(h.disk.free) + ' disk free</span>' : '');
@@ -195,9 +201,9 @@ const LocalAI = (() => {
   function ollamaLine() {
     const o = st.status && st.status.ollama;
     if (o && o.running) return '<span class="badge badge-green">Ollama ' + esc(o.version || '') + ' running</span>';
-    const none = noOllamaHere();
-    if (none) return '<span class="badge badge-gray">No Ollama for this system</span> <span class="form-hint">' + esc(none.detail) + ' <a href="#system">System</a> shows where each runtime works. You can browse meanwhile.</span>';
-    return '<span class="badge badge-amber">Ollama isn\'t running</span> <span class="form-hint">Install it from <strong>ollama.com</strong> on the computer MetaCode runs on (a separate download), then reload this page. You can browse meanwhile.</span>';
+    const n = noOllama();
+    if (n.none) return '<span class="badge badge-gray">No Ollama for this system</span> <span class="form-hint">' + esc(n.detail) + ' <a href="#system">System</a> shows where each runtime works. You can browse meanwhile.</span>';
+    return '<span class="badge badge-amber">Ollama isn\'t running</span> <span class="form-hint">' + esc(n.detail) + ' Then reload this page. You can browse meanwhile.</span>';
   }
   function manageLine() {
     const m = st.status && st.status.manage;
@@ -422,8 +428,8 @@ const LocalAI = (() => {
     const box = document.getElementById('lai-installed');
     if (!box) return;
     if (!ollamaUp()) {
-      const none = noOllamaHere();
-      box.innerHTML = '<div class="card"><p>' + (none ? esc(none.detail) : 'Ollama isn\'t running on the MetaCode server, so no installed model can be shown.') + '</p></div>';
+      const n = noOllama();
+      box.innerHTML = '<div class="card"><p>' + (n.none ? esc(n.detail) : 'Ollama isn\'t running on the MetaCode server, so no installed model can be shown.') + '</p></div>';
       return;
     }
     const ms = (st.installed && st.installed.models) || [];
@@ -517,8 +523,8 @@ const LocalAI = (() => {
   async function whyNoModel(data) {
     try { await loadStatus(); } catch (e) { /* the AI service's word, then */ }
     if (st.status && !ollamaUp()) {
-      const none = noOllamaHere();
-      return none ? esc(none.detail) : 'Ollama isn\'t running on the MetaCode server, so no model on this device can answer. Install it from <strong>ollama.com</strong> on the computer MetaCode runs on (a separate download), then reload this page.';
+      const n = noOllama();
+      return n.none ? esc(n.detail) : 'Ollama isn\'t running on the MetaCode server, so no model on this device can answer. ' + esc(n.detail) + ' Then reload this page.';
     }
     if (!(data.models || []).length && data.note) return esc(data.note);
     return 'No model on this device can answer yet. <a href="#model-store">Install one in the AI Model Store</a>.';
@@ -620,7 +626,7 @@ const LocalAI = (() => {
     const server = h ? '<div class="card"><h3>The MetaCode server</h3><table class="lai-kv">' +
       row('System', esc([h.os.name || h.os.platform, h.os.device].filter(Boolean).join(' · ') + ' (' + h.arch + ')')) +
       row('CPU', esc((h.cpu.model || '?') + ', ' + h.cpu.threads + ' threads')) +
-      row('Memory', size(h.memory.total) + ' (' + size(h.memory.available) + ' available)') +
+      row('Memory', size(h.memory.total) + (h.memory.available != null ? ' (' + size(h.memory.available) + ' available)' : '')) +
       row('GPU', (h.gpus || []).length ? h.gpus.map(g => esc(g.name) + (g.memory && !g.shared ? ' · ' + size(g.memory) : '') + (g.usable ? '' : ' (not used by Ollama)')).join('<br>') : 'none found: models run on the CPU') +
       row('Disk for models', h.disk && h.disk.free != null ? size(h.disk.free) + ' free of ' + size(h.disk.total) + (h.disk.path ? ' <span class="form-hint">' + esc(h.disk.path) + '</span>' : '') : '?') +
       row('AI', esc({ cloud: 'cloud providers first, models here as the backup', local: 'models on this computer first', 'local-only': 'only models on this computer: no prompt leaves it' }[st.status && st.status.mode] || 'cloud')) +
