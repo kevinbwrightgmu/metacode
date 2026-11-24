@@ -389,9 +389,14 @@ system. The launchers start `server.js` and leave the rest to it: `METACODE_OPEN
   computer's hardware, its models). Headers such as `X-Forwarded-For` don't change that, because a page can
   add them itself: they count only from a proxy that `TRUST_PROXY` names. Managing models takes localhost,
   127.x.x.x or [::1], and never comes from such a proxy without the admin token.
+  - **MetaCode's other routes don't check the name.** Such a site can still read the names of the installed
+    models (`/api/models`, `/api/settings/status`, `/api/keys/status`) and send prompts to MetaCode's AI
+    (`/api/ai`). A browser that asks before a website reaches this computer (Chrome's Local Network Access)
+    stops it there; Firefox and Safari don't ask.
   - **A reverse proxy on the same machine** should pass the visitor's address (`X-Forwarded-For`, as in
     [deploy-vps.md](deploy-vps.md)), with `TRUST_PROXY=loopback`. One that passes only the site's own name
-    (`Host`) needs that name in `PUBLIC_URL`: it may read, and managing models needs the admin token.
+    (`Host`) needs that name in `PUBLIC_URL`: it may read, and managing models needs the admin token. With
+    neither setting, the Store refuses the site's visitors (`foreign_host`).
   - **One that passes neither** (nginx with only `proxy_pass`, which sends `Host: 127.0.0.1:3000`) makes
     every visitor this computer, unless `TRUST_PROXY` names it. So keep deploy-vps.md's `Host`,
     `X-Forwarded-For` and `X-Real-IP` lines, and `TRUST_PROXY=loopback`.

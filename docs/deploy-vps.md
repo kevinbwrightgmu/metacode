@@ -498,6 +498,11 @@ of Reddit. Add Reddit API keys (step 7); the API isn't governed by robots.txt.
 nginx's `$host` leaves out the port, and MetaCode compares the page's address with the host name it
 receives. Use `proxy_set_header Host $http_host;` (which keeps the port) instead of `$host`.
 
+**The AI Model Store says "The AI Model Store answers MetaCode's own pages only…" (`foreign_host`)**
+MetaCode sees the requests come from this machine (nginx) under the site's name, and nothing tells it nginx is
+a proxy. Set `TRUST_PROXY=loopback` (with nginx's `X-Forwarded-For` line from step 6), or
+`PUBLIC_URL=https://metac0.de`, in `.env`, then `pm2 reload metacode`.
+
 **502 Bad Gateway from nginx**
 MetaCode isn't running: `pm2 status`, then `pm2 logs metacode --lines 50` for the reason (a missing
 `npm install`, a port in use, a Node.js that's too old).
