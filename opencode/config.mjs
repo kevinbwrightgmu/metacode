@@ -294,7 +294,9 @@ export function loadConfig(opts) {
     const ollamaUrl = kind === 'ollama' ? String((config.options && config.options.baseURL) || env.OLLAMA_BASE_URL || '').trim() || 'http://127.0.0.1:11434' : null;
     if (localOnly && kind === 'ollama' && !onThisMachine(ollamaUrl)) {
       disabled = 'Switched off: AI_MODE=local-only keeps every prompt on this machine, and OLLAMA_BASE_URL is another machine (' + (() => { try { return new URL(ollamaUrl).host; } catch (e) { return 'not a URL'; } })() + ').';
-    } else if (localOnly && !(kind === 'ollama' || (kind === 'openai-compatible' && onThisMachine(config.options.baseURL)))) {
+    // (never the AI gateway, wherever its address: it is a service on the internet, and one on 127.0.0.1 is a
+    // relay or a tunnel to it; providers/openai-compatible.mjs doesn't count its models as local either)
+    } else if (localOnly && !(kind === 'ollama' || (kind === 'openai-compatible' && id !== 'emis' && onThisMachine(config.options.baseURL)))) {
       disabled = 'Switched off: AI_MODE=local-only keeps every prompt on this machine.';
     } else if (envDisabled.includes(id)) disabled = 'Switched off by OPENCODE_DISABLED_PROVIDERS.';
     else if (disabledList.includes(id)) disabled = 'Switched off by disabled_providers in the service\'s config.';

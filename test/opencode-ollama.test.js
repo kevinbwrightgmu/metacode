@@ -72,12 +72,14 @@ function startOllama() {
   });
 }
 let gateway = null, gatewayBase = null;
+const gatewaySeen = [];         // every request the gateway stand-in got
 function startGateway() {
   return new Promise(resolve => {
     gateway = http.createServer((req, res) => {
       let b = '';
       req.on('data', c => { b += c; });
       req.on('end', () => {
+        gatewaySeen.push(req.method + ' ' + req.url);
         const send = (status, obj) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
         if (req.url === '/v1/models') return send(200, { object: 'list', data: [{ id: 'gpt-small', object: 'model' }] });
         const body = JSON.parse(b || '{}');
@@ -356,6 +358,23 @@ test('AI_MODE=local-only: every provider that isn\'t on this machine is switched
   assert.equal(r.json.choices[0].message.content, 'gateway gpt-small');
   const cloud = await call(svc, 'POST', '/v1/chat/completions', { model: 'emis/gpt-small', messages: [{ role: 'user', content: 'hi' }] });
   assert.notEqual(cloud.status, 200);
+});
+
+test('AI_MODE=local-only: the AI gateway at an address on this machine (a relay or a tunnel to it) is switched off too — not ready, not listed, never the default, and no prompt reaches it', async () => {
+  // (the gateway stand-in is on 127.0.0.1; nothing answers for Ollama, so no local model is ready either)
+  const svc = await start({ AI_MODE: 'local-only', OLLAMA_BASE_URL: 'http://127.0.0.1:' + await closedPort() + '/v1' });
+  gatewaySeen.length = 0;
+  const emis = await statusOf(svc, 'emis');
+  assert.equal(emis.ready, false);
+  assert.match(emis.problem, /AI_MODE=local-only keeps every prompt on this machine/);
+  const m = await models(svc);
+  assert.ok(!m.data.some(e => e.provider === 'emis'), JSON.stringify(m.data.map(e => e.id)));
+  assert.equal(m.default, null);
+  for (const asked of [{ model: 'emis/gpt-small' }, { model: 'gpt-small' }, {}]) {
+    const r = await call(svc, 'POST', '/v1/chat/completions', Object.assign({ messages: [{ role: 'user', content: 'hi' }] }, asked));
+    assert.notEqual(r.status, 200, JSON.stringify(asked) + ' → ' + r.text.slice(0, 200));
+  }
+  assert.deepEqual(gatewaySeen, [], 'nothing reaches the gateway');
 });
 
 test('POST /v1/local/refresh: a model installed meanwhile is offered at once, not after the next look (30 s)', async () => {
