@@ -205,23 +205,30 @@ function createCatalog(opts) {
   // The snapshot's tags (read once, when needed): each variant's size of the tags it knows
   let snapTags = null;
   const snapshotTags = () => snapTags || (snapTags = (readJson(SNAPSHOT) || {}).tags || {});
-  // A tag's variant sizes known already for the same tag at the same digest (the tags page's 12 hex digits): from
-  // the copy of the model's tags kept before (`before`), or from the snapshot
+  // A tag's variant sizes known already at the same digest (the tags page's 12 hex digits, the start of the manifest
+  // list's sha256: the same files under any name of the model, as :30b and :30b-a3b are): from the snapshot and from
+  // the copy of the model's tags kept before (`before`), put together → { apple?, other? }, or null when neither
+  // knows any
   function knownVariants(name, t, before) {
-    const same = entry => ((entry && entry.tags) || []).find(x => x && x.tag === t.tag && x.digest && x.digest === t.digest && x.variants);
-    const hit = same(before) || same(snapshotTags()[name]);
-    return hit ? hit.variants : null;
+    if (!t.digest) return null;
+    const v = {};
+    for (const entry of [snapshotTags()[name], before]) {
+      for (const x of (entry && Array.isArray(entry.tags) ? entry.tags : [])) if (x && x.digest === t.digest && x.variants) Object.assign(v, x.variants);
+    }
+    return v.apple || v.other ? v : null;
   }
+  const complete = v => !!(v && v.apple && v.other);
   function load() {
     if (mem) return mem;
     const cached = readJson(file);
     if (cached && Array.isArray(cached.models) && cached.models.length) {
       mem = Object.assign({ tags: {} }, cached, { source: 'cache' });
-      // (a copy kept by an earlier MetaCode has no variant sizes: the snapshot's, for the same tag at the same digest)
+      // (a copy kept by an earlier MetaCode may lack a variant size that its snapshot has: the snapshot's, for the same
+      // digest, put with what the copy has. A tag the snapshot doesn't know stays as it is.)
       for (const [name, entry] of Object.entries(mem.tags || {})) {
         for (const t of (entry && Array.isArray(entry.tags) ? entry.tags : [])) {
-          const v = t && !t.variants ? knownVariants(name, t, null) : null;
-          if (v) Object.assign(t, { ranged: true, variants: v });
+          const v = t && !complete(t.variants) ? knownVariants(name, t, null) : null;
+          if (v) Object.assign(t, { ranged: true, variants: Object.assign({}, v, t.variants) });
         }
       }
     } else {
@@ -286,7 +293,9 @@ function createCatalog(opts) {
   async function tagsOf(name, force) {
     const cat = load();
     const known = cat.tags[name];
-    const maxAge = known && known.incomplete ? VARIANTS_RETRY_MS : TAGS_MAX_AGE_MS;
+    // (a page with a variant size missing is read again after 10 minutes, then after twice as long each time, at most
+    // as long as a page that has them all)
+    const maxAge = known && known.incomplete ? Math.min(TAGS_MAX_AGE_MS, VARIANTS_RETRY_MS * 2 ** Math.min(20, (known.tries || 1) - 1)) : TAGS_MAX_AGE_MS;
     if (known && !force && now() - Date.parse(known.fetchedAt || 0) < maxAge) return { tags: known.tags, fetchedAt: known.fetchedAt };
     if (!force && resting()) return known ? { tags: known.tags, fetchedAt: known.fetchedAt, stale: true } : { tags: [], fetchedAt: null, offline: true };
     try {
@@ -294,16 +303,20 @@ function createCatalog(opts) {
       if (r.status === 200) {
         const tags = parseTags(r.body, name);
         // (a range: each variant's size, known already for the same digest or from the registry, all at once and
-        // briefly, as Details waits for them. What the registry doesn't give in time is asked again 10 minutes
-        // later, and meanwhile the size is the range's upper bound.)
+        // briefly, as Details waits for them; the tags at one digest are one look. What the registry doesn't give in
+        // time is asked again later, see maxAge, and meanwhile the size is the range's upper bound.)
+        const asked = new Map();
         await Promise.all(tags.filter(t => t.ranged).map(async t => {
           const k = knownVariants(name, t, known);
-          const v = Object.assign({}, k, k && k.apple && k.other ? null : await variantSizes(t.tag, variantMs));
+          const key = t.digest || t.tag;
+          if (!complete(k) && !asked.has(key)) asked.set(key, variantSizes(t.tag, variantMs));
+          const v = Object.assign({}, k, complete(k) ? null : await asked.get(key));
           if (v.apple || v.other) t.variants = v;
         }));
-        const incomplete = tags.some(t => t.ranged && !(t.variants && t.variants.apple && t.variants.other));
+        const incomplete = tags.some(t => t.ranged && !complete(t.variants));
+        const tries = incomplete ? (known && known.incomplete ? known.tries || 1 : 0) + 1 : 0;
         if (tags.length) {
-          cat.tags[name] = Object.assign({ fetchedAt: new Date(now()).toISOString(), tags }, incomplete ? { incomplete: true } : {});
+          cat.tags[name] = Object.assign({ fetchedAt: new Date(now()).toISOString(), tags }, incomplete ? { incomplete: true, tries } : {});
           save();
           return { tags, fetchedAt: cat.tags[name].fetchedAt };
         }

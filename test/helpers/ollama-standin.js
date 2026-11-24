@@ -64,6 +64,7 @@ function standIns(opts) {
     registryDelayMs: 0,         // before the registry answers a manifest
     mlxDelayMs: 0,              // before it answers an MLX variant's manifest (the big one: a line per tensor file)
     retagged: false,            // the tags pages' digests changed (tags published again): nothing known of them
+    alias: false,               // gemma4's page lists gemma4:e2b-alias too: the same files (digest) as gemma4:e2b
     sizes: new Map(),           // keyOf(name) → the weights' size /api/pull's progress lines report instead (no bytes sent)
     breakAt: null,              // stop the stream after this many bytes (an interrupted download)
     modelsDir: null,            // Ollama's models folder, for the records of a stopped download's parts
@@ -152,7 +153,8 @@ function standIns(opts) {
   app.get('/library', (req, res) => res.type('html').send(LIBRARY_HTML));
   app.get('/library/:name/tags', (req, res) => {
     if (!TAG_PAGES.has(req.params.name)) return res.status(404).send('no');
-    const html = TAG_PAGES.get(req.params.name);
+    let html = TAG_PAGES.get(req.params.name);
+    if (st.alias && req.params.name === 'gemma4') html = html.replace(/<a href="\/library\/gemma4:e2b" [\s\S]*?<\/a>/, m => m + m.replace(/gemma4:e2b/g, 'gemma4:e2b-alias'));
     res.type('html').send(st.retagged ? html.replace(/\b[0-9a-f]{12}\b/g, d => d.replace(/[0-9a-f]/g, c => '0123456789abcdef'[(parseInt(c, 16) + 1) % 16])) : html);
   });
   // (the raw path: each part decoded on its own, as a registry does)

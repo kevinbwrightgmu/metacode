@@ -1227,6 +1227,100 @@ test('variant sizes once known are kept: the same tag at the same digest needs n
   }
 });
 
+test('variant sizes are matched by digest, whatever the tag\'s name (:30b and :30b-a3b are the same files): the registry is asked once for the tags at a digest, and a page still missing a size is read again after 10 minutes, then 20, 40…', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-ranges-alias-'));
+  let clock = Date.now(), pages = 0;
+  const mk = () => createCatalog({ dataDir: dir, fetch: (u, i) => { if (/\/tags$/.test(String(u))) pages++; return fetch(u, i); }, libraryUrl: si.base + '/library', registry: si.base + '/v2/library/', variantMs: 300, now: () => clock });
+  const byTag = (t, tag) => t.tags.find(x => x.tag === tag);
+  const snapE2b = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'local-ai', 'catalog-snapshot.json'), 'utf8')).tags.gemma4.tags.find(x => x.tag === 'gemma4:e2b');
+  const registryFor = tag => si.st.registry.filter(r => r.includes('/gemma4/manifests/' + tag + ' ')).length;
+  const MIN = 60 * 1000;
+  try {
+    // an alias the snapshot doesn't list by name, at a digest it knows: its sizes, and no look at the registry
+    si.st.alias = true;
+    si.st.registry.length = 0;
+    let c = mk();
+    const t = await c.tagsOf('gemma4', true);
+    assert.deepEqual([byTag(t, 'gemma4:e2b-alias').digest, byTag(t, 'gemma4:e2b-alias').variants], [snapE2b.digest, snapE2b.variants]);
+    assert.equal(si.st.registry.filter(r => /gemma4\/manifests\/e2b-alias/.test(r)).length, 0);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'catalog.json'), 'utf8')).tags.gemma4.incomplete, undefined);
+    // tags published again (digests nothing knows): one look for the tags at a digest, the alias with the tag it's the alias of
+    fs.rmSync(path.join(dir, 'catalog.json'), { force: true });
+    si.st.retagged = true;
+    si.st.mlxDelayMs = 5000;               // (the MLX variants' manifests don't come in time)
+    si.st.registry.length = 0;
+    c = mk();
+    const first = await c.tagsOf('gemma4', true);
+    assert.deepEqual(byTag(first, 'gemma4:e2b-alias').variants, byTag(first, 'gemma4:e2b').variants);
+    // (one look = the tag's list, once for each of the two variants)
+    assert.deepEqual([registryFor('e2b'), registryFor('e2b-alias')], [2, 0], 'asked once for e2b and its alias together');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'catalog.json'), 'utf8')).tags.gemma4.tries, 1);
+    // read again after 10 minutes (not before), then after 20, then 40: not on every visit
+    // (time steps from the first read: the page was read at T)
+    pages = 0;
+    const T = Date.parse(JSON.parse(fs.readFileSync(path.join(dir, 'catalog.json'), 'utf8')).tags.gemma4.fetchedAt);
+    const readsAt = async minutes => { clock = T + minutes * MIN; const n = pages; await c.tagsOf('gemma4'); return pages - n; };
+    assert.equal(await readsAt(5), 0, 'not before 10 minutes');
+    assert.equal(await readsAt(11), 1, 'after 10 (the second look)');
+    const T2 = Date.parse(JSON.parse(fs.readFileSync(path.join(dir, 'catalog.json'), 'utf8')).tags.gemma4.fetchedAt);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'catalog.json'), 'utf8')).tags.gemma4.tries, 2);
+    clock = T2 + 11 * MIN;
+    const n2 = pages; await c.tagsOf('gemma4'); assert.equal(pages - n2, 0, 'the second wait is 20 minutes');
+    clock = T2 + 21 * MIN;
+    const n3 = pages; await c.tagsOf('gemma4'); assert.equal(pages - n3, 1, 'after 20');
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'catalog.json'), 'utf8')).tags.gemma4.tries, 3);
+    // (never longer than a week: after many tries it is the usual week)
+    const cat = JSON.parse(fs.readFileSync(path.join(dir, 'catalog.json'), 'utf8'));
+    cat.tags.gemma4.tries = 30;
+    fs.writeFileSync(path.join(dir, 'catalog.json'), JSON.stringify(cat));
+    c = mk();
+    const T3 = Date.parse(cat.tags.gemma4.fetchedAt);
+    clock = T3 + 6 * 24 * 60 * MIN;
+    const n4 = pages; await c.tagsOf('gemma4'); assert.equal(pages - n4, 0, 'not within the week');
+    clock = T3 + 7 * 24 * 60 * MIN + MIN;
+    const n5 = pages; await c.tagsOf('gemma4'); assert.equal(pages - n5, 1, 'after the week');
+  } finally {
+    Object.assign(si.st, { alias: false, retagged: false, mlxDelayMs: 0 });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a copy kept with one size of a ranged tag takes the other from the snapshot at the same digest, when it is loaded; a plain tag, and one the snapshot doesn\'t know, stay as they are', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-ranges-partial-'));
+  try {
+    const snap = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'local-ai', 'catalog-snapshot.json'), 'utf8'));
+    const tags = JSON.parse(JSON.stringify(snap.tags));          // (a copy kept by an earlier MetaCode: every model's tags, as fresh)
+    for (const t of Object.values(tags)) t.fetchedAt = new Date().toISOString();
+    const g = tags.gemma4.tags, snap26 = snap.tags.gemma4.tags.find(x => x.tag === 'gemma4:26b'), snap12 = snap.tags.gemma4.tags.find(x => x.tag === 'gemma4:12b');
+    // (saved with only the llama.cpp size: the MLX manifest didn't come in time, and the snapshot of that MetaCode didn't know the digest)
+    g.find(x => x.tag === 'gemma4:26b').variants = { other: snap26.variants.other };
+    delete g.find(x => x.tag === 'gemma4:12b').variants;
+    g.push({ tag: 'gemma4:newer', digest: 'abcdef012345', size: 9e9, context: 1, inputs: ['text'], ranged: true, variants: { other: 8e9 } });
+    g.push({ tag: 'gemma4:plain', digest: 'fedcba987654', size: 5e9, context: 1, inputs: ['text'] });
+    fs.writeFileSync(path.join(dir, 'catalog.json'), JSON.stringify({ fetchedAt: new Date().toISOString(), models: snap.models, tags }));
+    const c = createCatalog({ dataDir: dir, registry: si.base + '/v2/library/' });
+    const listed = (mlx) => c.list(mlx).models.find(m => m.name === 'gemma4').tags;
+    assert.equal(listed(true).find(x => x.tag === 'gemma4:26b').size, snap26.variants.apple, 'the MLX size from the snapshot, for an Ollama that takes MLX');
+    assert.equal(listed(false).find(x => x.tag === 'gemma4:26b').size, snap26.variants.other);
+    assert.equal(listed(true).find(x => x.tag === 'gemma4:12b').size, snap12.variants.apple, 'a copy with no sizes at all, too');
+    // not in the snapshot: its own size, and a plain tag isn't made a ranged one
+    const kept = (await c.tagsOf('gemma4')).tags;
+    assert.deepEqual(kept.find(x => x.tag === 'gemma4:newer').variants, { other: 8e9 });
+    assert.deepEqual([kept.find(x => x.tag === 'gemma4:plain').ranged, kept.find(x => x.tag === 'gemma4:plain').variants], [undefined, undefined]);
+    // (and across the whole catalog: a tag is ranged after loading exactly when the snapshot has it ranged)
+    let plain = 0;
+    for (const m of c.list(true).models) {
+      for (const t of m.tags) {
+        const was = ((snap.tags[m.name] || {}).tags || []).find(x => x.tag === t.tag);
+        if (!was) continue;
+        assert.equal(!!t.ranged, !!was.ranged, m.name + ':' + t.tag);
+        if (!was.ranged) plain++;
+      }
+    }
+    assert.ok(plain > 100, 'plain tags checked: ' + plain);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('a tag in ollama.com\'s spelling (gemma4:e2b-it-q4_K_M): the download and the model go by it; names that differ only in case are one model', async () => {
   try {
     const r = await api('POST', '/installs', { model: 'gemma4:e2b-it-q4_K_M' });
