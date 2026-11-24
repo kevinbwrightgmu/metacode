@@ -53,6 +53,8 @@
 .lai-table th { font-weight: 600; color: var(--tx-second); font-size: 12px; }
 .lai-table tr.lai-here td { background: var(--blue-lt, #EFF6FF); }
 .lai-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+/* (on its own line below the buttons, and out of the column's width: the buttons stay where they are, the text wraps) */
+.lai-why { flex: 0 0 100%; width: 0; min-width: 100%; }
 .lai-danger { color: var(--error, #EF4444) !important; }
 #lai-installed { display: flex; flex-direction: column; gap: 16px; }
 .lai-features { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px 16px; }

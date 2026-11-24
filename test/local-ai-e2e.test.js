@@ -616,7 +616,8 @@ test('AI Model Store: the catalog\'s age, sorting by size, a late Details answer
 });
 
 test('Installed Models shows Ollama\'s list at once while MetaCode\'s AI service is slow to say which models it offers, and offers none until it has', { skip, timeout: 60000 }, async () => {
-  si.st.installed.set('gemma3:270m', { digest: 'x', size: 6000800 });
+  const added = si.st.installed.has('gemma3:270m') ? [] : ['gemma3:270m'];
+  for (const m of added) si.st.installed.set(m, { digest: 'x', size: 6000800 });
   let release;
   const held = new Promise(r => { release = r; });
   try {
@@ -639,6 +640,45 @@ test('Installed Models shows Ollama\'s list at once while MetaCode\'s AI service
     await context.close();
   } finally {
     release();
+    for (const m of added) si.st.installed.delete(m);
+  }
+});
+
+test('Installed Models: when the AI service answers late and leaves a model out (or is down), its reason doesn\'t widen the buttons\' column: no button moves sideways, at any width', { skip, timeout: 120000 }, async () => {
+  // (only what isn't there already, and only that taken away again: what an earlier test installed has its layers
+  // recorded in its entry, which forget() needs later)
+  const added = ['gemma3:270m', 'gemma3:1b', 'qwen3:8b'].filter(m => !si.st.installed.has(m));
+  for (const m of added) si.st.installed.set(m, { digest: m, size: 6000800 });
+  try {
+    for (const [width, answer] of [[800, 'one left out'], [1024, 'one left out'], [1280, 'one left out'], [1440, 'one left out'], [1024, 'none, with a note']]) {
+      let release;
+      const held = new Promise(r => { release = r; });
+      const { page, context, errors } = await open('/app.html#dashboard', { context: { viewport: { width, height: 900 } }, setup: c => c.route(u => new URL(u).pathname === '/api/models', async route => {
+        await held;
+        const r = await route.fetch();
+        const j = await r.json();
+        if (answer === 'one left out') j.models = j.models.filter(m => m.id !== 'ollama/qwen3:8b');
+        else { j.models = []; j.note = 'MetaCode\'s AI service isn\'t answering. Start it, or check OPENCODE_SERVICE_URL, and try again in a moment.'; }
+        await route.fulfill({ response: r, json: j });
+      }) });
+      await page.evaluate(() => { location.hash = '#installed-models'; });
+      await page.waitForSelector('#lai-installed tbody tr', { timeout: 5000 });
+      assert.equal(await page.$$eval('#lai-installed tbody tr', trs => trs.length), 3);
+      const spots = () => page.$$eval('#lai-installed [data-act]:not([data-act="default"])', bs => bs.map(b => { const r = b.getBoundingClientRect(); return [b.dataset.model + ' ' + b.dataset.act, Math.round(r.x)]; }));
+      const before = await spots();
+      release();
+      await page.waitForSelector('#lai-installed[data-offered="known"] tbody');
+      // (to within the rounding of the columns, a few pixels: the buttons are 50 px wide and more; before, they moved by 80 to 180)
+      const after = await spots();
+      assert.deepEqual(after.map(a => a[0]), before.map(a => a[0]));
+      after.forEach((a, i) => assert.ok(Math.abs(a[1] - before[i][1]) <= 8, width + ' px, ' + answer + ': ' + a[0] + ' moved from x=' + before[i][1] + ' to x=' + a[1] + ' when the answer came (a click aimed at it lands on another button)'));
+      // (and the reason is there, in full, for the model left out)
+      if (answer === 'one left out') assert.match(await page.textContent('#lai-installed tbody tr:last-child'), /Not offered for AI features: MetaCode's AI service doesn't list it/);
+      assert.deepEqual(errors, []);
+      await context.close();
+    }
+  } finally {
+    for (const m of added) si.st.installed.delete(m);
   }
 });
 

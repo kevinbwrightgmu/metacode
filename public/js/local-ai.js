@@ -461,14 +461,19 @@ const LocalAI = (() => {
             same.length ? 'the same files as ' + same.join(', ') : ''].filter(Boolean).join(' · ')) + '</td>' +
           '<td>' + (m.loaded ? '<span class="badge badge-green">loaded</span> <span class="form-hint">' + size(m.loaded.size) + (m.loaded.sizeVram ? ' (GPU)' : '') + '</span>' : '<span class="form-hint">no</span>') + '</td>' +
           '<td class="lai-actions">' + (id ? '<button class="btn btn-secondary btn-sm" data-act="default" data-model="' + esc(m.name) + '" data-id="' + esc(id) + '"' + (def === lc(id) ? ' disabled' : '') + '>Use as default</button>'
-            // (while MetaCode's AI service hasn't answered: the button's place, so the buttons after it don't move when it does)
-            : !embedding(m) && offerUnknown(m) ? '<button class="btn btn-secondary btn-sm" disabled title="' + esc(notOffered(m)) + '" aria-label="' + esc(notOffered(m)) + '">Use as default</button>'
-            : '<span class="form-hint">' + esc(notOffered(m)) + '</span>') +
+            // (an embedding model is never offered, in any state: its reason stays as it is. Any other model keeps the
+            // button's place while the AI service hasn't answered and when it leaves the model out, with the reason in
+            // its title, so the buttons after it don't move sideways when the answer comes)
+            : embedding(m) ? '<span class="form-hint">' + esc(notOffered(m)) + '</span>'
+            : '<button class="btn btn-secondary btn-sm" disabled title="' + esc(notOffered(m)) + '" aria-label="' + esc(notOffered(m)) + '">Use as default</button>') +
           (canManage() ? (m.loaded ? '<button class="btn btn-ghost btn-sm" data-act="unload" data-model="' + esc(m.name) + '">Stop</button>' : '<button class="btn btn-ghost btn-sm" data-act="load" data-model="' + esc(m.name) + '">Load</button>') +
             '<button class="btn btn-ghost btn-sm" data-act="settings" data-model="' + esc(m.name) + '">Settings</button>' +
             // (Update downloads it again from Ollama's library: the server says which names that takes)
             (m.updatable !== false ? '<button class="btn btn-ghost btn-sm" data-act="update" data-model="' + esc(m.name) + '">Update</button>' : '') +
-            '<button class="btn btn-ghost btn-sm lai-danger" data-act="delete" data-model="' + esc(m.name) + '">Delete</button>' : '') + '</td></tr>';
+            '<button class="btn btn-ghost btn-sm lai-danger" data-act="delete" data-model="' + esc(m.name) + '">Delete</button>' : '') +
+          // (why it isn't offered, in full, on a line below the buttons that doesn't widen their column; rows below it move down
+          // by its height, which is a click on the same button of another row at worst)
+          (!id && !embedding(m) && !offerUnknown(m) ? '<span class="form-hint lai-why">' + esc(notOffered(m)) + '</span>' : '') + '</td></tr>';
       }).join('') + '</tbody></table></div></div>' +
       '<div class="card"><h3>Which model each AI feature uses</h3><p class="form-hint">A feature without its own model uses the default. These are this browser\'s settings, like Settings → AI models.</p>' +
       '<div class="lai-features">' + App.AI_FEATURES.map(([fid, name, what]) => {
