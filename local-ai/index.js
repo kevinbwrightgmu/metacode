@@ -61,7 +61,7 @@ function createLocalAi(opts) {
   // (LOCAL_AI_LIBRARY_URL / LOCAL_AI_REGISTRY_URL: a mirror of ollama.com's library and of Ollama's registry)
   const catalog = createCatalog({ dataDir, fetch: opts.fetch, libraryUrl: opts.libraryUrl || String(env.LOCAL_AI_LIBRARY_URL || '').trim() || undefined,
     registry: opts.registry || String(env.LOCAL_AI_REGISTRY_URL || '').trim() || undefined, minModels: opts.minLibraryModels });
-  const hardware = opts.hardware || createHardware({ env, dataDir });
+  const hardware = opts.hardware || createHardware({ env });
   const runtimes = createRuntimes({ ollama, fetch: opts.fetch });
   // (OLLAMA_PULL_IDLE_SECONDS, as for the AI service's own downloads: a download that makes no progress for this
   // long is stopped, and counts as interrupted; default 120)

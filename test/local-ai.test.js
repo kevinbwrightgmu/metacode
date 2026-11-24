@@ -249,6 +249,24 @@ test('the free disk space without blocking: a models folder that hangs (a networ
   assert.equal((await disks.detect(true)).disk.free, 3000 * 4096);
 });
 
+test('before Ollama\'s first download (no models folder yet): the disk it will put models on is measured, never MetaCode\'s data folder (a portable MetaCode\'s is on its USB stick)', async () => {
+  const home = os.homedir();
+  const looked = [];
+  const only = dirs => ({
+    stat: async d => { looked.push(d); if (!dirs.includes(d)) throw Object.assign(new Error('ENOENT: ' + d), { code: 'ENOENT' }); return {}; },
+    statfs: async d => ({ bavail: d === home ? 7 : 9, bsize: 1, blocks: 10 }),
+  });
+  const fresh = (await createHardware({ env: {}, system: only([home, path.dirname(home), '/']) }).detect(true)).disk;
+  assert.deepEqual([fresh.path, fresh.free, fresh.ollamaDir], [home, 7, false]);
+  assert.equal(looked[0], path.join(home, '.ollama', 'models'), 'Ollama\'s own folder first');
+  // OLLAMA_MODELS_DIR on another disk, not made yet: that disk
+  const other = (await createHardware({ env: { OLLAMA_MODELS_DIR: '/mnt/big/ollama/models' }, system: only(['/mnt/big', '/mnt', '/', home]) }).detect(true)).disk;
+  assert.deepEqual([other.path, other.free, other.ollamaDir], ['/mnt/big', 9, false]);
+  // once Ollama has made its folder: that one
+  const made = (await createHardware({ env: {}, system: only([path.join(home, '.ollama', 'models'), path.join(home, '.ollama'), home, '/']) }).detect(true)).disk;
+  assert.deepEqual([made.path, made.ollamaDir], [path.join(home, '.ollama', 'models'), true]);
+});
+
 // ── The routes, against stand-ins ───────────────────────────────────────────
 
 let si, api, local, localEnv, tmp, changed;

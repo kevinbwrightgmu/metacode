@@ -115,14 +115,19 @@ function modelsDirs(sys, env) {
   return out;
 }
 const unknownDisk = () => ({ path: null, free: null, total: null, ollamaDir: false });
-async function measureDisk(sys, env, fallback) {
+// Before its first download Ollama has no models folder yet, and makes it where it would be: so the folder above
+// that is measured (the home folder, usually). Not MetaCode's own data folder: a portable MetaCode's is on its USB
+// stick, while Ollama keeps models on this computer's disk.
+async function measureDisk(sys, env) {
   try {
-    const candidates = modelsDirs(sys, env).concat([fallback, os.homedir()]).filter(Boolean);
+    const dirs = modelsDirs(sys, env);
+    const candidates = dirs.slice();
+    for (let d = path.dirname(dirs[0]); !candidates.includes(d); d = path.dirname(d)) candidates.push(d);
     for (const dir of candidates) {
       try {
         await sys.stat(dir);
         const st = await sys.statfs(dir);
-        return { path: dir, free: Number(st.bavail) * Number(st.bsize), total: Number(st.blocks) * Number(st.bsize), ollamaDir: candidates.indexOf(dir) < candidates.length - 2 };
+        return { path: dir, free: Number(st.bavail) * Number(st.bsize), total: Number(st.blocks) * Number(st.bsize), ollamaDir: dirs.includes(dir) };
       } catch (e) { /* next */ }
     }
   } catch (e) { /* (no home folder) */ }
@@ -141,7 +146,7 @@ function createHardware(opts) {
   async function disk() {
     if (look && last) return last;
     if (!look) {
-      const pending = measureDisk(sys, env, opts.dataDir).then(d => { last = d; return d; });
+      const pending = measureDisk(sys, env).then(d => { last = d; return d; });
       look = pending;
       pending.then(() => { if (look === pending) look = null; });
     }
