@@ -34,8 +34,9 @@ const MATRIX = [
 function platformId(hw) {
   const p = hw.os.platform;
   if (p === 'win32') return 'windows';
-  if (p === 'darwin') return hw.arch === 'arm64' ? 'macos-arm' : 'macos-intel';
-  if (/android/i.test(hw.os.name || '')) return 'android';
+  // (an Intel MetaCode under Rosetta runs on Apple Silicon too)
+  if (p === 'darwin') return hw.appleSilicon || hw.arch === 'arm64' ? 'macos-arm' : 'macos-intel';
+  if (p === 'android' || /android/i.test(hw.os.name || '')) return 'android';
   if (p === 'linux') return hw.arch === 'arm64' ? 'linux-arm64' : /^arm/.test(hw.arch) ? 'linux-arm32' : 'linux-x64';
   return null;
 }
@@ -62,12 +63,15 @@ function createRuntimes(opts) {
     const out = [];
     let version = null;
     try { version = await ollama.version(); } catch (e) { version = null; }
-    const ollamaSupported = !row || !/^no/.test(row.ollama);
+    // (Android: no official build, but Termux has one)
+    const termux = pid === 'android';
+    const ollamaSupported = termux || !row || !/^no/.test(row.ollama);
     out.push({
       id: 'ollama', name: 'Ollama', kind: 'ollama', primary: true,
       status: version ? 'running' : ollamaSupported ? 'not-running' : 'unsupported',
       version, address: ollama.base(),
       detail: version ? 'Ollama ' + version + ' answers at ' + ollama.base() + '.'
+        : termux ? 'Ollama isn\'t answering at ' + ollama.base() + '. In Termux, install it with "pkg install ollama", then start it with "ollama serve"; MetaCode finds it by itself.'
         : ollamaSupported ? 'Ollama isn\'t answering at ' + ollama.base() + '. Install it from ollama.com (a separate download, about 1 GB with its GPU libraries) and start it; MetaCode finds it by itself.'
           : 'There is no Ollama for this system (' + (row ? row.name : hw.os.platform) + '). Use an OpenAI-compatible server instead, or another MetaCode server with Ollama.',
       canInstallModels: true,

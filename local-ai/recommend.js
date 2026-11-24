@@ -25,8 +25,10 @@ const estimatedSize = paramCount => Math.round(paramCount * 0.6 + 50e6);
 function budgetOf(hw) {
   const total = hw.memory.total;
   const reserve = Math.max(1.5 * GB, total * 0.25);
-  const gpu = (hw.gpus || []).filter(g => g.usable && g.memory && !g.shared).sort((a, b) => b.memory - a.memory)[0] || null;
-  return { total, available: hw.memory.available, budget: Math.max(0, total - reserve), reserve, gpu };
+  // (a GPU that shares the system's memory counts too: Ollama runs models on Apple Silicon's with Metal)
+  const gpu = (hw.gpus || []).filter(g => g.usable && g.memory).sort((a, b) => b.memory - a.memory)[0] || null;
+  // (available: null when it isn't known, as on a Mac whose vm_stat didn't answer)
+  return { total, available: Number.isFinite(hw.memory.available) ? hw.memory.available : null, budget: Math.max(0, total - reserve), reserve, gpu };
 }
 
 // The tag of a model to offer here: the biggest that fits the budget (the best answers this device can give)
@@ -70,14 +72,15 @@ function recommend(catalogModels, hw, opts) {
     tier.models.push(entry);
   }
   tiers.forEach(t => { t.total = t.models.length; t.models = t.models.sort((x, y) => (y.pulls || 0) - (x.pulls || 0)).slice(0, limit); });
-  return { device: { totalMemory: b.total, availableMemory: b.available, budget: b.budget, gpu: b.gpu ? { name: b.gpu.name, memory: b.gpu.memory } : null }, tiers, tooBig };
+  return { device: { totalMemory: b.total, availableMemory: b.available, budget: b.budget, gpu: b.gpu ? { name: b.gpu.name, memory: b.gpu.memory, shared: !!b.gpu.shared } : null }, tiers, tooBig };
 }
 
-// For one model's card: how each of its tags fits this device
+// For one model's card: how each of its tags fits this device ("tight": not in the memory free now; without
+// knowing that, whatever is in the budget fits)
 function fit(tag, size, hw) {
   const b = budgetOf(hw);
   const need = ramNeeded(size, params(String(tag).split(':')[1]));
-  const level = need <= b.budget ? (need <= b.available ? 'good' : 'tight') : 'too-big';
+  const level = need <= b.budget ? (b.available === null || need <= b.available ? 'good' : 'tight') : 'too-big';
   return { need, budget: b.budget, level, runsOn: b.gpu && b.gpu.memory >= need ? 'gpu' : 'cpu' };
 }
 

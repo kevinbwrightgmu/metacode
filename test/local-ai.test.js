@@ -11,9 +11,11 @@ const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
 const { parseLibrary, parseTags, mainTags, categories, createCatalog, pickVariant } = require('../local-ai/catalog');
-const { recommend, ramNeeded } = require('../local-ai/recommend');
+const { recommend, ramNeeded, fit } = require('../local-ai/recommend');
 const { createLocalAi } = require('../local-ai');
 const { createOllama } = require('../local-ai/ollama');
+const { createHardware, vmStatAvailable } = require('../local-ai/hardware');
+const { createRuntimes, platformId } = require('../local-ai/runtimes');
 const { normalize, keyOf } = require('../local-ai/installs');
 const { standIns, manifestFor, listFor, MODEL_BYTES } = require('./helpers/ollama-standin');
 
@@ -135,6 +137,116 @@ test('recommendations never exceed what the device can hold; the best tag that f
   assert.equal(gpu.tiers.flatMap(t => t.models).find(m => m.name === 'gemma3').runsOn, 'gpu');
   // 1 GB: nothing fits, and nothing is recommended
   assert.equal(recommend(catalogModels(), hw(1)).tiers.flatMap(t => t.models).length, 0);
+});
+
+// ── This device on other systems (hardware.js, with what each system's tools print) ──
+
+const VM_STAT = [
+  'Mach Virtual Memory Statistics: (page size of 16384 bytes)',
+  'Pages free:                                3000.',
+  'Pages active:                            400000.',
+  'Pages inactive:                          300000.',
+  'Pages speculative:                        20000.',
+  'Pages throttled:                              0.',
+  'Pages wired down:                        150000.',
+  'Pages purgeable:                          10000.',
+  '"Translation faults":                 123456789.',
+].join('\n') + '\n';
+// A Mac (or another system): what its commands print, by path
+const system = (platform, arch, release, prints) => ({ platform, arch, release: () => release, run: async cmd => (prints && prints[cmd]) || null });
+
+test('Apple Silicon: models run on its GPU (Metal), in the recommendations and in each tag\'s fit', () => {
+  const mac = { memory: { total: 32 * GB, available: 20 * GB }, gpus: [{ vendor: 'apple', name: 'Apple Silicon GPU (Metal)', memory: 32 * GB, shared: true, usable: true }], os: { platform: 'darwin' }, arch: 'arm64' };
+  const r = recommend(catalogModels(), mac);
+  assert.deepEqual(r.device.gpu, { name: 'Apple Silicon GPU (Metal)', memory: 32 * GB, shared: true });
+  const all = r.tiers.flatMap(t => t.models);
+  assert.ok(all.length > 0 && all.every(m => m.runsOn === 'gpu'), JSON.stringify(all.map(m => [m.tag, m.runsOn])));
+  assert.equal(fit('gemma3:4b', 3.3e9, mac).runsOn, 'gpu');
+  // (a GPU that can't run models still doesn't count)
+  const intel = Object.assign({}, mac, { gpus: [{ vendor: 'intel', name: 'Intel integrated GPU', memory: null, usable: false }] });
+  assert.equal(recommend(catalogModels(), intel).device.gpu, null);
+  assert.equal(fit('gemma3:4b', 3.3e9, intel).runsOn, 'cpu');
+});
+
+test('a Mac\'s available memory: its free, inactive, speculative and purgeable pages (vm_stat); unknown when vm_stat can\'t say, and then whatever is in the budget fits', async () => {
+  const hw = await createHardware({ system: system('darwin', 'arm64', '24.1.0', { '/usr/bin/vm_stat': VM_STAT, '/usr/bin/sw_vers': '15.1\n' }) }).detect();
+  const available = Math.min(os.totalmem(), (3000 + 300000 + 20000 + 10000) * 16384);
+  assert.equal(hw.memory.available, available);
+  assert.equal(vmStatAvailable(VM_STAT.replace(/page size of \d+/, 'page size of 4096'), 64 * GB), (3000 + 300000 + 20000 + 10000) * 4096);
+  assert.equal(vmStatAvailable(VM_STAT.replace(/^Pages inactive.*$/m, ''), 64 * GB), null);
+  assert.equal(vmStatAvailable('', 64 * GB), null);
+  const mac = { memory: { total: 16 * GB, available: 5 * GB }, gpus: [], os: { platform: 'darwin' } };
+  assert.equal(fit('x:8b', 7e9, mac).level, 'tight');
+  const unknown = await createHardware({ system: system('darwin', 'arm64', '24.1.0', {}) }).detect();
+  assert.equal(unknown.memory.available, null);
+  assert.equal(fit('x:8b', 7e9, Object.assign({}, mac, { memory: { total: 16 * GB, available: null } })).level, 'good');
+  assert.equal(fit('x:70b', 40e9, Object.assign({}, mac, { memory: { total: 16 * GB, available: null } })).level, 'too-big');
+  assert.equal(recommend(catalogModels(), Object.assign({}, mac, { memory: { total: 16 * GB, available: null } })).device.availableMemory, null);
+});
+
+test('the macOS version: sw_vers\'s, or from the Darwin release when sw_vers can\'t say (Darwin 24 is macOS 15, Darwin 25 macOS 26)', async () => {
+  const name = async (said, release) => (await createHardware({ system: system('darwin', 'arm64', release, { '/usr/bin/sw_vers': said }) }).detect()).os.name;
+  assert.equal(await name('15.1\n', '24.1.0'), 'macOS 15.1');
+  assert.equal(await name('26.0.1\n', '25.0.0'), 'macOS 26.0.1');
+  assert.equal(await name(null, '24.1.0'), 'macOS 15');
+  assert.equal(await name(null, '20.6.0'), 'macOS 11');
+  assert.equal(await name(null, '25.1.0'), 'macOS 26');
+  assert.equal(await name(null, '19.6.0'), 'macOS 10.15');
+  assert.equal(await name('not a version', 'x'), 'macOS');
+});
+
+test('a Mac with Apple Silicon is recognised under Rosetta too (an Intel MetaCode next to an arm64 Ollama): its GPU and its row in the matrix', async () => {
+  const rosetta = await createHardware({ system: system('darwin', 'x64', '24.1.0', { '/usr/sbin/sysctl': '1\n' }) }).detect();
+  assert.deepEqual([rosetta.appleSilicon, rosetta.gpus.map(g => g.vendor), platformId(rosetta)], [true, ['apple'], 'macos-arm']);
+  const intel = await createHardware({ system: system('darwin', 'x64', '24.1.0', { '/usr/sbin/sysctl': '0\n' }) }).detect();
+  assert.deepEqual([intel.appleSilicon, intel.gpus.length, platformId(intel)], [false, 0, 'macos-intel']);
+  const unsure = await createHardware({ system: system('darwin', 'x64', '24.1.0', {}) }).detect();
+  assert.deepEqual([unsure.appleSilicon, platformId(unsure)], [null, 'macos-intel']);
+  const native = await createHardware({ system: system('darwin', 'arm64', '24.1.0', {}) }).detect();
+  assert.deepEqual([native.appleSilicon, native.gpus.map(g => g.vendor), platformId(native)], [true, ['apple'], 'macos-arm']);
+});
+
+test('Termux on Android (Node calls the platform "android"): recognised, its row in the matrix, and how to get Ollama there', async () => {
+  const hw = await createHardware({ system: system('android', 'arm64', '5.15.0-android', {}) }).detect();
+  assert.equal(hw.os.name, 'Android (Termux)');
+  assert.equal(platformId(hw), 'android');
+  const rt = createRuntimes({ ollama: createOllama({ env: { OLLAMA_BASE_URL: 'http://127.0.0.1:9/v1' } }) });
+  const r = await rt.list(hw);
+  assert.equal(r.platform.id, 'android');
+  assert.equal(r.runtimes[0].status, 'not-running');
+  assert.match(r.runtimes[0].detail, /isn't answering at http:\/\/127\.0\.0\.1:9\. In Termux, install it with "pkg install ollama", then start it with "ollama serve"/);
+  // (where there's no Ollama at all, it still says so)
+  const arm32 = await rt.list({ os: { platform: 'linux', name: 'Raspberry Pi OS' }, arch: 'arm' });
+  assert.equal(arm32.runtimes[0].status, 'unsupported');
+});
+
+test('the free disk space without blocking: a models folder that hangs (a network mount gone away) is "unknown" after 2 s, one look at a time', async () => {
+  let looks = 0, answer = () => new Promise(() => {});           // (stuck for good)
+  const hang = createHardware({ env: { OLLAMA_MODELS_DIR: '/mnt/nas/ollama' }, system: { diskTimeoutMs: 150, stat: async () => ({}), statfs: () => { looks++; return answer(); } } });
+  let ticks = 0;
+  const timer = setInterval(() => ticks++, 10);
+  const t0 = Date.now();
+  const first = await hang.detect(true);
+  clearInterval(timer);
+  assert.deepEqual([first.disk.path, first.disk.free], [null, null]);
+  assert.ok(Date.now() - t0 < 1000 && ticks >= 5, 'the server went on meanwhile');
+  // while that look hangs, no other starts
+  assert.equal((await hang.detect(true)).disk.free, null);
+  assert.equal(looks, 1);
+  // a folder that answers: measured; while a later look hangs, that answer
+  const disks = createHardware({ env: { OLLAMA_MODELS_DIR: '/mnt/nas/ollama' }, system: { diskTimeoutMs: 150, stat: async () => ({}), statfs: () => { looks++; return answer(); } } });
+  answer = async () => ({ bavail: 1000, bsize: 4096, blocks: 5000 });
+  assert.deepEqual([(await disks.detect(true)).disk.path, (await disks.detect(true)).disk.free], ['/mnt/nas/ollama', 4096000]);
+  let unstick;
+  answer = () => new Promise(r => { unstick = r; });
+  assert.equal((await disks.detect(true)).disk.free, null);
+  const looked = looks;
+  assert.equal((await disks.detect(true)).disk.free, 4096000);
+  assert.equal(looks, looked);
+  unstick({ bavail: 2000, bsize: 4096, blocks: 5000 });
+  await sleep(10);
+  answer = async () => ({ bavail: 3000, bsize: 4096, blocks: 5000 });
+  assert.equal((await disks.detect(true)).disk.free, 3000 * 4096);
 });
 
 // ── The routes, against stand-ins ───────────────────────────────────────────
