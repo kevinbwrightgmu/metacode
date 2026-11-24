@@ -10,7 +10,7 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
-const { parseLibrary, parseTags, mainTags, categories, createCatalog, pickVariant } = require('../local-ai/catalog');
+const { parseLibrary, parseTags, mainTags, categories, createCatalog, pickVariant, pullsMlx } = require('../local-ai/catalog');
 const { recommend, ramNeeded, fit } = require('../local-ai/recommend');
 const { createLocalAi } = require('../local-ai');
 const { createOllama } = require('../local-ai/ollama');
@@ -802,6 +802,49 @@ test('a tag with variants for several runners (a manifest list): the variant Oll
     si.st.runner = 'llamacpp';
     si.st.installed.delete('gemma4:26b');
     si.st.installed.delete('gemma4:e2b');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('the variant is the one the Ollama that pulls takes: before 0.40 Ollama asks for the plain manifest and gets llama.cpp, on Apple Silicon too; any variant of the tag verifies, as an Ollama in a VM or on another computer takes its own', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-ollama-version-'));
+  try {
+    // (MLX: Apple Silicon and Ollama 0.40 or later; an unknown version, or 0.0.0, a development build, counts as new)
+    assert.deepEqual(['0.40.0', '0.40.17', '1.2.0', '0.0.0', null, '0.35.1', '0.39.9', '0.4.0'].map(v => pullsMlx(true, v)), [true, true, true, true, true, false, false, false]);
+    assert.deepEqual([pullsMlx(false, '0.40.17'), pullsMlx(false, null), pullsMlx(null, '0.40.17'), pullsMlx(undefined, null), pullsMlx(null, '0.35.1')], [false, false, null, null, false]);
+    // the registry asked as that Ollama asks it
+    const c = createCatalog({ dataDir: dir, fetch: (u, i) => fetch(u, i), registry: si.base + '/v2/library/' });
+    const [llama, mlx] = listFor('gemma4:26b').variants;
+    const asked = si.st.registry.length;
+    const old = await c.manifest('gemma4:26b', { appleSilicon: true, version: '0.35.1' });
+    assert.deepEqual([old.digest, old.size, old.digests], [llama.digest, MODEL_BYTES + 800, [llama.digest]]);
+    assert.deepEqual(si.st.registry.slice(asked), ['/v2/library/gemma4/manifests/26b application/vnd.docker.distribution.manifest.v2+json']);
+    const now = await c.manifest('gemma4:26b', { appleSilicon: true, version: '0.40.17' });
+    assert.deepEqual([now.digest, now.digests], [mlx.digest, [llama.digest, mlx.digest]]);
+    // Ollama 0.35 on a Mac with Apple Silicon: llama.cpp's download is checked (room for it and the margin, not for
+    // MLX's, 1 MB more), and its digest verifies
+    machine.appleSilicon = true;
+    si.st.version = '0.35.1';
+    si.st.runner = 'llamacpp';
+    disk.free = MODEL_BYTES + 800 + 512e6 + 0.5e6;
+    await api('POST', '/installs', { model: 'gemma4:12b' });
+    await until(async () => { const j = await job('gemma4:12b'); return j && ['done', 'failed'].includes(j.state); }, 8000, 'the install with Ollama 0.35');
+    let j = await job('gemma4:12b');
+    assert.deepEqual([j.state, j.verified, j.total], ['done', true, MODEL_BYTES + 800], j.error);
+    // Ollama 0.40 in a Linux VM or container on that Mac takes llama.cpp too, where MLX was expected: still verified
+    si.st.version = '0.40.17';
+    disk.free = 100 * GB;
+    await api('POST', '/installs', { model: 'gemma4:31b' });
+    await until(async () => { const x = await job('gemma4:31b'); return x && ['done', 'failed'].includes(x.state); }, 8000, 'the install in a VM');
+    j = await job('gemma4:31b');
+    assert.deepEqual([j.state, j.verified, si.st.installed.get('gemma4:31b').digest], ['done', true, listFor('gemma4:31b').variants[0].digest]);
+  } finally {
+    machine.appleSilicon = false;
+    si.st.version = '0.40.17';
+    si.st.runner = 'llamacpp';
+    disk.free = 100 * GB;
+    si.st.installed.delete('gemma4:12b');
+    si.st.installed.delete('gemma4:31b');
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

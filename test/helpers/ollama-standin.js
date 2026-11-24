@@ -52,7 +52,10 @@ function standIns(opts) {
     loaded: new Set(),
     partial: new Map(),         // keyOf(name) → bytes kept from a stopped download
     revisions: new Map(),       // keyOf(name) → the registry's revision of it (a new one has new weights)
-    runner: 'llamacpp',         // the variant this Ollama pulls from a manifest list (MLX on Apple Silicon)
+    version: '0.40.17',         // what /api/version says
+    // the variant this Ollama pulls from a manifest list: MLX for an Ollama 0.40 or later on a Mac with Apple
+    // Silicon; llama.cpp elsewhere, and for an older Ollama, which asks the registry for the plain manifest
+    runner: 'llamacpp',
     pullDelayMs: 25,            // per progress step (20 steps)
     verifyDelayMs: 0,           // nothing sent for this long after "verifying sha256 digest"
     registryDelayMs: 0,         // before the registry answers a manifest
@@ -69,7 +72,7 @@ function standIns(opts) {
   const app = express();
   app.use(express.json());
   // Ollama
-  app.get('/api/version', (req, res) => res.json({ version: '0.40.17' }));
+  app.get('/api/version', (req, res) => res.json({ version: st.version }));
   // (a cloud model, pulled with the command line, has its remote_host)
   app.get('/api/tags', (req, res) => res.json({ models: [...st.installed.entries()].map(([name, m]) => Object.assign({ name, model: name, size: m.size, digest: m.digest, modified_at: '2026-11-21T00:00:00Z', details: { family: 'gemma3', parameter_size: '268M', quantization_level: 'Q8_0', context_length: 32768 }, capabilities: ['completion'] }, m.remote_host ? { remote_host: m.remote_host, remote_model: name.replace(/-?cloud$/, '') } : {})) }));
   app.get('/api/ps', (req, res) => res.json({ models: [...st.loaded].map(name => ({ name, model: name, size: 326201507, size_vram: 0, expires_at: '2026-11-21T01:00:00Z', context_length: 4096 })) }));

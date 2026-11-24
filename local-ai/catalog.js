@@ -128,6 +128,21 @@ function mainTags(model, tags) {
 }
 
 // ── Ollama's registry ──────────────────────────────────────────────────────
+// Which variant of a tag with variants for several runners (a manifest list) Ollama gets depends on the Ollama.
+// From 0.40 it asks for the list and takes the variant for its own computer (manifest/manifest.go,
+// runnerPreferences: MLX first on a Mac with Apple Silicon, llama.cpp first everywhere else). Before 0.40 it
+// asks for the plain manifest only, and the registry answers with the llama.cpp variant. An unknown version
+// counts as new, as does 0.0.0 (a development build).
+function listsAsked(version) {
+  const v = /^0\.(\d+)\./.exec(String(version || ''));
+  return !v || Number(v[1]) >= 40 || version === '0.0.0';
+}
+// Whether the Ollama that downloads (its version, when known) on this device (appleSilicon, as hardware.js found
+// it) takes a tag's MLX variant: → true, false, or null when it isn't known whether this is Apple Silicon
+function pullsMlx(appleSilicon, version) {
+  if (!listsAsked(version)) return false;
+  return typeof appleSilicon === 'boolean' ? appleSilicon : null;
+}
 // The variant Ollama pulls from a manifest list (manifest/manifest.go, runnerPreferences): MLX first on a Mac
 // with Apple Silicon, llama.cpp first everywhere else. → the list's entry, or null when none fits
 function pickVariant(list, appleSilicon) {
@@ -263,25 +278,29 @@ function createCatalog(opts) {
     return known ? { tags: known.tags, fetchedAt: known.fetchedAt, stale: true } : { tags: [], fetchedAt: null, offline: true };
   }
 
-  // The registry's manifest for "name:tag", as Ollama pulls it: its layers with their exact sizes, their total,
-  // and the digest Ollama will report once it's installed. A tag with variants for several runners is a list of
-  // manifests: Ollama pulls the variant for this computer and reports that one's digest.
+  // The registry's manifest for "name:tag", as the Ollama here pulls it: its layers with their exact sizes, their
+  // total, and the digest Ollama will report once it's installed. A tag with variants for several runners is a
+  // list of manifests: Ollama 0.40 and later pull the variant for their computer and report that one's digest; an
+  // older Ollama gets the registry's plain manifest (see pullsMlx). `digests`: every variant's, as an Ollama in a
+  // VM, a container or on another computer takes the one for its own system.
   // (o.appleSilicon: what the hardware module found; otherwise this process's own platform and architecture.
-  // o.signal: stops it early.)
+  // o.version: Ollama's, when known. o.signal: stops it early.)
   async function manifest(model, o) {
     o = o || {};
     const [name, tag] = String(model).split(':');
     const repo = root + (name.includes('/') ? name : 'library/' + name).split('/').map(encodeURIComponent).join('/');
     const unreadable = { ok: false, problem: 'Ollama\'s registry sent something unreadable.' };
-    const r = await get(repo + '/manifests/' + encodeURIComponent(tag || 'latest'), 15000, { Accept: MANIFEST_TYPES }, o.signal);
+    const r = await get(repo + '/manifests/' + encodeURIComponent(tag || 'latest'), 15000, { Accept: listsAsked(o.version) ? MANIFEST_TYPES : MANIFEST }, o.signal);
     if (r.status === 404) return { ok: false, missing: true };
     if (r.status !== 200) return { ok: false, problem: 'Ollama\'s registry answered HTTP ' + r.status + '.' };
     let m;
     try { m = JSON.parse(r.body); } catch (e) { return unreadable; }
     let digest = sha256(r.body);
+    let digests = [digest];
     if (m && m.mediaType === MANIFEST_LIST) {
-      const apple = typeof o.appleSilicon === 'boolean' ? o.appleSilicon : process.platform === 'darwin' && process.arch === 'arm64';
-      const v = pickVariant(m, apple);
+      digests = (Array.isArray(m.manifests) ? m.manifests : []).map(c => String(c && c.digest || '').toLowerCase().replace(/^sha256:/, '')).filter(d => /^[0-9a-f]{64}$/.test(d));
+      const mlx = pullsMlx(o.appleSilicon, o.version);
+      const v = pickVariant(m, mlx === null ? process.platform === 'darwin' && process.arch === 'arm64' : mlx);
       if (!v) return { ok: false, problem: 'Ollama\'s registry has no variant of ' + model + ' that Ollama runs on this computer.' };
       const want = String(v.digest || '').toLowerCase().replace(/^sha256:/, '');
       if (!/^[0-9a-f]{64}$/.test(want)) {
@@ -298,7 +317,7 @@ function createCatalog(opts) {
     }
     if (!m || typeof m !== 'object') return unreadable;
     const blobs = layersOf(m);
-    return { ok: true, size: blobs.reduce((n, l) => n + l.size, 0), digest, blobs };
+    return { ok: true, size: blobs.reduce((n, l) => n + l.size, 0), digest, digests: digest && !digests.includes(digest) ? digests.concat(digest) : digests, blobs };
   }
 
   // The catalog for the browser: each model with its categories and the tags known so far
@@ -317,4 +336,4 @@ function createCatalog(opts) {
   return { refresh, tagsOf, manifest, list, find, mainTags };
 }
 
-module.exports = { createCatalog, internetFetch, parseLibrary, parseTags, mainTags, categories, pickVariant, params, bytes, tokens, count, LIBRARY_URL, SNAPSHOT };
+module.exports = { createCatalog, internetFetch, parseLibrary, parseTags, mainTags, categories, pickVariant, pullsMlx, params, bytes, tokens, count, LIBRARY_URL, SNAPSHOT };

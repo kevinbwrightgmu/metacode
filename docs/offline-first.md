@@ -224,9 +224,10 @@ Run `npm install`, then `METACODE_PROFILE=lite AI_MODE=local-only npm start` (RE
      Ollama doesn't have yet, less what arrived before a pause, keeping 512 MB spare. A resume, or an update
      that changes little, doesn't ask for the whole model again.
    - After it, the installed model's digest is compared with the registry's. For a tag with variants for
-     several runners, that is the variant Ollama pulls on this device (MLX on Apple silicon, llama.cpp
-     elsewhere). A mismatch is reported, and the model stays installed. An interrupted download says so and
-     can be resumed.
+     several runners, any of its variants counts: Ollama 0.40 and later pull MLX on Apple silicon and
+     llama.cpp elsewhere, an older Ollama pulls llama.cpp, and an Ollama in a VM or on another computer the
+     variant for its own system. A mismatch is reported, and the model stays installed. An interrupted
+     download says so and can be resumed.
 4. **Installed Models.**
    - Load a model into memory or stop it, update it, or delete it; each shows the space it uses. Load, Stop,
      Settings and Delete work for any model Ollama lists, also one pulled from another registry (`hf.co/…`)

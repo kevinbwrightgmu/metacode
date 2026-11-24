@@ -5,8 +5,8 @@
 // - the same model is never downloaded twice at once;
 // - before a download: what it still has to fetch (the registry's layers Ollama doesn't have yet) against the
 //   free disk space;
-// - after it: the installed model's digest against the registry's (the sha256 of its manifest, or of the variant
-//   Ollama pulled when a tag has variants for several runners).
+// - after it: the installed model's digest against the registry's (the sha256 of its manifest, or of one of the
+//   variants when a tag has variants for several runners).
 'use strict';
 const { EventEmitter } = require('events');
 
@@ -92,13 +92,15 @@ function createInstalls(opts) {
     emit(j, true);
     const hw = await hardware.detect(true);
     if (j.stopping) return stopped(j);
-    // The registry's exact layers, sizes and digest, of the variant Ollama pulls on this computer (needs the
-    // internet, as the download itself does)
+    // The registry's exact layers, sizes and digests, of the variant this Ollama pulls: it depends on its version
+    // too (catalog.js, pullsMlx). Needs the internet, as the download itself does.
+    let version = null;
+    try { version = await ollama.version(); } catch (e) { version = null; }
     let man = null;
-    try { man = await catalog.manifest(j.model, { signal: j.controller.signal, appleSilicon: hw.appleSilicon }); } catch (e) { man = null; }
+    try { man = await catalog.manifest(j.model, { signal: j.controller.signal, appleSilicon: hw.appleSilicon, version }); } catch (e) { man = null; }
     if (j.stopping) return stopped(j);
     if (man && man.missing) return finish(j, 'failed', { error: 'Ollama\'s library has no model called "' + j.model + '".', code: 'not_in_library' });
-    if (man && man.ok) { j.expected = man.size; j.digest = man.digest; j.blobs = man.blobs; j.total = Math.max(j.total || 0, man.size); }
+    if (man && man.ok) { j.expected = man.size; j.digest = man.digest; j.digests = man.digests || [man.digest]; j.blobs = man.blobs; j.total = Math.max(j.total || 0, man.size); }
     const free = hw.disk && Number.isFinite(hw.disk.free) ? hw.disk.free : null;
     const need = j.blobs && free !== null ? await toFetch(j) : 0;
     if (j.stopping) return stopped(j);
@@ -142,7 +144,8 @@ function createInstalls(opts) {
       const resumable = code === 'interrupted' || code === 'unreachable';
       return finish(j, 'failed', { error: String(e && e.message || e) + (resumable ? ' Resume to continue from where it stopped.' : ''), code, speed: null });
     }
-    // Installed: is it the model the registry has? (Ollama may list it in the case of an earlier pull)
+    // Installed: is it the model the registry has? (Ollama may list it in the case of an earlier pull; any variant
+    // of a tag with several is the registry's)
     j.state = 'verifying'; j.status = 'Checking the installed model'; j.completed = j.total;
     emit(j, true);
     let verified = null;
@@ -150,7 +153,7 @@ function createInstalls(opts) {
       const key = keyOf(j.model);
       const installed = (await ollama.tags()).find(m => keyOf(m.name) === key || (m.model && keyOf(m.model) === key));
       if (!installed) return finish(j, 'failed', { error: 'Ollama said the download finished, but doesn\'t list ' + j.model + '.', code: 'not_installed' });
-      if (j.digest) verified = String(installed.digest || '').toLowerCase().replace(/^sha256:/, '') === j.digest;
+      if (j.digest) verified = j.digests.includes(String(installed.digest || '').toLowerCase().replace(/^sha256:/, ''));
     } catch (e) { verified = null; }
     if (verified === false) {
       return finish(j, 'done', { status: 'Installed, but its digest doesn\'t match Ollama\'s library: delete it and install it again if in doubt', verified: false });
