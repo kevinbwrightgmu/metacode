@@ -219,9 +219,11 @@ Run `npm install`, then `METACODE_PROFILE=lite AI_MODE=local-only npm start` (RE
      window and the inputs, and whether it fits this device.
    - A tag with variants for several runners (ollama.com shows a size range) is given, there and in
      Recommended, at the size of the variant the Ollama here downloads, from Ollama's registry. The sizes are
-     kept with the tag: the same tag at the same digest isn't asked again. What the registry doesn't give
-     within 5 s is asked again 10 minutes later, and meanwhile, or when it isn't known whether this is Apple
-     silicon, the size is the range's upper bound.
+     kept with the tag's digest: a tag at a digest whose two sizes are known, under its own name or another
+     tag's of the model, isn't asked again, and the tags at one digest are asked once. What the registry doesn't
+     give within 5 s is asked again, when Details is next opened, after 10 minutes, then after twice as long
+     each time (20, 40…), at most a week; meanwhile, or when it isn't known whether this is Apple silicon, the
+     size is the range's upper bound.
 3. **Install.** Downloads show progress, speed and time left.
    - They can be paused, resumed (Ollama continues where it stopped) and cancelled.
    - One downloads at a time, the others queue, and the same model is never downloaded twice at once.
