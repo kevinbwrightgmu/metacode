@@ -25,21 +25,24 @@ const LocalAI = (() => {
   // ── Helpers ────────────────────────────────────────────────────────────────
   const token = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } };
   const forgetToken = () => { try { localStorage.removeItem(TOKEN_KEY); } catch (e) { /* private mode */ } };
+  // What can't go in a header: beyond Latin-1 (a "–" or a curly quote), or a control character but a tab
+  const UNSENDABLE = /[^\t\x20-\x7e\x80-\xff]/;
   // The admin token to send. One a browser can't put in a header (kept by an older version, say with a "–" copied
   // from a document) would fail every request as if the server were away, so it is forgotten instead.
   function adminToken() {
     const t = token();
     if (!t) return '';
-    try { new Headers({ 'X-MetaCode-Admin-Token': t }); return t; } catch (e) { /* not sendable */ }
+    if (!UNSENDABLE.test(t)) return t;
     forgetToken();
     App.notify('The admin token kept in this browser had a character no browser can send in a request, so it was forgotten. Enter it again.', 'warning', 9000);
     return '';
   }
-  // Why a typed token can't be the server's admin token ('' when it can): a browser sends only printable ASCII in a
-  // header, and the server's token is at least 12 characters
+  // Why a typed token can't be the server's admin token ('' when it can): a browser sends a header's characters as
+  // Latin-1 bytes (a space or an "ö" too, never a "–"), the server's HTTP parser refuses control characters but a
+  // tab, and the server's token is at least 12 characters
   function tokenProblem(v) {
     if (!v) return 'Enter this server\'s admin token (LOCAL_AI_ADMIN_TOKEN) first.';
-    if (/[^\x21-\x7e]/.test(v)) return 'That token has a space or a character a browser can\'t send (such as a “–” or a curly quote, often copied from a document). An admin token is letters, digits and punctuation only: type it again.';
+    if (UNSENDABLE.test(v)) return 'That token has a character a browser can\'t send (such as a “–” or a curly quote, often copied from a document): type it again.';
     if (v.length < 12) return 'That token is too short: this server\'s admin token (LOCAL_AI_ADMIN_TOKEN) is at least 12 characters.';
     return '';
   }

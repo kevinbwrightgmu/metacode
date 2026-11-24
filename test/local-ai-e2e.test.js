@@ -392,6 +392,35 @@ test('Another device: the admin token is checked before it is kept, a refused on
   }
 });
 
+test('Another device: an admin token with spaces or a Latin-1 letter (a passphrase) is kept and works; a control character isn\'t', { skip, timeout: 90000 }, async () => {
+  try {
+    const { page, context, errors } = await open('/app.html#dashboard', { context: { extraHTTPHeaders: { 'X-Forwarded-For': '203.0.113.9' } } });
+    const saved = () => page.evaluate(() => localStorage.getItem('metacode_local_ai_token'));
+    for (const t of ['correct horse battery staple', 'Passwörter-sind-sicher-2026']) {
+      process.env.LOCAL_AI_ADMIN_TOKEN = t;
+      await page.evaluate(() => { localStorage.removeItem('metacode_local_ai_token'); location.hash = '#dashboard'; });
+      await page.evaluate(() => { location.hash = '#model-store'; });
+      await page.waitForSelector('.lai-locked #lai-token', { timeout: 15000 });
+      await page.fill('#lai-token', t);
+      await page.click('[data-act="token"]');
+      await page.waitForFunction(() => !document.querySelector('.lai-locked') && document.querySelector('.lai-card [data-act="install"]'), null, { timeout: 15000 });
+      assert.equal(await saved(), t);
+    }
+    // (a browser sends a control character, but the server's HTTP parser refuses it: every request would fail)
+    await page.evaluate(() => { localStorage.removeItem('metacode_local_ai_token'); location.hash = '#dashboard'; });
+    await page.evaluate(() => { location.hash = '#model-store'; });
+    await page.waitForSelector('.lai-locked #lai-token', { timeout: 15000 });
+    await page.fill('#lai-token', 'abc\x01def-ghi-123');
+    await page.click('[data-act="token"]');
+    await page.waitForFunction(() => /can't send/.test(document.getElementById('notif-stack').textContent));
+    assert.equal(await saved(), null);
+    assert.deepEqual(errors, []);
+    await context.close();
+  } finally {
+    delete process.env.LOCAL_AI_ADMIN_TOKEN;
+  }
+});
+
 test('AI Chat: leaving mid-answer stops it; notes and errors aren\'t sent back as the model\'s words; a cut-off answer says so; Enter in an IME doesn\'t send', { skip, timeout: 90000 }, async () => {
   si.st.installed.set('gemma3:270m', { digest: 'x', size: 6000800 });
   const { page, context, errors } = await open('/app.html#ai-chat');
