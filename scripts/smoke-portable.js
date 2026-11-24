@@ -116,7 +116,17 @@ async function answers(child) {
       let version = null;
       try { version = execFileSync('sw_vers', ['-productVersion'], { encoding: 'utf8' }).trim(); } catch (e) { /* none */ }
       check(!!version && h.os && h.os.name === 'macOS ' + version, 'AI Model Store: the macOS version (' + (h.os && h.os.name) + '; sw_vers says ' + version + ')', JSON.stringify(h.os));
-      check(h.memory && typeof h.memory.available === 'number' && h.memory.available > 0 && h.memory.available <= h.memory.total, 'AI Model Store: the memory available, from vm_stat (' + Math.round(((h.memory && h.memory.available) || 0) / 1e9) + ' GB)', JSON.stringify(h.memory));
+      // (vm_stat's own sum, read right after a fresh reading of the server's: os.freemem()'s free pages alone are far
+      // less on a Mac, which keeps most of its memory as inactive pages it hands out when asked)
+      const now = (await get('/api/local-ai/hardware?refresh=1')).json || {};
+      const mem = now.memory || {};
+      let vm = '';
+      try { vm = execFileSync('/usr/bin/vm_stat', { encoding: 'utf8' }); } catch (e) { /* none */ }
+      const pg = /page size of (\d+) bytes/.exec(vm);
+      const pages = w => Number((new RegExp('^Pages ' + w + ':\\s+(\\d+)', 'm').exec(vm) || [0, 0])[1]);
+      const sum = pg && mem.total ? Math.min(mem.total, (pages('free') + pages('inactive') + pages('speculative') + pages('purgeable')) * Number(pg[1])) : null;
+      check(!!sum && typeof mem.available === 'number' && Math.abs(mem.available - sum) <= 0.25 * sum,
+        'AI Model Store: the memory available, from vm_stat (' + ((mem.available || 0) / 1e9).toFixed(1) + ' GB; vm_stat says ' + ((sum || 0) / 1e9).toFixed(1) + ' GB)', JSON.stringify(mem) + ' ' + vm.slice(0, 300));
       // Apple silicon, also for the Intel build under Rosetta: its GPU (Metal) runs the models
       let arm = false;
       try { arm = execFileSync('sysctl', ['-n', 'hw.optional.arm64'], { encoding: 'utf8' }).trim() === '1'; } catch (e) { /* an Intel Mac */ }
