@@ -612,6 +612,29 @@ test('AI Model Store: the catalog\'s age, sorting by size, a late Details answer
   await context.close();
 });
 
+test('Installed Models shows Ollama\'s list at once while MetaCode\'s AI service is slow to say which models it offers, and offers none until it has', { skip, timeout: 60000 }, async () => {
+  si.st.installed.set('gemma3:270m', { digest: 'x', size: 6000800 });
+  let release;
+  const held = new Promise(r => { release = r; });
+  try {
+    // (the AI service's list doesn't come: /api/models is held back)
+    const { page, context, errors } = await open('/app.html#dashboard', { setup: c => c.route(u => new URL(u).pathname === '/api/models', async route => { await held; await route.continue().catch(() => {}); }) });
+    await page.evaluate(() => { location.hash = '#installed-models'; });
+    await page.waitForSelector('#lai-installed tbody tr', { timeout: 5000 });
+    assert.match(await page.textContent('#lai-installed tbody'), /Checking whether MetaCode's AI service offers it…/);
+    assert.ok(await page.$('[data-act="load"][data-model="gemma3:270m"]'), 'Load, Stop, Settings and Delete need only Ollama');
+    assert.equal(await has(page, '[data-act="default"][data-model="gemma3:270m"]'), false);
+    assert.equal(await page.$$eval('select[data-feature="coding"] option', os => os.length), 1, 'no model offered for a feature yet');
+    // once it answers: offered
+    release();
+    await page.waitForSelector('#lai-installed[data-offered="known"] [data-act="default"][data-model="gemma3:270m"]');
+    assert.deepEqual(errors, []);
+    await context.close();
+  } finally {
+    release();
+  }
+});
+
 test('Installed Models: a model the AI service doesn\'t offer (an embedding model) isn\'t offered as the default or a feature\'s model; two names for the same files say so', { skip, timeout: 60000 }, async () => {
   si.st.installed.set('gemma3:270m', { digest: 'x', size: 6000800 });
   si.st.installed.set('nomic-embed-text:latest', { digest: 'y', size: 274302450 });
@@ -621,6 +644,9 @@ test('Installed Models: a model the AI service doesn\'t offer (an embedding mode
   try {
     const { page, context, errors } = await open('/app.html#installed-models');
     await page.waitForFunction(() => /nomic-embed-text/.test((document.querySelector('#lai-installed tbody') || {}).textContent || ''));
+    // (what MetaCode's AI service offers is filled in once it answers)
+    const answered = () => page.waitForSelector('#lai-installed[data-offered="known"] tbody');
+    await answered();
     const rowOf = name => page.$$eval('#lai-installed tbody tr', (trs, n) => trs.map(t => t.textContent).find(t => t.startsWith(n)), name);
     assert.ok(await page.$('[data-act="default"][data-model="gemma3:270m"]'));
     assert.equal(await has(page, '[data-act="default"][data-model="nomic-embed-text:latest"]'), false);
@@ -637,6 +663,7 @@ test('Installed Models: a model the AI service doesn\'t offer (an embedding mode
       return route.fulfill({ response: r, json: j });
     });
     await revisit(page, '#installed-models', '#lai-installed tbody');
+    await answered();
     assert.equal(await has(page, '[data-act="default"][data-model="gemma3:270m"]'), false);
     assert.match(await rowOf('gemma3:270m'), /Not offered for AI features: MetaCode's AI service doesn't list it/);
     const offered = await page.$$eval('select[data-feature="coding"] option', os => os.map(o => o.value));

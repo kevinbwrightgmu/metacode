@@ -18,7 +18,7 @@ const LocalAI = (() => {
   const API = '/api/local-ai';
   const TOKEN_KEY = 'metacode_local_ai_token';
   const esc = s => App.esc(String(s == null ? '' : s));
-  const st = { view: null, status: null, hw: null, runtimes: null, catalog: null, recs: null, installed: null, offered: null, offeredNote: '',
+  const st = { view: null, status: null, hw: null, runtimes: null, catalog: null, recs: null, installed: null, offered: undefined, offeredNote: '', offeredLooks: 0,
     jobs: new Map(), events: null, tab: 'recommended', query: '', category: '', capability: '', sort: 'pulls', shown: 30,
     chat: { messages: [], model: '', busy: null } };
 
@@ -145,8 +145,12 @@ const LocalAI = (() => {
   // (fresh: a model just installed, which MetaCode's AI service may list only a moment later)
   async function refreshInstalled(fresh) {
     try { st.installed = await api('GET', '/models'); } catch (e) { st.installed = null; }
-    if (st.view === 'installed') await loadOffered();
     if (st.view === 'store') { paintBody(); paintJobs(); }      // (the Details modal's buttons too)
+    if (st.view !== 'installed') return;
+    // (Ollama's list at once; which of them MetaCode's AI service offers once it answers, which may take a while)
+    const offered = loadOffered();
+    paintInstalled();
+    await offered;
     if (st.view === 'installed') paintInstalled();
     const m = fresh && st.view === 'installed' && st.offered && ((st.installed && st.installed.models) || []).find(x => lc(x.name) === lc(fresh));
     if (m && !embedding(m) && !chatId(m)) setTimeout(async () => { if (st.view !== 'installed') return; await loadOffered(); if (st.view === 'installed') paintInstalled(); }, 3000);
@@ -392,19 +396,21 @@ const LocalAI = (() => {
 
   // ── Installed Models ───────────────────────────────────────────────────────
   async function renderInstalled(container) {
-    try { await loadStatus(); if (ollamaUp()) await refreshInstalled(); else st.installed = null; } catch (e) { return failed(container, e); }
+    try { await loadStatus(); } catch (e) { return failed(container, e); }
     if (st.view !== 'installed') return;
     show(container, '<div class="lai"><div class="card lai-head"><div class="lai-head-row"><div><h2 class="lai-title">Installed Models</h2>' +
       '<p class="form-hint">The models on this computer. Pick which one each AI feature uses, keep one in memory for quick answers, or remove those you don\'t need.</p></div>' +
       '<div class="lai-head-side">' + ollamaLine() + '</div></div><div class="lai-chips">' + deviceLine() + '</div></div>' + manageLine() +
       '<div id="lai-jobs">' + jobsHTML() + '</div><div id="lai-installed"></div></div>');
-    paintInstalled();
     openEvents();
+    if (ollamaUp()) await refreshInstalled(); else { st.installed = null; paintInstalled(); }
   }
   // Which of this device's models MetaCode's AI service offers: only those can be the default or a feature's model
   // (it never offers an embedding model, and METACODE_OLLAMA_MODELS can leave others out).
-  // st.offered: lowercase id → the service's id; null when its list can't be read
+  // st.offered: lowercase id → the service's id; null when its list can't be read; undefined before it first
+  // answers. st.offeredLooks: looks under way (the last answer holds meanwhile, for the models it has).
   async function loadOffered() {
+    st.offeredLooks++;
     let offered = null, note = '';
     try {
       const res = await fetch('/api/models');
@@ -414,22 +420,27 @@ const LocalAI = (() => {
         if (!(data.models || []).length) note = data.note || '';
       }
     } catch (e) { offered = null; }
-    st.offered = offered; st.offeredNote = note;
+    st.offered = offered; st.offeredNote = note; st.offeredLooks--;
   }
+  // (not known yet whether it offers this one: no answer so far, or one that didn't have it and a new look under way)
+  const offerUnknown = m => st.offered === undefined || (st.offeredLooks > 0 && !(st.offered && st.offered.has(lc('ollama/' + m.name))));
   const embedding = m => (m.capabilities || []).includes('embedding') || /embed/i.test(m.name);
   // The AI service's id for an installed model, or null when it doesn't offer it (when its list can't be read, any
   // model but an embedding one, as it can't be checked)
   function chatId(m) {
-    if (embedding(m)) return null;
+    if (embedding(m) || offerUnknown(m)) return null;
     return st.offered ? st.offered.get(lc('ollama/' + m.name)) || null : 'ollama/' + m.name;
   }
   const notOffered = m => (embedding(m) ? 'Not offered for AI features: an embedding model, which can\'t chat.'
+    : offerUnknown(m) ? 'Checking whether MetaCode\'s AI service offers it…'
     : 'Not offered for AI features' + (st.offeredNote ? ' right now: ' + st.offeredNote : ': MetaCode\'s AI service doesn\'t list it (METACODE_OLLAMA_MODELS may leave it out).'));
   // The other names Ollama lists for a model's files (one digest): deleting one of them frees nothing while another stays
   const sameFiles = m => ((st.installed && st.installed.models) || []).filter(o => o !== m && m.digest && o.digest === m.digest).map(o => o.name);
   function paintInstalled() {
     const box = document.getElementById('lai-installed');
     if (!box) return;
+    // ("checking" while MetaCode's AI service hasn't said which models it offers)
+    box.dataset.offered = st.offered === undefined || st.offeredLooks > 0 ? 'checking' : 'known';
     if (!ollamaUp()) {
       const n = noOllama();
       box.innerHTML = '<div class="card"><p>' + (n.none ? esc(n.detail) : 'Ollama isn\'t running on the MetaCode server, so no installed model can be shown.') + '</p></div>';
