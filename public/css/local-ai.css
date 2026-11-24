@@ -12,6 +12,8 @@
 .lai-warn { color: #B45309; }
 .lai-locked { border-left: 3px solid var(--amber, #F59E0B); }
 .lai-token { display: flex; gap: 8px; margin-top: 10px; max-width: 420px; }
+.lai-locked .lai-warn { margin: 8px 0 0; }
+.lai-tokenline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .lai-problem { border-left: 3px solid var(--error, #EF4444); }
 
 .lai-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
@@ -72,6 +74,7 @@
 .lai-msg { max-width: min(760px, 88%); padding: 10px 14px; border-radius: 14px; line-height: 1.5; font-size: 14px; white-space: normal; word-wrap: break-word; }
 .lai-user { align-self: flex-end; background: var(--blue); color: #fff; border-bottom-right-radius: 4px; }
 .lai-assistant { align-self: flex-start; background: var(--bg-surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.lai-note { color: var(--tx-muted); font-size: 12.5px; }
 .lai-chat-form { display: flex; gap: 8px; align-items: flex-end; }
 .lai-chat-form textarea { flex: 1; resize: vertical; min-height: 44px; max-height: 200px; }
 

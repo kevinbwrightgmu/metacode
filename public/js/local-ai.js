@@ -9,23 +9,48 @@
    - System: this browser and the MetaCode server, the AI runtimes that work here, and where each works.
    Browsing works for everyone. Installing and removing models works on the computer MetaCode runs on, or with
    the server's admin token (kept in this browser).
+   Each page's root, and the Details modal's own wrapper, takes all their clicks with one listener: buttons that a
+   download's progress repaints keep working. Model names are compared whatever their case: the catalog spells
+   them as ollama.com does, Ollama as they were first pulled, and the server keys downloads in lowercase.
    ══════════════════════════════════════════════ */
 const LocalAI = (() => {
   'use strict';
   const API = '/api/local-ai';
   const TOKEN_KEY = 'metacode_local_ai_token';
   const esc = s => App.esc(String(s == null ? '' : s));
-  const st = { view: null, status: null, hw: null, catalog: null, recs: null, installed: null, jobs: new Map(), events: null,
-    tab: 'recommended', query: '', category: '', capability: '', sort: 'pulls', shown: 30, chat: { messages: [], model: '', busy: null } };
+  const st = { view: null, status: null, hw: null, runtimes: null, catalog: null, recs: null, installed: null, offered: null, offeredNote: '',
+    jobs: new Map(), events: null, tab: 'recommended', query: '', category: '', capability: '', sort: 'pulls', shown: 30,
+    chat: { messages: [], model: '', busy: null } };
 
   // ── Helpers ────────────────────────────────────────────────────────────────
   const token = () => { try { return localStorage.getItem(TOKEN_KEY) || ''; } catch (e) { return ''; } };
+  const forgetToken = () => { try { localStorage.removeItem(TOKEN_KEY); } catch (e) { /* private mode */ } };
+  // The admin token to send. One a browser can't put in a header (kept by an older version, say with a "–" copied
+  // from a document) would fail every request as if the server were away, so it is forgotten instead.
+  function adminToken() {
+    const t = token();
+    if (!t) return '';
+    try { new Headers({ 'X-MetaCode-Admin-Token': t }); return t; } catch (e) { /* not sendable */ }
+    forgetToken();
+    App.notify('The admin token kept in this browser had a character no browser can send in a request, so it was forgotten. Enter it again.', 'warning', 9000);
+    return '';
+  }
+  // Why a typed token can't be the server's admin token ('' when it can): a browser sends only printable ASCII in a
+  // header, and the server's token is at least 12 characters
+  function tokenProblem(v) {
+    if (!v) return 'Enter this server\'s admin token (LOCAL_AI_ADMIN_TOKEN) first.';
+    if (/[^\x21-\x7e]/.test(v)) return 'That token has a space or a character a browser can\'t send (such as a “–” or a curly quote, often copied from a document). An admin token is letters, digits and punctuation only: type it again.';
+    if (v.length < 12) return 'That token is too short: this server\'s admin token (LOCAL_AI_ADMIN_TOKEN) is at least 12 characters.';
+    return '';
+  }
+  const unreachable = () => (navigator.onLine === false ? 'This device is offline, and the MetaCode server can\'t be reached.' : 'The MetaCode server can\'t be reached.');
   async function api(method, path, body) {
     const headers = { 'Content-Type': 'application/json' };
-    if (token()) headers['X-MetaCode-Admin-Token'] = token();
+    const t = adminToken();
+    if (t) headers['X-MetaCode-Admin-Token'] = t;
     let res;
     try { res = await fetch(API + path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) }); }
-    catch (e) { throw new Error(navigator.onLine === false ? 'This device is offline, and the MetaCode server can\'t be reached.' : 'The MetaCode server can\'t be reached.'); }
+    catch (e) { throw new Error(unreachable()); }
     let json = null;
     try { json = await res.json(); } catch (e) { json = null; }
     if (!res.ok) throw Object.assign(new Error((json && json.error && json.error.message) || ('HTTP ' + res.status)), { status: res.status, code: json && json.error && json.error.code });
@@ -37,50 +62,95 @@ const LocalAI = (() => {
   const eta = s => (s == null ? '' : s < 60 ? s + ' s left' : s < 3600 ? Math.round(s / 60) + ' min left' : (s / 3600).toFixed(1) + ' h left');
   const count = n => (n == null ? '' : n >= 1e6 ? (n / 1e6).toFixed(1).replace(/\.0$/, '') + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'K' : String(n));
   const when = iso => { const t = Date.parse(iso); return t ? new Date(t).toLocaleDateString() : ''; };
+  // "just now", "25 min ago", "5 h ago", else the day
+  const ago = iso => {
+    const t = Date.parse(iso);
+    if (!t) return '';
+    const min = Math.round((Date.now() - t) / 60000);
+    return min < 2 ? 'just now' : min < 60 ? min + ' min ago' : min < 36 * 60 ? Math.round(min / 60) + ' h ago' : 'on ' + new Date(t).toLocaleDateString();
+  };
+  const lc = s => String(s == null ? '' : s).toLowerCase();
   const canManage = () => !!(st.status && st.status.manage && st.status.manage.allowed);
   const ollamaUp = () => !!(st.status && st.status.ollama && st.status.ollama.running);
-  const installedNames = () => new Set(((st.installed && st.installed.models) || []).map(m => m.name));
+  const installedNames = () => new Set(((st.installed && st.installed.models) || []).map(m => lc(m.name)));
   const tagged = n => (String(n).includes(':') ? String(n) : n + ':latest');
+  // The server's word on Ollama (as System shows it): on some systems there is none at all
+  const noOllamaHere = () => { const r = ((st.runtimes && st.runtimes.runtimes) || []).find(x => x.id === 'ollama'); return r && r.status === 'unsupported' ? r : null; };
+  // A model's size badge as a parameter count: "270m" → 2.7e8, "1.5b" → 1.5e9, "8x7b" → 5.6e10, "e2b" → 2e9
+  const paramsOf = s => { const m = /^(?:(\d+)x)?e?([\d.]+)([mbt])$/i.exec(String(s || '').trim()); return m ? (m[1] ? Number(m[1]) : 1) * Number(m[2]) * { m: 1e6, b: 1e9, t: 1e12 }[m[3].toLowerCase()] : null; };
+  // A model's smallest download: its tags' sizes when known, else from its smallest size at about 0.6 bytes per
+  // parameter (the library's usual 4-bit default); null when neither is known
+  function smallest(m) {
+    const sizes = (m.tags || []).map(t => t.size).filter(n => n > 0);
+    if (sizes.length) return Math.min(...sizes);
+    const p = (m.sizes || []).map(paramsOf).filter(n => n > 0);
+    return p.length ? Math.min(...p) * 0.6 : null;
+  }
   function loadCss() {
     if (document.getElementById('local-ai-css')) return;
     const l = document.createElement('link');
     l.id = 'local-ai-css'; l.rel = 'stylesheet'; l.href = 'css/local-ai.css';
     document.head.appendChild(l);
   }
+  const fromHTML = html => { const t = document.createElement('template'); t.innerHTML = html; return t.content.firstElementChild; };
   const CATEGORIES = [['general', 'General'], ['coding', 'Coding'], ['reasoning', 'Reasoning'], ['vision', 'Vision'], ['embedding', 'Embeddings'], ['small', 'Small'], ['multilingual', 'Multilingual']];
   const CAPS = { vision: 'vision', tools: 'tools', thinking: 'reasoning', embedding: 'embeddings', audio: 'audio' };
+  const RUNNING = ['queued', 'checking', 'downloading', 'verifying'];
 
   // ── Live install progress (server-sent events, while a Local AI page is open) ──
+  const jobMap = list => new Map((list || []).map(j => [lc(j.model), j]));
   function openEvents() {
     if (st.events || typeof EventSource === 'undefined') return;
     const es = new EventSource(API + '/installs/events');
     st.events = es;
-    es.addEventListener('snapshot', e => { const d = JSON.parse(e.data); st.jobs = new Map(d.installs.map(j => [j.model, j])); paintJobs(); });
+    es.addEventListener('snapshot', e => {
+      const before = st.jobs;
+      st.jobs = jobMap(JSON.parse(e.data).installs);
+      paintJobs();
+      // (a download that ended while the stream was away says so now)
+      st.jobs.forEach((j, k) => ended(j, before.get(k)));
+    });
     es.addEventListener('job', e => {
       const j = JSON.parse(e.data);
-      const before = st.jobs.get(j.model);
-      if (j.state === 'cancelled') st.jobs.delete(j.model); else st.jobs.set(j.model, j);
+      const k = lc(j.model);
+      const before = st.jobs.get(k);
+      if (j.state === 'cancelled') st.jobs.delete(k); else st.jobs.set(k, j);
       paintJobs();
-      if (j.state === 'done' && (!before || before.state !== 'done')) {
-        App.notify(j.verified === false ? j.model + ' installed, but its digest doesn\'t match Ollama\'s library.' : j.model + ' is installed' + (j.verified ? ' and verified.' : '.'), j.verified === false ? 'warning' : 'success', 5000);
-        refreshInstalled();
-      }
-      if (j.state === 'failed' && (!before || before.state !== 'failed')) App.notify(j.error || ('Couldn\'t install ' + j.model + '.'), 'error', 9000);
+      ended(j, before);
     });
-    es.onerror = () => { /* the browser reconnects by itself */ };
+    // The browser reconnects by itself after a network error, but not after an HTTP error (a proxy's 502 while
+    // MetaCode restarts): then the stream is opened again a little later, and its snapshot catches up
+    es.onerror = () => {
+      if (es.readyState !== EventSource.CLOSED || st.events !== es) return;
+      st.events = null;
+      setTimeout(() => { if (st.view === 'store' || st.view === 'installed') openEvents(); }, 5000);
+    };
   }
   function closeEvents() { if (st.events) { st.events.close(); st.events = null; } }
-  async function refreshInstalled() {
+  function ended(j, before) {
+    if (j.state === 'done' && (!before || before.state !== 'done')) {
+      App.notify(j.verified === false ? j.model + ' installed, but its digest doesn\'t match Ollama\'s library.' : j.model + ' is installed' + (j.verified ? ' and verified.' : '.'), j.verified === false ? 'warning' : 'success', 5000);
+      refreshInstalled(j.model);
+    }
+    if (j.state === 'failed' && (!before || before.state !== 'failed')) App.notify(j.error || ('Couldn\'t install ' + j.model + '.'), 'error', 9000);
+  }
+  // (fresh: a model just installed, which MetaCode's AI service may list only a moment later)
+  async function refreshInstalled(fresh) {
     try { st.installed = await api('GET', '/models'); } catch (e) { st.installed = null; }
-    if (st.view === 'store') paintBody();
+    if (st.view === 'installed') await loadOffered();
+    if (st.view === 'store') { paintBody(); paintJobs(); }      // (the Details modal's buttons too)
     if (st.view === 'installed') paintInstalled();
+    const m = fresh && st.view === 'installed' && st.offered && ((st.installed && st.installed.models) || []).find(x => lc(x.name) === lc(fresh));
+    if (m && !embedding(m) && !chatId(m)) setTimeout(async () => { if (st.view !== 'installed') return; await loadOffered(); if (st.view === 'installed') paintInstalled(); }, 3000);
   }
 
   // ── Entry ──────────────────────────────────────────────────────────────────
   function render(view, container) {
     loadCss();
     st.view = view;
-    App.setViewCleanup(() => { closeEvents(); st.view = null; });
+    // (leaving stops the live progress, and an answer AI Chat is still streaming: nobody would read it, and it would
+    // keep this machine's model busy)
+    App.setViewCleanup(() => { closeEvents(); if (st.chat.busy) st.chat.busy.abort(); st.view = null; });
     container.innerHTML = '<div class="lai"><div class="loading-state">Loading…</div></div>';
     const done = () => {};
     if (view === 'store') return renderStore(container).then(done);
@@ -88,14 +158,28 @@ const LocalAI = (() => {
     if (view === 'chat') return renderChat(container).then(done);
     if (view === 'system') return renderSystem(container).then(done);
   }
+  // A page's content: its root, new on each render, takes the page's clicks, edits and choices
+  function show(container, html) {
+    container.innerHTML = html;
+    const root = container.querySelector('.lai');
+    if (root) delegate(root);
+  }
   async function loadStatus() {
-    const [status, hw] = await Promise.all([api('GET', '/status'), api('GET', '/hardware').catch(() => null)]);
-    st.status = status; st.hw = hw;
-    st.jobs = new Map((status.installs || []).map(j => [j.model, j]));
+    try {
+      // (the runtimes too: the server's word on Ollama when it isn't running)
+      const [status, hw, runtimes] = await Promise.all([api('GET', '/status'), api('GET', '/hardware').catch(() => null), api('GET', '/runtimes').catch(() => null)]);
+      st.status = status; st.hw = hw; st.runtimes = runtimes;
+      st.jobs = jobMap(status.installs);
+    } catch (e) {
+      // (nothing from an earlier visit is shown as if it were current)
+      st.status = null; st.hw = null; st.runtimes = null;
+      throw e;
+    }
   }
   function failed(container, err) {
-    container.innerHTML = '<div class="lai"><div class="card lai-problem"><h3>The AI Model Store can\'t be shown</h3><p>' + esc(err.message) + '</p>' +
-      '<p class="form-hint">The store and the models live on the MetaCode server. Your projects are still here and work offline.</p></div></div>';
+    show(container, '<div class="lai"><div class="card lai-problem"><h3>The AI Model Store can\'t be shown</h3><p>' + esc(err.message) + '</p>' +
+      '<p class="form-hint">The store and the models live on the MetaCode server. Your projects are still here and work offline.</p>' +
+      (token() ? '<p class="form-hint">This browser keeps an admin token for the store. <button class="btn btn-ghost btn-sm" data-act="forget-token">Forget token</button></p>' : '') + '</div></div>');
   }
 
   // ── Header: this device, Ollama, who may manage ─────────────────────────────
@@ -111,44 +195,88 @@ const LocalAI = (() => {
   function ollamaLine() {
     const o = st.status && st.status.ollama;
     if (o && o.running) return '<span class="badge badge-green">Ollama ' + esc(o.version || '') + ' running</span>';
+    const none = noOllamaHere();
+    if (none) return '<span class="badge badge-gray">No Ollama for this system</span> <span class="form-hint">' + esc(none.detail) + ' <a href="#system">System</a> shows where each runtime works. You can browse meanwhile.</span>';
     return '<span class="badge badge-amber">Ollama isn\'t running</span> <span class="form-hint">Install it from <strong>ollama.com</strong> on the computer MetaCode runs on (a separate download), then reload this page. You can browse meanwhile.</span>';
   }
   function manageLine() {
     const m = st.status && st.status.manage;
-    if (!m || m.allowed) return '';
-    return '<div class="lai-locked card"><strong>Browsing only on this device.</strong> ' + esc(m.reason) +
+    if (!m) return '';
+    const forget = '<button class="btn btn-ghost btn-sm" data-act="forget-token">Forget token</button>';
+    if (m.allowed) return m.how === 'token' && token() ? '<div class="form-hint lai-tokenline">Models are managed from here with the admin token kept in this browser. ' + forget + '</div>' : '';
+    const kept = token() ? '<p class="lai-warn">' + (m.tokenSet ? 'The server refused the admin token kept in this browser: enter the right one, or forget it.' : 'This browser keeps an admin token, but the server has none set.') + ' ' + forget + '</p>' : '';
+    return '<div class="lai-locked card"><strong>Browsing only on this device.</strong> ' + esc(m.reason) + kept +
       (m.tokenSet ? '<div class="lai-token"><input type="password" class="form-input" id="lai-token" placeholder="Admin token" autocomplete="off">' +
         '<button class="btn btn-secondary btn-sm" data-act="token">Use token</button></div>' : '') + '</div>';
   }
+  const shownJobs = () => [...st.jobs.values()].filter(j => !['done', 'cancelled'].includes(j.state));
   function jobsHTML() {
-    const jobs = [...st.jobs.values()].filter(j => !['done', 'cancelled'].includes(j.state));
+    const jobs = shownJobs();
     if (!jobs.length) return '';
     return '<div class="card lai-downloads"><h3>Downloads</h3>' + jobs.map(jobRow).join('') + '</div>';
   }
+  // A download's row is built again only when its buttons change (sig); its progress is updated in place, so a
+  // press on Pause or Cancel isn't lost when the next progress event repaints the card
+  const jobSig = j => (canManage() ? 'm' : '') + (RUNNING.includes(j.state) ? 'p' : '') + (j.state === 'paused' || j.state === 'failed' ? 'r' : '');
+  const jobState = j => (j.state === 'failed' ? 'Failed' : j.status || j.state);
+  const jobFacts = j => (j.state === 'failed' ? j.error || '' : [j.total ? size(j.completed) + ' of ' + size(j.total) : '', speed(j.speed), eta(j.eta), j.resumed ? 'continued where it stopped' : ''].filter(Boolean).join(' · '));
   function jobRow(j) {
     const pct = j.percent == null ? 0 : j.percent;
-    const busy = ['queued', 'checking', 'downloading', 'verifying'].includes(j.state);
-    const facts = [j.total ? size(j.completed) + ' of ' + size(j.total) : '', speed(j.speed), eta(j.eta), j.resumed ? 'continued where it stopped' : ''].filter(Boolean).join(' · ');
-    return '<div class="lai-job" data-model="' + esc(j.model) + '">' +
-      '<div class="lai-job-top"><strong>' + esc(j.model) + '</strong><span class="lai-job-state">' + esc(j.state === 'failed' ? 'Failed' : j.status || j.state) + '</span></div>' +
+    const b = (what, cls, label) => '<button class="btn ' + cls + ' btn-sm" data-act="' + what + '" data-model="' + esc(j.model) + '">' + label + '</button>';
+    return '<div class="lai-job" data-model="' + esc(j.model) + '" data-sig="' + jobSig(j) + '">' +
+      '<div class="lai-job-top"><strong>' + esc(j.model) + '</strong><span class="lai-job-state">' + esc(jobState(j)) + '</span></div>' +
       '<div class="lai-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' + pct + '"><span style="width:' + pct + '%"></span></div>' +
-      '<div class="lai-job-foot"><span class="form-hint">' + esc(j.state === 'failed' ? j.error : facts) + '</span><span>' +
-      (canManage() ? (busy ? '<button class="btn btn-ghost btn-sm" data-act="pause" data-model="' + esc(j.model) + '">Pause</button>' : '') +
-        (j.state === 'paused' || j.state === 'failed' ? '<button class="btn btn-secondary btn-sm" data-act="resume" data-model="' + esc(j.model) + '">Resume</button>' : '') +
-        '<button class="btn btn-ghost btn-sm" data-act="cancel" data-model="' + esc(j.model) + '">Cancel</button>' : '') + '</span></div></div>';
+      '<div class="lai-job-foot"><span class="form-hint lai-job-facts">' + esc(jobFacts(j)) + '</span><span>' +
+      (canManage() ? (RUNNING.includes(j.state) ? b('pause', 'btn-ghost', 'Pause') : '') + (j.state === 'paused' || j.state === 'failed' ? b('resume', 'btn-secondary', 'Resume') : '') +
+        b('cancel', 'btn-ghost', 'Cancel') : '') + '</span></div></div>';
+  }
+  function fillJob(row, j) {
+    const pct = j.percent == null ? 0 : j.percent;
+    row.querySelector('.lai-job-state').textContent = jobState(j);
+    const bar = row.querySelector('.lai-bar');
+    bar.setAttribute('aria-valuenow', pct);
+    bar.firstElementChild.style.width = pct + '%';
+    row.querySelector('.lai-job-facts').textContent = jobFacts(j);
   }
   function paintJobs() {
     const box = document.getElementById('lai-jobs');
-    if (box) box.innerHTML = jobsHTML();
-    // the cards' buttons follow
-    document.querySelectorAll('[data-install-for]').forEach(el => { el.outerHTML = installButton(el.getAttribute('data-install-for')); });
+    if (box) {
+      const jobs = shownJobs();
+      if (!jobs.length) box.innerHTML = '';
+      else {
+        if (!box.querySelector('.lai-downloads')) box.innerHTML = '<div class="card lai-downloads"><h3>Downloads</h3></div>';
+        const card = box.querySelector('.lai-downloads');
+        const rows = new Map([...card.querySelectorAll('.lai-job')].map(r => [lc(r.dataset.model), r]));
+        let prev = card.querySelector('h3');
+        for (const j of jobs) {
+          let row = rows.get(lc(j.model));
+          rows.delete(lc(j.model));
+          if (row && row.dataset.sig === jobSig(j)) fillJob(row, j);
+          else { const fresh = fromHTML(jobRow(j)); if (row) row.replaceWith(fresh); row = fresh; }
+          if (prev.nextElementSibling !== row) prev.after(row);
+          prev = row;
+        }
+        rows.forEach(r => r.remove());
+      }
+    }
+    // The cards' buttons follow, each rebuilt only when what it shows changed (so a press on one isn't lost)
+    document.querySelectorAll('[data-install-for]').forEach(el => {
+      const tag = el.getAttribute('data-install-for');
+      if (el.getAttribute('data-sig') !== installSig(tag)) el.outerHTML = installButton(tag);
+    });
+  }
+  // What a model's Install button shows depends on this
+  function installSig(tag) {
+    const k = lc(tagged(tag));
+    const j = st.jobs.get(k);
+    return [installedNames().has(k) ? 'i' : '', j ? j.state + ' ' + (j.percent == null ? '' : j.percent) : '', canManage() && ollamaUp() ? 'm' : ''].join('|');
   }
   function installButton(tag) {
     const t = tagged(tag);
-    const j = st.jobs.get(t);
-    const attr = ' data-install-for="' + esc(t) + '"';
-    if (installedNames().has(t) && !(j && !['done', 'failed', 'cancelled'].includes(j.state))) return '<span class="badge badge-green"' + attr + '>Installed</span>';
-    if (j && ['queued', 'checking', 'downloading', 'verifying'].includes(j.state)) return '<span class="lai-mini"' + attr + '><span class="lai-bar"><span style="width:' + (j.percent || 0) + '%"></span></span>' + (j.percent != null ? j.percent + '%' : '…') + '</span>';
+    const j = st.jobs.get(lc(t));
+    const attr = ' data-install-for="' + esc(t) + '" data-sig="' + esc(installSig(t)) + '"';
+    if (installedNames().has(lc(t)) && !(j && !['done', 'failed', 'cancelled'].includes(j.state))) return '<span class="badge badge-green"' + attr + '>Installed</span>';
+    if (j && RUNNING.includes(j.state)) return '<span class="lai-mini"' + attr + '><span class="lai-bar"><span style="width:' + (j.percent || 0) + '%"></span></span>' + (j.percent != null ? j.percent + '%' : '…') + '</span>';
     if (j && j.state === 'paused') return '<span class="badge badge-amber"' + attr + '>Paused</span>';
     if (!canManage() || !ollamaUp()) return '<span' + attr + '></span>';
     return '<button class="btn btn-primary btn-sm"' + attr + ' data-act="install" data-model="' + esc(t) + '">Install</button>';
@@ -160,22 +288,23 @@ const LocalAI = (() => {
       await loadStatus();
       const [catalog, recs] = await Promise.all([api('GET', '/catalog'), api('GET', '/recommendations')]);
       st.catalog = catalog; st.recs = recs;
-      if (ollamaUp()) await refreshInstalled();
+      if (ollamaUp()) await refreshInstalled(); else st.installed = null;
     } catch (e) { return failed(container, e); }
     if (st.view !== 'store') return;
-    const src = st.catalog.source === 'live' ? 'from ollama.com just now' : st.catalog.source === 'cache' ? 'saved on ' + when(st.catalog.fetchedAt) : 'the copy that came with MetaCode (' + when(st.catalog.fetchedAt) + ')';
-    container.innerHTML = '<div class="lai">' +
+    const c = st.catalog;
+    // (the library is read again after a day, or with Refresh: when it was read is said)
+    const src = c.source === 'live' ? ('from ollama.com ' + ago(c.fetchedAt)).trim() : c.source === 'cache' ? 'saved on ' + when(c.fetchedAt) : 'the copy that came with MetaCode (' + when(c.fetchedAt) + ')';
+    show(container, '<div class="lai">' +
       '<div class="card lai-head"><div class="lai-head-row"><div><h2 class="lai-title">AI Model Store</h2>' +
         '<p class="form-hint">Models from Ollama\'s library that run on your own hardware: your prompts and data stay here. Big models need lots of memory; the recommendations below fit this computer.</p></div>' +
         '<div class="lai-head-side">' + ollamaLine() + '</div></div>' +
         '<div class="lai-chips">' + deviceLine() + '</div>' +
-        '<div class="form-hint lai-source">Catalog: ' + esc(src) + ' · ' + st.catalog.models.length + ' models' +
-          (st.catalog.problem ? ' · <span class="lai-warn">' + esc(st.catalog.problem) + '</span>' : '') +
+        '<div class="form-hint lai-source">Catalog: ' + esc(src) + ' · ' + c.models.length + ' models' +
+          (c.problem ? ' · <span class="lai-warn">' + esc(c.problem) + '</span>' : '') +
           ' <button class="btn btn-ghost btn-sm" data-act="refresh">Refresh</button></div></div>' +
       manageLine() + '<div id="lai-jobs">' + jobsHTML() + '</div>' +
       '<div class="lai-tabs" role="tablist"><button role="tab" class="lai-tab" data-tab="recommended">Recommended for this computer</button><button role="tab" class="lai-tab" data-tab="all">All models</button></div>' +
-      '<div id="lai-body"></div></div>';
-    wire(container);
+      '<div id="lai-body"></div></div>');
     paintBody();
     openEvents();
   }
@@ -206,18 +335,23 @@ const LocalAI = (() => {
   }
   function filtered() {
     const q = st.query.trim().toLowerCase();
-    let list = (st.catalog ? st.catalog.models : []).filter(m => (!q || m.name.includes(q) || (m.description || '').toLowerCase().includes(q)) &&
+    let list = (st.catalog ? st.catalog.models : []).filter(m => (!q || lc(m.name).includes(q) || lc(m.description).includes(q)) &&
       (!st.category || (m.categories || []).includes(st.category)) && (!st.capability || (m.capabilities || []).includes(st.capability)));
     if (st.sort === 'name') list = list.slice().sort((a, b) => a.name.localeCompare(b.name));
     else if (st.sort === 'updated') list = list.slice().sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
-    else list = list.slice().sort((a, b) => (b.pulls || 0) - (a.pulls || 0));
+    else if (st.sort === 'size') {
+      // (the smallest download first; a model whose sizes aren't known last)
+      const key = new Map(list.map(m => [m, smallest(m)]));
+      list = list.slice().sort((a, b) => { const x = key.get(a), y = key.get(b); return ((x == null) - (y == null)) || (x - y) || ((b.pulls || 0) - (a.pulls || 0)); });
+    } else list = list.slice().sort((a, b) => (b.pulls || 0) - (a.pulls || 0));
     return list;
   }
   function allHTML() {
     const list = filtered();
     const chips = (items, key) => items.map(([v, label]) => '<button class="lai-filter' + (st[key] === v ? ' on' : '') + '" data-filter="' + key + '" data-value="' + esc(v) + '">' + esc(label) + '</button>').join('');
+    const sorts = [['pulls', 'Most used'], ['updated', 'Recently updated'], ['size', 'Smallest first'], ['name', 'Name']];
     return '<div class="lai-search"><input type="search" class="form-input" id="lai-q" placeholder="Search models by name or description" value="' + esc(st.query) + '" aria-label="Search models">' +
-      '<select class="form-select" id="lai-sort" aria-label="Sort"><option value="pulls"' + (st.sort === 'pulls' ? ' selected' : '') + '>Most used</option><option value="updated"' + (st.sort === 'updated' ? ' selected' : '') + '>Recently updated</option><option value="name"' + (st.sort === 'name' ? ' selected' : '') + '>Name</option></select></div>' +
+      '<select class="form-select" id="lai-sort" aria-label="Sort">' + sorts.map(([v, label]) => '<option value="' + v + '"' + (st.sort === v ? ' selected' : '') + '>' + label + '</option>').join('') + '</select></div>' +
       '<div class="lai-filters">' + chips([['', 'All']].concat(CATEGORIES), 'category') + '</div>' +
       '<div class="lai-filters">' + chips([['', 'Any capability'], ['vision', 'Vision'], ['tools', 'Tools'], ['thinking', 'Reasoning'], ['embedding', 'Embeddings']], 'capability') + '</div>' +
       '<p class="form-hint">' + list.length + ' model' + (list.length === 1 ? '' : 's') + '</p>' +
@@ -229,64 +363,106 @@ const LocalAI = (() => {
       (list.length > st.shown ? '<div class="lai-more"><button class="btn btn-secondary" data-act="more">Show more</button></div>' : '');
   }
   async function showDetails(name) {
-    App.openModal(name, '<div class="loading-state">Loading its sizes…</div>');
+    // (its content sits in a wrapper of LocalAI's own, which takes its clicks: #modal-body is every page's)
+    App.openModal(name, '<div class="lai-details"><div class="loading-state">Loading its sizes…</div></div>');
+    const box = document.querySelector('#modal-body .lai-details');
+    delegate(box);
     let m;
-    try { m = await api('GET', '/catalog/model?name=' + encodeURIComponent(name)); } catch (e) { document.getElementById('modal-body').innerHTML = '<p>' + esc(e.message) + '</p>'; return; }
+    try { m = await api('GET', '/catalog/model?name=' + encodeURIComponent(name)); } catch (e) { if (box.isConnected) box.innerHTML = '<p>' + esc(e.message) + '</p>'; return; }
+    // (an answer that comes after this modal was closed, or another one opened, is too late for it)
+    if (!box.isConnected) return;
     const fitLabel = f => (f.level === 'good' ? '<span class="badge badge-green">fits</span>' : f.level === 'tight' ? '<span class="badge badge-amber">fits, tight</span>' : '<span class="badge badge-red">too big here</span>');
     const rows = m.tags.slice().sort((a, b) => (b.main - a.main) || (a.size - b.size)).map(t =>
       '<tr><td><code>' + esc(t.tag) + '</code></td><td>' + size(t.size) + '</td><td>≈ ' + size(t.fit.need) + '</td><td>' + (t.context ? Math.round(t.context / 1024) + 'K' : '') + '</td><td>' + esc((t.inputs || []).join(', ')) + '</td><td>' + fitLabel(t.fit) + '</td>' +
       '<td>' + (t.fit.level === 'too-big' ? '' : installButton(t.tag)) + '</td></tr>').join('');
-    document.getElementById('modal-body').innerHTML = '<p>' + esc(m.description) + '</p>' +
+    box.innerHTML = '<p>' + esc(m.description) + '</p>' +
       (m.tagsOffline ? '<p class="form-hint lai-warn">Offline: the sizes known from before are shown.</p>' : '') +
       '<div class="lai-table-wrap"><table class="lai-table"><thead><tr><th>Tag</th><th>Download</th><th>Memory</th><th>Context</th><th>Input</th><th>Here</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<p class="form-hint">Memory is an estimate for Ollama\'s default context; Ollama checks the download\'s sha256, and MetaCode checks the installed model against Ollama\'s library.</p>';
-    wire(document.getElementById('modal-body'));
   }
 
   // ── Installed Models ───────────────────────────────────────────────────────
   async function renderInstalled(container) {
-    try { await loadStatus(); if (ollamaUp()) await refreshInstalled(); } catch (e) { return failed(container, e); }
+    try { await loadStatus(); if (ollamaUp()) await refreshInstalled(); else st.installed = null; } catch (e) { return failed(container, e); }
     if (st.view !== 'installed') return;
-    container.innerHTML = '<div class="lai"><div class="card lai-head"><div class="lai-head-row"><div><h2 class="lai-title">Installed Models</h2>' +
+    show(container, '<div class="lai"><div class="card lai-head"><div class="lai-head-row"><div><h2 class="lai-title">Installed Models</h2>' +
       '<p class="form-hint">The models on this computer. Pick which one each AI feature uses, keep one in memory for quick answers, or remove those you don\'t need.</p></div>' +
       '<div class="lai-head-side">' + ollamaLine() + '</div></div><div class="lai-chips">' + deviceLine() + '</div></div>' + manageLine() +
-      '<div id="lai-jobs">' + jobsHTML() + '</div><div id="lai-installed"></div></div>';
-    wire(container);
+      '<div id="lai-jobs">' + jobsHTML() + '</div><div id="lai-installed"></div></div>');
     paintInstalled();
     openEvents();
   }
+  // Which of this device's models MetaCode's AI service offers: only those can be the default or a feature's model
+  // (it never offers an embedding model, and METACODE_OLLAMA_MODELS can leave others out).
+  // st.offered: lowercase id → the service's id; null when its list can't be read
+  async function loadOffered() {
+    let offered = null, note = '';
+    try {
+      const res = await fetch('/api/models');
+      if (res.ok) {
+        const data = await res.json();
+        offered = new Map((data.models || []).filter(m => /^ollama\//i.test(m.id)).map(m => [lc(m.id), m.id]));
+        if (!(data.models || []).length) note = data.note || '';
+      }
+    } catch (e) { offered = null; }
+    st.offered = offered; st.offeredNote = note;
+  }
+  const embedding = m => (m.capabilities || []).includes('embedding') || /embed/i.test(m.name);
+  // The AI service's id for an installed model, or null when it doesn't offer it (when its list can't be read, any
+  // model but an embedding one, as it can't be checked)
+  function chatId(m) {
+    if (embedding(m)) return null;
+    return st.offered ? st.offered.get(lc('ollama/' + m.name)) || null : 'ollama/' + m.name;
+  }
+  const notOffered = m => (embedding(m) ? 'Not offered for AI features: an embedding model, which can\'t chat.'
+    : 'Not offered for AI features' + (st.offeredNote ? ' right now: ' + st.offeredNote : ': MetaCode\'s AI service doesn\'t list it (METACODE_OLLAMA_MODELS may leave it out).'));
+  // The other names Ollama lists for a model's files (one digest): deleting one of them frees nothing while another stays
+  const sameFiles = m => ((st.installed && st.installed.models) || []).filter(o => o !== m && m.digest && o.digest === m.digest).map(o => o.name);
   function paintInstalled() {
     const box = document.getElementById('lai-installed');
     if (!box) return;
-    if (!ollamaUp()) { box.innerHTML = '<div class="card"><p>Ollama isn\'t running on the MetaCode server, so no installed model can be shown.</p></div>'; return; }
+    if (!ollamaUp()) {
+      const none = noOllamaHere();
+      box.innerHTML = '<div class="card"><p>' + (none ? esc(none.detail) : 'Ollama isn\'t running on the MetaCode server, so no installed model can be shown.') + '</p></div>';
+      return;
+    }
     const ms = (st.installed && st.installed.models) || [];
     if (!ms.length) { box.innerHTML = '<div class="card"><p>No model is installed yet.</p><a class="btn btn-primary" href="#model-store">Open the AI Model Store</a></div>'; return; }
     const s = App.getState().settings || {};
-    const def = s.model || '';
-    const id = m => 'ollama/' + m.name;
+    const def = lc(s.model);
+    const chat = ms.map(m => ({ m, id: chatId(m) })).filter(x => x.id);
     box.innerHTML = '<div class="card"><h3>' + ms.length + ' model' + (ms.length === 1 ? '' : 's') + ', ' + size(st.installed.totalSize) + ' on disk</h3>' +
       '<div class="lai-table-wrap"><table class="lai-table"><thead><tr><th>Model</th><th>Size</th><th>Details</th><th>In memory</th><th></th></tr></thead><tbody>' +
-      ms.map(m => '<tr><td><strong>' + esc(m.name) + '</strong>' + (def === id(m) ? ' <span class="badge badge-blue">default</span>' : '') + '</td><td>' + size(m.size) + '</td>' +
-        '<td class="form-hint">' + esc([m.parameterSize, m.quantization, m.contextLength ? Math.round(m.contextLength / 1024) + 'K context' : '', (m.capabilities || []).filter(c => c !== 'completion').join(', ')].filter(Boolean).join(' · ')) + '</td>' +
-        '<td>' + (m.loaded ? '<span class="badge badge-green">loaded</span> <span class="form-hint">' + size(m.loaded.size) + (m.loaded.sizeVram ? ' (GPU)' : '') + '</span>' : '<span class="form-hint">no</span>') + '</td>' +
-        '<td class="lai-actions"><button class="btn btn-secondary btn-sm" data-act="default" data-model="' + esc(m.name) + '"' + (def === id(m) ? ' disabled' : '') + '>Use as default</button>' +
-        (canManage() ? (m.loaded ? '<button class="btn btn-ghost btn-sm" data-act="unload" data-model="' + esc(m.name) + '">Stop</button>' : '<button class="btn btn-ghost btn-sm" data-act="load" data-model="' + esc(m.name) + '">Load</button>') +
-          '<button class="btn btn-ghost btn-sm" data-act="settings" data-model="' + esc(m.name) + '">Settings</button><button class="btn btn-ghost btn-sm" data-act="update" data-model="' + esc(m.name) + '">Update</button>' +
-          '<button class="btn btn-ghost btn-sm lai-danger" data-act="delete" data-model="' + esc(m.name) + '">Delete</button>' : '') + '</td></tr>').join('') + '</tbody></table></div></div>' +
+      ms.map(m => {
+        const id = chatId(m);
+        const same = sameFiles(m);
+        return '<tr><td><strong>' + esc(m.name) + '</strong>' + (def && def === lc('ollama/' + m.name) ? ' <span class="badge badge-blue">default</span>' : '') + '</td><td>' + size(m.size) + '</td>' +
+          '<td class="form-hint">' + esc([m.parameterSize, m.quantization, m.contextLength ? Math.round(m.contextLength / 1024) + 'K context' : '', (m.capabilities || []).filter(c => c !== 'completion').join(', '),
+            same.length ? 'the same files as ' + same.join(', ') : ''].filter(Boolean).join(' · ')) + '</td>' +
+          '<td>' + (m.loaded ? '<span class="badge badge-green">loaded</span> <span class="form-hint">' + size(m.loaded.size) + (m.loaded.sizeVram ? ' (GPU)' : '') + '</span>' : '<span class="form-hint">no</span>') + '</td>' +
+          '<td class="lai-actions">' + (id ? '<button class="btn btn-secondary btn-sm" data-act="default" data-model="' + esc(m.name) + '" data-id="' + esc(id) + '"' + (def === lc(id) ? ' disabled' : '') + '>Use as default</button>'
+            : '<span class="form-hint">' + esc(notOffered(m)) + '</span>') +
+          (canManage() ? (m.loaded ? '<button class="btn btn-ghost btn-sm" data-act="unload" data-model="' + esc(m.name) + '">Stop</button>' : '<button class="btn btn-ghost btn-sm" data-act="load" data-model="' + esc(m.name) + '">Load</button>') +
+            '<button class="btn btn-ghost btn-sm" data-act="settings" data-model="' + esc(m.name) + '">Settings</button><button class="btn btn-ghost btn-sm" data-act="update" data-model="' + esc(m.name) + '">Update</button>' +
+            '<button class="btn btn-ghost btn-sm lai-danger" data-act="delete" data-model="' + esc(m.name) + '">Delete</button>' : '') + '</td></tr>';
+      }).join('') + '</tbody></table></div></div>' +
       '<div class="card"><h3>Which model each AI feature uses</h3><p class="form-hint">A feature without its own model uses the default. These are this browser\'s settings, like Settings → AI models.</p>' +
-      '<div class="lai-features">' + App.AI_FEATURES.map(([fid, name, what]) => '<label class="form-group"><span class="form-label">' + esc(name) + ' <span class="form-hint">' + esc(what) + '</span></span>' +
-        '<select class="form-select" data-feature="' + esc(fid) + '"><option value="">The default model</option>' + ms.map(m => '<option value="' + esc(id(m)) + '"' + ((s.models || {})[fid] === id(m) ? ' selected' : '') + '>' + esc(m.name) + '</option>').join('') +
-        ((s.models || {})[fid] && !ms.some(m => id(m) === (s.models || {})[fid]) ? '<option value="' + esc(s.models[fid]) + '" selected>' + esc(App.modelName(s.models[fid])) + '</option>' : '') + '</select></label>').join('') + '</div></div>';
-    box.querySelectorAll('select[data-feature]').forEach(sel => sel.addEventListener('change', () => {
-      const models = Object.assign({}, (App.getState().settings || {}).models || {});
-      if (sel.value) models[sel.dataset.feature] = sel.value; else delete models[sel.dataset.feature];
-      App.setState({ settings: Object.assign({}, App.getState().settings, { models }) });
-      App.notify('Saved: ' + (sel.value ? App.modelName(sel.value) : 'the default model') + ' for ' + sel.closest('label').querySelector('.form-label').firstChild.textContent.trim() + '.', 'success');
-    }));
-    wire(box);
+      '<div class="lai-features">' + App.AI_FEATURES.map(([fid, name, what]) => {
+        const saved = (s.models || {})[fid] || '';
+        return '<label class="form-group"><span class="form-label">' + esc(name) + ' <span class="form-hint">' + esc(what) + '</span></span>' +
+          '<select class="form-select" data-feature="' + esc(fid) + '"><option value="">The default model</option>' +
+          chat.map(x => '<option value="' + esc(x.id) + '"' + (saved && lc(saved) === lc(x.id) ? ' selected' : '') + '>' + esc(x.m.name) + '</option>').join('') +
+          (saved && !chat.some(x => lc(x.id) === lc(saved)) ? '<option value="' + esc(saved) + '" selected>' + esc(App.modelName(saved)) + '</option>' : '') + '</select></label>';
+      }).join('') + '</div></div>';
+  }
+  function featureModel(sel) {
+    const models = Object.assign({}, (App.getState().settings || {}).models || {});
+    if (sel.value) models[sel.dataset.feature] = sel.value; else delete models[sel.dataset.feature];
+    App.setState({ settings: Object.assign({}, App.getState().settings, { models }) });
+    App.notify('Saved: ' + (sel.value ? App.modelName(sel.value) : 'the default model') + ' for ' + sel.closest('label').querySelector('.form-label').firstChild.textContent.trim() + '.', 'success');
   }
   function modelSettings(name) {
-    const m = ((st.installed && st.installed.models) || []).find(x => x.name === name) || {};
+    const m = ((st.installed && st.installed.models) || []).find(x => lc(x.name) === lc(name)) || {};
     const s = m.settings || {};
     App.openModal('Settings for ' + name,
       '<p class="form-hint">Used for this model\'s requests. A feature that sets its own temperature (AI Coding uses 0.1) keeps it; the answer length is a cap.</p>' +
@@ -305,57 +481,80 @@ const LocalAI = (() => {
 
   // ── AI Chat ────────────────────────────────────────────────────────────────
   async function renderChat(container) {
-    let models = [];
+    let models = [], why = '';
     try {
       const res = await fetch('/api/models');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
       models = (data.models || []).filter(m => m.local || m.backup);
-    } catch (e) { models = []; }
+      if (!models.length) why = await whyNoModel(data);
+    } catch (e) { why = esc(unreachable()); }
     if (st.view !== 'chat') return;
     const c = st.chat;
-    if (!c.model || !models.some(m => m.id === c.model)) c.model = (models[0] && models[0].id) || '';
-    container.innerHTML = '<div class="lai lai-chat"><div class="card lai-chat-head">' +
+    const kept = models.find(m => lc(m.id) === lc(c.model));
+    c.model = kept ? kept.id : (models[0] && models[0].id) || '';
+    show(container, '<div class="lai lai-chat"><div class="card lai-chat-head">' +
       (models.length ? '<label class="lai-chat-model"><span class="form-label">Model on this device</span><select class="form-select" id="lai-chat-model">' +
         models.map(m => '<option value="' + esc(m.id) + '"' + (m.id === c.model ? ' selected' : '') + '>' + esc(String(m.name || m.id).replace(/ \((on this device|local backup)\)/, '')) + '</option>').join('') + '</select></label>' +
         '<button class="btn btn-ghost btn-sm" data-act="new-chat">New chat</button>'
-        : '<p>No model on this device can answer yet. <a href="#model-store">Install one in the AI Model Store</a>.</p>') +
+        : '<p>' + why + '</p>') +
       '<p class="form-hint">Answers come from a model on the MetaCode server\'s own hardware: nothing you write here leaves it.</p></div>' +
       '<div class="lai-chat-log" id="lai-log" role="log" aria-live="polite"></div>' +
       '<form class="lai-chat-form" id="lai-chat-form"><textarea class="form-input" id="lai-chat-input" rows="2" placeholder="Message the model…" aria-label="Message"' + (models.length ? '' : ' disabled') + '></textarea>' +
-      '<button class="btn btn-primary" type="submit" id="lai-send"' + (models.length ? '' : ' disabled') + '>Send</button><button class="btn btn-ghost" type="button" id="lai-stop" hidden>Stop</button></form></div>';
+      '<button class="btn btn-primary" type="submit" id="lai-send"' + (models.length && !c.busy ? '' : ' disabled') + '>Send</button><button class="btn btn-ghost" type="button" id="lai-stop"' + (c.busy ? '' : ' hidden') + '>Stop</button></form></div>');
     paintChat();
     const sel = document.getElementById('lai-chat-model');
     if (sel) sel.addEventListener('change', () => { c.model = sel.value; });
     const input = document.getElementById('lai-chat-input');
-    input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); document.getElementById('lai-chat-form').requestSubmit(); } });
+    // (an Enter that picks an input method's candidate, as in Japanese, Chinese or Korean, doesn't send: Safari marks
+    // it only with keyCode 229)
+    input.addEventListener('keydown', e => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && e.keyCode !== 229) { e.preventDefault(); document.getElementById('lai-chat-form').requestSubmit(); } });
     document.getElementById('lai-chat-form').addEventListener('submit', e => { e.preventDefault(); send(input.value); });
     document.getElementById('lai-stop').addEventListener('click', () => { if (c.busy) c.busy.abort(); });
-    wire(container);
+  }
+  // Why no model on this device can answer: Ollama isn't running (or there is none for this system), the AI service's
+  // own reason, or none is installed yet
+  async function whyNoModel(data) {
+    try { await loadStatus(); } catch (e) { /* the AI service's word, then */ }
+    if (st.status && !ollamaUp()) {
+      const none = noOllamaHere();
+      return none ? esc(none.detail) : 'Ollama isn\'t running on the MetaCode server, so no model on this device can answer. Install it from <strong>ollama.com</strong> on the computer MetaCode runs on (a separate download), then reload this page.';
+    }
+    if (!(data.models || []).length && data.note) return esc(data.note);
+    return 'No model on this device can answer yet. <a href="#model-store">Install one in the AI Model Store</a>.';
   }
   function paintChat() {
     const log = document.getElementById('lai-log');
     if (!log) return;
     const c = st.chat;
-    log.innerHTML = c.messages.length ? c.messages.map(m => '<div class="lai-msg lai-' + m.role + '">' + esc(m.content || (m.role === 'assistant' ? '…' : '')).replace(/\n/g, '<br>') + '</div>').join('')
+    // (a note of MetaCode's, such as "(stopped)", shows under the model's words)
+    const shown = m => esc(m.content).replace(/\n/g, '<br>') + (m.note ? (m.content ? '<br>' : '') + '<span class="lai-note">' + esc(m.note) + '</span>' : '');
+    log.innerHTML = c.messages.length ? c.messages.map(m => '<div class="lai-msg lai-' + m.role + '">' + (m.content || m.note ? shown(m) : m.role === 'assistant' ? '…' : '') + '</div>').join('')
       : '<div class="lai-chat-empty">Ask anything. Small models are quick but make mistakes: check what matters.</div>';
     log.scrollTop = log.scrollHeight;
   }
+  // The conversation as the model said it, sent with the next question: no notes ("(stopped)", errors), and no
+  // question that got no answer
+  const spoken = ms => ms.filter((m, i) => (m.role === 'assistant' ? !!m.content : !(ms[i + 1] && ms[i + 1].role === 'assistant' && !ms[i + 1].content)))
+    .map(m => ({ role: m.role, content: m.content }));
   async function send(text) {
     const c = st.chat;
     text = String(text || '').trim();
     if (!text || c.busy || !c.model) return;
     document.getElementById('lai-chat-input').value = '';
     c.messages.push({ role: 'user', content: text });
-    const answer = { role: 'assistant', content: '' };
+    const messages = spoken(c.messages).slice(-20);
+    const answer = { role: 'assistant', content: '', note: '' };
     c.messages.push(answer);
     paintChat();
     const ac = new AbortController();
     c.busy = ac;
     document.getElementById('lai-stop').hidden = false;
     document.getElementById('lai-send').disabled = true;
+    let finish = null, thinking = false;
     try {
       const res = await fetch('/api/ai', { method: 'POST', signal: ac.signal, headers: { 'Content-Type': 'application/json', 'x-provider': 'openai', 'X-MetaCode-Feature': 'chat', 'X-MetaCode-Model-Switch': 'off' },
-        body: JSON.stringify({ model: c.model, stream: true, max_tokens: 1024, messages: c.messages.filter(m => m !== answer).slice(-20).map(m => ({ role: m.role, content: m.content })) }) });
+        body: JSON.stringify({ model: c.model, stream: true, max_tokens: 1024, messages }) });
       if (!res.ok || !res.body) {
         let msg = 'HTTP ' + res.status;
         try { const j = await res.json(); msg = (j.error && j.error.message) || msg; } catch (e) { /* not JSON */ }
@@ -377,16 +576,23 @@ const LocalAI = (() => {
           try {
             const j = JSON.parse(data);
             if (j.error) throw new Error(j.error.message || 'The model failed.');
-            const d = j.choices && j.choices[0] && j.choices[0].delta;
+            const ch = j.choices && j.choices[0];
+            const d = ch && ch.delta;
             if (d && d.content) { answer.content += d.content; paintChat(); }
+            else if (d && (d.reasoning_content || d.reasoning)) thinking = true;
+            if (ch && ch.finish_reason) finish = ch.finish_reason;
           } catch (e) { if (e instanceof SyntaxError) continue; throw e; }
         }
       }
     } catch (e) {
-      if (e.name !== 'AbortError') answer.content = (answer.content ? answer.content + '\n\n' : '') + '⚠ ' + e.message;
+      if (!ac.signal.aborted) answer.note = '⚠ ' + e.message;
     } finally {
       c.busy = null;
-      if (!answer.content) answer.content = '(stopped)';
+      if (!answer.note) {
+        answer.note = ac.signal.aborted ? '(stopped)'
+          : finish === 'length' ? (answer.content ? '(cut off at the length limit)' : thinking ? '(no answer: the model was still thinking when it reached the length limit)' : '(no answer within the length limit)')
+            : answer.content ? '' : '(no answer)';
+      }
       paintChat();
       const stop = document.getElementById('lai-stop'); if (stop) stop.hidden = true;
       const sendBtn = document.getElementById('lai-send'); if (sendBtn) sendBtn.disabled = false;
@@ -395,8 +601,8 @@ const LocalAI = (() => {
 
   // ── System ─────────────────────────────────────────────────────────────────
   async function renderSystem(container) {
-    let rt = null;
-    try { await loadStatus(); rt = await api('GET', '/runtimes'); } catch (e) { /* the browser half still shows */ }
+    try { await loadStatus(); } catch (e) { /* the browser half still shows, and the server's says it can't be reached */ }
+    const rt = st.runtimes;
     if (st.view !== 'system') return;
     const est = navigator.storage && navigator.storage.estimate ? await navigator.storage.estimate().catch(() => null) : null;
     const persisted = navigator.storage && navigator.storage.persisted ? await navigator.storage.persisted().catch(() => null) : null;
@@ -426,30 +632,34 @@ const LocalAI = (() => {
       '<div class="card"><h3>Where each runtime works</h3><div class="lai-table-wrap"><table class="lai-table"><thead><tr><th>System</th><th>Ollama</th><th>OpenAI-compatible server</th><th>Another MetaCode server</th></tr></thead><tbody>' +
         rt.matrix.map(m => '<tr' + (rt.platform && rt.platform.id === m.id ? ' class="lai-here"' : '') + '><td>' + esc(m.name) + (rt.platform && rt.platform.id === m.id ? ' <span class="badge badge-blue">this server</span>' : '') + '</td><td>' + esc(m.ollama) + '</td><td>' + esc(m.openai) + '</td><td>' + esc(m.server) + '</td></tr>').join('') +
       '</tbody></table></div><p class="form-hint">Phones and tablets use the AI of a MetaCode server on your network or online: open it in the browser and install it as an app.</p></div>' : '';
-    container.innerHTML = '<div class="lai"><div class="lai-sys">' + browser + server + '</div>' + runtimes + '</div>';
-    wire(container);
+    show(container, '<div class="lai"><div class="lai-sys">' + browser + server + '</div>' + runtimes + '</div>');
   }
 
   // ── Actions ────────────────────────────────────────────────────────────────
-  function wire(root) {
-    root.querySelectorAll('[data-act]').forEach(el => {
-      if (el.dataset.wired) return;
-      el.dataset.wired = '1';
-      el.addEventListener('click', e => { e.preventDefault(); act(el.dataset.act, el.dataset.model || el.dataset.name, el); });
+  // One listener for each kind of event on a page's root, and on the Details modal's wrapper: an element that a
+  // repaint replaced still answers, and each press is handled once
+  function delegate(root) {
+    root.addEventListener('click', e => {
+      const hit = sel => { const el = e.target.closest(sel); return el && root.contains(el) ? el : null; };
+      const tab = hit('.lai-tab');
+      if (tab) { st.tab = tab.dataset.tab; return paintBody(); }
+      const f = hit('[data-filter]');
+      if (f) { st[f.dataset.filter] = f.dataset.value; st.shown = 30; return paintBody(); }
+      const a = hit('[data-act]');
+      if (a) { e.preventDefault(); act(a.dataset.act, a.dataset.model || a.dataset.name, a); }
     });
-    root.querySelectorAll('.lai-tab').forEach(el => el.addEventListener('click', () => { st.tab = el.dataset.tab; paintBody(); }));
-    const body = root.querySelector('#lai-body') || (root.id === 'lai-body' ? root : null);
-    if (body && !body.dataset.wired) {
-      body.dataset.wired = '1';
-      body.addEventListener('input', e => { if (e.target.id === 'lai-q') { st.query = e.target.value; st.shown = 30; const pos = e.target.selectionStart; paintBody(); const q = document.getElementById('lai-q'); if (q) { q.focus(); q.setSelectionRange(pos, pos); } } });
-      body.addEventListener('change', e => { if (e.target.id === 'lai-sort') { st.sort = e.target.value; paintBody(); } });
-      body.addEventListener('click', e => {
-        const f = e.target.closest('[data-filter]');
-        if (f) { st[f.dataset.filter] = f.dataset.value; st.shown = 30; paintBody(); return; }
-        const a = e.target.closest('[data-act]');
-        if (a && !a.dataset.wired) { e.preventDefault(); act(a.dataset.act, a.dataset.model || a.dataset.name, a); }
-      });
-    }
+    root.addEventListener('input', e => {
+      if (e.target.id !== 'lai-q') return;
+      st.query = e.target.value; st.shown = 30;
+      const pos = e.target.selectionStart;
+      paintBody();
+      const q = document.getElementById('lai-q');
+      if (q) { q.focus(); q.setSelectionRange(pos, pos); }
+    });
+    root.addEventListener('change', e => {
+      if (e.target.id === 'lai-sort') { st.sort = e.target.value; return paintBody(); }
+      if (e.target.matches('select[data-feature]')) featureModel(e.target);
+    });
   }
   async function act(what, model, el) {
     try {
@@ -458,9 +668,16 @@ const LocalAI = (() => {
       if (what === 'details') return showDetails(model);
       if (what === 'more') { st.shown += 30; return paintBody(); }
       if (what === 'refresh') { const c = await api('GET', '/catalog?refresh=1'); st.catalog = c; st.recs = await api('GET', '/recommendations'); App.notify(c.problem || 'The catalog is up to date.', c.problem ? 'warning' : 'success', 6000); return App.navigate('model-store'); }
-      if (what === 'token') { const v = document.getElementById('lai-token').value.trim(); try { localStorage.setItem(TOKEN_KEY, v); } catch (e) { /* private mode */ } return App.navigate(location.hash.slice(1)); }
+      if (what === 'token') {
+        const v = ((document.getElementById('lai-token') || {}).value || '').trim();
+        const bad = tokenProblem(v);
+        if (bad) return App.notify(bad, 'error', 9000);
+        try { localStorage.setItem(TOKEN_KEY, v); } catch (e) { return App.notify('This browser won\'t keep the token (private browsing?).', 'error', 7000); }
+        return App.navigate(location.hash.slice(1));
+      }
+      if (what === 'forget-token') { forgetToken(); App.notify('The admin token was removed from this browser.', 'info'); return App.navigate(location.hash.slice(1)); }
       if (what === 'default') {
-        App.setState({ settings: Object.assign({}, App.getState().settings, { model: 'ollama/' + model }) });
+        App.setState({ settings: Object.assign({}, App.getState().settings, { model: el.dataset.id || 'ollama/' + model }) });
         App.notify(model + ' is now the default model in this browser.', 'success');
         return paintInstalled();
       }
@@ -468,7 +685,11 @@ const LocalAI = (() => {
       if (what === 'update') { await api('POST', '/models/update', { model }); App.notify('Checking ' + model + ' for an update…', 'info'); return; }
       if (what === 'settings') return modelSettings(model);
       if (what === 'delete') {
-        App.openModal('Delete ' + model + '?', '<p>It is removed from this computer (' + size((((st.installed && st.installed.models) || []).find(m => m.name === model) || {}).size) + '). You can install it again from the AI Model Store.</p>',
+        const m = ((st.installed && st.installed.models) || []).find(x => lc(x.name) === lc(model)) || {};
+        const same = sameFiles(m);
+        App.openModal('Delete ' + model + '?', '<p>' + (same.length
+          ? esc(model) + ' has the same files as ' + esc(same.join(', ')) + ' (one model under ' + (same.length === 1 ? 'two names' : 'several names') + '). Deleting it removes only this name, and frees no disk space while ' + esc(same.join(', ')) + (same.length === 1 ? ' stays.' : ' stay.')
+          : 'It is removed from this computer (' + size(m.size) + ').') + ' You can install it again from the AI Model Store.</p>',
           '<button class="btn btn-secondary" onclick="App.closeModal()">Cancel</button><button class="btn btn-danger" id="lai-del-ok">Delete</button>');
         document.getElementById('lai-del-ok').addEventListener('click', async () => {
           try { st.installed = await api('POST', '/models/delete', { model }); App.closeModal(); App.notify(model + ' was deleted.', 'success'); paintInstalled(); }
