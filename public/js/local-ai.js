@@ -339,7 +339,7 @@ const LocalAI = (() => {
         '<div class="lai-card-top"><h4>' + esc(m.name) + '</h4>' + installButton(m.tag) + '</div>' +
         '<p class="lai-desc">' + esc(m.description) + '</p>' +
         '<div class="lai-facts"><span>' + esc(m.tag) + '</span><span>' + size(m.size) + ' download' + (m.estimated ? ' (estimated)' : '') + '</span><span>needs ≈ ' + size(m.need) + ' memory</span>' +
-          (m.context ? '<span>' + Math.round(m.context / 1024) + 'K context</span>' : '') + '<span>' + (m.runsOn === 'gpu' ? 'runs on the GPU' : 'runs on the CPU') + '</span></div>' +
+          (m.context ? '<span>' + Math.round(m.context / 1024) + 'K context</span>' : '') + '<span>' + (m.runsOn === 'gpu' ? 'runs on the GPU' : m.runsOn === 'mixed' ? 'runs partly on the CPU' : 'runs on the CPU') + '</span></div>' +
         '<div class="lai-badges">' + badges(m) + ' <button class="btn btn-ghost btn-sm" data-act="details" data-name="' + esc(m.name) + '">Details</button></div></article>').join('') + '</div></section>').join('');
   }
   function filtered() {

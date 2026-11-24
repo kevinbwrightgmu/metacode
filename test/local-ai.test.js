@@ -149,7 +149,9 @@ test('model names: library names only, ":latest" when there is no tag, never a c
 const hw = (totalGb, gpus) => ({ memory: { total: totalGb * GB, available: totalGb * GB * 0.7 }, gpus: gpus || [], os: { platform: 'linux' }, arch: 'x64', disk: { free: 100 * GB } });
 // (as hardware.js describes a PC and a Mac with Apple Silicon)
 const linux = gb => Object.assign(hw(gb), { appleSilicon: false });
-const mac = gb => Object.assign(hw(gb, [{ vendor: 'apple', name: 'Apple Silicon GPU (Metal)', memory: gb * GB, shared: true, usable: true }]), { os: { platform: 'darwin' }, arch: 'arm64', appleSilicon: true });
+// (its GPU's memory is what Metal may use: 2/3 of it up to 32 GiB, 3/4 above, as hardware.js says)
+const metal = bytes => Math.floor(bytes * (bytes <= 32 * 2 ** 30 ? 2 / 3 : 3 / 4));
+const mac = gb => Object.assign(hw(gb, [{ vendor: 'apple', name: 'Apple Silicon GPU (Metal)', memory: metal(gb * GB), shared: true, usable: true }]), { os: { platform: 'darwin' }, arch: 'arm64', appleSilicon: true });
 const catalogModels = () => {
   const models = parseLibrary(LIBRARY_HTML).map(m => Object.assign(m, { categories: categories(m) }));
   const tags = parseTags(TAGS_HTML, 'gemma3');
@@ -199,13 +201,22 @@ const VM_STAT = [
 // A Mac (or another system): what its commands print, by path
 const system = (platform, arch, release, prints) => ({ platform, arch, release: () => release, run: async cmd => (prints && prints[cmd]) || null });
 
-test('Apple Silicon: models run on its GPU (Metal), in the recommendations and in each tag\'s fit', () => {
-  const mac = { memory: { total: 32 * GB, available: 20 * GB }, gpus: [{ vendor: 'apple', name: 'Apple Silicon GPU (Metal)', memory: 32 * GB, shared: true, usable: true }], os: { platform: 'darwin' }, arch: 'arm64' };
+test('Apple Silicon: models run on its GPU (Metal), in the recommendations and in each tag\'s fit; one bigger than what Metal may use runs partly on the CPU (llama.cpp), an MLX variant on the GPU', () => {
+  // (a Mac's memory is in GiB: 32 GiB is 34.4 GB)
+  const mac = { memory: { total: 32 * 2 ** 30, available: 20 * GB }, gpus: [{ vendor: 'apple', name: 'Apple Silicon GPU (Metal)', memory: metal(32 * 2 ** 30), shared: true, usable: true }], os: { platform: 'darwin' }, arch: 'arm64' };
   const r = recommend(catalogModels(), mac);
-  assert.deepEqual(r.device.gpu, { name: 'Apple Silicon GPU (Metal)', memory: 32 * GB, shared: true });
+  assert.deepEqual(r.device.gpu, { name: 'Apple Silicon GPU (Metal)', memory: metal(32 * 2 ** 30), shared: true });
   const all = r.tiers.flatMap(t => t.models);
   assert.ok(all.length > 0 && all.every(m => m.runsOn === 'gpu'), JSON.stringify(all.map(m => [m.tag, m.runsOn])));
   assert.equal(fit('gemma3:4b', 3.3e9, mac).runsOn, 'gpu');
+  // an 8 GiB Mac: Metal may use 5.7 GB, and llama.cpp keeps 1 GiB of it free, so an 8B model (5.2 GB, and its cache)
+  // is split between the GPU and the CPU; a 4B one fits. An MLX variant runs on the GPU.
+  const small = { memory: { total: 8 * 2 ** 30, available: 3 * GB }, gpus: [{ vendor: 'apple', name: 'Apple Silicon GPU (Metal)', memory: metal(8 * 2 ** 30), shared: true, usable: true }], os: { platform: 'darwin' }, arch: 'arm64', appleSilicon: true };
+  assert.deepEqual([fit('qwen3:8b', 5.2e9, small).runsOn, fit('gemma3:4b', 3.3e9, small).runsOn, fit('gemma4:e2b', 4.6e9, small, { mlx: true }).runsOn], ['mixed', 'gpu', 'gpu']);
+  const eight = recommend(catalogModels(), Object.assign({}, small, { memory: { total: 8 * 2 ** 30, available: 6 * GB } })).tiers.flatMap(t => t.models);
+  assert.ok(eight.some(m => m.runsOn === 'gpu') && eight.every(m => m.runsOn !== 'cpu'), JSON.stringify(eight.map(m => [m.tag, m.runsOn])));
+  // (a GPU of its own: a model too big for it runs on the CPU, as before)
+  assert.equal(fit('qwen3:8b', 5.2e9, Object.assign({}, small, { gpus: [{ vendor: 'nvidia', name: 'RTX', memory: 4 * GB, usable: true }] })).runsOn, 'cpu');
   // (a GPU that can't run models still doesn't count)
   const intel = Object.assign({}, mac, { gpus: [{ vendor: 'intel', name: 'Intel integrated GPU', memory: null, usable: false }] });
   assert.equal(recommend(catalogModels(), intel).device.gpu, null);
@@ -242,6 +253,8 @@ test('the macOS version: sw_vers\'s, or from the Darwin release when sw_vers can
 test('a Mac with Apple Silicon is recognised under Rosetta too (an Intel MetaCode next to an arm64 Ollama): its GPU and its row in the matrix', async () => {
   const rosetta = await createHardware({ system: system('darwin', 'x64', '24.1.0', { '/usr/sbin/sysctl': '1\n' }) }).detect();
   assert.deepEqual([rosetta.appleSilicon, rosetta.gpus.map(g => g.vendor), platformId(rosetta)], [true, ['apple'], 'macos-arm']);
+  // (its GPU's memory: what Metal may keep resident, not all of it)
+  assert.deepEqual([rosetta.gpus[0].memory, rosetta.gpus[0].shared], [metal(os.totalmem()), true]);
   const intel = await createHardware({ system: system('darwin', 'x64', '24.1.0', { '/usr/sbin/sysctl': '0\n' }) }).detect();
   assert.deepEqual([intel.appleSilicon, intel.gpus.length, platformId(intel)], [false, 0, 'macos-intel']);
   const unsure = await createHardware({ system: system('darwin', 'x64', '24.1.0', {}) }).detect();

@@ -215,7 +215,7 @@ function createLocalAi(opts) {
     const [t, hw, version] = await Promise.all([catalog.tagsOf(name, req.query.refresh === '1'), hardware.detect(), ollama.version().catch(() => null)]);
     const mlx = catalog.pullsMlx(hw.appleSilicon, version);
     const main = catalog.mainTags(model, t.tags);
-    const tags = t.tags.map(x => { const size = catalog.sizeHere(x, mlx); return Object.assign({}, x, { size, fit: fit(x.tag, size, hw), main: main.includes(x) }); });
+    const tags = t.tags.map(x => { const size = catalog.sizeHere(x, mlx); return Object.assign({}, x, { size, fit: fit(x.tag, size, hw, { mlx: mlx === true && !!(x.ranged || x.variants) }), main: main.includes(x) }); });
     res.json(Object.assign({}, model, { tags, tagsFetchedAt: t.fetchedAt, tagsOffline: !!t.offline || !!t.stale }));
   });
   router.get('/recommendations', async (req, res) => {

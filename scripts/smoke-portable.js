@@ -133,7 +133,8 @@ async function answers(child) {
       if (arm) {
         check(h.appleSilicon === true && (h.gpus || []).some(g => g.vendor === 'apple' && g.shared && g.usable), 'AI Model Store: Apple silicon and its GPU' + (h.arch === 'x64' ? ' (MetaCode under Rosetta)' : ''), JSON.stringify({ appleSilicon: h.appleSilicon, arch: h.arch, gpus: h.gpus }));
         const picks = ((rec.json && rec.json.tiers) || []).flatMap(t => t.models || []);
-        check(picks.length > 0 && picks.every(p => p.runsOn === 'gpu'), 'AI Model Store: recommended models run on the GPU (' + picks.length + ')', JSON.stringify(picks.slice(0, 3)));
+        // (on the GPU, or one bigger than what Metal may use partly on the CPU; never only on the CPU)
+        check(picks.some(p => p.runsOn === 'gpu') && picks.every(p => p.runsOn === 'gpu' || p.runsOn === 'mixed'), 'AI Model Store: recommended models run on the GPU (' + picks.filter(p => p.runsOn === 'gpu').length + ' of ' + picks.length + ', the others partly)', JSON.stringify(picks.filter(p => p.runsOn !== 'gpu').slice(0, 3)));
       }
     }
     let kept = [];

@@ -80,7 +80,8 @@ async function operatingSystem(sys, env) {
 
 async function gpus(sys, apple) {
   const found = [];
-  if (apple) return [{ vendor: 'apple', name: 'Apple Silicon GPU (Metal)', memory: os.totalmem(), shared: true, usable: true }];
+  // (what Metal may keep resident, macOS's recommendedMaxWorkingSetSize: 2/3 of the memory up to 32 GiB, 3/4 above)
+  if (apple) { const total = os.totalmem(); return [{ vendor: 'apple', name: 'Apple Silicon GPU (Metal)', memory: Math.floor(total * (total <= 32 * 2 ** 30 ? 2 / 3 : 3 / 4)), shared: true, usable: true }]; }
   if (sys.platform === 'linux') {
     // AMD and Intel through the kernel's DRM devices; NVIDIA below through its driver
     let cards = [];

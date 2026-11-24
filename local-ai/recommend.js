@@ -19,6 +19,17 @@ function ramNeeded(size, paramCount) {
   const cache = paramCount ? (paramCount / 8e9) * 300e6 : size * 0.06;
   return Math.round(size * 1.12 + cache + 64e6);
 }
+// Where a model runs. A GPU of its own: there if the model fits, else on the CPU. One that shares the memory (Apple
+// Silicon, its memory what Metal may use): an MLX variant runs on it; llama.cpp, Ollama's runner for the rest,
+// puts the weights and the context's cache on it but keeps 1 GiB of it free (llama-server's --fit), and runs the
+// layers that don't fit on the CPU: "mixed". (mlx: the variant here is MLX)
+const FIT_MARGIN = 2 ** 30;
+function runsOn(gpu, size, paramCount, need, mlx) {
+  if (!gpu) return 'cpu';
+  if (!gpu.shared) return gpu.memory >= need ? 'gpu' : 'cpu';
+  if (mlx) return 'gpu';
+  return gpu.memory >= size + (paramCount ? (paramCount / 8e9) * 300e6 : size * 0.06) + FIT_MARGIN ? 'gpu' : 'mixed';
+}
 // Q4_K_M, the library's usual default, is about 0.6 bytes per parameter
 const estimatedSize = paramCount => Math.round(paramCount * 0.6 + 50e6);
 
@@ -40,7 +51,8 @@ function pickTag(model, budget, mlx) {
   const tags = here.filter(t => t.size && !(/:latest$/.test(t.tag) && here.some(o => o !== t && o.size === t.size)));
   const sized = tags.map(t => {
     const v = t.tag.split(':')[1];
-    return { tag: t.tag, size: t.size, context: t.context, inputs: t.inputs, estimated: false, need: ramNeeded(t.size, params(v)) };
+    // (a tag with variants for several runners is its MLX one for an Ollama that takes MLX)
+    return { tag: t.tag, size: t.size, context: t.context, inputs: t.inputs, estimated: false, need: ramNeeded(t.size, params(v)), mlx: mlx === true && !!(t.ranged || t.variants) };
   });
   const options = sized.length ? sized : (model.sizes || []).map(s => {
     const p = params(s);
@@ -71,7 +83,7 @@ function recommend(catalogModels, hw, opts) {
     const entry = {
       name: m.name, tag: pick.tag, size: pick.size, need: pick.need, estimated: pick.estimated, context: pick.context, inputs: pick.inputs,
       description: m.description, capabilities: m.capabilities, categories: m.categories || [], pulls: m.pulls,
-      runsOn: b.gpu && b.gpu.memory >= pick.need ? 'gpu' : 'cpu',
+      runsOn: runsOn(b.gpu, pick.size, params(pick.tag.split(':')[1]), pick.need, pick.mlx),
     };
     const tier = experimental(m) ? tiers[tiers.length - 1] : tiers.find(t => pick.need <= t.max);
     tier.models.push(entry);
@@ -81,12 +93,13 @@ function recommend(catalogModels, hw, opts) {
 }
 
 // For one model's card: how each of its tags fits this device ("tight": not in the memory free now; without
-// knowing that, whatever is in the budget fits)
-function fit(tag, size, hw) {
+// knowing that, whatever is in the budget fits). (o.mlx: the tag's variant here is MLX)
+function fit(tag, size, hw, o) {
   const b = budgetOf(hw);
-  const need = ramNeeded(size, params(String(tag).split(':')[1]));
+  const p = params(String(tag).split(':')[1]);
+  const need = ramNeeded(size, p);
   const level = need <= b.budget ? (b.available === null || need <= b.available ? 'good' : 'tight') : 'too-big';
-  return { need, budget: b.budget, level, runsOn: b.gpu && b.gpu.memory >= need ? 'gpu' : 'cpu' };
+  return { need, budget: b.budget, level, runsOn: runsOn(b.gpu, size, p, need, !!(o && o.mlx)) };
 }
 
 module.exports = { recommend, fit, ramNeeded, budgetOf, pickTag, TIERS };
