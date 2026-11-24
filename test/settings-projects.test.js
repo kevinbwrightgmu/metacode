@@ -270,7 +270,7 @@ test('settings status shows what .env set (names only) and the AI service\'s pro
   assert.equal(answered.status, 200);
   assert.equal(service.timeoutHeader, '120000', 'MetaCode tells the service how long it waits');
   assert.equal(service.wrongToken, 0, 'every request carried the service\'s token');
-  assert.deepEqual((await json('GET', '/api/health')).json, { status: 'ok', provider: 'opencode', aiConfigured: true, aiReady: true, node: process.version });
+  assert.deepEqual((await json('GET', '/api/health')).json, { status: 'ok', app: 'metacode', provider: 'opencode', aiConfigured: true, aiReady: true, node: process.version });
   // Reload is refused from other sites
   assert.equal((await json('POST', '/api/settings/reload', {}, { Origin: 'https://evil.example' })).status, 403);
 });

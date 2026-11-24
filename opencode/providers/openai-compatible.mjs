@@ -202,8 +202,9 @@ export function loadSettings(id, config, env, repoDir) {
     const envProxy = text(env.HTTPS_PROXY || env.https_proxy || env.HTTP_PROXY || env.http_proxy);
     if (envProxy) { try { s.proxyHost = new URL(envProxy).host || 'set'; } catch (e) { s.proxyHost = 'set'; } }
   }
-  // (its models are on this machine: what AI_MODE=local / local-only count as local)
-  s.onThisMachine = !!(url && loopbackHost(url.hostname));
+  // (its models are on this machine: what AI_MODE=local / local-only count as local. Never the AI gateway's: it
+  // is a service on the internet, and an address on 127.0.0.1 for it is a relay or a tunnel to it)
+  s.onThisMachine = !isEmis && !!(url && loopbackHost(url.hostname));
 
   const rawFile = text(options.models_file) || (isEmis ? text(env.EMIS_MODELS_FILE) || EMIS_MODELS_FILE : '');
   if (rawFile && !isOff(rawFile)) s.modelsFile = path.resolve(repoDir || REPO_DIR, rawFile.replace(/^~(?=$|[\\/])/, os.homedir()));
