@@ -279,19 +279,22 @@ test('Termux on Android (Node calls the platform "android"): recognised, its row
 
 test('the free disk space without blocking: a models folder that hangs (a network mount gone away) is "unknown" after 2 s, one look at a time', async () => {
   let looks = 0, answer = () => new Promise(() => {});           // (stuck for good)
-  const hang = createHardware({ env: { OLLAMA_MODELS_DIR: '/mnt/nas/ollama' }, system: { diskTimeoutMs: 150, stat: async () => ({}), statfs: () => { looks++; return answer(); } } });
+  // (no commands run: only the disk is timed, not an nvidia-smi that may take a while on a machine with the driver)
+  const hang = createHardware({ env: { OLLAMA_MODELS_DIR: '/mnt/nas/ollama' }, system: { run: async () => null, diskTimeoutMs: 150, stat: async () => ({}), statfs: () => { looks++; return answer(); } } });
   let ticks = 0;
   const timer = setInterval(() => ticks++, 10);
   const t0 = Date.now();
   const first = await hang.detect(true);
   clearInterval(timer);
   assert.deepEqual([first.disk.path, first.disk.free], [null, null]);
-  assert.ok(Date.now() - t0 < 1000 && ticks >= 5, 'the server went on meanwhile');
+  const ms = Date.now() - t0;
+  assert.ok(ms < 1000, 'answered after ' + ms + ' ms');
+  assert.ok(ticks >= 5, 'the server went on meanwhile (' + ticks + ' ticks)');
   // while that look hangs, no other starts
   assert.equal((await hang.detect(true)).disk.free, null);
   assert.equal(looks, 1);
   // a folder that answers: measured; while a later look hangs, that answer
-  const disks = createHardware({ env: { OLLAMA_MODELS_DIR: '/mnt/nas/ollama' }, system: { diskTimeoutMs: 150, stat: async () => ({}), statfs: () => { looks++; return answer(); } } });
+  const disks = createHardware({ env: { OLLAMA_MODELS_DIR: '/mnt/nas/ollama' }, system: { run: async () => null, diskTimeoutMs: 150, stat: async () => ({}), statfs: () => { looks++; return answer(); } } });
   answer = async () => ({ bavail: 1000, bsize: 4096, blocks: 5000 });
   assert.deepEqual([(await disks.detect(true)).disk.path, (await disks.detect(true)).disk.free], ['/mnt/nas/ollama', 4096000]);
   let unstick;
@@ -310,10 +313,14 @@ test('before Ollama\'s first download (no models folder yet): the disk it will p
   const home = os.homedir();
   const looked = [];
   const only = dirs => ({
+    run: async () => null,
     stat: async d => { looked.push(d); if (!dirs.includes(d)) throw Object.assign(new Error('ENOENT: ' + d), { code: 'ENOENT' }); return {}; },
     statfs: async d => ({ bavail: d === home ? 7 : 9, bsize: 1, blocks: 10 }),
   });
-  const fresh = (await createHardware({ env: {}, system: only([home, path.dirname(home), '/']) }).detect(true)).disk;
+  // (a portable MetaCode's data folder, which exists, on a USB stick: never what's measured, given as the option or
+  // in the environment)
+  const usb = path.join(path.sep, 'media', 'usb', 'MetaCode', 'data', 'local-ai-data');
+  const fresh = (await createHardware({ env: { LOCAL_AI_DATA_DIR: usb, METACODE_DATA_DIR: path.dirname(usb) }, dataDir: usb, system: only([usb, path.dirname(usb), home, path.dirname(home), '/']) }).detect(true)).disk;
   assert.deepEqual([fresh.path, fresh.free, fresh.ollamaDir], [home, 7, false]);
   assert.equal(looked[0], path.join(home, '.ollama', 'models'), 'Ollama\'s own folder first');
   // OLLAMA_MODELS_DIR on another disk, not made yet: that disk
@@ -896,6 +903,15 @@ test('Ollama\'s sha256 check after a download isn\'t a stall: it gets time for w
     // a check that takes much longer is stopped, and says what took long
     si.st.verifyDelayMs = 1600;
     await assert.rejects(ollama.pull('verify-test:2b', () => {}, null, 200), e => e.code === 'interrupted' && /^Ollama's check of the download \(sha256\) took longer than 1 s\.$/.test(e.message));
+    // a bigger download gets more: 30 MB of weights (and 800 bytes of template and config) take up to 2 s to hash
+    for (const m of ['verify-test:4b', 'verify-test:5b']) si.st.sizes.set(m, 30e6);
+    si.st.verifyDelayMs = 1500;
+    await ollama.pull('verify-test:4b', () => {}, null, 200);
+    si.st.verifyDelayMs = 2600;
+    await assert.rejects(ollama.pull('verify-test:5b', () => {}, null, 200), e => e.code === 'interrupted' && /^Ollama's check of the download \(sha256\) took longer than 2 s\.$/.test(e.message));
+    // and never less than the setting's quiet time: 6 MB with 1.5 s allowed
+    si.st.verifyDelayMs = 1200;
+    await ollama.pull('verify-test:6b', () => {}, null, 1500);
     // (while downloading, the quiet time is still the setting's)
     si.st.verifyDelayMs = 0;
     si.st.pullDelayMs = 400;
@@ -903,7 +919,8 @@ test('Ollama\'s sha256 check after a download isn\'t a stall: it gets time for w
   } finally {
     si.st.verifyDelayMs = 0;
     si.st.pullDelayMs = 25;
-    for (const m of ['verify-test:1b', 'verify-test:2b', 'verify-test:3b']) si.st.installed.delete(m);
+    si.st.sizes.clear();
+    for (const m of ['verify-test:1b', 'verify-test:2b', 'verify-test:3b', 'verify-test:4b', 'verify-test:5b', 'verify-test:6b']) si.st.installed.delete(m);
   }
 });
 

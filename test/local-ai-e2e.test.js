@@ -270,10 +270,13 @@ test('Downloads: Pause, Resume and Cancel in the Downloads card reach the server
   // Resume it: it waits for that one
   await press(page, '#lai-jobs [data-act="resume"][data-model="gemma3:270m"]');
   await until(async () => (await jobOf('gemma3:270m')).state === 'queued', 5000, 'Resume');
-  // Cancel the one downloading: the resumed one continues where it stopped
-  si.st.pullDelayMs = 25;
+  // Cancel the one downloading: the resumed one continues where it stopped. (Steps of 100 ms meanwhile: the rest
+  // of gemma3:1b takes about 2 s, longer than the press, and the row is still repainted during it. Faster, it
+  // could finish before Cancel is released, and a finished download can't be cancelled.)
+  si.st.pullDelayMs = 100;
   await press(page, '#lai-jobs [data-act="cancel"][data-model="gemma3:1b"]');
   await until(async () => !(await jobOf('gemma3:1b')), 5000, 'Cancel while it downloads');
+  si.st.pullDelayMs = 25;
   const done = await until(async () => { const j = await jobOf('gemma3:270m'); return j.state === 'done' && j; }, 15000, 'the download');
   assert.equal(done.resumed, true, 'it continued where it stopped');
   await page.waitForFunction(() => /gemma3:270m is installed and verified/.test(document.getElementById('notif-stack').textContent));

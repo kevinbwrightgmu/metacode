@@ -64,6 +64,7 @@ function standIns(opts) {
     registryDelayMs: 0,         // before the registry answers a manifest
     mlxDelayMs: 0,              // before it answers an MLX variant's manifest (the big one: a line per tensor file)
     retagged: false,            // the tags pages' digests changed (tags published again): nothing known of them
+    sizes: new Map(),           // keyOf(name) → the weights' size /api/pull's progress lines report instead (no bytes sent)
     breakAt: null,              // stop the stream after this many bytes (an interrupted download)
     modelsDir: null,            // Ollama's models folder, for the records of a stopped download's parts
     wrongDigest: false,
@@ -122,7 +123,8 @@ function standIns(opts) {
     let gone = false;
     res.on('close', () => { gone = true; });
     const m = pulled(model);
-    const [weights, ...rest] = m.layers;
+    const [listed, ...rest] = m.layers;
+    const weights = st.sizes.has(keyOf(model)) ? Object.assign({}, listed, { size: st.sizes.get(keyOf(model)) }) : listed;
     const short = l => 'pulling ' + l.digest.slice(7, 19);
     const key = keyOf(model);
     let done = st.blobs.has(weights.digest) ? weights.size : st.partial.get(key) || 0;
