@@ -139,15 +139,16 @@ test('recommendations never exceed what the device can hold; the best tag that f
 
 // ── The routes, against stand-ins ───────────────────────────────────────────
 
-let si, api, local, tmp, changed;
+let si, api, local, localEnv, tmp, changed;
 const disk = { free: 100 * GB };
 const machine = { appleSilicon: false };
 test.before(async () => {
   si = await standIns();
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-local-ai-'));
   changed = [];
+  localEnv = { OLLAMA_BASE_URL: si.base + '/v1', LOCAL_AI_DATA_DIR: tmp, LOCAL_AI_ADMIN_TOKEN: 'admin-token-123456' };
   local = createLocalAi({
-    env: { OLLAMA_BASE_URL: si.base + '/v1', LOCAL_AI_DATA_DIR: tmp, LOCAL_AI_ADMIN_TOKEN: 'admin-token-123456' },
+    env: localEnv,
     libraryUrl: si.base + '/library', registry: si.base + '/v2/library/', minLibraryModels: 1,
     // (a request from "this machine" unless the test says it came through a proxy)
     isLoopback: req => req.get('x-test-remote') !== '1',
@@ -203,6 +204,16 @@ async function until(check, ms, what) {
   }
 }
 const job = async model => (await api('GET', '/installs')).json.installs.find(j => j.model === model);
+// A request with any Host header (a page can't choose it, and fetch doesn't let a test either)
+const raw = (method, p, host, body, headers) => new Promise((resolve, reject) => {
+  const req = http.request({ host: '127.0.0.1', port: api.port, path: '/api/local-ai' + p, method, headers: Object.assign({ host, 'content-type': 'application/json' }, headers) }, res => {
+    let text = '';
+    res.on('data', d => { text += d; });
+    res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(text) }));
+  });
+  req.on('error', reject);
+  req.end(body === undefined ? undefined : JSON.stringify(body));
+});
 
 test('status, hardware and runtimes: Ollama found with its version; this machine may manage models; the compatibility matrix', async () => {
   const s = await api('GET', '/status');
@@ -419,25 +430,30 @@ test('managing models from another device needs the admin token; browsing doesn\
   assert.equal((await api('GET', '/status', undefined, Object.assign({ 'x-metacode-admin-token': 'admin-token-123456' }, remote))).json.manage.how, 'token');
 });
 
-test('another website whose name is pointed at 127.0.0.1 (DNS rebinding) can\'t manage models; this machine\'s own names can', async () => {
-  // (a request with any Host header: a page can't choose it, and fetch doesn't let this test either)
-  const raw = (method, p, host, body) => new Promise((resolve, reject) => {
-    const req = http.request({ host: '127.0.0.1', port: api.port, path: '/api/local-ai' + p, method, headers: { host, 'content-type': 'application/json' } }, res => {
-      let text = '';
-      res.on('data', d => { text += d; });
-      res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(text) }));
-    });
-    req.on('error', reject);
-    req.end(body === undefined ? undefined : JSON.stringify(body));
-  });
-  for (const host of ['evil.example:' + api.port, 'evil.example', '127.0.0.1.evil.example', 'localhost.evil.example:' + api.port]) {
-    assert.equal((await raw('GET', '/status', host)).json.manage.allowed, false, host);
-    const r = await raw('POST', '/models/load', host, { model: 'gemma3:270m' });
-    assert.deepEqual([r.status, r.json.error.code], [403, 'manage_locked'], host);
+test('another website whose name is pointed at 127.0.0.1 (DNS rebinding) gets nothing, reads included; PUBLIC_URL\'s site may read; only this machine\'s own names may manage', async () => {
+  const evil = ['evil.example:' + api.port, 'evil.example', '127.0.0.1.evil.example', 'localhost.evil.example:' + api.port];
+  for (const host of evil) {
+    for (const [method, p, body] of [['GET', '/status'], ['GET', '/hardware'], ['GET', '/models'], ['GET', '/catalog'], ['GET', '/installs'], ['POST', '/models/load', { model: 'gemma3:270m' }]]) {
+      const r = await raw(method, p, host, body);
+      assert.deepEqual([r.status, r.json.error.code], [403, 'foreign_host'], host + ' ' + p);
+    }
   }
+  assert.match((await raw('GET', '/hardware', 'evil.example')).json.error.message, /answers MetaCode's own pages only, and "evil\.example" isn't a name of this computer\. .*PUBLIC_URL/);
   for (const host of ['localhost:' + api.port, '127.0.0.1:' + api.port, '127.1.2.3', '[::1]:' + api.port, 'metacode.localhost']) {
     assert.equal((await raw('GET', '/status', host)).json.manage.allowed, true, host);
   }
+  // (from another device, through a proxy: no Host check, and managing needs the admin token)
+  assert.equal((await raw('GET', '/hardware', 'metacode.example', undefined, { 'x-test-remote': '1' })).status, 200);
+  // a reverse proxy on this machine that forwards no client address: its site (PUBLIC_URL) reads, never manages
+  localEnv.PUBLIC_URL = 'https://metac0.de, https://www.metac0.de:8443';
+  try {
+    assert.equal((await raw('GET', '/hardware', 'metac0.de')).status, 200);
+    const s = await raw('GET', '/status', 'www.metac0.de:8443');
+    assert.deepEqual([s.status, s.json.manage.allowed], [200, false]);
+    const m = await raw('POST', '/models/load', 'metac0.de', { model: 'gemma3:270m' });
+    assert.deepEqual([m.status, m.json.error.code], [403, 'manage_locked']);
+    assert.equal((await raw('GET', '/hardware', 'evil.example')).status, 403);
+  } finally { delete localEnv.PUBLIC_URL; }
 });
 
 test('Ollama not running: the store still browses (catalog, recommendations), and says how to install Ollama', async () => {
@@ -658,4 +674,49 @@ test('a look at ollama.com that failed: for 5 minutes the saved catalog answers 
     await c.refresh(false);
     assert.equal(calls, 4);
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a model from another registry (hf.co/…), as Ollama lists it: loaded, stopped, configured and deleted; a download still needs a name from Ollama\'s library', async () => {
+  const hf = 'hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF:Q4_K_M';
+  si.st.installed.set(hf, { digest: 'c'.repeat(64), size: 807694464, blobs: [] });
+  try {
+    let m = await api('POST', '/models/load', { model: hf });
+    assert.equal(m.status, 200, m.text);
+    assert.ok(m.json.models.find(x => x.name === hf).loaded);
+    m = await api('POST', '/models/unload', { model: hf.toLowerCase() });             // (whatever the case)
+    assert.equal(m.json.models.find(x => x.name === hf).loaded, null);
+    const s = await api('PUT', '/models/settings', { model: hf, settings: { maxTokens: 256 } });
+    assert.deepEqual([s.status, s.json.model, s.json.settings], [200, hf, { maxTokens: 256 }]);
+    assert.deepEqual((await api('GET', '/models')).json.models.find(x => x.name === hf).settings, { maxTokens: 256 });
+    assert.deepEqual(local.modelSettings('ollama/' + hf), { maxTokens: 256 });
+    const u = await api('POST', '/models/update', { model: hf });
+    assert.deepEqual([u.status, u.json.error.code], [400, 'invalid_model']);
+    const d = await api('POST', '/models/delete', { model: hf });
+    assert.equal(d.status, 200);
+    assert.ok(!si.st.installed.has(hf) && !d.json.models.some(x => x.name === hf));
+    assert.deepEqual(changed.pop(), ['deleted', hf]);
+    assert.equal(local.modelSettings('ollama/' + hf), null, 'its settings went with it');
+    // a model Ollama doesn't have, and what isn't a name
+    for (const [method, p] of [['POST', '/models/load'], ['POST', '/models/unload'], ['POST', '/models/delete'], ['PUT', '/models/settings']]) {
+      const gone = await api(method, p, { model: hf, settings: {} });
+      assert.deepEqual([gone.status, gone.json.error.code], [404, 'not_found'], p);
+      assert.match(gone.json.error.message, /^Ollama has no model called "hf\.co\/bartowski\/Llama-3\.2-1B-Instruct-GGUF:Q4_K_M"\.$/);
+      const bad = await api(method, p, { model: 'x;rm -rf /', settings: {} });
+      assert.deepEqual([bad.status, bad.json.error.code], [400, 'invalid_model'], p);
+    }
+  } finally { si.st.installed.delete(hf); }
+});
+
+test('Installed Models: names that share a digest are one model, counted once, and each says which other names use its files', async () => {
+  const same = manifestFor('gemma3:4b');
+  for (const name of ['gemma3:4b', 'gemma3:latest', 'gemma3:4b-it-q4_K_M']) si.st.installed.set(name, { digest: same.digest, size: same.size, blobs: [] });
+  try {
+    const m = (await api('GET', '/models')).json;
+    const unique = new Map([...si.st.installed.values()].map(x => [x.digest, x.size]));
+    assert.equal(m.totalSize, [...unique.values()].reduce((n, x) => n + x, 0));
+    assert.ok(m.totalSize < m.models.reduce((n, x) => n + x.size, 0));
+    assert.deepEqual(m.models.find(x => x.name === 'gemma3:4b').aliases, ['gemma3:4b-it-q4_K_M', 'gemma3:latest']);
+    assert.deepEqual(m.models.find(x => x.name === 'gemma3:latest').aliases, ['gemma3:4b', 'gemma3:4b-it-q4_K_M']);
+    assert.ok(m.models.filter(x => x.digest !== same.digest).every(x => x.aliases.length === 0));
+  } finally { for (const name of ['gemma3:4b', 'gemma3:latest', 'gemma3:4b-it-q4_K_M']) si.st.installed.delete(name); }
 });

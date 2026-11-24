@@ -9,12 +9,16 @@
 //   GET  /recommendations   what this device can run, by tier
 //   GET  /models            installed models (size, details, loaded or not) and the space they use
 //   GET  /installs          downloads; GET /installs/events: their progress as server-sent events
+// (A request from this machine under a name that is neither this machine's own nor PUBLIC_URL's is refused,
+// reads too: see the router's first handler.)
 // Managing models needs this machine itself (a request from 127.0.0.1 that no proxy forwarded, to this
 // machine's own name: localhost, 127.x.x.x or [::1]), or the LOCAL_AI_ADMIN_TOKEN from .env (header
 // X-MetaCode-Admin-Token). Visitors of a hosted MetaCode can browse the store, never download or delete:
 //   POST /installs {model}   POST /installs/pause|resume|cancel {model}
 //   POST /models/load|unload|delete|update {model}   PUT /models/settings {model, settings}
 //   POST /runtimes/scan      look for OpenAI-compatible servers on this machine
+// Downloads take a name from Ollama's library; loading, unloading, deleting and settings take any model Ollama
+// lists (also one from another registry, such as hf.co/<user>/<repo>:<quantization>), whatever the case.
 'use strict';
 const fs = require('fs');
 const path = require('path');
@@ -23,7 +27,7 @@ const express = require('express');
 const { createOllama } = require('./ollama');
 const { createCatalog } = require('./catalog');
 const { createHardware } = require('./hardware');
-const { createInstalls, normalize, keyOf } = require('./installs');
+const { createInstalls, keyOf } = require('./installs');
 const { createRuntimes, MATRIX } = require('./runtimes');
 const { recommend, fit } = require('./recommend');
 const { defaultDataDir } = require('../lib/data-dir');
@@ -33,10 +37,20 @@ const SETTING_LIMITS = { temperature: [0, 2], maxTokens: [16, 32768], keepAliveM
 // The name the browser used for this server is this machine's own. (Another website whose name is made to point
 // at 127.0.0.1, "DNS rebinding", reaches this server from this machine too, but under its own name; the raw Host
 // header is read, as a page can't change it, unlike X-Forwarded-Host.)
+const hostOf = req => String((req.headers && req.headers.host) || '').trim().toLowerCase().replace(/:\d+$/, '');
 function loopbackHost(req) {
-  const host = String((req.headers && req.headers.host) || '').trim().toLowerCase().replace(/:\d+$/, '');
+  const host = hostOf(req);
   return host === 'localhost' || host.endsWith('.localhost') || host === '[::1]' || /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
 }
+// The name of the site in PUBLIC_URL (comma-separated, e.g. https://metac0.de)
+function publicHost(req, env) {
+  const host = hostOf(req);
+  return !!host && String(env.PUBLIC_URL || '').split(',').some(u => {
+    try { return new URL(u.trim()).hostname.toLowerCase() === host; } catch (e) { return false; }
+  });
+}
+// A name Ollama may list a model under: a host, a namespace, the model and its tag
+const LISTED_NAME = /^[a-z0-9_][a-z0-9._:/-]{0,400}$/i;
 
 function createLocalAi(opts) {
   const env = opts.env || process.env;
@@ -100,7 +114,16 @@ function createLocalAi(opts) {
   };
   const fail = (res, status, code, message) => res.status(status).json({ error: { type: status >= 500 ? 'service_unavailable' : 'invalid_request', code, message } });
   const ollamaFail = (res, e) => fail(res, e.status === 404 ? 404 : e.status === 503 ? 503 : 502, e.code || 'ollama_error', e.message);
-  const modelOf = req => normalize(req.body && req.body.model);
+  // The installed model a request names, as Ollama lists it: → its name, or null once the request is answered
+  async function installedModel(req, res) {
+    const name = String((req.body && req.body.model) || '').trim();
+    if (!LISTED_NAME.test(name)) { fail(res, 400, 'invalid_model', 'Name a model.'); return null; }
+    let list;
+    try { list = await ollama.tags(); } catch (e) { ollamaFail(res, e); return null; }
+    const m = list.find(x => keyOf(x.name) === keyOf(name) || (x.model && keyOf(x.model) === keyOf(name)));
+    if (!m) { fail(res, 404, 'not_found', 'Ollama has no model called "' + name.slice(0, 120) + '".'); return null; }
+    return m.name;
+  }
 
   async function installed() {
     const [list, running] = await Promise.all([ollama.tags(), ollama.ps().catch(() => [])]);
@@ -115,10 +138,26 @@ function createLocalAi(opts) {
         settings: settingsOf(m.name),
       };
     }).sort((a, b) => a.name.localeCompare(b.name));
-    return { models, totalSize: models.reduce((n, m) => n + (m.size || 0), 0) };
+    // (names with the same digest are one model under several names, e.g. gemma3:latest and gemma3:4b: its files
+    // are counted once, and deleting one of the names frees nothing while another uses them)
+    const names = new Map();              // digest → names
+    for (const m of models) if (m.digest) names.set(m.digest, (names.get(m.digest) || []).concat(m.name));
+    for (const m of models) m.aliases = m.digest ? names.get(m.digest).filter(n => n !== m.name) : [];
+    const sizes = new Map(models.map(m => [m.digest || 'name ' + m.name, m.size || 0]));
+    return { models, totalSize: [...sizes.values()].reduce((n, size) => n + size, 0) };
   }
 
   const router = express.Router();
+  // MetaCode's own pages only: a request from this machine (from 127.0.0.1, through no proxy) under a name that
+  // isn't this machine's comes from another website whose name was made to point at 127.0.0.1 ("DNS rebinding"),
+  // and reads nothing either (the hardware and the home folder's path, the models). A reverse proxy on this
+  // machine that forwards no client address looks the same: its site's name, in PUBLIC_URL, may read (managing
+  // still needs the admin token).
+  router.use((req, res, next) => {
+    if (!isLocal(req) || loopbackHost(req) || publicHost(req, env)) return next();
+    res.status(403).json({ error: { type: 'forbidden', code: 'foreign_host', message: 'The AI Model Store answers MetaCode\'s own pages only, and "' + hostOf(req).slice(0, 100) +
+      '" isn\'t a name of this computer. Open MetaCode at localhost (or 127.0.0.1); behind a reverse proxy on this computer, set PUBLIC_URL in .env to the site\'s address.' } });
+  });
   router.use(express.json({ limit: '64kb' }));
 
   router.get('/status', async (req, res) => {
@@ -161,21 +200,23 @@ function createLocalAi(opts) {
     try { res.json(await installed()); } catch (e) { ollamaFail(res, e); }
   });
   router.post('/models/load', manage, async (req, res) => {
-    const model = modelOf(req);
-    if (!model) return fail(res, 400, 'invalid_model', 'Name a model.');
+    const model = await installedModel(req, res);
+    if (!model) return;
     const s = settingsOf(model) || {};
     const minutes = Number.isFinite(s.keepAliveMinutes) ? s.keepAliveMinutes : 10;
     try { await ollama.load(model, minutes ? minutes + 'm' : -1); res.json(await installed()); } catch (e) { ollamaFail(res, e); }
   });
   router.post('/models/unload', manage, async (req, res) => {
-    const model = modelOf(req);
-    if (!model) return fail(res, 400, 'invalid_model', 'Name a model.');
+    const model = await installedModel(req, res);
+    if (!model) return;
     try { await ollama.unload(model); res.json(await installed()); } catch (e) { ollamaFail(res, e); }
   });
   router.post('/models/delete', manage, async (req, res) => {
-    const model = modelOf(req);
-    if (!model) return fail(res, 400, 'invalid_model', 'Name a model.');
-    if (installs.busy(model)) return fail(res, 409, 'busy', model + ' is downloading: cancel the download first.');
+    // (not while it downloads: also the first time, when Ollama doesn't list it yet)
+    const busy = name => installs.busy(name) && (fail(res, 409, 'busy', name + ' is downloading: cancel the download first.'), true);
+    if (busy(String((req.body && req.body.model) || '').trim())) return;
+    const model = await installedModel(req, res);
+    if (!model || busy(model)) return;
     try {
       await ollama.remove(model);
       const s = loadSettings();
@@ -190,9 +231,9 @@ function createLocalAi(opts) {
     if (r.error) return fail(res, r.status, r.code, r.error);
     res.status(202).json(r);
   });
-  router.put('/models/settings', manage, (req, res) => {
-    const model = modelOf(req);
-    if (!model) return fail(res, 400, 'invalid_model', 'Name a model.');
+  router.put('/models/settings', manage, async (req, res) => {
+    const model = await installedModel(req, res);
+    if (!model) return;
     const given = (req.body && req.body.settings) || {};
     const clean = {};
     for (const [k, [lo, hi]] of Object.entries(SETTING_LIMITS)) {
