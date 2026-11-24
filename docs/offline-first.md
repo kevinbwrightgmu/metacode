@@ -383,23 +383,33 @@ system. The launchers start `server.js` and leave the rest to it: `METACODE_OPEN
 - **This computer only.** The packages listen on `127.0.0.1`. To let a phone or tablet on the same network
   in, set `METACODE_HOST=0.0.0.0`.
 - **The AI Model Store answers MetaCode's own pages only.** It sends no CORS headers, and cross-site requests
-  are refused. A request from this computer must also use one of this computer's own names: localhost,
-  127.x.x.x, [::1], or (to read) its host name. So another site whose name points at 127.0.0.1 (DNS
-  rebinding) gets nothing from the Store's routes (`/api/local-ai`), not even what they'd let it read (this
-  computer's hardware, its models). Headers such as `X-Forwarded-For` don't change that, because a page can
-  add them itself: they count only from a proxy that `TRUST_PROXY` names. Managing models takes localhost,
-  127.x.x.x or [::1], and never comes from such a proxy without the admin token.
+  are refused. A request from this computer (from 127.0.0.1, or from one of its own network addresses to
+  itself) must also use one of this computer's own names: localhost, 127.x.x.x, [::1], an address, or (to
+  read) 0.0.0.0 or a name its hosts file maps to a loopback address (on Debian, Ubuntu and Raspberry Pi OS,
+  the computer's host name). Not the host name the network gave it: on a Mac that can come from DHCP or
+  reverse DNS. So another site whose name points at this computer (DNS rebinding) gets nothing from the
+  Store's routes (`/api/local-ai`), not even what they'd let it read (this computer's hardware, its models),
+  and the refusal doesn't give it this computer's name. Headers such as `X-Forwarded-For` don't change that,
+  because a page can add them itself: they count only from a proxy that `TRUST_PROXY` names. Managing models
+  takes localhost, 127.x.x.x or [::1], and never comes from such a proxy without the admin token.
+  - **Other devices** (`METACODE_HOST=0.0.0.0`, or none) read under any name, and so does a site open in a
+    browser on one of them whose name points at this computer's address. Managing needs the admin token.
   - **MetaCode's other routes don't check the name.** Such a site can still read the names of the installed
     models (`/api/models`, `/api/settings/status`, `/api/keys/status`) and send prompts to MetaCode's AI
-    (`/api/ai`). A browser that asks before a website reaches this computer (Chrome's Local Network Access)
-    stops it there; Firefox and Safari don't ask.
-  - **A reverse proxy on the same machine** should pass the visitor's address (`X-Forwarded-For`, as in
-    [deploy-vps.md](deploy-vps.md)), with `TRUST_PROXY=loopback`. One that passes only the site's own name
-    (`Host`) needs that name in `PUBLIC_URL`: it may read, and managing models needs the admin token. With
-    neither setting, the Store refuses the site's visitors (`foreign_host`).
-  - **One that passes neither** (nginx with only `proxy_pass`, which sends `Host: 127.0.0.1:3000`) makes
-    every visitor this computer, unless `TRUST_PROXY` names it. So keep deploy-vps.md's `Host`,
-    `X-Forwarded-For` and `X-Real-IP` lines, and `TRUST_PROXY=loopback`.
+    (`/api/ai`). Recent versions of Chrome, Edge and Firefox ask before a website reaches this computer,
+    which stops such a site; older versions and other browsers don't.
+  - **A reverse proxy on the same machine** must send the visitor's address (`X-Forwarded-For`, as in
+    [deploy-vps.md](deploy-vps.md)). Then nothing that comes through it manages models without the admin
+    token. For its visitors to read the Store, either:
+    - on a server where no one browses, `TRUST_PROXY=loopback` (as in deploy-vps.md). That names every
+      program on the computer, a browser included, so a page there can add `X-Forwarded-For` itself and read
+      the Store (never manage it);
+    - or, on a computer whose browser also opens MetaCode (HTTPS or a tunnel in front of it, for a phone),
+      leave `TRUST_PROXY` unset and put the site's address in `PUBLIC_URL`.
+  - **A proxy that sends no `X-Forwarded-For`** (nginx with only `proxy_pass`; HAProxy by default) can't be
+    told from a browser on this computer: anyone who sends `Host: localhost` through it manages models. Make
+    it send the header. If it can't, `TRUST_PROXY=loopback` keeps its visitors from managing without the
+    token, and `PUBLIC_URL` lets them read.
   - Ollama itself stays on 127.0.0.1, because it has no authentication.
 - **Downloads are checked.**
   - Models: Ollama checks each file's sha256 as it downloads. MetaCode then compares the installed model's

@@ -131,11 +131,18 @@ test('the AI Model Store answers MetaCode\'s own pages only: no CORS, cross-site
         assert.deepEqual([read.status, read.json && read.json.error && read.json.error.code], [403, 'foreign_host'], JSON.stringify(fwd) + ' ' + p);
       }
     }
-    // this computer's own name reads (Debian and Raspberry Pi OS map it to 127.0.1.1); managing needs localhost
+    // the refusal doesn't give this computer's name to the page it answers (it may be the other website's)
     const me = os.hostname().toLowerCase();
-    if (me && !/^(localhost|.+\.localhost|127\.\d+\.\d+\.\d+)$/.test(me)) {
+    const refused = await raw(port, 'GET', '/api/local-ai/status', { host: evil });
+    assert.equal(refused.status, 403);
+    if (me.length > 2) assert.ok(!JSON.stringify(refused.json).toLowerCase().includes(me), 'the refusal names this computer');
+    // this computer's own name reads when its hosts file maps it to a loopback address (Debian and Raspberry Pi OS
+    // do, at 127.0.1.1); a name the network gave it doesn't; managing needs localhost either way
+    const hosts = (() => { try { return fs.readFileSync('/etc/hosts', 'utf8'); } catch (e) { return ''; } })();
+    const mapped = hosts.split(/\r?\n/).some(l => { const [a, ...n] = l.replace(/#.*/, '').trim().split(/\s+/); return /^127\./.test(a) && n.map(x => x.toLowerCase()).includes(me); });
+    if (process.platform !== 'win32' && me && !/^(localhost|.+\.localhost)$/.test(me)) {
       const named = await raw(port, 'GET', '/api/local-ai/status', { host: me + ':' + port });
-      assert.deepEqual([named.status, named.json.manage.allowed], [200, false]);
+      assert.deepEqual([named.status, named.status === 200 && named.json.manage.allowed], mapped ? [200, false] : [403, false]);
     }
     for (const host of ['127.0.0.1:' + port, '[::1]:' + port, 'metacode.localhost:' + port]) {
       assert.equal((await raw(port, 'GET', '/api/local-ai/status', { host })).json.manage.allowed, true, host);

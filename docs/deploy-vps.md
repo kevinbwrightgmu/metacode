@@ -174,7 +174,8 @@ TRUST_PROXY=loopback                  # nginx on this machine forwards to MetaCo
 ```
 
 With it, installing or removing models in the AI Model Store needs `LOCAL_AI_ADMIN_TOKEN`, also from the
-server itself: a request from nginx can be any visitor's.
+server itself: a request from nginx can be any visitor's. Keep nginx's `X-Forwarded-For` line from step 6: a
+proxy that sends none can't be told from a browser on the server.
 
 Administrators (they see the scraper's network diagnostics and the AI Coding Lab's operational metrics; it
 grants no plan and no access to anyone's data):
@@ -500,8 +501,8 @@ receives. Use `proxy_set_header Host $http_host;` (which keeps the port) instead
 
 **The AI Model Store says "The AI Model Store answers MetaCode's own pages only…" (`foreign_host`)**
 MetaCode sees the requests come from this machine (nginx) under the site's name, and nothing tells it nginx is
-a proxy. Set `TRUST_PROXY=loopback` (with nginx's `X-Forwarded-For` line from step 6), or
-`PUBLIC_URL=https://metac0.de`, in `.env`, then `pm2 reload metacode`.
+a proxy. Set `TRUST_PROXY=loopback` in `.env` and keep nginx's `X-Forwarded-For` line from step 6 (without that
+line, also set `PUBLIC_URL=https://metac0.de`), then `pm2 reload metacode`.
 
 **502 Bad Gateway from nginx**
 MetaCode isn't running: `pm2 status`, then `pm2 logs metacode --lines 50` for the reason (a missing

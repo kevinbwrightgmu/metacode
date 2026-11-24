@@ -9,12 +9,12 @@
 //   GET  /recommendations   what this device can run, by tier
 //   GET  /models            installed models (size, details, loaded or not) and the space they use
 //   GET  /installs          downloads; GET /installs/events: their progress as server-sent events
-// (A request from this machine under a name that is neither this machine's own nor PUBLIC_URL's is refused,
-// reads too: see the router's first handler.)
+// (A request from this machine, from 127.0.0.1 or from one of its own addresses to itself, under a name that
+// is neither this machine's own nor PUBLIC_URL's is refused, reads too: see the router's first handler.)
 // Managing models needs this machine itself (a request from 127.0.0.1 that no proxy forwarded, to this
 // machine's own name: localhost, 127.x.x.x or [::1], and not from a proxy TRUST_PROXY names), or the
-// LOCAL_AI_ADMIN_TOKEN from .env (header X-MetaCode-Admin-Token). Visitors of a hosted MetaCode can browse the
-// store; downloading or deleting needs the token:
+// LOCAL_AI_ADMIN_TOKEN from .env (header X-MetaCode-Admin-Token). Visitors of a hosted MetaCode (its proxy
+// sends X-Forwarded-For) can browse the store; downloading or deleting needs the token:
 //   POST /installs {model}   POST /installs/pause|resume|cancel {model}
 //   POST /models/load|unload|delete|update {model}   PUT /models/settings {model, settings}
 //   POST /runtimes/scan      look for OpenAI-compatible servers on this machine
@@ -52,12 +52,42 @@ function publicHost(req, env) {
     try { return new URL(u.trim()).hostname.toLowerCase() === host; } catch (e) { return false; }
   });
 }
-// This computer's own name (Debian, Ubuntu and Raspberry Pi OS map it to 127.0.1.1), or 0.0.0.0: no other
-// website can make a browser send these. For reading only: a proxy on this computer may send its name too.
-const ownName = req => { const host = hostOf(req), me = String(os.hostname() || '').trim().toLowerCase(); return host === '0.0.0.0' || (!!me && host === me); };
-// The connection itself came from this computer (MetaCode's own pages in a browser here, a proxy here, or
-// another website's page whose name was made to point at 127.0.0.1)
-const fromThisComputer = req => { const a = String((req.socket && req.socket.remoteAddress) || ''); return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1'; };
+// The names this computer's hosts file gives to a loopback address: Debian, Ubuntu and Raspberry Pi OS put the
+// computer's own name there, at 127.0.1.1. → a Set, read again when the file changes
+const HOSTS_FILE = process.platform === 'win32' ? path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'drivers', 'etc', 'hosts') : '/etc/hosts';
+const hostsCache = new Map();
+function loopbackNames(file) {
+  let st;
+  try { st = fs.statSync(file); } catch (e) { return new Set(); }
+  const hit = hostsCache.get(file);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) return hit.names;
+  const names = new Set();
+  try {
+    for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
+      const [addr, ...list] = line.replace(/#.*/, '').trim().split(/\s+/);
+      if (/^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(addr) || addr === '::1') for (const n of list) names.add(n.toLowerCase());
+    }
+  } catch (e) { /* unreadable: no names */ }
+  hostsCache.set(file, { mtimeMs: st.mtimeMs, size: st.size, names });
+  return names;
+}
+// This computer's own names besides localhost: 0.0.0.0, and what its hosts file maps to a loopback address (its
+// own name on Debian, Ubuntu and Raspberry Pi OS). Not os.hostname(): on a Mac or a laptop the network can name
+// the computer (DHCP, reverse DNS), and then another website could be served under that name. On Windows the
+// computer's name is its own. For reading only: a proxy on this computer may send such a name too.
+const ownName = (req, hostsFile) => {
+  const host = hostOf(req);
+  return !!host && (host === '0.0.0.0' || loopbackNames(hostsFile).has(host) || (process.platform === 'win32' && host === String(os.hostname() || '').trim().toLowerCase()));
+};
+// An address as the name (http://192.168.1.20:3000): no other website's name is an address
+const addressHost = req => { const host = hostOf(req); return /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /^\[[0-9a-f:.]+\]$/.test(host); };
+// The connection itself came from this computer: from 127.0.0.1, or from one of its own addresses to itself (a
+// browser here that opened http://<this computer's address>:3000). That is MetaCode's own pages in a browser here,
+// a proxy here, or another website's page whose name was made to point at this computer.
+const fromThisComputer = req => {
+  const s = req.socket || {}, a = String(s.remoteAddress || '');
+  return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1' || (!!a && a === String(s.localAddress || ''));
+};
 // It came from a proxy that TRUST_PROXY names (server.js: "loopback", a number of hops or addresses), so it may
 // be passing a visitor on, with X-Forwarded-For or without (nginx with only proxy_pass sends none)
 function trustedProxy(req) {
@@ -73,6 +103,7 @@ function createLocalAi(opts) {
   const env = opts.env || process.env;
   const dataDir = path.resolve(String(env.LOCAL_AI_DATA_DIR || '').trim() || defaultDataDir('local-ai-data', env));
   const isLocal = opts.isLoopback || (() => false);
+  const hostsFile = opts.hostsFile || HOSTS_FILE;
   const onModelsChanged = opts.onModelsChanged || (() => {});
   const ollama = createOllama({ env, fetch: opts.fetch });
   // (LOCAL_AI_LIBRARY_URL / LOCAL_AI_REGISTRY_URL: a mirror of ollama.com's library and of Ollama's registry)
@@ -172,16 +203,18 @@ function createLocalAi(opts) {
 
   const router = express.Router();
   // MetaCode's own pages only. A request from this computer under a name that isn't this computer's comes from
-  // another website whose name was made to point at 127.0.0.1 ("DNS rebinding"), and reads nothing either (the
-  // hardware and the home folder's path, the models). The Host header says the name: a page can't change it.
+  // another website whose name was made to point at it ("DNS rebinding"), and reads nothing either (the hardware
+  // and the home folder's path, the models). The Host header says the name: a page can't change it.
   // X-Forwarded-For and the like count only from a proxy TRUST_PROXY names, as any page can add them to its own
-  // requests. So a reverse proxy on this computer needs TRUST_PROXY, or its site's name in PUBLIC_URL; the latter
-  // may read, and managing models needs the admin token either way.
+  // requests. TRUST_PROXY=loopback names every program on this computer, a browser too: it is for a server where
+  // no one browses; elsewhere leave it unset and put the proxy's site in PUBLIC_URL. Either way the proxy must
+  // send X-Forwarded-For: one that sends none can't be told from a browser here (its visitors would manage
+  // models), and then only TRUST_PROXY (with PUBLIC_URL for reading) keeps them from it.
+  // (The refusal doesn't give this computer's name: the page it answers may be the other website's.)
   router.use((req, res, next) => {
-    if (!fromThisComputer(req) || (forwarded(req) && trustedProxy(req)) || loopbackHost(req) || ownName(req) || publicHost(req, env)) return next();
-    const me = String(os.hostname() || '').trim().toLowerCase();
-    res.status(403).json({ error: { type: 'forbidden', code: 'foreign_host', message: 'The AI Model Store answers MetaCode\'s own pages only: open MetaCode at localhost, 127.0.0.1' +
-      (me ? ' or "' + me.slice(0, 100) + '" (this computer\'s name)' : '') + ', not "' + hostOf(req).slice(0, 100) + '". Behind a reverse proxy on this computer, set TRUST_PROXY, or PUBLIC_URL to the site\'s address, in .env.' } });
+    if (!fromThisComputer(req) || (forwarded(req) && trustedProxy(req)) || loopbackHost(req) || addressHost(req) || ownName(req, hostsFile) || publicHost(req, env)) return next();
+    res.status(403).json({ error: { type: 'forbidden', code: 'foreign_host', message: 'The AI Model Store answers MetaCode\'s own pages only: open MetaCode at localhost, 127.0.0.1 or this computer\'s host name, not "' +
+      hostOf(req).slice(0, 100) + '". Behind a reverse proxy on this computer, make the proxy send X-Forwarded-For and set PUBLIC_URL to the site\'s address in .env (or, on a server no one browses from, TRUST_PROXY=loopback).' } });
   });
   router.use(express.json({ limit: '64kb' }));
 
