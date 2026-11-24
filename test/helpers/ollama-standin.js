@@ -62,6 +62,8 @@ function standIns(opts) {
     pullDelayMs: 25,            // per progress step (20 steps)
     verifyDelayMs: 0,           // nothing sent for this long after "verifying sha256 digest"
     registryDelayMs: 0,         // before the registry answers a manifest
+    mlxDelayMs: 0,              // before it answers an MLX variant's manifest (the big one: a line per tensor file)
+    retagged: false,            // the tags pages' digests changed (tags published again): nothing known of them
     breakAt: null,              // stop the stream after this many bytes (an interrupted download)
     modelsDir: null,            // Ollama's models folder, for the records of a stopped download's parts
     wrongDigest: false,
@@ -146,7 +148,11 @@ function standIns(opts) {
   });
   // ollama.com (the library) and the registry
   app.get('/library', (req, res) => res.type('html').send(LIBRARY_HTML));
-  app.get('/library/:name/tags', (req, res) => (TAG_PAGES.has(req.params.name) ? res.type('html').send(TAG_PAGES.get(req.params.name)) : res.status(404).send('no')));
+  app.get('/library/:name/tags', (req, res) => {
+    if (!TAG_PAGES.has(req.params.name)) return res.status(404).send('no');
+    const html = TAG_PAGES.get(req.params.name);
+    res.type('html').send(st.retagged ? html.replace(/\b[0-9a-f]{12}\b/g, d => d.replace(/[0-9a-f]/g, c => '0123456789abcdef'[(parseInt(c, 16) + 1) % 16])) : html);
+  });
   // (the raw path: each part decoded on its own, as a registry does)
   const variants = new Map();    // digest → body: the variants of the manifest lists served
   app.get(/^\/v2\/.+\/(manifests|blobs)\/[^/]+$/, async (req, res) => {
@@ -158,7 +164,11 @@ function standIns(opts) {
     if (repoParts.length !== 2 || repoParts.some(x => /%2f/i.test(x))) return unknown();
     const [ns, name] = repoParts.map(decodeURIComponent);
     const repo = ns === 'library' ? name : ns + '/' + name;
-    if (what === 'blobs') return variants.has(ref) ? res.type('application/octet-stream').send(variants.get(ref)) : unknown();
+    if (what === 'blobs') {
+      if (!variants.has(ref)) return unknown();
+      if (st.mlxDelayMs && /"runner":"mlx"/.test(variants.get(ref))) { await sleep(st.mlxDelayMs); if (req.destroyed) return; }
+      return res.type('application/octet-stream').send(variants.get(ref));
+    }
     if (st.registryDelayMs) { await sleep(st.registryDelayMs); if (req.destroyed) return; }
     const model = repo + ':' + ref;
     if (/^missing/.test(repo)) return unknown();

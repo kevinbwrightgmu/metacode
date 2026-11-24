@@ -20,6 +20,7 @@ const MANIFEST_TYPES = MANIFEST_LIST + ', ' + MANIFEST;
 const LIBRARY_MAX_AGE_MS = 24 * 3600 * 1000;      // the library is looked at again after a day (when online)
 const TAGS_MAX_AGE_MS = 7 * 24 * 3600 * 1000;     // a model's tags after a week
 const RETRY_MS = 5 * 60 * 1000;                   // after ollama.com didn't answer, the saved catalog for 5 minutes
+const VARIANTS_RETRY_MS = 10 * 60 * 1000;         // a tags page whose variants the registry didn't all give: again then
 
 // Requests to ollama.com and its registry go out like the AI service's: through HTTPS_PROXY / HTTP_PROXY when set
 // (NO_PROXY respected). Node's own fetch ignores those variables.
@@ -201,11 +202,29 @@ function createCatalog(opts) {
   let failed = null;           // { at, problem }: ollama.com didn't answer (it isn't asked again for a while)
 
   function readJson(f) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return null; } }
+  // The snapshot's tags (read once, when needed): each variant's size of the tags it knows
+  let snapTags = null;
+  const snapshotTags = () => snapTags || (snapTags = (readJson(SNAPSHOT) || {}).tags || {});
+  // A tag's variant sizes known already for the same tag at the same digest (the tags page's 12 hex digits): from
+  // the copy of the model's tags kept before (`before`), or from the snapshot
+  function knownVariants(name, t, before) {
+    const same = entry => ((entry && entry.tags) || []).find(x => x && x.tag === t.tag && x.digest && x.digest === t.digest && x.variants);
+    const hit = same(before) || same(snapshotTags()[name]);
+    return hit ? hit.variants : null;
+  }
   function load() {
     if (mem) return mem;
     const cached = readJson(file);
-    if (cached && Array.isArray(cached.models) && cached.models.length) mem = Object.assign({ tags: {} }, cached, { source: 'cache' });
-    else {
+    if (cached && Array.isArray(cached.models) && cached.models.length) {
+      mem = Object.assign({ tags: {} }, cached, { source: 'cache' });
+      // (a copy kept by an earlier MetaCode has no variant sizes: the snapshot's, for the same tag at the same digest)
+      for (const [name, entry] of Object.entries(mem.tags || {})) {
+        for (const t of (entry && Array.isArray(entry.tags) ? entry.tags : [])) {
+          const v = t && !t.variants ? knownVariants(name, t, null) : null;
+          if (v) Object.assign(t, { ranged: true, variants: v });
+        }
+      }
+    } else {
       const snap = readJson(SNAPSHOT) || { fetchedAt: null, models: [], tags: {} };
       mem = { source: 'snapshot', fetchedAt: snap.fetchedAt, models: snap.models || [], tags: snap.tags || {} };
     }
@@ -267,17 +286,24 @@ function createCatalog(opts) {
   async function tagsOf(name, force) {
     const cat = load();
     const known = cat.tags[name];
-    if (known && !force && now() - Date.parse(known.fetchedAt || 0) < TAGS_MAX_AGE_MS) return { tags: known.tags, fetchedAt: known.fetchedAt };
+    const maxAge = known && known.incomplete ? VARIANTS_RETRY_MS : TAGS_MAX_AGE_MS;
+    if (known && !force && now() - Date.parse(known.fetchedAt || 0) < maxAge) return { tags: known.tags, fetchedAt: known.fetchedAt };
     if (!force && resting()) return known ? { tags: known.tags, fetchedAt: known.fetchedAt, stale: true } : { tags: [], fetchedAt: null, offline: true };
     try {
       const r = await get(libraryUrl + '/' + encodeURIComponent(name) + '/tags', 15000);
       if (r.status === 200) {
         const tags = parseTags(r.body, name);
-        // (a range: each variant's size from the registry, all at once and briefly, as Details waits for them;
-        // without an answer the upper bound stays)
-        await Promise.all(tags.filter(t => t.ranged).map(async t => { const v = await variantSizes(t.tag, variantMs); if (v) t.variants = v; }));
+        // (a range: each variant's size, known already for the same digest or from the registry, all at once and
+        // briefly, as Details waits for them. What the registry doesn't give in time is asked again 10 minutes
+        // later, and meanwhile the size is the range's upper bound.)
+        await Promise.all(tags.filter(t => t.ranged).map(async t => {
+          const k = knownVariants(name, t, known);
+          const v = Object.assign({}, k, k && k.apple && k.other ? null : await variantSizes(t.tag, variantMs));
+          if (v.apple || v.other) t.variants = v;
+        }));
+        const incomplete = tags.some(t => t.ranged && !(t.variants && t.variants.apple && t.variants.other));
         if (tags.length) {
-          cat.tags[name] = { fetchedAt: new Date(now()).toISOString(), tags };
+          cat.tags[name] = Object.assign({ fetchedAt: new Date(now()).toISOString(), tags }, incomplete ? { incomplete: true } : {});
           save();
           return { tags, fetchedAt: cat.tags[name].fetchedAt };
         }
@@ -329,12 +355,13 @@ function createCatalog(opts) {
   }
 
   // A tag with variants for several runners: what Ollama downloads of it on a Mac with Apple Silicon (MLX, from
-  // Ollama 0.40) and everywhere else (llama.cpp) → { apple, other } in bytes, or null when the registry doesn't
-  // answer within `ms`
+  // Ollama 0.40) and everywhere else (llama.cpp) → { apple, other } in bytes, each one the registry gave within
+  // `ms` (the llama.cpp variant's manifest is a few KB, the MLX one's up to 2 MB), or null when it gave neither
   async function variantSizes(model, ms) {
     const signal = AbortSignal.timeout(ms || 5000);
     const [apple, other] = await Promise.all([true, false].map(a => manifest(model, { appleSilicon: a, signal }).catch(() => null)));
-    return apple && apple.ok && other && other.ok ? { apple: apple.size, other: other.size } : null;
+    const v = Object.assign({}, apple && apple.ok ? { apple: apple.size } : null, other && other.ok ? { other: other.size } : null);
+    return v.apple || v.other ? v : null;
   }
 
   // The catalog for the browser: each model with its categories and the tags known so far, each at its download

@@ -28,14 +28,16 @@ async function get(url) {
     }
   }
 }
-// The size of each variant of a tag shown as a range (up to 3 tries): → { apple, other }, or null
+// The size of each variant of a tag shown as a range (up to 3 tries): → { apple, other }, what the registry gave
+// of them, or null
 async function variants(tag) {
+  let got = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const v = await registry.variantSizes(tag, 30000);
-    if (v) return v;
+    got = Object.assign({}, got, await registry.variantSizes(tag, 30000));
+    if (got.apple && got.other) return got;
     if (attempt < 3) await sleep(2000 * attempt);
   }
-  return null;
+  return got.apple || got.other ? got : null;
 }
 
 (async () => {
@@ -55,7 +57,8 @@ async function variants(tag) {
         for (const t of main.filter(x => x.ranged)) {
           ranged++;
           const v = await variants(t.tag);
-          if (v) t.variants = v; else unsized.push(t.tag);
+          if (v) t.variants = v;
+          if (!v || !v.apple || !v.other) unsized.push(t.tag);
         }
         tags[m.name] = { fetchedAt: new Date().toISOString(), tags: main };
       }
@@ -68,5 +71,5 @@ async function variants(tag) {
   const withTags = Object.keys(tags).length;
   console.log('local-ai/catalog-snapshot.json: ' + models.length + ' models, ' + withTags + ' with their tags, ' + ranged + ' tags with variants for several runners, ' + Math.round(fs.statSync(SNAPSHOT).size / 1024) + ' KB');
   // (a range whose variants the registry didn't give: its upper bound stays, on the safe side)
-  if (unsized.length) console.log('Without their variants\' sizes (the upper bound is kept): ' + unsized.join(', '));
+  if (unsized.length) console.log('Without the size of each variant (the upper bound is kept where one is missing): ' + unsized.join(', '));
 })().catch(e => { console.error('update-model-catalog: ' + e.message); process.exit(1); });

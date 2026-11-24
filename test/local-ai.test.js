@@ -986,6 +986,7 @@ test('Details, the list and the recommendations give a tag shown as a size range
   await new Promise(r => server.listen(0, '127.0.0.1', r));
   const get = async p => (await fetch('http://127.0.0.1:' + server.address().port + '/api/local-ai' + p)).json();
   const LLAMA = MODEL_BYTES + 800, MLX = MODEL_BYTES + 1e6 + 800;
+  si.st.retagged = true;           // (tags the snapshot doesn't know: their variants come from the stand-in's registry)
   // → the size of gemma4:e2b in Details (with its fit's need), in the list, and of the recommended gemma4 tag
   const sizes = async () => {
     const e2b = (await get('/catalog/model?name=gemma4')).tags.find(t => t.tag === 'gemma4:e2b');
@@ -1012,6 +1013,7 @@ test('Details, the list and the recommendations give a tag shown as a size range
     assert.deepEqual((await sizes()).slice(0, 2), [7.5e9, 7.5e9]);
   } finally {
     si.st.version = '0.40.17';
+    si.st.retagged = false;
     store.close();
     server.closeAllConnections();
     await new Promise(r => server.close(r));
@@ -1024,6 +1026,7 @@ test('a tags page whose variants the registry doesn\'t give in time: Details doe
   try {
     const c = createCatalog({ dataDir: dir, fetch: (u, i) => fetch(u, i), libraryUrl: si.base + '/library', registry: si.base + '/v2/library/', variantMs: 300 });
     si.st.registryDelayMs = 2000;
+    si.st.retagged = true;
     const t0 = Date.now();
     const t = await c.tagsOf('gemma4', true);
     assert.ok(Date.now() - t0 < 1500, (Date.now() - t0) + ' ms');
@@ -1034,6 +1037,59 @@ test('a tags page whose variants the registry doesn\'t give in time: Details doe
     assert.deepEqual((await c.tagsOf('gemma4', true)).tags.find(x => x.tag === 'gemma4:e2b').variants, { apple: MODEL_BYTES + 1e6 + 800, other: MODEL_BYTES + 800 });
   } finally {
     si.st.registryDelayMs = 0;
+    si.st.retagged = false;
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('variant sizes once known are kept: the same tag at the same digest needs no new look (also when the registry is slow), the snapshot\'s count, a copy kept by an earlier MetaCode gets them; what the registry didn\'t give in time is asked again 10 minutes later', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-ranges-kept-'));
+  let clock = Date.now();
+  const mk = () => createCatalog({ dataDir: dir, fetch: (u, i) => fetch(u, i), libraryUrl: si.base + '/library', registry: si.base + '/v2/library/', variantMs: 300, now: () => clock });
+  const asked = () => si.st.registry.filter(r => /gemma4/.test(r)).length;
+  const e2bOf = t => t.tags.find(x => x.tag === 'gemma4:e2b');
+  const snapE2b = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'local-ai', 'catalog-snapshot.json'), 'utf8')).tags.gemma4.tags.find(x => x.tag === 'gemma4:e2b');
+  const LLAMA = MODEL_BYTES + 800, MLX = MODEL_BYTES + 1e6 + 800;
+  try {
+    // the tags as ollama.com lists them today: the snapshot has their sizes for these digests, so the registry isn't asked
+    si.st.registry.length = 0;
+    let c = mk();
+    const today = await c.tagsOf('gemma4', true);
+    assert.equal(e2bOf(today).digest, snapE2b.digest);
+    assert.deepEqual(e2bOf(today).variants, snapE2b.variants);
+    assert.equal(asked(), 0);
+    // a copy kept by an earlier MetaCode (no variants, the range's upper bound): the snapshot's, for the same digest
+    const old = JSON.parse(fs.readFileSync(path.join(dir, 'catalog.json'), 'utf8'));
+    for (const t of old.tags.gemma4.tags) { delete t.variants; delete t.ranged; }
+    fs.writeFileSync(path.join(dir, 'catalog.json'), JSON.stringify(old));
+    c = mk();
+    assert.deepEqual(c.list(false).models.find(m => m.name === 'gemma4').tags.find(x => x.tag === 'gemma4:e2b').size, snapE2b.variants.other);
+    assert.deepEqual(e2bOf(await c.tagsOf('gemma4')).variants, snapE2b.variants);
+    // tags published again (new digests), with the MLX variants' big manifests too slow: the llama.cpp sizes at once,
+    // for a PC, and the page is read again 10 minutes later for the rest
+    si.st.retagged = true;
+    si.st.mlxDelayMs = 2000;
+    const t0 = Date.now();
+    const partial = await c.tagsOf('gemma4', true);
+    assert.ok(Date.now() - t0 < 1500, (Date.now() - t0) + ' ms');
+    assert.deepEqual([e2bOf(partial).variants, sizeHere(e2bOf(partial), false), sizeHere(e2bOf(partial), true)], [{ other: LLAMA }, LLAMA, 7.5e9]);
+    si.st.mlxDelayMs = 0;
+    clock += 5 * 60 * 1000;
+    assert.deepEqual(e2bOf(await c.tagsOf('gemma4')).variants, { other: LLAMA }, 'not before 10 minutes');
+    clock += 6 * 60 * 1000;
+    assert.deepEqual(e2bOf(await c.tagsOf('gemma4')).variants, { apple: MLX, other: LLAMA });
+    // a week later, read again while the registry is too slow: the same digests keep their sizes, nothing is asked
+    clock += 8 * 24 * 3600 * 1000;
+    si.st.registryDelayMs = 2000;
+    si.st.registry.length = 0;
+    const t1 = Date.now();
+    const week = await c.tagsOf('gemma4');
+    assert.ok(Date.now() - t1 < 1500, (Date.now() - t1) + ' ms');
+    assert.deepEqual(e2bOf(week).variants, { apple: MLX, other: LLAMA });
+    assert.equal(asked(), 0);
+    assert.equal(JSON.parse(fs.readFileSync(path.join(dir, 'catalog.json'), 'utf8')).tags.gemma4.incomplete, undefined);
+  } finally {
+    Object.assign(si.st, { registryDelayMs: 0, mlxDelayMs: 0, retagged: false });
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
