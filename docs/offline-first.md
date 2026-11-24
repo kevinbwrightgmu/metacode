@@ -224,7 +224,10 @@ Run `npm install`, then `METACODE_PROFILE=lite AI_MODE=local-only npm start` (RE
    - They can be paused, resumed (Ollama continues where it stopped) and cancelled.
    - One downloads at a time, the others queue, and the same model is never downloaded twice at once.
    - Before a download starts, free disk space is checked against what it still has to fetch: the files
-     Ollama doesn't have yet, less what arrived before a pause, keeping 512 MB spare. A resume, or an update
+     Ollama doesn't have yet, less what Ollama already has of them, keeping 512 MB spare. That is read from
+     Ollama's models folder, so it holds after MetaCode restarts or a Cancel too (Ollama keeps a stopped
+     download's parts until it starts again more than an hour later). Where MetaCode can't read that folder,
+     what arrived while it ran counts. The check assumes Ollama runs on this computer. A resume, or an update
      that changes little, doesn't ask for the whole model again.
    - After it, the installed model's digest is compared with the registry's. For a tag with variants for
      several runners, any of its variants counts: Ollama 0.40 and later pull MLX on Apple silicon and

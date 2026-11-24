@@ -708,7 +708,8 @@ test('Ollama not running: the store still browses (catalog, recommendations), an
 
 test('the disk check counts only what a download still needs: a resume what didn\'t arrive, an update only the layers that changed', async () => {
   try {
-    // an interrupted download: 4.5 of the 6 MB arrived, and Ollama keeps them
+    // an interrupted download: 4.5 of the 6 MB arrived, and Ollama keeps them (the disk measured here isn't
+    // Ollama's models folder: what arrived in this run counts)
     si.st.breakAt = MODEL_BYTES * 0.75;
     await api('POST', '/installs', { model: 'deepseek-r1:8b' });
     await until(async () => { const j = await job('deepseek-r1:8b'); return j && j.state === 'failed'; }, 8000, 'the interrupted download');
@@ -748,6 +749,83 @@ test('the disk check asks Ollama about the layers 16 at a time (an MLX variant h
   assert.equal(j.code, 'insufficient_disk');
   assert.match(j.error, /^Not enough disk space: gemma4:e2b-mlx needs 600 MB more \(and 512 MB to spare\), and \/models has 1\.0 GB free\./);
   assert.deepEqual([asked, most], [1200, 16]);
+});
+
+test('the disk check after MetaCode starts again or a Cancel: what Ollama keeps of a layer, read from its models folder; a part Ollama has removed counts whole', async () => {
+  const models = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-ollama-models-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-restart-'));
+  const room = { path: models, free: 100 * GB, total: 200 * GB, ollamaDir: true };
+  // (MetaCode's downloads, made again as when MetaCode starts)
+  const start = () => createInstalls({ ollama: createOllama({ env: { OLLAMA_BASE_URL: si.base + '/v1' } }), catalog: createCatalog({ dataDir: dir, registry: si.base + '/v2/library/' }),
+    hardware: { detect: async () => ({ disk: Object.assign({}, room) }) } });
+  const ended = async (installs, model) => {
+    await until(() => { const j = installs.list().find(x => x.model === model); return j && ['done', 'failed'].includes(j.state); }, 8000, model);
+    return installs.list().find(x => x.model === model);
+  };
+  const recordOf = model => path.join(models, 'blobs', manifestFor(model).layers[0].digest.replace(':', '-') + '-partial-0');
+  // an interrupted download: 4.5 of the 6 MB arrived, and Ollama keeps them
+  const interrupted = async (installs, model) => {
+    room.free = 100 * GB;
+    si.st.breakAt = MODEL_BYTES * 0.75;
+    installs.start(model);
+    assert.equal((await ended(installs, model)).code, 'interrupted');
+    assert.equal(JSON.parse(fs.readFileSync(recordOf(model), 'utf8')).Completed, MODEL_BYTES * 0.75);
+  };
+  const rest = MODEL_BYTES * 0.25 + 800 + 512e6 + 1e6;          // (room for the rest and the margin, not for all of it)
+  const names = ['qwen3:8b', 'mistral:7b', 'llama3.2:3b', 'phi4:14b'];
+  si.st.modelsDir = models;
+  let installs = start();
+  try {
+    // MetaCode starts again (it lists no download any more), and Install continues
+    await interrupted(installs, 'qwen3:8b');
+    installs.close();
+    installs = start();
+    assert.equal(installs.list().length, 0);
+    room.free = rest;
+    installs.start('qwen3:8b');
+    let j = await ended(installs, 'qwen3:8b');
+    assert.deepEqual([j.state, j.resumed, j.verified], ['done', true, true], j.error);
+    assert.ok(!fs.existsSync(recordOf('qwen3:8b')));
+    // cancelled while downloading, then Install again
+    si.st.pullDelayMs = 60;
+    room.free = 100 * GB;
+    installs.start('mistral:7b');
+    await until(() => installs.list().find(x => x.model === 'mistral:7b').completed >= MODEL_BYTES / 2, 8000, 'half of it');
+    installs.cancel('mistral:7b');
+    await until(() => !installs.list().some(x => x.model === 'mistral:7b') && fs.existsSync(recordOf('mistral:7b')), 5000, 'cancelled, and the part kept');
+    si.st.pullDelayMs = 25;
+    room.free = MODEL_BYTES - JSON.parse(fs.readFileSync(recordOf('mistral:7b'), 'utf8')).Completed + 800 + 512e6 + 0.5e6;
+    installs.start('mistral:7b');
+    j = await ended(installs, 'mistral:7b');
+    assert.deepEqual([j.state, j.resumed], ['done', true], j.error);
+    // a model of many tensor files keeps a layer's start in a .tmp file
+    fs.writeFileSync(path.join(models, 'blobs', manifestFor('llama3.2:3b').layers[0].digest.replace(':', '-') + '.tmp'), Buffer.alloc(MODEL_BYTES * 0.75));
+    room.free = rest;
+    installs.start('llama3.2:3b');
+    assert.equal((await ended(installs, 'llama3.2:3b')).state, 'done');
+    // Ollama started again more than an hour later and removed the part: what arrived before is gone, in this run
+    // (Resume) and after MetaCode starts again
+    await interrupted(installs, 'phi4:14b');
+    fs.rmSync(recordOf('phi4:14b'));
+    si.st.partial.delete('phi4:14b');
+    room.free = rest;
+    installs.resume('phi4:14b');
+    j = await ended(installs, 'phi4:14b');
+    assert.equal(j.code, 'insufficient_disk');
+    assert.match(j.error, /^Not enough disk space: phi4:14b needs 7 MB \(and 512 MB to spare\)/);
+    installs.close();
+    installs = start();
+    installs.start('phi4:14b');
+    assert.equal((await ended(installs, 'phi4:14b')).code, 'insufficient_disk');
+  } finally {
+    installs.close();
+    si.st.modelsDir = null;
+    si.st.breakAt = null;
+    si.st.pullDelayMs = 25;
+    for (const name of names) { si.st.installed.delete(name); si.st.partial.delete(name); }
+    fs.rmSync(models, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test('Ollama\'s sha256 check after a download isn\'t a stall: it gets time for what it hashes (about 20 MB a second)', async () => {

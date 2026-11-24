@@ -63,10 +63,20 @@ function standIns(opts) {
     verifyDelayMs: 0,           // nothing sent for this long after "verifying sha256 digest"
     registryDelayMs: 0,         // before the registry answers a manifest
     breakAt: null,              // stop the stream after this many bytes (an interrupted download)
+    modelsDir: null,            // Ollama's models folder, for the records of a stopped download's parts
     wrongDigest: false,
     pulls: [], deletes: [], loads: [], unloads: [], registry: [],
   };
   const named = model => [...st.installed.keys()].find(n => keyOf(n) === keyOf(model)) || null;
+  // Ollama's record of a layer's part in its models folder, blobs/sha256-<hex>-partial-<n> (server/download.go,
+  // writePart): written when a download stops, removed once the layer is complete (completed null)
+  const record = (layer, completed) => {
+    if (!st.modelsDir) return;
+    const f = path.join(st.modelsDir, 'blobs', layer.digest.replace(':', '-') + '-partial-0');
+    if (completed === null) return fs.rmSync(f, { force: true });
+    fs.mkdirSync(path.dirname(f), { recursive: true });
+    fs.writeFileSync(f, JSON.stringify({ N: 0, Offset: 0, Size: layer.size, Completed: completed }) + '\n');
+  };
   // What Ollama pulls for a name: the manifest, or the variant of a manifest list for its runner
   const pulled = model => {
     const revision = st.revisions.get(keyOf(model));
@@ -117,12 +127,13 @@ function standIns(opts) {
     line({ status: short(weights), digest: weights.digest, total: weights.size, ...(done ? { completed: done } : {}) });
     while (done < weights.size) {
       await sleep(st.pullDelayMs);
-      if (gone) { st.partial.set(key, done); return; }
+      if (gone) { st.partial.set(key, done); record(weights, done); return; }
       done = Math.min(weights.size, done + weights.size / 20);
       st.partial.set(key, done);
       line({ status: short(weights), digest: weights.digest, total: weights.size, completed: done });
-      if (st.breakAt !== null && done >= st.breakAt) { st.breakAt = null; return res.destroy(); }
+      if (st.breakAt !== null && done >= st.breakAt) { st.breakAt = null; record(weights, done); return res.destroy(); }
     }
+    record(weights, null);
     for (const l of rest) line({ status: short(l), digest: l.digest, total: l.size, completed: l.size });
     line({ status: 'verifying sha256 digest' });
     if (st.verifyDelayMs) { await sleep(st.verifyDelayMs); if (gone) return; }

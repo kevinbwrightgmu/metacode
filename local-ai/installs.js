@@ -1,13 +1,16 @@
 // Model installs (downloads through Ollama), one at a time, the others queued:
 // - progress, speed and time left from Ollama's progress lines;
 // - pause = stop the download, keeping what arrived; resume = pull again, and Ollama continues from there
-//   (checked with a real Ollama); cancel = stop and forget it (Ollama tidies the parts up when it restarts);
+//   (checked with a real Ollama); cancel = stop and forget the download. Ollama keeps the parts on disk until it
+//   starts again more than an hour later, and installing again before then continues from them;
 // - the same model is never downloaded twice at once;
-// - before a download: what it still has to fetch (the registry's layers Ollama doesn't have yet) against the
-//   free disk space;
+// - before a download: what it still has to fetch (the registry's layers Ollama doesn't have yet, less what it
+//   keeps of them) against the free disk space;
 // - after it: the installed model's digest against the registry's (the sha256 of its manifest, or of one of the
 //   variants when a tag has variants for several runners).
 'use strict';
+const fs = require('fs');
+const path = require('path');
 const { EventEmitter } = require('events');
 
 const NAME = /^[a-z0-9][a-z0-9._-]{0,80}(\/[a-z0-9][a-z0-9._-]{0,80})?(:[a-z0-9][a-z0-9._-]{0,60})?$/i;
@@ -28,6 +31,28 @@ function keyOf(model) {
   return /:[^:/]*$/.test(m) ? m : m + ':latest';
 }
 const size = n => (n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : Math.ceil(n / 1e6) + ' MB');
+
+// What Ollama keeps of the layers it hasn't finished, and continues from: read from its models folder, so also
+// after MetaCode restarted or a download was cancelled. A layer's parts each have a record,
+// blobs/sha256-<hex>-partial-<n>, with the bytes completed (server/download.go); a model of many tensor files
+// has blobs/sha256-<hex>.tmp, its size so far (transfer/download.go). When Ollama starts more than an hour later
+// it removes them, and the layer counts whole again. → Map digest → bytes, or null when the folder can't be read
+async function keptByOllama(disk) {
+  if (!disk || !disk.ollamaDir || !disk.path) return null;
+  const dir = path.join(disk.path, 'blobs');
+  let names;
+  try { names = await fs.promises.readdir(dir); } catch (e) { return null; }
+  const kept = new Map();
+  const add = (hex, n) => { const d = 'sha256:' + hex.toLowerCase(); kept.set(d, (kept.get(d) || 0) + Math.max(0, Number(n) || 0)); };
+  await Promise.all(names.map(async f => {
+    const part = /^sha256-([0-9a-f]{64})-partial-\d+$/i.exec(f), tmp = /^sha256-([0-9a-f]{64})\.tmp$/i.exec(f);
+    try {
+      if (part) add(part[1], JSON.parse(await fs.promises.readFile(path.join(dir, f), 'utf8')).Completed);
+      else if (tmp) add(tmp[1], (await fs.promises.stat(path.join(dir, f))).size);
+    } catch (e) { /* being written, or just removed: nothing kept */ }
+  }));
+  return kept;
+}
 
 function createInstalls(opts) {
   const { ollama, catalog, hardware } = opts;
@@ -66,14 +91,16 @@ function createInstalls(opts) {
     return finish(j, 'paused', { status: 'Paused: what arrived is kept, and resuming continues from there', speed: null });
   }
   // What a download still has to fetch: the layers Ollama doesn't have yet (an update, or a tag that shares them
-  // with an installed model, needs only the rest), less what arrived of them before a pause or an interruption
-  async function toFetch(j) {
+  // with an installed model, needs only the rest), less what Ollama keeps of them. (Where its models folder can't
+  // be read: less what arrived in this run before a pause or an interruption.)
+  async function toFetch(j, disk) {
+    const kept = await keptByOllama(disk);
     let need = 0;
     // (16 at a time: an MLX variant has a thousand layers and more)
     for (let i = 0; i < j.blobs.length && !j.stopping; i += 16) {
       const part = j.blobs.slice(i, i + 16);
       const have = await Promise.all(part.map(b => ollama.hasBlob(b.digest)));
-      part.forEach((b, k) => { if (!have[k]) need += Math.max(0, b.size - (j.arrived[b.digest] || 0)); });
+      part.forEach((b, k) => { if (!have[k]) need += Math.max(0, b.size - ((kept ? kept.get(String(b.digest).toLowerCase()) : j.arrived[b.digest]) || 0)); });
     }
     return need;
   }
@@ -102,7 +129,7 @@ function createInstalls(opts) {
     if (man && man.missing) return finish(j, 'failed', { error: 'Ollama\'s library has no model called "' + j.model + '".', code: 'not_in_library' });
     if (man && man.ok) { j.expected = man.size; j.digest = man.digest; j.digests = man.digests || [man.digest]; j.blobs = man.blobs; j.total = Math.max(j.total || 0, man.size); }
     const free = hw.disk && Number.isFinite(hw.disk.free) ? hw.disk.free : null;
-    const need = j.blobs && free !== null ? await toFetch(j) : 0;
+    const need = j.blobs && free !== null ? await toFetch(j, hw.disk) : 0;
     if (j.stopping) return stopped(j);
     if (need && free < need + DISK_MARGIN) {
       return finish(j, 'failed', { error: 'Not enough disk space: ' + j.model + ' needs ' + size(need) + (need < j.expected ? ' more' : '') + ' (and ' + size(DISK_MARGIN) + ' to spare), and ' +
@@ -120,7 +147,7 @@ function createInstalls(opts) {
           layer.total = line.total;
           if (typeof line.completed === 'number') layer.completed = line.completed;
           layers.set(line.digest, layer);
-          j.arrived[line.digest] = layer.completed;                                   // (kept for the disk check of a resume)
+          j.arrived[line.digest] = layer.completed;                                   // (the disk check's, if Ollama's folder can't be read)
           let total = 0, done = 0;
           for (const l of layers.values()) { total += l.total; done += l.completed; }
           j.completed = done;
@@ -173,7 +200,8 @@ function createInstalls(opts) {
     }
     const j = { model: name, state: 'queued', status: 'Waiting for the download before it', completed: 0, total: 0, speed: null, resumed: false, verified: null,
       update: !!(o && o.update), startedAt: new Date(now()).toISOString(), updatedAt: null, controller: null, stopping: null, error: null, code: null,
-      // (what arrived per layer: an interrupted download installed again continues, as a resume does)
+      // (what arrived per layer, for the disk check where Ollama's folder can't be read: an interrupted
+      // download installed again continues, as a resume does)
       arrived: existing && existing.state === 'failed' ? existing.arrived : {} };
     jobs.set(keyOf(name), j);
     emit(j, true);
