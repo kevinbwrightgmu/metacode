@@ -37,25 +37,42 @@ const size = n => (n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : Math.ceil(n / 1e6) 
 // blobs/sha256-<hex>-partial-<n>, with the bytes completed (server/download.go); a model of many tensor files
 // has blobs/sha256-<hex>.tmp, its size so far (transfer/download.go). When Ollama starts more than an hour later
 // it removes them, and the layer counts whole again. → Map digest → bytes, or null when the folder can't be read
-async function keptByOllama(disk) {
-  if (!disk || !disk.ollamaDir || !disk.path) return null;
-  const dir = path.join(disk.path, 'blobs');
+// (One file at a time: a folder on a network mount that stopped answering then holds up one of Node's file
+// threads, not all of them.)
+async function readKept(dir) {
   let names;
   try { names = await fs.promises.readdir(dir); } catch (e) { return null; }
   const kept = new Map();
   const add = (hex, n) => { const d = 'sha256:' + hex.toLowerCase(); kept.set(d, (kept.get(d) || 0) + Math.max(0, Number(n) || 0)); };
-  await Promise.all(names.map(async f => {
+  for (const f of names) {
     const part = /^sha256-([0-9a-f]{64})-partial-\d+$/i.exec(f), tmp = /^sha256-([0-9a-f]{64})\.tmp$/i.exec(f);
     try {
       if (part) add(part[1], JSON.parse(await fs.promises.readFile(path.join(dir, f), 'utf8')).Completed);
       else if (tmp) add(tmp[1], (await fs.promises.stat(path.join(dir, f))).size);
     } catch (e) { /* being written, or just removed: nothing kept */ }
-  }));
+  }
   return kept;
 }
+const KEPT_WAIT_MS = 2000;                // how long the disk check waits for Ollama's models folder
 
 function createInstalls(opts) {
   const { ollama, catalog, hardware } = opts;
+  // What Ollama keeps (readKept), as long as its models folder answers within 2 s, as hardware.js waits for it, and
+  // the download isn't stopped meanwhile: otherwise null, as for a folder that can't be read. One look at a time:
+  // while one still waits on the folder, the next doesn't start another.
+  let looking = null;
+  async function keptByOllama(disk, signal) {
+    if (!disk || !disk.ollamaDir || !disk.path || looking) return null;
+    const look = looking = readKept(path.join(disk.path, 'blobs')).catch(() => null).finally(() => { if (looking === look) looking = null; });
+    let timer, stop;
+    try {
+      return await Promise.race([look, new Promise(r => { timer = setTimeout(r, opts.keptWaitMs || KEPT_WAIT_MS, null); }),
+        new Promise(r => { stop = () => r(null); if (signal) { if (signal.aborted) stop(); else signal.addEventListener('abort', stop, { once: true }); } })]);
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', stop);
+    }
+  }
   const onInstalled = opts.onInstalled || (() => {});
   const now = opts.now || Date.now;
   const events = new EventEmitter();
@@ -94,7 +111,7 @@ function createInstalls(opts) {
   // with an installed model, needs only the rest), less what Ollama keeps of them. (Where its models folder can't
   // be read: less what arrived in this run before a pause or an interruption.)
   async function toFetch(j, disk) {
-    const kept = await keptByOllama(disk);
+    const kept = await keptByOllama(disk, j.controller && j.controller.signal);
     let need = 0;
     // (16 at a time: an MLX variant has a thousand layers and more)
     for (let i = 0; i < j.blobs.length && !j.stopping; i += 16) {

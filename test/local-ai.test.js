@@ -828,6 +828,50 @@ test('the disk check after MetaCode starts again or a Cancel: what Ollama keeps 
   }
 });
 
+test('the disk check doesn\'t hang on a models folder that stopped answering (a network mount gone away): after 2 s it goes on as if the folder can\'t be read, Cancel works meanwhile, one look at a time', { skip: process.platform === 'win32' && 'no FIFOs' }, async () => {
+  const models = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-ollama-hung-'));
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-hung-'));
+  fs.mkdirSync(path.join(models, 'blobs'));
+  // (a read of a FIFO waits until something writes to it, as a read on a dead mount waits)
+  const fifo = path.join(models, 'blobs', 'sha256-' + 'a'.repeat(64) + '-partial-0');
+  require('child_process').execFileSync('mkfifo', [fifo]);
+  // (the reads waiting on it get this and go on; without one waiting, nothing happens)
+  const answer = () => { try { const fd = fs.openSync(fifo, fs.constants.O_WRONLY | fs.constants.O_NONBLOCK); fs.writeSync(fd, JSON.stringify({ N: 0, Offset: 0, Size: 1, Completed: 0 })); fs.closeSync(fd); } catch (e) { /* none waiting */ } };
+  const installs = createInstalls({ ollama: createOllama({ env: { OLLAMA_BASE_URL: si.base + '/v1' } }), catalog: createCatalog({ dataDir: dir, registry: si.base + '/v2/library/' }),
+    hardware: { detect: async () => ({ disk: { path: models, free: 100 * GB, total: 200 * GB, ollamaDir: true } }) }, keptWaitMs: 1500 });
+  const jobOf = model => installs.list().find(x => x.model === model);
+  try {
+    // Cancel while it waits on the folder: cancelled at once, not after the wait
+    installs.start('qwen3:8b');
+    await until(() => (jobOf('qwen3:8b') || {}).state === 'checking', 5000, 'checking');
+    await sleep(150);
+    const t0 = Date.now();
+    installs.cancel('qwen3:8b');
+    await until(() => !jobOf('qwen3:8b'), 3000, 'cancelled');
+    assert.ok(Date.now() - t0 < 1000, (Date.now() - t0) + ' ms');
+    // (that look still waits on the folder: the next install doesn't start another, and isn't held up)
+    const t1 = Date.now();
+    installs.start('mistral:7b');
+    await until(() => (jobOf('mistral:7b') || {}).state === 'downloading' || ['done', 'failed'].includes((jobOf('mistral:7b') || {}).state), 5000, 'mistral:7b past the check');
+    assert.ok(Date.now() - t1 < 1000, (Date.now() - t1) + ' ms');
+    await until(() => ['done', 'failed'].includes(jobOf('mistral:7b').state), 8000, 'mistral:7b');
+    assert.deepEqual([jobOf('mistral:7b').state, jobOf('mistral:7b').verified], ['done', true], jobOf('mistral:7b').error);
+    // the folder answers again: the look waiting on it ends, and the next one waits only its 1.5 s at most
+    answer();
+    const t2 = Date.now();
+    installs.start('llama3.2:3b');
+    await until(() => ['done', 'failed'].includes((jobOf('llama3.2:3b') || {}).state), 8000, 'llama3.2:3b');
+    assert.equal(jobOf('llama3.2:3b').state, 'done', jobOf('llama3.2:3b').error);
+    assert.ok(Date.now() - t2 < 4000, (Date.now() - t2) + ' ms');
+  } finally {
+    installs.close();
+    answer();
+    for (const name of ['qwen3:8b', 'mistral:7b', 'llama3.2:3b']) { si.st.installed.delete(name); si.st.partial.delete(name); }
+    fs.rmSync(models, { recursive: true, force: true });
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('Ollama\'s sha256 check after a download isn\'t a stall: it gets time for what it hashes (about 20 MB a second)', async () => {
   const ollama = createOllama({ env: { OLLAMA_BASE_URL: si.base + '/v1' } });
   try {
