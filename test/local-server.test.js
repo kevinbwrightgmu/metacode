@@ -124,6 +124,19 @@ test('the AI Model Store answers MetaCode\'s own pages only: no CORS, cross-site
       const read = await raw(port, 'GET', p, { host: evil });
       assert.deepEqual([read.status, read.json.error.code], [403, 'foreign_host'], p);
     }
+    // (that page can add X-Forwarded-For and the like to its requests: without TRUST_PROXY they change nothing)
+    for (const fwd of [{ 'x-forwarded-for': '203.0.113.9' }, { forwarded: 'for=203.0.113.9' }, { 'x-real-ip': '203.0.113.9' }]) {
+      for (const p of ['/api/local-ai/status', '/api/local-ai/hardware', '/api/local-ai/models', '/api/local-ai/installs']) {
+        const read = await raw(port, 'GET', p, Object.assign({ host: evil }, fwd));
+        assert.deepEqual([read.status, read.json && read.json.error && read.json.error.code], [403, 'foreign_host'], JSON.stringify(fwd) + ' ' + p);
+      }
+    }
+    // this computer's own name reads (Debian and Raspberry Pi OS map it to 127.0.1.1); managing needs localhost
+    const me = os.hostname().toLowerCase();
+    if (me && !/^(localhost|.+\.localhost|127\.\d+\.\d+\.\d+)$/.test(me)) {
+      const named = await raw(port, 'GET', '/api/local-ai/status', { host: me + ':' + port });
+      assert.deepEqual([named.status, named.json.manage.allowed], [200, false]);
+    }
     for (const host of ['127.0.0.1:' + port, '[::1]:' + port, 'metacode.localhost:' + port]) {
       assert.equal((await raw(port, 'GET', '/api/local-ai/status', { host })).json.manage.allowed, true, host);
     }

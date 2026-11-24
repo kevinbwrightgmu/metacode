@@ -449,7 +449,9 @@ const LocalAI = (() => {
           '<td class="lai-actions">' + (id ? '<button class="btn btn-secondary btn-sm" data-act="default" data-model="' + esc(m.name) + '" data-id="' + esc(id) + '"' + (def === lc(id) ? ' disabled' : '') + '>Use as default</button>'
             : '<span class="form-hint">' + esc(notOffered(m)) + '</span>') +
           (canManage() ? (m.loaded ? '<button class="btn btn-ghost btn-sm" data-act="unload" data-model="' + esc(m.name) + '">Stop</button>' : '<button class="btn btn-ghost btn-sm" data-act="load" data-model="' + esc(m.name) + '">Load</button>') +
-            '<button class="btn btn-ghost btn-sm" data-act="settings" data-model="' + esc(m.name) + '">Settings</button><button class="btn btn-ghost btn-sm" data-act="update" data-model="' + esc(m.name) + '">Update</button>' +
+            '<button class="btn btn-ghost btn-sm" data-act="settings" data-model="' + esc(m.name) + '">Settings</button>' +
+            // (Update downloads it again from Ollama's library: the server says which names that takes)
+            (m.updatable !== false ? '<button class="btn btn-ghost btn-sm" data-act="update" data-model="' + esc(m.name) + '">Update</button>' : '') +
             '<button class="btn btn-ghost btn-sm lai-danger" data-act="delete" data-model="' + esc(m.name) + '">Delete</button>' : '') + '</td></tr>';
       }).join('') + '</tbody></table></div></div>' +
       '<div class="card"><h3>Which model each AI feature uses</h3><p class="form-hint">A feature without its own model uses the default. These are this browser\'s settings, like Settings → AI models.</p>' +

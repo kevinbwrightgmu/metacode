@@ -173,6 +173,9 @@ for surveys that collect them):
 TRUST_PROXY=loopback                  # nginx on this machine forwards to MetaCode
 ```
 
+With it, installing or removing models in the AI Model Store needs `LOCAL_AI_ADMIN_TOKEN`, also from the
+server itself: a request from nginx can be any visitor's.
+
 Administrators (they see the scraper's network diagnostics and the AI Coding Lab's operational metrics; it
 grants no plan and no access to anyone's data):
 
@@ -444,8 +447,10 @@ The WebSocket to `/wisp/` doesn't reach MetaCode. Run `pm2 logs metacode` and lo
   `map` from step 6, then `sudo nginx -t && sudo systemctl reload nginx`. On Cloudflare, also turn on
   WebSockets.
 - `[wisp] Refused a WebSocket from https://metac0.de (Host: 127.0.0.1:3000)…` (your own address) means nginx replaces the host name.
-  Add `proxy_set_header Host $host;`, or set `PUBLIC_URL=https://metac0.de` in `.env` and
-  `pm2 reload metacode`.
+  Add `proxy_set_header Host $host;`, and keep the `X-Forwarded-For` and `X-Real-IP` lines from step 6:
+  without them and without `TRUST_PROXY=loopback`, every visitor counts as the server itself, which may
+  manage the AI Model Store's models. Setting `PUBLIC_URL=https://metac0.de` in `.env` (then
+  `pm2 reload metacode`) also lets the WebSocket in.
 - Nothing at all means the request never reached MetaCode. Check that the nginx site is enabled
   (`ls /etc/nginx/sites-enabled`), that `server_name` matches, and that `proxy_pass` uses MetaCode's `PORT`.
 

@@ -525,7 +525,7 @@ Configuration lives only in the server's `.env` file, which MetaCode and the AI 
 | `AI_LOCAL_TIMEOUT_MS`, `AI_LOCAL_PARALLEL` | no | How long one answer from a model on this machine may take (default 300000 ms) and how many it gets at once (default 1) |
 | `AI_LOCAL_CONTEXT_TOKENS` | no | How much a model on this machine takes in, prompt and answer together (default 4096, Ollama's own default without a big GPU; set it to Ollama's `OLLAMA_CONTEXT_LENGTH`). A prompt that doesn't fit isn't sent to such a model: it would lose its start. The answer gets what's left. Ask MetaCode sends a model on this machine only the parts of its reference that fit |
 | `AI_MODE` | no | `cloud` (default: the providers first, Ollama the last-resort backup), `local` (models on this machine first, and the default) or `local-only` (only them: no prompt leaves this machine) |
-| `LOCAL_AI_ADMIN_TOKEN` | no | Lets another device install and remove models in the AI Model Store (at least 12 characters); on the computer MetaCode runs on, no token is needed |
+| `LOCAL_AI_ADMIN_TOKEN` | no | Lets another device install and remove models in the AI Model Store (at least 12 characters); on the computer MetaCode runs on, no token is needed, unless it's behind a reverse proxy that `TRUST_PROXY` names |
 | `OPENCODE_SERVICE_URL`, `OPENCODE_SERVICE_PORT`, `OPENCODE_SERVICE_MANAGED`, … | no | Where the AI service runs and who starts it (default: `127.0.0.1:4097`, started by MetaCode unless pm2 runs it). `OPENCODE_SERVICE_URL=off` switches MetaCode's AI off. See [docs/opencode-service.md](docs/opencode-service.md#4-settings) |
 
 After changing `.env`, click **Settings → Reload .env** (AI settings apply at once, in the AI service too; scraper,

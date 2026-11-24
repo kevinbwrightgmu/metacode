@@ -335,8 +335,8 @@ async function until(check, ms, what) {
 }
 const job = async model => (await api('GET', '/installs')).json.installs.find(j => j.model === model);
 // A request with any Host header (a page can't choose it, and fetch doesn't let a test either)
-const raw = (method, p, host, body, headers) => new Promise((resolve, reject) => {
-  const req = http.request({ host: '127.0.0.1', port: api.port, path: '/api/local-ai' + p, method, headers: Object.assign({ host, 'content-type': 'application/json' }, headers) }, res => {
+const raw = (method, p, host, body, headers, port) => new Promise((resolve, reject) => {
+  const req = http.request({ host: '127.0.0.1', port: port || api.port, path: '/api/local-ai' + p, method, headers: Object.assign({ host, 'content-type': 'application/json' }, headers) }, res => {
     let text = '';
     res.on('data', d => { text += d; });
     res.on('end', () => resolve({ status: res.statusCode, json: JSON.parse(text) }));
@@ -568,12 +568,62 @@ test('another website whose name is pointed at 127.0.0.1 (DNS rebinding) gets no
       assert.deepEqual([r.status, r.json.error.code], [403, 'foreign_host'], host + ' ' + p);
     }
   }
-  assert.match((await raw('GET', '/hardware', 'evil.example')).json.error.message, /answers MetaCode's own pages only, and "evil\.example" isn't a name of this computer\. .*PUBLIC_URL/);
+  assert.match((await raw('GET', '/hardware', 'evil.example')).json.error.message, /answers MetaCode's own pages only: open MetaCode at localhost, 127\.0\.0\.1 or ".+" \(this computer's name\), not "evil\.example"\. .*TRUST_PROXY.*PUBLIC_URL/);
+  // (a page can add X-Forwarded-For and the like to its own requests: they count only from a proxy TRUST_PROXY names)
+  for (const fwd of [{ 'x-forwarded-for': '203.0.113.9' }, { forwarded: 'for=203.0.113.9' }, { 'x-real-ip': '203.0.113.9' }]) {
+    for (const p of ['/hardware', '/models', '/status', '/installs']) {
+      const r = await raw('GET', p, 'evil.example:' + api.port, undefined, fwd);
+      assert.deepEqual([r.status, r.json.error.code], [403, 'foreign_host'], JSON.stringify(fwd) + ' ' + p);
+    }
+  }
   for (const host of ['localhost:' + api.port, '127.0.0.1:' + api.port, '127.1.2.3', '[::1]:' + api.port, 'metacode.localhost']) {
     assert.equal((await raw('GET', '/status', host)).json.manage.allowed, true, host);
   }
-  // (from another device, through a proxy: no Host check, and managing needs the admin token)
-  assert.equal((await raw('GET', '/hardware', 'metacode.example', undefined, { 'x-test-remote': '1' })).status, 200);
+  // this computer's own name (Debian and Raspberry Pi OS map it to 127.0.1.1), and 0.0.0.0: no other site can have
+  // a browser send them, so they read; managing needs localhost (a proxy on this computer may send its name too)
+  const me = os.hostname().toLowerCase();
+  const named = me && !/^(localhost|.+\.localhost|127\.\d+\.\d+\.\d+)$/.test(me) ? [me, me + ':' + api.port, os.hostname().toUpperCase()] : [];
+  for (const host of named.concat('0.0.0.0:' + api.port)) {
+    const s = await raw('GET', '/status', host);
+    assert.deepEqual([s.status, s.json.manage.allowed], [200, false], host);
+    assert.equal((await raw('GET', '/hardware', host)).status, 200, host);
+    const m = await raw('POST', '/models/load', host, { model: 'gemma3:270m' });
+    assert.deepEqual([m.status, m.json.error.code], [403, 'manage_locked'], host);
+  }
+  for (const host of named.length ? [me + '.evil.example', 'evil.' + me, 'x' + me] : []) assert.equal((await raw('GET', '/hardware', host)).status, 403, host);
+  // behind a proxy TRUST_PROXY names ("loopback"): what it forwards is a visitor's, under the site's name, so it
+  // reads; it never manages unless with the admin token, also when the proxy sends no X-Forwarded-For and puts
+  // 127.0.0.1 in the Host header (nginx with only proxy_pass)
+  const behind = express();
+  behind.set('trust proxy', 'loopback');
+  behind.use('/api/local-ai', local.router);
+  const proxied = http.createServer(behind);
+  await new Promise(r => proxied.listen(0, '127.0.0.1', r));
+  const at = proxied.address().port;
+  try {
+    assert.equal((await raw('GET', '/hardware', 'metacode.example', undefined, { 'x-forwarded-for': '203.0.113.9' }, at)).status, 200);
+    const visitor = await raw('POST', '/models/load', 'metacode.example', { model: 'gemma3:270m' }, { 'x-forwarded-for': '203.0.113.9' }, at);
+    assert.deepEqual([visitor.status, visitor.json.error.code], [403, 'manage_locked']);
+    const bare = await raw('GET', '/status', '127.0.0.1:3000', undefined, {}, at);
+    assert.deepEqual([bare.status, bare.json.manage.allowed, bare.json.manage.how], [200, false, null]);
+    assert.deepEqual([(await raw('POST', '/models/load', '127.0.0.1:3000', { model: 'gemma3:270m' }, {}, at)).json.error.code], ['manage_locked']);
+    const token = await raw('POST', '/models/load', '127.0.0.1:3000', { model: 'gemma3:270m' }, { 'x-metacode-admin-token': 'admin-token-123456' }, at);
+    assert.equal(token.status, 200);
+    assert.equal((await raw('GET', '/hardware', 'evil.example', undefined, {}, at)).status, 403, 'with nothing forwarded, the Host still counts');
+  } finally { proxied.closeAllConnections(); await new Promise(r => proxied.close(r)); }
+  // without a token set, the message says what managing behind a proxy needs
+  const saved = localEnv.LOCAL_AI_ADMIN_TOKEN;
+  delete localEnv.LOCAL_AI_ADMIN_TOKEN;
+  try {
+    const app2 = express(); app2.set('trust proxy', 'loopback'); app2.use('/api/local-ai', local.router);
+    const s2 = http.createServer(app2);
+    await new Promise(r => s2.listen(0, '127.0.0.1', r));
+    try {
+      const st = await raw('GET', '/status', 'localhost', undefined, {}, s2.address().port);
+      assert.equal(st.json.manage.allowed, false);
+      assert.match(st.json.manage.reason, /^Behind a reverse proxy \(TRUST_PROXY\), installing and removing models needs LOCAL_AI_ADMIN_TOKEN/);
+    } finally { s2.closeAllConnections(); await new Promise(r => s2.close(r)); }
+  } finally { localEnv.LOCAL_AI_ADMIN_TOKEN = saved; }
   // a reverse proxy on this machine that forwards no client address: its site (PUBLIC_URL) reads, never manages
   localEnv.PUBLIC_URL = 'https://metac0.de, https://www.metac0.de:8443';
   try {
@@ -833,6 +883,10 @@ test('a model from another registry (hf.co/…), as Ollama lists it: loaded, sto
     assert.deepEqual([s.status, s.json.model, s.json.settings], [200, hf, { maxTokens: 256 }]);
     assert.deepEqual((await api('GET', '/models')).json.models.find(x => x.name === hf).settings, { maxTokens: 256 });
     assert.deepEqual(local.modelSettings('ollama/' + hf), { maxTokens: 256 });
+    // (an update downloads it again from Ollama's library: the list says it can't, so Installed Models offers none)
+    const listed = (await api('GET', '/models')).json.models;
+    assert.deepEqual(listed.filter(x => x.updatable === false).map(x => x.name), [hf]);
+    assert.ok(listed.length > 1 && listed.every(x => typeof x.updatable === 'boolean'));
     const u = await api('POST', '/models/update', { model: hf });
     assert.deepEqual([u.status, u.json.error.code], [400, 'invalid_model']);
     const d = await api('POST', '/models/delete', { model: hf });
@@ -842,6 +896,7 @@ test('a model from another registry (hf.co/…), as Ollama lists it: loaded, sto
     assert.equal(local.modelSettings('ollama/' + hf), null, 'its settings went with it');
     // a cloud model Ollama lists runs on Ollama's servers: nothing to load (it can be deleted)
     si.st.installed.set('gpt-oss:120b-cloud', { digest: 'd'.repeat(64), size: 384, blobs: [], remote_host: 'https://ollama.com:443' });
+    assert.equal((await api('GET', '/models')).json.models.find(x => x.name === 'gpt-oss:120b-cloud').updatable, false);
     const cloud = await api('POST', '/models/load', { model: 'gpt-oss:120b-cloud' });
     assert.deepEqual([cloud.status, cloud.json.error.code], [400, 'cloud_model']);
     assert.match(cloud.json.error.message, /^gpt-oss:120b-cloud runs on Ollama's servers, not on this computer/);

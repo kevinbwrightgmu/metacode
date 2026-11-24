@@ -228,8 +228,11 @@ Run `npm install`, then `METACODE_PROFILE=lite AI_MODE=local-only npm start` (RE
      elsewhere). A mismatch is reported, and the model stays installed. An interrupted download says so and
      can be resumed.
 4. **Installed Models.**
-   - Load a model into memory or stop it, update it, or delete it; each shows the space it uses. This works
-     for any model Ollama lists, also one pulled from another registry (`hf.co/…`).
+   - Load a model into memory or stop it, update it, or delete it; each shows the space it uses. Load, Stop,
+     Settings and Delete work for any model Ollama lists, also one pulled from another registry (`hf.co/…`)
+     (a cloud model has nothing to load). Update downloads the model again from Ollama's library, so it's
+     offered for names from there (like `gemma3:1b`); update a model from another registry with
+     `ollama pull <name>`.
    - Names that share one model's files (`gemma3:latest` and `gemma3:4b`) say so, and their files are counted
      once. Deleting one of them frees nothing while another stays.
    - **Use as default** makes a model MetaCode's default in this browser. Each AI task can have its own:
@@ -264,7 +267,8 @@ They manage their own models, so the Store doesn't install models for them.
 
 **From another device.** Installing and removing models is allowed from the computer MetaCode runs on. On a
 server, set `LOCAL_AI_ADMIN_TOKEN` (at least 12 characters) and enter it in the Store. Everyone else can
-browse, never install.
+browse, never install. Behind a reverse proxy that `TRUST_PROXY` names, managing models always needs the
+token, also on the server itself: a request from the proxy can be any visitor's.
 
 ## 6. Performance
 
@@ -368,11 +372,19 @@ system. The launchers start `server.js` and leave the rest to it: `METACODE_OPEN
 - **This computer only.** The packages listen on `127.0.0.1`. To let a phone or tablet on the same network
   in, set `METACODE_HOST=0.0.0.0`.
 - **The AI Model Store answers MetaCode's own pages only.** It sends no CORS headers, and cross-site requests
-  are refused. A request from this computer must also use this computer's own name (localhost, 127.x.x.x,
-  [::1]). So another site whose name points at 127.0.0.1 (DNS rebinding) gets nothing, not even what it could
-  read (this computer's hardware, its models). The one other name allowed is the site in `PUBLIC_URL`, for a
-  reverse proxy on the same machine that forwards no client address; it may read, and managing models still
-  needs the admin token. Ollama itself stays on 127.0.0.1, because it has no authentication.
+  are refused. A request from this computer must also use one of this computer's own names: localhost,
+  127.x.x.x, [::1], or (to read) its host name. So another site whose name points at 127.0.0.1 (DNS
+  rebinding) gets nothing from the Store's routes (`/api/local-ai`), not even what they'd let it read (this
+  computer's hardware, its models). Headers such as `X-Forwarded-For` don't change that, because a page can
+  add them itself: they count only from a proxy that `TRUST_PROXY` names. Managing models takes localhost,
+  127.x.x.x or [::1], and never comes from such a proxy without the admin token.
+  - **A reverse proxy on the same machine** should pass the visitor's address (`X-Forwarded-For`, as in
+    [deploy-vps.md](deploy-vps.md)), with `TRUST_PROXY=loopback`. One that passes only the site's own name
+    (`Host`) needs that name in `PUBLIC_URL`: it may read, and managing models needs the admin token.
+  - **One that passes neither** (nginx with only `proxy_pass`, which sends `Host: 127.0.0.1:3000`) makes
+    every visitor this computer, unless `TRUST_PROXY` names it. So keep deploy-vps.md's `Host`,
+    `X-Forwarded-For` and `X-Real-IP` lines, and `TRUST_PROXY=loopback`.
+  - Ollama itself stays on 127.0.0.1, because it has no authentication.
 - **Downloads are checked.**
   - Models: Ollama checks each file's sha256 as it downloads. MetaCode then compares the installed model's
     digest with the registry's manifest, and reports a mismatch.
@@ -479,7 +491,7 @@ portable folders), or in the data folder (`~/Library/Application Support/MetaCod
 | `METACODE_DATA_DIR` | One folder for everything the server keeps |
 | `OLLAMA_BASE_URL` | Where Ollama answers (`http://127.0.0.1:11434/v1`) |
 | `AI_LOCAL_CONTEXT_TOKENS` | How much a model on this machine takes in, prompt and answer together: 4096, Ollama's default, unless set. Set it to Ollama's `OLLAMA_CONTEXT_LENGTH`. A prompt that doesn't fit is refused with what to change, and Ask MetaCode sends only the parts of its reference that fit |
-| `LOCAL_AI_ADMIN_TOKEN` | Lets other devices install and remove models |
+| `LOCAL_AI_ADMIN_TOKEN` | Lets other devices install and remove models (behind a reverse proxy that `TRUST_PROXY` names, it's needed on the server too) |
 | `LOCAL_AI_LIBRARY_URL`, `LOCAL_AI_REGISTRY_URL` | A mirror of Ollama's library and registry |
 | `OLLAMA_PULL_IDLE_SECONDS` | How long a download may make no progress before it's stopped as interrupted (default 120 s); resuming continues |
 | `METACODE_ANALYTICS_ID` | Turns Google Analytics on (off by default) |

@@ -12,22 +12,25 @@
 // (A request from this machine under a name that is neither this machine's own nor PUBLIC_URL's is refused,
 // reads too: see the router's first handler.)
 // Managing models needs this machine itself (a request from 127.0.0.1 that no proxy forwarded, to this
-// machine's own name: localhost, 127.x.x.x or [::1]), or the LOCAL_AI_ADMIN_TOKEN from .env (header
-// X-MetaCode-Admin-Token). Visitors of a hosted MetaCode can browse the store, never download or delete:
+// machine's own name: localhost, 127.x.x.x or [::1], and not from a proxy TRUST_PROXY names), or the
+// LOCAL_AI_ADMIN_TOKEN from .env (header X-MetaCode-Admin-Token). Visitors of a hosted MetaCode can browse the
+// store; downloading or deleting needs the token:
 //   POST /installs {model}   POST /installs/pause|resume|cancel {model}
 //   POST /models/load|unload|delete|update {model}   PUT /models/settings {model, settings}
 //   POST /runtimes/scan      look for OpenAI-compatible servers on this machine
-// Downloads take a name from Ollama's library; loading, unloading, deleting and settings take any model Ollama
-// lists (also one from another registry, such as hf.co/<user>/<repo>:<quantization>), whatever the case.
+// Downloads and updates take a name from Ollama's library; loading, unloading, deleting and settings take any
+// model Ollama lists (also one from another registry, such as hf.co/<user>/<repo>:<quantization>), whatever the
+// case.
 'use strict';
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 const express = require('express');
 const { createOllama } = require('./ollama');
 const { createCatalog } = require('./catalog');
 const { createHardware } = require('./hardware');
-const { createInstalls, keyOf } = require('./installs');
+const { createInstalls, normalize, keyOf } = require('./installs');
 const { createRuntimes, MATRIX } = require('./runtimes');
 const { recommend, fit } = require('./recommend');
 const { defaultDataDir } = require('../lib/data-dir');
@@ -49,6 +52,20 @@ function publicHost(req, env) {
     try { return new URL(u.trim()).hostname.toLowerCase() === host; } catch (e) { return false; }
   });
 }
+// This computer's own name (Debian, Ubuntu and Raspberry Pi OS map it to 127.0.1.1), or 0.0.0.0: no other
+// website can make a browser send these. For reading only: a proxy on this computer may send its name too.
+const ownName = req => { const host = hostOf(req), me = String(os.hostname() || '').trim().toLowerCase(); return host === '0.0.0.0' || (!!me && host === me); };
+// The connection itself came from this computer (MetaCode's own pages in a browser here, a proxy here, or
+// another website's page whose name was made to point at 127.0.0.1)
+const fromThisComputer = req => { const a = String((req.socket && req.socket.remoteAddress) || ''); return a === '127.0.0.1' || a === '::1' || a === '::ffff:127.0.0.1'; };
+// It came from a proxy that TRUST_PROXY names (server.js: "loopback", a number of hops or addresses), so it may
+// be passing a visitor on, with X-Forwarded-For or without (nginx with only proxy_pass sends none)
+function trustedProxy(req) {
+  const trust = req.app && req.app.get('trust proxy fn');
+  const a = String((req.socket && req.socket.remoteAddress) || '');
+  return !!a && typeof trust === 'function' && !!trust(a, 0);
+}
+const forwarded = req => { const h = req.headers || {}; return !!(h['x-forwarded-for'] || h['forwarded'] || h['x-real-ip']); };
 // A name Ollama may list a model under: a host, a namespace, the model and its tag
 const LISTED_NAME = /^[a-z0-9_][a-z0-9._:/-]{0,400}$/i;
 
@@ -100,10 +117,14 @@ function createLocalAi(opts) {
       const b = crypto.createHash('sha256').update(given).digest();
       if (crypto.timingSafeEqual(a, b)) return { allowed: true, how: 'token' };
     }
-    if (isLocal(req) && loopbackHost(req)) return { allowed: true, how: 'this-machine' };
+    // (never through a proxy TRUST_PROXY names: one that sends no X-Forwarded-For and puts 127.0.0.1 in the Host
+    // header, as nginx with only proxy_pass does, would make every visitor this machine)
+    const proxy = trustedProxy(req);
+    if (isLocal(req) && loopbackHost(req) && !proxy) return { allowed: true, how: 'this-machine' };
     return {
       allowed: false, how: null, tokenSet: token.length >= 12,
       reason: token.length >= 12 ? 'Enter this server\'s admin token (LOCAL_AI_ADMIN_TOKEN) to install or remove models.'
+        : proxy ? 'Behind a reverse proxy (TRUST_PROXY), installing and removing models needs LOCAL_AI_ADMIN_TOKEN (at least 12 characters) in the server\'s .env: set it and click Reload .env.'
         : 'Installing and removing models works on the computer MetaCode runs on. To manage them from another device, set LOCAL_AI_ADMIN_TOKEN (at least 12 characters) in the server\'s .env and click Reload .env.',
     };
   }
@@ -136,6 +157,8 @@ function createLocalAi(opts) {
         contextLength: d.context_length || null, capabilities: Array.isArray(m.capabilities) ? m.capabilities : null,
         loaded: r ? { size: r.size, sizeVram: r.size_vram || 0, expiresAt: r.expires_at || null, contextLength: r.context_length || null } : null,
         settings: settingsOf(m.name),
+        // (Update downloads it again from Ollama's library: not a model from another registry, nor a cloud model)
+        updatable: !!normalize(m.name),
       };
     }).sort((a, b) => a.name.localeCompare(b.name));
     // (names with the same digest are one model under several names, e.g. gemma3:latest and gemma3:4b: its files
@@ -148,15 +171,17 @@ function createLocalAi(opts) {
   }
 
   const router = express.Router();
-  // MetaCode's own pages only: a request from this machine (from 127.0.0.1, through no proxy) under a name that
-  // isn't this machine's comes from another website whose name was made to point at 127.0.0.1 ("DNS rebinding"),
-  // and reads nothing either (the hardware and the home folder's path, the models). A reverse proxy on this
-  // machine that forwards no client address looks the same: its site's name, in PUBLIC_URL, may read (managing
-  // still needs the admin token).
+  // MetaCode's own pages only. A request from this computer under a name that isn't this computer's comes from
+  // another website whose name was made to point at 127.0.0.1 ("DNS rebinding"), and reads nothing either (the
+  // hardware and the home folder's path, the models). The Host header says the name: a page can't change it.
+  // X-Forwarded-For and the like count only from a proxy TRUST_PROXY names, as any page can add them to its own
+  // requests. So a reverse proxy on this computer needs TRUST_PROXY, or its site's name in PUBLIC_URL; the latter
+  // may read, and managing models needs the admin token either way.
   router.use((req, res, next) => {
-    if (!isLocal(req) || loopbackHost(req) || publicHost(req, env)) return next();
-    res.status(403).json({ error: { type: 'forbidden', code: 'foreign_host', message: 'The AI Model Store answers MetaCode\'s own pages only, and "' + hostOf(req).slice(0, 100) +
-      '" isn\'t a name of this computer. Open MetaCode at localhost (or 127.0.0.1); behind a reverse proxy on this computer, set PUBLIC_URL in .env to the site\'s address.' } });
+    if (!fromThisComputer(req) || (forwarded(req) && trustedProxy(req)) || loopbackHost(req) || ownName(req) || publicHost(req, env)) return next();
+    const me = String(os.hostname() || '').trim().toLowerCase();
+    res.status(403).json({ error: { type: 'forbidden', code: 'foreign_host', message: 'The AI Model Store answers MetaCode\'s own pages only: open MetaCode at localhost, 127.0.0.1' +
+      (me ? ' or "' + me.slice(0, 100) + '" (this computer\'s name)' : '') + ', not "' + hostOf(req).slice(0, 100) + '". Behind a reverse proxy on this computer, set TRUST_PROXY, or PUBLIC_URL to the site\'s address, in .env.' } });
   });
   router.use(express.json({ limit: '64kb' }));
 
