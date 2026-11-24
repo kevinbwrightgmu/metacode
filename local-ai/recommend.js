@@ -5,7 +5,7 @@
 // (a 292 MB file) took 326 MB loaded. Budget = total memory minus what the system, the browser and MetaCode
 // need (at least 1.5 GB, or a quarter of it). A model over the budget is never recommended.
 'use strict';
-const { params } = require('./catalog');
+const { params, pullsMlx, sizeHere } = require('./catalog');
 
 const GB = 1e9;
 const TIERS = [
@@ -31,10 +31,13 @@ function budgetOf(hw) {
   return { total, available: Number.isFinite(hw.memory.available) ? hw.memory.available : null, budget: Math.max(0, total - reserve), reserve, gpu };
 }
 
-// The tag of a model to offer here: the biggest that fits the budget (the best answers this device can give)
-function pickTag(model, budget) {
+// The tag of a model to offer here: the biggest that fits the budget (the best answers this device can give).
+// (mlx: whether the Ollama here takes a tag's MLX variant, catalog.js's pullsMlx)
+function pickTag(model, budget, mlx) {
+  // (each tag at its download here: for a tag with variants for several runners, the one this Ollama takes)
+  const here = (model.tags || []).map(t => Object.assign({}, t, { size: sizeHere(t, mlx) }));
   // (":latest" is one of the other tags under another name: the same file, so it isn't offered twice)
-  const tags = (model.tags || []).filter(t => t.size && !(/:latest$/.test(t.tag) && (model.tags || []).some(o => o !== t && o.size === t.size)));
+  const tags = here.filter(t => t.size && !(/:latest$/.test(t.tag) && here.some(o => o !== t && o.size === t.size)));
   const sized = tags.map(t => {
     const v = t.tag.split(':')[1];
     return { tag: t.tag, size: t.size, context: t.context, inputs: t.inputs, estimated: false, need: ramNeeded(t.size, params(v)) };
@@ -53,15 +56,17 @@ function pickTag(model, budget) {
 const experimental = m => /\b(preview|experimental|exp|beta)\b/i.test(m.name + ' ' + (m.description || '')) || (m.pulls !== null && m.pulls < 20000);
 
 // → { device, tiers: [{ id, name, note, models: [...] }], tooBig }
+// (opts.ollamaVersion: the version of the Ollama here, when known, for the variant it takes of a tag)
 function recommend(catalogModels, hw, opts) {
   const b = budgetOf(hw);
   const limit = (opts && opts.perTier) || 12;
+  const mlx = pullsMlx(hw.appleSilicon, opts && opts.ollamaVersion);
   const tiers = TIERS.map(t => Object.assign({ models: [] }, t)).concat([{ id: 'experimental', name: 'Experimental', note: 'New or rarely used models: interesting, but less tested.', models: [] }]);
   let tooBig = 0;
   for (const m of catalogModels) {
     // (embedding models can't chat, and no MetaCode feature uses them: they're under "All models")
     if ((m.capabilities || []).includes('embedding') || (m.categories && !m.categories.includes('general'))) continue;
-    const { pick } = pickTag(m, b.budget);
+    const { pick } = pickTag(m, b.budget, mlx);
     if (!pick) { tooBig++; continue; }
     const entry = {
       name: m.name, tag: pick.tag, size: pick.size, need: pick.need, estimated: pick.estimated, context: pick.context, inputs: pick.inputs,

@@ -3,7 +3,8 @@
 // sha256 of the registry's manifest, names are looked up whatever their case and listed in the case of the
 // first pull, HEAD /api/blobs/<digest> says whether a layer is complete on disk), for ollama.com's library
 // pages and for Ollama's registry (manifests at /v2/<namespace>/<model>/manifests/<tag>, a "%2F" in a name is
-// no separator; gemma4's size tags are manifest lists, one variant per runner, each variant a blob).
+// no separator; gemma4's size tags are manifest lists, one variant per runner, each variant a blob, and its tags
+// page shows them as size ranges).
 // Used by test/local-ai.test.js and test/local-ai-e2e.test.js.
 const fs = require('fs');
 const path = require('path');
@@ -14,6 +15,8 @@ const express = require('express');
 const FIXTURES = path.join(__dirname, '..', 'fixtures', 'ollama');
 const LIBRARY_HTML = fs.readFileSync(path.join(FIXTURES, 'library.html'), 'utf8');
 const TAGS_HTML = fs.readFileSync(path.join(FIXTURES, 'gemma3-tags.html'), 'utf8');
+// (gemma4's shows size ranges: its size tags have variants for llama.cpp and MLX)
+const TAG_PAGES = new Map([['gemma3', TAGS_HTML], ['gemma4', fs.readFileSync(path.join(FIXTURES, 'gemma4-tags.html'), 'utf8')]]);
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const sha256 = s => crypto.createHash('sha256').update(s).digest('hex');
 const MANIFEST = 'application/vnd.docker.distribution.manifest.v2+json';
@@ -132,7 +135,7 @@ function standIns(opts) {
   });
   // ollama.com (the library) and the registry
   app.get('/library', (req, res) => res.type('html').send(LIBRARY_HTML));
-  app.get('/library/:name/tags', (req, res) => (req.params.name === 'gemma3' ? res.type('html').send(TAGS_HTML) : res.status(404).send('no')));
+  app.get('/library/:name/tags', (req, res) => (TAG_PAGES.has(req.params.name) ? res.type('html').send(TAG_PAGES.get(req.params.name)) : res.status(404).send('no')));
   // (the raw path: each part decoded on its own, as a registry does)
   const variants = new Map();    // digest → body: the variants of the manifest lists served
   app.get(/^\/v2\/.+\/(manifests|blobs)\/[^/]+$/, async (req, res) => {

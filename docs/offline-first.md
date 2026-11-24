@@ -217,6 +217,9 @@ Run `npm install`, then `METACODE_PROFILE=lite AI_MODE=local-only npm start` (RE
      embeddings, small, multilingual), capabilities, and sorting by popularity, date or size.
    - Each model lists its tags. For each tag it gives the download size, the memory needed, the context
      window and the inputs, and whether it fits this device.
+   - A tag with variants for several runners (ollama.com shows a size range) is given, there and in
+     Recommended, at the size of the variant the Ollama here downloads, from Ollama's registry. When the
+     registry doesn't answer, or it isn't known whether this is Apple silicon, it is the range's upper bound.
 3. **Install.** Downloads show progress, speed and time left.
    - They can be paused, resumed (Ollama continues where it stopped) and cancelled.
    - One downloads at a time, the others queue, and the same model is never downloaded twice at once.

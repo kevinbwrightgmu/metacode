@@ -10,7 +10,7 @@ const path = require('path');
 const http = require('http');
 const crypto = require('crypto');
 const express = require('express');
-const { parseLibrary, parseTags, mainTags, categories, createCatalog, pickVariant, pullsMlx } = require('../local-ai/catalog');
+const { parseLibrary, parseTags, mainTags, categories, createCatalog, pickVariant, pullsMlx, sizeHere } = require('../local-ai/catalog');
 const { recommend, ramNeeded, fit } = require('../local-ai/recommend');
 const { createLocalAi } = require('../local-ai');
 const { createOllama } = require('../local-ai/ollama');
@@ -25,6 +25,14 @@ const TAGS_HTML = fs.readFileSync(path.join(FIXTURES, 'gemma3-tags.html'), 'utf8
 const GEMMA4_TAGS_HTML = fs.readFileSync(path.join(FIXTURES, 'gemma4-tags.html'), 'utf8');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const GB = 1e9;
+const GEMMA4 = { name: 'gemma4', capabilities: ['vision', 'tools', 'thinking'], sizes: ['e2b', 'e4b', '12b', '26b', '31b'], pulls: 29600000, description: 'Gemma 4 models.' };
+// gemma4's variants as Ollama's registry gave them (November 2026): what an Ollama on Apple Silicon that takes MLX
+// downloads, and what every other does (llama.cpp)
+const GEMMA4_VARIANTS = {
+  'gemma4:latest': { apple: 9461576343, other: 6583656505 }, 'gemma4:e4b': { apple: 9461576343, other: 6583656505 },
+  'gemma4:e2b': { apple: 7476595162, other: 4587156505 }, 'gemma4:12b': { apple: 7714091504, other: 8021618941 },
+  'gemma4:26b': { apple: 16146867483, other: 18731025629 }, 'gemma4:31b': { apple: 19424434885, other: 20385458234 },
+};
 
 // ── Reading the library ─────────────────────────────────────────────────────
 
@@ -53,19 +61,38 @@ test('a model\'s tags page: size, context window, inputs and digest per tag; the
   assert.deepEqual(mainTags(model, tags).map(t => t.tag), ['gemma3:latest', 'gemma3:270m', 'gemma3:1b', 'gemma3:4b']);
 });
 
-test('tags with variants for several runners show a size range: read as its upper bound, so a model\'s size tags (and :latest) are its main tags', () => {
+test('tags with variants for several runners show a size range: ranged, and read as its upper bound until the registry gives each variant\'s size; a model\'s size tags (and :latest) are its main tags', () => {
   const tags = parseTags(GEMMA4_TAGS_HTML, 'gemma4');
-  assert.deepEqual(tags.map(t => [t.tag, t.size]), [['gemma4:latest', 9.5e9], ['gemma4:e2b', 7.5e9], ['gemma4:e4b', 9.5e9], ['gemma4:12b', 8e9], ['gemma4:26b', 19e9],
-    ['gemma4:31b', 20e9], ['gemma4:e2b-it-q4_K_M', 4.6e9], ['gemma4:e2b-mlx', 7.5e9]]);
-  assert.deepEqual(tags.find(t => t.tag === 'gemma4:26b'), { tag: 'gemma4:26b', digest: 'ed3c4359df98', size: 19e9, context: 262144, inputs: ['text', 'image'] });
-  const model = { name: 'gemma4', capabilities: ['vision', 'tools', 'thinking'], sizes: ['e2b', 'e4b', '12b', '26b', '31b'], pulls: 29600000, description: 'Gemma 4 models.' };
-  const main = mainTags(model, tags);
+  assert.deepEqual(tags.map(t => [t.tag, t.size, !!t.ranged]), [['gemma4:latest', 9.5e9, true], ['gemma4:e2b', 7.5e9, true], ['gemma4:e4b', 9.5e9, true], ['gemma4:12b', 8e9, true],
+    ['gemma4:26b', 19e9, true], ['gemma4:31b', 20e9, true], ['gemma4:e2b-it-q4_K_M', 4.6e9, false], ['gemma4:e2b-mlx', 7.5e9, false]]);
+  assert.deepEqual(tags.find(t => t.tag === 'gemma4:26b'), { tag: 'gemma4:26b', digest: 'ed3c4359df98', size: 19e9, context: 262144, inputs: ['text', 'image'], ranged: true });
+  const main = mainTags(GEMMA4, tags);
   assert.deepEqual(main.map(t => t.tag), ['gemma4:latest', 'gemma4:e2b', 'gemma4:e4b', 'gemma4:12b', 'gemma4:26b', 'gemma4:31b']);
-  // (a size tag is recommended, not one of the first quantizations on the page)
-  const pick = gb => recommend([Object.assign({}, model, { categories: categories(model), tags: main })], hw(gb)).tiers.flatMap(t => t.models)[0];
+  // (a size tag is recommended, not one of the first quantizations on the page; without the variants' sizes, the
+  // upper bound)
+  const pick = gb => recommend([Object.assign({}, GEMMA4, { categories: categories(GEMMA4), tags: main })], linux(gb)).tiers.flatMap(t => t.models)[0];
   assert.equal(pick(16).tag, 'gemma4:e4b');
   assert.equal(pick(30).tag, 'gemma4:26b');
   assert.equal(pick(32).tag, 'gemma4:31b');
+});
+
+test('a tag with variants for several runners at the size of the one the Ollama here takes: llama.cpp off Apple Silicon and before Ollama 0.40, MLX on Apple Silicon; the upper bound where that isn\'t known', () => {
+  const tags = parseTags(GEMMA4_TAGS_HTML, 'gemma4').map(t => Object.assign(t, GEMMA4_VARIANTS[t.tag] ? { variants: GEMMA4_VARIANTS[t.tag] } : {}));
+  const model = Object.assign({}, GEMMA4, { categories: categories(GEMMA4), tags: mainTags(GEMMA4, tags) });
+  const pick = (device, ollamaVersion) => (recommend([model], device, { ollamaVersion }).tiers.flatMap(t => t.models)[0] || { tag: null }).tag;
+  assert.equal(pick(linux(8)), 'gemma4:e2b');                   // (4.59 GB: needs 5.28 of the 6 GB for models)
+  assert.equal(pick(linux(16)), 'gemma4:12b');                  // (e4b is 6.58 GB here, not MLX's 9.46)
+  assert.equal(pick(mac(8)), null);                             // (MLX's e2b is 7.48 GB)
+  assert.equal(pick(mac(8), '0.35.1'), 'gemma4:e2b');           // (an Ollama before 0.40 takes llama.cpp there too)
+  assert.equal(pick(mac(16)), 'gemma4:e4b');
+  assert.equal(pick(mac(32)), 'gemma4:31b');
+  assert.equal(pick(Object.assign(linux(8), { appleSilicon: null })), null);       // (not known: the upper bound, 7.5 GB)
+  // each tag's download and fit, as Details gives them
+  const e2b = tags.find(t => t.tag === 'gemma4:e2b');
+  assert.deepEqual([sizeHere(e2b, false), sizeHere(e2b, true), sizeHere(e2b, null)], [4587156505, 7476595162, 7.5e9]);
+  assert.equal(sizeHere(tags.find(t => t.tag === 'gemma4:e2b-it-q4_K_M'), true), 4.6e9);
+  assert.equal(fit('gemma4:e2b', sizeHere(e2b, false), linux(8)).level, 'good');
+  assert.equal(fit('gemma4:e2b', sizeHere(e2b, true), mac(8)).level, 'too-big');
 });
 
 test('a manifest list: the variant Ollama pulls, as Ollama picks it (MLX first on Apple Silicon, llama.cpp first elsewhere)', () => {
@@ -88,6 +115,20 @@ test('the shipped snapshot: hundreds of local models with their tags, for a firs
   assert.ok(Date.parse(snap.fetchedAt));
   assert.ok(snap.tags.gemma3 && snap.tags.gemma3.tags.some(t => t.tag === 'gemma3:270m' && t.size > 2e8));
   assert.ok(!snap.models.some(m => m.capabilities.includes('cloud')));
+  // (a tag shown as a size range has each variant's size from the registry)
+  const ranged = snap.tags.gemma4.tags.filter(t => t.ranged);
+  assert.ok(ranged.length >= 5 && ranged.every(t => t.variants && t.variants.apple > 1e9 && t.variants.other > 1e9), JSON.stringify(ranged));
+});
+
+test('recommendations from the shipped snapshot, offline, take the variant the Ollama here takes: gemma4:e2b on an 8 GB PC, none on an 8 GB Mac with Apple Silicon; nemotron-3-nano:30b fits a 32 GB Mac', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-snapshot-'));
+  try {
+    const models = createCatalog({ dataDir: dir, fetch: () => Promise.reject(new TypeError('fetch failed')) }).list().models;
+    const pick = (device, name) => (recommend(models, device, { perTier: 1000 }).tiers.flatMap(t => t.models).find(m => m.name === name) || { tag: null }).tag;
+    assert.deepEqual([pick(linux(8), 'gemma4'), pick(linux(16), 'gemma4'), pick(mac(8), 'gemma4')], ['gemma4:e2b', 'gemma4:12b', null]);
+    // (its MLX variant is 18.3 GB; llama.cpp's, 24.3 GB, doesn't fit a 32 GB PC)
+    assert.deepEqual([pick(mac(32), 'nemotron-3-nano'), pick(linux(32), 'nemotron-3-nano')], ['nemotron-3-nano:30b', 'nemotron-3-nano:4b']);
+  } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
 test('model names: library names only, ":latest" when there is no tag, never a cloud tag; a tag keeps its case, and names that differ only in case are one model', () => {
@@ -106,6 +147,9 @@ test('model names: library names only, ":latest" when there is no tag, never a c
 // ── Recommendations ─────────────────────────────────────────────────────────
 
 const hw = (totalGb, gpus) => ({ memory: { total: totalGb * GB, available: totalGb * GB * 0.7 }, gpus: gpus || [], os: { platform: 'linux' }, arch: 'x64', disk: { free: 100 * GB } });
+// (as hardware.js describes a PC and a Mac with Apple Silicon)
+const linux = gb => Object.assign(hw(gb), { appleSilicon: false });
+const mac = gb => Object.assign(hw(gb, [{ vendor: 'apple', name: 'Apple Silicon GPU (Metal)', memory: gb * GB, shared: true, usable: true }]), { os: { platform: 'darwin' }, arch: 'arm64', appleSilicon: true });
 const catalogModels = () => {
   const models = parseLibrary(LIBRARY_HTML).map(m => Object.assign(m, { categories: categories(m) }));
   const tags = parseTags(TAGS_HTML, 'gemma3');
@@ -845,6 +889,73 @@ test('the variant is the one the Ollama that pulls takes: before 0.40 Ollama ask
     disk.free = 100 * GB;
     si.st.installed.delete('gemma4:12b');
     si.st.installed.delete('gemma4:31b');
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Details, the list and the recommendations give a tag shown as a size range at the download of the variant the Ollama here takes, and its fit from that', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-ranges-'));
+  // (a catalog that has gemma4; its tags page and its manifest lists are the stand-in's)
+  fs.writeFileSync(path.join(dir, 'catalog.json'), JSON.stringify({ fetchedAt: new Date().toISOString(), models: parseLibrary(LIBRARY_HTML).concat(Object.assign({ tagCount: 49, updated: null }, GEMMA4)), tags: {} }));
+  const device = { appleSilicon: false };
+  const store = createLocalAi({
+    env: { OLLAMA_BASE_URL: si.base + '/v1', LOCAL_AI_DATA_DIR: dir }, libraryUrl: si.base + '/library', registry: si.base + '/v2/library/', minLibraryModels: 1, isLoopback: () => true,
+    hardware: { detect: async () => ({ os: { platform: 'linux' }, arch: 'x64', appleSilicon: device.appleSilicon, cpu: { threads: 4 }, memory: { total: 16 * GB, available: 12 * GB }, gpus: [], disk: { path: dir, free: 100 * GB, total: 200 * GB } }) },
+  });
+  const app = express();
+  app.use('/api/local-ai', store.router);
+  const server = http.createServer(app);
+  await new Promise(r => server.listen(0, '127.0.0.1', r));
+  const get = async p => (await fetch('http://127.0.0.1:' + server.address().port + '/api/local-ai' + p)).json();
+  const LLAMA = MODEL_BYTES + 800, MLX = MODEL_BYTES + 1e6 + 800;
+  // → the size of gemma4:e2b in Details (with its fit's need), in the list, and of the recommended gemma4 tag
+  const sizes = async () => {
+    const e2b = (await get('/catalog/model?name=gemma4')).tags.find(t => t.tag === 'gemma4:e2b');
+    assert.equal(e2b.fit.need, ramNeeded(e2b.size, 2e9));
+    const listed = (await get('/catalog')).models.find(m => m.name === 'gemma4').tags.find(t => t.tag === 'gemma4:e2b');
+    const recommended = (await get('/recommendations')).tiers.flatMap(t => t.models).find(m => m.name === 'gemma4');
+    return [e2b.size, listed.size, recommended.size];
+  };
+  try {
+    const details = await get('/catalog/model?name=gemma4');
+    const e2b = details.tags.find(t => t.tag === 'gemma4:e2b');
+    assert.deepEqual([e2b.ranged, e2b.variants], [true, { apple: MLX, other: LLAMA }]);
+    const q4 = details.tags.find(t => t.tag === 'gemma4:e2b-it-q4_K_M');           // (one variant: the size shown)
+    assert.deepEqual([q4.ranged, q4.variants, q4.size], [undefined, undefined, 4.6e9]);
+    // a PC: llama.cpp; a Mac with Apple Silicon and Ollama 0.40: MLX; Ollama 0.35 on that Mac: llama.cpp
+    assert.deepEqual(await sizes(), [LLAMA, LLAMA, LLAMA]);
+    device.appleSilicon = true;
+    assert.deepEqual(await sizes(), [MLX, MLX, MLX]);
+    si.st.version = '0.35.1';
+    assert.deepEqual(await sizes(), [LLAMA, LLAMA, LLAMA]);
+    // not known whether this is Apple Silicon: the range's upper bound
+    si.st.version = '0.40.17';
+    device.appleSilicon = null;
+    assert.deepEqual((await sizes()).slice(0, 2), [7.5e9, 7.5e9]);
+  } finally {
+    si.st.version = '0.40.17';
+    store.close();
+    server.closeAllConnections();
+    await new Promise(r => server.close(r));
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('a tags page whose variants the registry doesn\'t give in time: Details doesn\'t wait longer, and the range\'s upper bound stays', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-ranges-slow-'));
+  try {
+    const c = createCatalog({ dataDir: dir, fetch: (u, i) => fetch(u, i), libraryUrl: si.base + '/library', registry: si.base + '/v2/library/', variantMs: 300 });
+    si.st.registryDelayMs = 2000;
+    const t0 = Date.now();
+    const t = await c.tagsOf('gemma4', true);
+    assert.ok(Date.now() - t0 < 1500, (Date.now() - t0) + ' ms');
+    const e2b = t.tags.find(x => x.tag === 'gemma4:e2b');
+    assert.deepEqual([e2b.ranged, e2b.variants, sizeHere(e2b, false)], [true, undefined, 7.5e9]);
+    // (and once the registry answers, each variant's size)
+    si.st.registryDelayMs = 0;
+    assert.deepEqual((await c.tagsOf('gemma4', true)).tags.find(x => x.tag === 'gemma4:e2b').variants, { apple: MODEL_BYTES + 1e6 + 800, other: MODEL_BYTES + 800 });
+  } finally {
+    si.st.registryDelayMs = 0;
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });

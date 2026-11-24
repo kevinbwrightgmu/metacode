@@ -95,7 +95,7 @@ function parseLibrary(html) {
 }
 
 // ── ollama.com/library/<name>/tags ─────────────────────────────────────────
-// → [{ tag: "gemma3:270m", digest: "e7d36fb2c3b3", size, context, inputs: ["text"] }]
+// → [{ tag: "gemma3:270m", digest: "e7d36fb2c3b3", size, context, inputs: ["text"], ranged? }]
 function parseTags(html, name) {
   const out = [];
   const seen = new Set();
@@ -107,15 +107,15 @@ function parseTags(html, name) {
     if (seen.has(tag) || /:.*cloud/i.test(tag)) continue;
     const line = text(m[2]);                    // "gemma3:270m e7d36fb2c3b3 • 292MB • 32K context window • Text input • 1 year ago"
     const digest = (/\b([0-9a-f]{12})\b/.exec(line) || [])[1] || null;
-    // (a tag with variants for several runners shows a range, "16GB - 19GB": the bigger, so the estimates of
-    // memory and disk stay on the safe side)
+    // (a tag with variants for several runners shows a range, "16GB - 19GB", which doesn't say which variant is
+    // which: ranged, and the bigger until the registry gives each variant's size, see variantSizes)
     const sizes = /•\s*([\d.]+\s*(?:B|KB|MB|GB|TB))(?:\s*[-–]\s*([\d.]+\s*(?:B|KB|MB|GB|TB)))?\s*•/i.exec(line);
     const size = sizes && bytes(sizes[2] || sizes[1]);
     const context = tokens((/•\s*([\d.]+\s*[KM]?)\s*context window/i.exec(line) || [])[1]);
     const inputs = ((/•\s*([A-Za-z, ]+?)\s*input/i.exec(line) || [])[1] || '').split(',').map(s => s.trim().toLowerCase()).filter(Boolean);
     if (!size) continue;
     seen.add(tag);
-    out.push({ tag, digest, size, context, inputs });
+    out.push(Object.assign({ tag, digest, size, context, inputs }, sizes[2] ? { ranged: true } : {}));
   }
   return out;
 }
@@ -143,6 +143,10 @@ function pullsMlx(appleSilicon, version) {
   if (!listsAsked(version)) return false;
   return typeof appleSilicon === 'boolean' ? appleSilicon : null;
 }
+// A tag's download for the Ollama here (mlx: pullsMlx's answer). A tag shown as a range has each variant's size
+// (variants: { apple: what an Ollama on Apple Silicon that takes MLX gets, other: what every other gets }); the
+// size shown otherwise, and when it isn't known which this Ollama takes (for a range, its upper bound).
+const sizeHere = (t, mlx) => (t.variants && typeof mlx === 'boolean' && t.variants[mlx ? 'apple' : 'other']) || t.size;
 // The variant Ollama pulls from a manifest list (manifest/manifest.go, runnerPreferences): MLX first on a Mac
 // with Apple Silicon, llama.cpp first everywhere else. → the list's entry, or null when none fits
 function pickVariant(list, appleSilicon) {
@@ -191,6 +195,7 @@ function createCatalog(opts) {
   const libraryUrl = opts.libraryUrl || LIBRARY_URL;
   // (the library's namespace, …/v2/library/; models of other namespaces are beside it, …/v2/<user>/<model>)
   const root = String(opts.registry || REGISTRY).replace(/\/*$/, '/').replace(/\/library\/$/, '/');
+  const variantMs = opts.variantMs || 5000;      // (how long a model's tags wait for the registry's variant sizes)
   let mem = null;              // { source, fetchedAt, models: [...], tags: { name: { fetchedAt, tags } } }
   let refreshing = null;
   let failed = null;           // { at, problem }: ollama.com didn't answer (it isn't asked again for a while)
@@ -268,6 +273,9 @@ function createCatalog(opts) {
       const r = await get(libraryUrl + '/' + encodeURIComponent(name) + '/tags', 15000);
       if (r.status === 200) {
         const tags = parseTags(r.body, name);
+        // (a range: each variant's size from the registry, all at once and briefly, as Details waits for them;
+        // without an answer the upper bound stays)
+        await Promise.all(tags.filter(t => t.ranged).map(async t => { const v = await variantSizes(t.tag, variantMs); if (v) t.variants = v; }));
         if (tags.length) {
           cat.tags[name] = { fetchedAt: new Date(now()).toISOString(), tags };
           save();
@@ -320,20 +328,32 @@ function createCatalog(opts) {
     return { ok: true, size: blobs.reduce((n, l) => n + l.size, 0), digest, digests: digest && !digests.includes(digest) ? digests.concat(digest) : digests, blobs };
   }
 
-  // The catalog for the browser: each model with its categories and the tags known so far
-  function list() {
+  // A tag with variants for several runners: what Ollama downloads of it on a Mac with Apple Silicon (MLX, from
+  // Ollama 0.40) and everywhere else (llama.cpp) → { apple, other } in bytes, or null when the registry doesn't
+  // answer within `ms`
+  async function variantSizes(model, ms) {
+    const signal = AbortSignal.timeout(ms || 5000);
+    const [apple, other] = await Promise.all([true, false].map(a => manifest(model, { appleSilicon: a, signal }).catch(() => null)));
+    return apple && apple.ok && other && other.ok ? { apple: apple.size, other: other.size } : null;
+  }
+
+  // The catalog for the browser: each model with its categories and the tags known so far, each at its download
+  // for the Ollama here (mlx: pullsMlx's answer)
+  function list(mlx) {
     const cat = load();
     return {
       source: cat.source, fetchedAt: cat.fetchedAt,
       models: cat.models.map(m => {
         const t = cat.tags[m.name];
-        return Object.assign({}, m, { categories: categories(m), tags: t ? mainTags(m, t.tags) : [], allTags: t ? t.tags.length : null });
+        const tags = t ? mainTags(m, t.tags).map(x => Object.assign({}, x, { size: sizeHere(x, mlx) })) : [];
+        return Object.assign({}, m, { categories: categories(m), tags, allTags: t ? t.tags.length : null });
       }),
     };
   }
   function find(name) { return load().models.find(m => m.name === name) || null; }
 
-  return { refresh, tagsOf, manifest, list, find, mainTags };
+  // (pullsMlx and sizeHere too, for the routes)
+  return { refresh, tagsOf, manifest, variantSizes, list, find, mainTags, pullsMlx, sizeHere };
 }
 
-module.exports = { createCatalog, internetFetch, parseLibrary, parseTags, mainTags, categories, pickVariant, pullsMlx, params, bytes, tokens, count, LIBRARY_URL, SNAPSHOT };
+module.exports = { createCatalog, internetFetch, parseLibrary, parseTags, mainTags, categories, pickVariant, pullsMlx, sizeHere, params, bytes, tokens, count, LIBRARY_URL, SNAPSHOT };

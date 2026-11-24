@@ -202,23 +202,26 @@ function createLocalAi(opts) {
     res.json(Object.assign(await runtimes.list(await hardware.detect()), { matrix: MATRIX }));
   });
 
+  // (a tag with variants for several runners is given at the download of the one the Ollama here takes, which
+  // depends on its version too: catalog.js, pullsMlx)
   router.get('/catalog', async (req, res) => {
-    const r = await catalog.refresh(req.query.refresh === '1');
-    res.json(Object.assign(catalog.list(), { problem: r.ok ? null : r.problem }));
+    const [r, hw, version] = await Promise.all([catalog.refresh(req.query.refresh === '1'), hardware.detect(), ollama.version().catch(() => null)]);
+    res.json(Object.assign(catalog.list(catalog.pullsMlx(hw.appleSilicon, version)), { problem: r.ok ? null : r.problem }));
   });
   router.get('/catalog/model', async (req, res) => {
     const name = String(req.query.name || '').trim().toLowerCase();
     const model = catalog.find(name);
     if (!model) return fail(res, 404, 'not_found', 'The catalog has no model called "' + name.slice(0, 80) + '".');
-    const t = await catalog.tagsOf(name, req.query.refresh === '1');
-    const hw = await hardware.detect();
-    const tags = t.tags.map(x => Object.assign({}, x, { fit: fit(x.tag, x.size, hw), main: catalog.mainTags(model, t.tags).includes(x) }));
+    const [t, hw, version] = await Promise.all([catalog.tagsOf(name, req.query.refresh === '1'), hardware.detect(), ollama.version().catch(() => null)]);
+    const mlx = catalog.pullsMlx(hw.appleSilicon, version);
+    const main = catalog.mainTags(model, t.tags);
+    const tags = t.tags.map(x => { const size = catalog.sizeHere(x, mlx); return Object.assign({}, x, { size, fit: fit(x.tag, size, hw), main: main.includes(x) }); });
     res.json(Object.assign({}, model, { tags, tagsFetchedAt: t.fetchedAt, tagsOffline: !!t.offline || !!t.stale }));
   });
   router.get('/recommendations', async (req, res) => {
-    await catalog.refresh(false);
-    const hw = await hardware.detect();
-    res.json(Object.assign(recommend(catalog.list().models, hw), { catalog: { source: catalog.list().source, fetchedAt: catalog.list().fetchedAt } }));
+    const [, hw, version] = await Promise.all([catalog.refresh(false), hardware.detect(), ollama.version().catch(() => null)]);
+    const list = catalog.list();
+    res.json(Object.assign(recommend(list.models, hw, { ollamaVersion: version }), { catalog: { source: list.source, fetchedAt: list.fetchedAt } }));
   });
 
   router.get('/models', async (req, res) => {
