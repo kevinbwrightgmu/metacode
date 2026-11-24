@@ -22,7 +22,9 @@ function ramNeeded(size, paramCount) {
 // Where a model runs. A GPU of its own: there if the model fits, else on the CPU. One that shares the memory (Apple
 // Silicon, its memory what Metal may use): an MLX variant runs on it; llama.cpp, Ollama's runner for the rest,
 // puts the weights and the context's cache on it but keeps 1 GiB of it free (llama-server's --fit), and runs the
-// layers that don't fit on the CPU: "mixed". (mlx: the variant here is MLX)
+// layers that don't fit on the CPU: "mixed". (The cache is the 4,096 tokens of Ollama's default on a Mac of up
+// to 32 GiB; with more memory Ollama's default context is 32K and more, and the biggest models there can split
+// although this says GPU: the catalog has no per-model cache size to say better.) (mlx: the variant here is MLX)
 const FIT_MARGIN = 2 ** 30;
 function runsOn(gpu, size, paramCount, need, mlx) {
   if (!gpu) return 'cpu';

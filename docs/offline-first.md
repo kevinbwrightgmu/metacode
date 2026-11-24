@@ -262,8 +262,12 @@ mode, a two-sentence answer.
 | `gemma3:1b` (Ultra lightweight) | 806 MB | 883 MB | 122 ms / 2.1 s | ~22 tokens/s | Correct and usable |
 
 Larger models need more memory and answer more slowly on a CPU. A GPU, or Apple silicon's unified memory,
-changes this a lot. On Apple silicon, Metal may use about 2/3 of the memory (3/4 above 32 GB): a model too big
-for that runs partly on the CPU, and its card says so.
+changes this a lot. On Apple silicon, Metal may use about 2/3 of the memory (3/4 above 32 GB): a model whose
+weights and a 4K context don't fit that runs partly on the CPU, and its card says so. On a Mac with more than
+32 GB, Ollama gives a model more context unless told otherwise (32K, and from 64 GB up to 256K, or the model's
+own limit), so the biggest models there can run partly on the CPU although their card says GPU: a 70B on a
+64 GB Mac needs more memory than the Mac has. For the cards to hold, set `OLLAMA_CONTEXT_LENGTH` (the Ollama
+app's Context length setting) to 4096 or 8192, and `AI_LOCAL_CONTEXT_TOKENS` to the same.
 
 **Where the AI runs** (`AI_MODE`):
 - `cloud` is the hosted default: cloud providers first, Ollama the last-resort backup.
