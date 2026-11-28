@@ -19,6 +19,7 @@
 //                             administrator grants no plan and no access to other people's data.
 //   ACCOUNT_DATA_DIR          usage counters and Stripe customer links (default account-data/)
 
+const { defaultDataDir } = require('../lib/data-dir');
 const path = require('path');
 
 const DEFAULT_PRODUCTS = { pro: 'prod_VQeJh2lPqfmae9', max: 'prod_VQeK26tKchu1VI', ultra: 'prod_VQeKXAJtQQLKqm' };
@@ -135,7 +136,7 @@ function accountConfig(env) {
     overrides: parseOverrides(env.ACCOUNT_PLAN_OVERRIDES),
     admins: parseAdmins(env.ADMIN_EMAILS),
     publicUrl,
-    dataDir: path.resolve(String(env.ACCOUNT_DATA_DIR || '').trim() || path.join(__dirname, '..', 'account-data')),
+    dataDir: path.resolve(String(env.ACCOUNT_DATA_DIR || '').trim() || defaultDataDir('account-data', env)),
     problems
   };
 }

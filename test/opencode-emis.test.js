@@ -795,18 +795,19 @@ test('a base URL without /v1 (the website answers) is corrected automatically, w
 
 test('EMIS_PROXY: requests go through it (Node.js and Python)', async t => {
   let proxied = 0;
-  // Handles both CONNECT tunnels and plain forwarded requests (absolute URLs)
+  // Handles both CONNECT tunnels and plain forwarded requests (absolute URLs). gateway.test is the gateway on
+  // the internet: only the proxy knows where it is (the stand-in's port on 127.0.0.1)
   const proxy = http.createServer((req, res) => {
     proxied++;
     const target = new URL(req.url);
-    const up = http.request({ hostname: target.hostname, port: target.port, path: target.pathname + target.search, method: req.method, headers: req.headers }, ur => { res.writeHead(ur.statusCode, ur.headers); ur.pipe(res); });
+    const up = http.request({ hostname: target.hostname === 'gateway.test' ? '127.0.0.1' : target.hostname, port: target.port, path: target.pathname + target.search, method: req.method, headers: req.headers }, ur => { res.writeHead(ur.statusCode, ur.headers); ur.pipe(res); });
     up.on('error', () => { res.statusCode = 502; res.end(); });
     req.pipe(up);
   });
   proxy.on('connect', (req, socket, head) => {
     proxied++;
     const [host, port] = req.url.split(':');
-    const up = net.connect(Number(port), host, () => { socket.write('HTTP/1.1 200 Connection Established\r\n\r\n'); if (head && head.length) up.write(head); up.pipe(socket); socket.pipe(up); });
+    const up = net.connect(Number(port), host === 'gateway.test' ? '127.0.0.1' : host, () => { socket.write('HTTP/1.1 200 Connection Established\r\n\r\n'); if (head && head.length) up.write(head); up.pipe(socket); socket.pipe(up); });
     up.on('error', () => socket.destroy()); socket.on('error', () => up.destroy());
   });
   await new Promise(r => proxy.listen(0, '127.0.0.1', r));
@@ -828,16 +829,26 @@ test('EMIS_PROXY: requests go through it (Node.js and Python)', async t => {
       });
     });
     // without EMIS_PROXY: HTTPS_PROXY / HTTP_PROXY with NO_PROXY from the service's environment
-    await withProvider({ env: { HTTP_PROXY: proxyUrl, NO_PROXY: 'example.invalid' } }, async p => {
+    const remote = { baseURL: 'http://gateway.test:' + emis.port + '/v1' };
+    await withProvider({ env: { HTTP_PROXY: proxyUrl, NO_PROXY: 'example.invalid' }, options: remote }, async p => {
       proxied = 0;
-      await ask(p, 'other-1');
+      assert.equal((await ask(p, 'other-1')).choices[0].message.content, 'ok from other-1');
       assert.ok(proxied >= 1, 'HTTP_PROXY used');
     });
-    await withProvider({ env: { HTTP_PROXY: proxyUrl, NO_PROXY: '127.0.0.1' } }, async p => {
+    await withProvider({ env: { HTTP_PROXY: proxyUrl, NO_PROXY: 'gateway.test' }, options: remote }, async p => {
       proxied = 0;
-      await ask(p, 'other-1');
-      await p.models({ refresh: true });
+      await ask(p, 'other-1').catch(() => null);
+      await p.models({ refresh: true }).catch(() => null);
       assert.equal(proxied, 0, 'NO_PROXY honoured');
+    });
+    // an address on this machine (a relay to the gateway) is reached directly: a proxy for the internet can't
+    // reach this machine's 127.0.0.1. The gateway's models still aren't counted as this machine's
+    await withProvider({ env: { HTTP_PROXY: proxyUrl, NO_PROXY: '' } }, async p => {
+      proxied = 0;
+      assert.equal((await ask(p, 'other-1')).choices[0].message.content, 'ok from other-1');
+      assert.equal(proxied, 0, 'reached directly');
+      assert.equal(p.status().local, false);
+      assert.ok((await p.models()).every(m => m.local === false));
     });
   } finally {
     proxy.closeAllConnections();
@@ -920,7 +931,7 @@ test('the live model list (no models file): the gateway\'s order, image/embeddin
     const m = a.find(x => x.model === 'claude-opus-5.5');
     assert.deepEqual(m, {
       id: 'emis/claude-opus-5.5', provider: 'emis', providerName: 'AI gateway', model: 'claude-opus-5.5', name: 'claude-opus-5.5', free: false, available: true,
-      toolCall: undefined, reasoning: undefined, attachment: undefined, temperature: undefined, contextWindow: undefined, maxOutput: undefined,
+      local: false, toolCall: undefined, reasoning: undefined, attachment: undefined, temperature: undefined, contextWindow: undefined, maxOutput: undefined,
       variants: [], releaseDate: undefined, protocol: 'chat'
     });
     await p.models();
@@ -1054,7 +1065,7 @@ test('through the service (startService), when it is there: models listed with p
   const env = {
     OPENCODE_SERVICE_HOST: '127.0.0.1', OPENCODE_SERVICE_PORT: '0', OPENCODE_SERVICE_TOKEN: token, OPENCODE_SERVICE_DATA_DIR: dataDir,
     OPENCODE_DISABLED_PROVIDERS: 'opencode', OPENCODE_DISABLE_MODELS_FETCH: '1', METACODE_ENV_FILE: 'none', METACODE_LOG: 'off',
-    EMIS_BASE_URL: emisBase, EMIS_API_KEY: KEY, EMIS_TRANSPORT: 'node', EMIS_MODELS_FILE: 'none'
+    EMIS_BASE_URL: emisBase, EMIS_API_KEY: KEY, EMIS_TRANSPORT: 'node', EMIS_MODELS_FILE: 'none', OLLAMA_BACKUP: 'off'
   };
   let svc;
   try { svc = await S.startService({ env, port: 0, host: '127.0.0.1', dataDir, token, log }); }

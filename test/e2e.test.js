@@ -257,6 +257,16 @@ test('scraper job controls: pause at a safe point → paused state with checkpoi
   }
 });
 
+// The custom-code editor: CodeMirror (served by MetaCode, public/vendor/codemirror5), or the plain textarea it
+// falls back to when it can't load
+async function setScraperCode(page, code) {
+  await page.waitForFunction(() => document.querySelector('#sc-custom .CodeMirror') || (document.getElementById('sc-code') && document.getElementById('sc-code').offsetParent));
+  await page.evaluate(text => {
+    const cm = document.querySelector('#sc-custom .CodeMirror');
+    if (cm && cm.CodeMirror) cm.CodeMirror.setValue(text); else document.getElementById('sc-code').value = text;
+  }, code);
+}
+
 test('custom code: write a scraper, run it in the sandbox, see results', { skip }, async () => {
   const { page, context } = await openApp('#scraper');
   await page.click('.sc-mode[data-mode="custom"]');
@@ -266,7 +276,7 @@ test('custom code: write a scraper, run it in the sandbox, see results', { skip 
   assert.match(await page.textContent('#modal-body'), /ctx\.reddit\.pages/);
   await page.click('#modal-close');
   assert.equal(await page.inputValue('#sc-language'), 'python');     // Python is the default
-  await page.fill('#sc-code', [
+  await setScraperCode(page, [
     'import statistics',
     '',
     'async def scrape(ctx):',
@@ -287,7 +297,7 @@ test('custom code: write a scraper, run it in the sandbox, see results', { skip 
 
   // JavaScript still works; a failing script shows the sandbox's error.
   await page.selectOption('#sc-language', 'javascript');
-  await page.fill('#sc-code', 'async function scrape(ctx) {\n  throw new Error("deliberate failure");\n}');
+  await setScraperCode(page, 'async function scrape(ctx) {\n  throw new Error("deliberate failure");\n}');
   await page.click('#sc-start');
   await page.waitForFunction(() => document.querySelector('#sc-job-status') && document.querySelector('#sc-job-status').textContent === 'Failed', null, { timeout: 30000 });
   assert.match(await page.textContent('.sc-error-box'), /deliberate failure/);
@@ -327,6 +337,28 @@ test('in-app Reddit browser (Scramjet) loads pages through Wisp and sets the tar
   assert.equal(await page.inputValue('#sc-target-type'), 'url');
   // Requests from the browser reached the mock only through the Wisp proxy.
   assert.ok(mock.state.requests.some(r => r.path === '/r/test/comments/abc123/hello/'));
+  await context.close();
+});
+
+test('in-app Reddit browser: a new MetaCode version\'s service worker takes the tab over, and the browser keeps working', { skip }, async () => {
+  const { page, context } = await openApp('#scraper');
+  await page.waitForFunction(() => /RedditAPIs\.com|This browser|Public pages|Reddit Data API/.test(document.querySelector('#sc-status').textContent));
+  await page.click('#sc-browser-toggle');
+  const redditBase = 'http://localhost:' + mock.server.address().port;
+  await page.fill('#sc-browser-url', redditBase + '/r/test/');
+  const frame = page.frameLocator('#sc-browser-frame');
+  await frame.locator('#mock-title').waitFor({ timeout: 30000 });
+  // (the same service worker under a new address installs like an update: it activates and claims this tab)
+  const changed = await page.evaluate(() => new Promise(resolve => {
+    const before = navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener('controllerchange', () => resolve(navigator.serviceWorker.controller !== before), { once: true });
+    navigator.serviceWorker.register('/sw.js?update=1', { scope: '/', updateViaCache: 'none' });
+    setTimeout(() => resolve(false), 20000);
+  }));
+  assert.ok(changed, 'a new service worker took the tab over');
+  await page.click('.sc-browser-bar button[type=submit]');
+  await frame.locator('#mock-link').click();
+  await frame.locator('#mock-title:has-text("/comments/abc123/")').waitFor({ timeout: 15000 });
   await context.close();
 });
 

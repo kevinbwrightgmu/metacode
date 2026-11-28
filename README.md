@@ -27,6 +27,8 @@ The front page (`index.html`) introduces the four research methods — Reddit da
 | **Metrics** | Engagement averages, every post's engagement (sortable list — posts from the Scraper bring theirs), code distributions, engagement by code, AI–human agreement and completion charts |
 | **Export** | Download coded data, reliability reports, and codebook as CSV |
 | **MetaCode Assistant** | Built-in help chat — click **Ask MetaCode** (top right) to ask how to use any feature, what a number means, or how to fix an error; answers come from the same AI as AI Coding and use a summary of your project's current state |
+| **Works offline, on any device** | Install MetaCode from the browser (**Install**, or **Add to Home Screen** on phones): it opens and works without a connection, your data stays in the browser, and nothing is loaded from other sites (libraries and fonts come from MetaCode itself; analytics only if the operator turns it on). Phones get a navigation drawer. **Settings → Performance**: Potato, Balanced or Performance, or Auto for this device. Portable bundles and packages run MetaCode on Windows, macOS, Linux and Raspberry Pi with its own Node.js. See [docs/offline-first.md](docs/offline-first.md) |
+| **AI Model Store (local AI)** | Sidebar → **Local AI**. Ollama's library (kept for offline use), what fits this computer in tiers from Ultra lightweight to High performance (never more than its memory holds), downloads with progress, pause, resume and a check of what arrived; **Installed Models** (load, stop, update, delete, settings, a model for each AI task), **AI Chat** with a model on this computer, and **System** (this device and which AI runtimes work on it). With `AI_MODE=local-only` no prompt leaves the computer. See [docs/offline-first.md](docs/offline-first.md#5-local-ai-and-the-ai-model-store) |
 
 ---
 
@@ -84,6 +86,17 @@ step, Python 3 and MetaCode's AI — see [AI Scraper (beta)](#ai-scraper-beta) b
 **Running MetaCode on a server** (a VPS with pm2, nginx and HTTPS): follow **[docs/deploy-vps.md](docs/deploy-vps.md)**.
 It includes `ecosystem.config.cjs` for pm2 (MetaCode and its AI service as two apps) and an nginx config that
 forwards the Reddit Scraper browser's WebSocket.
+
+**On your own computer, without installing anything** (Windows, macOS, Linux, Raspberry Pi, a USB stick):
+```bash
+npm run build:portable                       # a folder for this computer: MetaCode, its own Node.js, a launcher
+npm run build:portable -- --all --packages   # every system, plus a Windows setup program, MetaCode.app, a .deb, an AppImage
+```
+They start MetaCode on this computer only (`127.0.0.1`), in its lite profile, with AI on this computer only
+(`AI_MODE=local-only`, models from the **AI Model Store** through [Ollama](https://ollama.com)), and open it in the
+browser. CI builds them too and starts each on its own system (`.github/workflows/portable.yml`); a `metacode-v*`
+tag makes a draft release with all of them. [docs/offline-first.md](docs/offline-first.md) covers each platform and
+how it was tested, installing, offline use, local AI, performance and the limits.
 
 ### Tests
 ```bash
@@ -451,7 +464,7 @@ same server and AI service. Each question sends the AI model:
 - the last few messages of the conversation.
 
 The conversation lives in memory only: it's cleared when you reload the page or click the clear button.
-Each question uses one prompt and roughly 3,000 tokens of the provider's budget.
+Each question uses one prompt and roughly 10,000 tokens of the provider's budget (the assistant's reference is sent with every question).
 
 ---
 
@@ -460,7 +473,7 @@ Each question uses one prompt and roughly 3,000 tokens of the provider's budget.
 Every AI feature — AI Coding, the assistant, column detection in Import Data and Analyze CSV, the AI Scraper, the
 AI Coding Lab and Test Connection — goes through MetaCode's own server to its **AI service**: an OpenCode service
 (`opencode/`, built on OpenCode's `@opencode/ai` package) that runs beside MetaCode on the same computer and
-reaches two AI providers:
+reaches two AI providers (and, as a last resort, small models on the server itself):
 
 ```
 browser → POST /api/ai (MetaCode server) → POST http://127.0.0.1:4097/v1/chat/completions (MetaCode's AI service)
@@ -471,6 +484,10 @@ browser → POST /api/ai (MetaCode server) → POST http://127.0.0.1:4097/v1/cha
   `OPENCODE_API_KEY` adds the paid ones, billed to that key's account.
 - **The AI gateway** (EMIS) — an OpenAI-compatible gateway with keys issued by hand (`EMIS_API_KEY`, see
   [Prerequisites](#prerequisites)), each with a budget.
+- **The local backup** (optional) — when [Ollama](https://ollama.com) runs on the server, two small models on it
+  (`gemma3:1b` and `gemma3:270m`, about 1.1 GB together, downloaded by the AI service itself) answer when every
+  other provider is out: only then, never as the default, one request at a time. They run on the server's CPU, so
+  they're slow and make more mistakes. Setup: [docs/deploy-vps.md](docs/deploy-vps.md#12-optional-a-local-backup-model-ollama).
 
 > **Privacy.** Free Zen models are rate-limited, and their providers may use prompts to improve their models during
 > the free period. AI Coding sends the text of the posts it codes. If you work with sensitive posts, use paid models
@@ -481,7 +498,9 @@ browser → POST /api/ai (MetaCode server) → POST http://127.0.0.1:4097/v1/cha
 
 `npm start` starts the AI service by itself (its log lines start with `[opencode]`); on a server pm2 runs it as a
 second app ([docs/deploy-vps.md](docs/deploy-vps.md)). How it runs, all its settings, its config file, its model
-catalog and its HTTP API: **[docs/opencode-service.md](docs/opencode-service.md)**.
+catalog and its HTTP API: **[docs/opencode-service.md](docs/opencode-service.md)**. Free, cheap and self-hosted
+models it can use (free tiers, a few cents a run, research credits, our own model):
+**[docs/free-ai-options.md](docs/free-ai-options.md)**.
 
 Configuration lives only in the server's `.env` file, which MetaCode and the AI service both read:
 
@@ -501,6 +520,12 @@ Configuration lives only in the server's `.env` file, which MetaCode and the AI 
 | `AI_BATCH_PAUSE_SECONDS` | no | How long AI Coding first pauses when the AI service answers with a server error (default 5; doubles with each pause, up to 60) |
 | `AI_KEEPALIVE_SECONDS` | no | The longest a streamed AI response (an AI Coding run, a Lab answer) stays silent while the model works: MetaCode sends a blank line or an SSE comment that every reader skips, so a proxy in front (Cloudflare, nginx) doesn't close it (default 15, 1–60) |
 | `AI_TIMEOUT_MS` | no | How long to wait for an AI answer (default 120000 ms). Older name: `EMIS_TIMEOUT_MS` |
+| `OLLAMA_BACKUP` | no | The local backup (Ollama on the server): `auto` (default — used when Ollama answers), `on` (always listed, with what's wrong) or `off` |
+| `METACODE_OLLAMA_MODELS` | no | The local models to offer, best first (default `gemma3:1b,gemma3:270m`, downloaded by themselves unless `OLLAMA_AUTO_PULL=off`, then every other model installed in the AI Model Store). `OLLAMA_MODELS` is read too when it's a list, as it used to be, but it is Ollama's own setting for its models folder. `OLLAMA_BASE_URL`: where Ollama answers (default `http://127.0.0.1:11434/v1`) |
+| `AI_LOCAL_TIMEOUT_MS`, `AI_LOCAL_PARALLEL` | no | How long one answer from a model on this machine may take (default 300000 ms) and how many it gets at once (default 1) |
+| `AI_LOCAL_CONTEXT_TOKENS` | no | How much a model on this machine takes in, prompt and answer together (default 4096, Ollama's own default without a big GPU; set it to Ollama's `OLLAMA_CONTEXT_LENGTH`). A prompt that doesn't fit isn't sent to such a model: it would lose its start. The answer gets what's left. Ask MetaCode sends a model on this machine only the parts of its reference that fit |
+| `AI_MODE` | no | `cloud` (default: the providers first, Ollama the last-resort backup), `local` (models on this machine first, and the default) or `local-only` (only them: no prompt leaves this machine) |
+| `LOCAL_AI_ADMIN_TOKEN` | no | Lets another device install and remove models in the AI Model Store (at least 12 characters); on the computer MetaCode runs on, no token is needed, unless it's behind a reverse proxy that `TRUST_PROXY` names |
 | `OPENCODE_SERVICE_URL`, `OPENCODE_SERVICE_PORT`, `OPENCODE_SERVICE_MANAGED`, … | no | Where the AI service runs and who starts it (default: `127.0.0.1:4097`, started by MetaCode unless pm2 runs it). `OPENCODE_SERVICE_URL=off` switches MetaCode's AI off. See [docs/opencode-service.md](docs/opencode-service.md#4-settings) |
 
 After changing `.env`, click **Settings → Reload .env** (AI settings apply at once, in the AI service too; scraper,
@@ -696,6 +721,13 @@ metacode/
 │                               datasets, checks, evaluations, optimisation, fine-tuning, code experiments
 │                               (experiments*.js, code-policy.js, code-sandbox.js + sandbox/ preludes) — see docs/ai-lab.md
 ├── lib/log.js                  Structured logging with secret redaction
+├── lib/pwa.js · pwa-sw.js      The installable app: /sw.js (works offline), /analytics.js (only with METACODE_ANALYTICS_ID)
+├── lib/data-dir.js             METACODE_DATA_DIR: one folder for everything the server keeps
+├── local-ai/                   AI Model Store (server side, /api/local-ai): Ollama's catalog, this device's hardware,
+│                               recommendations, downloads, installed models, runtimes — see docs/offline-first.md
+├── scripts/build-portable.js   Portable bundles and packages (npm run build:portable); scripts/smoke-portable.js checks one
+├── scripts/vendor-web.js       Copies the browser libraries and fonts into public/vendor (pinned, with checksums)
+├── packaging/                  The Windows and macOS packages' icons
 ├── types/                      Shared type definitions (scraper, AI Lab) for `npm run typecheck`
 ├── scraper/                    Scraper (server side) — see docs/reddit-scraper.md, docs/platforms.md
 │   ├── platforms/              YouTube (Data API v3) and X (API v2) jobs, through the same network route
@@ -720,6 +752,8 @@ metacode/
 ├── docs/deploy-vps.md         Running MetaCode on a server: pm2, nginx, HTTPS, troubleshooting
 ├── ecosystem.config.cjs        pm2 process file (MetaCode and its AI service: two apps, fork mode)
 ├── docs/opencode-service.md    MetaCode's AI service: running it, providers, settings, API, troubleshooting
+├── docs/free-ai-options.md     Free, cheap and self-hosted AI models MetaCode can use (research, Nov 2026)
+├── docs/offline-first.md       Offline, on any device, with local AI: platforms, install, the AI Model Store, limits
 ├── docs/survey-studio.md       Survey Studio guide
 ├── docs/accounts.md            Accounts, plans and limits: setup and how it works
 ├── test/                       node:test suites (+ Playwright browser tests) and a mock Reddit
@@ -730,7 +764,9 @@ metacode/
 │   └── emis_fetch.py           The AI gateway's Python transport (used by the AI service)
 ├── public/
 │   ├── index.html                Landing page — explains MetaCode, links to app.html
-│   ├── scramjet-sw.js            Service worker for the Scraper's in-app Reddit browser (Scramjet)
+│   ├── scramjet-sw.js            The Reddit browser's former service worker (/sw.js routes Scramjet now)
+│   ├── manifest.webmanifest      The installable app: name, icons (img/icons/), shortcuts
+│   ├── vendor/                   Browser libraries and fonts served by MetaCode (scripts/vendor-web.js; VENDOR.json: checksums)
 │   ├── app.html                  The actual application shell (dashboard, sidebar, etc.)
 │   ├── studio.html               Survey Studio (its own page, linked from the front page)
 │   ├── status.html               Status page (served for status.metac0.de and at /status); css/status.css, js/status.js
@@ -742,6 +778,9 @@ metacode/
 │   ├── css/survey.css            Survey rendering; css/survey-studio.css + survey-blocks.css  Survey Studio editor
 │   └── js/
 │       ├── app.js               Router, state, modals, notifications, Settings, AI requests (via the server)
+│       ├── pwa.js               The installable app: its service worker, the offline banner, updates
+│       ├── perf.js              Performance profiles (Potato, Balanced, Performance; Auto picks one)
+│       ├── local-ai.js          Local AI pages: AI Model Store, Installed Models, AI Chat, System
 │       ├── local-db.js          Your data in this browser (IndexedDB), browser identity, backup/restore
 │       ├── tour.js · app-tour.js  Guided tours and hands-on tutorials (spotlight + card); the coding app's tour
 │       ├── projects.js          Projects page: saved projects (in the browser), autosave

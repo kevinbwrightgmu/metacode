@@ -1,28 +1,26 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <!-- Google tag (gtag.js) -->
-  <script async src="https://www.googletagmanager.com/gtag/js?id=G-VYEQCY48SX"></script>
-  <script>
-    window.dataLayer = window.dataLayer || [];
-    function gtag(){dataLayer.push(arguments);}
-    gtag('js', new Date());
-
-    gtag('config', 'G-VYEQCY48SX');
-  </script>
+  <!-- Analytics: only when the server sets METACODE_ANALYTICS_ID (an empty script otherwise) -->
+  <script async src="/analytics.js"></script>
   <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>MetaCode — Social Media Coding Platform</title>
   <link rel="icon" type="image/png" href="img/metacode-mark.png">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/papaparse@5.4.1/papaparse.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/d3@7.8.5/dist/d3.min.js"></script>
+  <script src="js/perf.js"></script>
+  <link rel="stylesheet" href="css/fonts.css">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#0F172A">
+  <link rel="apple-touch-icon" href="/img/icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="MetaCode">
+  <script src="vendor/papaparse/papaparse.min.js"></script>
   <link rel="stylesheet" href="css/main.css">
   <link rel="stylesheet" href="css/tour.css">
   <link rel="stylesheet" href="css/account.css">
   <link rel="stylesheet" href="css/collab.css">
+  <script src="js/pwa.js" defer></script>
 </head>
 <body>
 <div class="app-shell">
@@ -105,6 +103,26 @@
       </div>
 
       <div class="nav-group">
+        <div class="nav-group-label">Local AI</div>
+        <a class="nav-item" data-view="model-store" href="#model-store" title="Install AI models that run on this computer">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2L3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><line x1="3" y1="6" x2="21" y2="6"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>
+          AI Model Store
+        </a>
+        <a class="nav-item" data-view="installed-models" href="#installed-models">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg>
+          Installed Models
+        </a>
+        <a class="nav-item" data-view="ai-chat" href="#ai-chat">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+          AI Chat
+        </a>
+        <a class="nav-item" data-view="system" href="#system">
+          <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+          System
+        </a>
+      </div>
+
+      <div class="nav-group">
         <div class="nav-group-label">Visualize</div>
         <a class="nav-item" data-view="csv-analyzer" href="#csv-analyzer">
           <svg class="nav-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><circle cx="9" cy="9" r="1"/><circle cx="13" cy="12" r="1"/></svg>
@@ -145,6 +163,9 @@
   <main class="main-content">
     <header class="topbar">
       <div class="topbar-left">
+        <button type="button" class="nav-toggle" id="nav-toggle" aria-controls="sidebar" aria-expanded="false" aria-label="Menu" title="Menu">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg>
+        </button>
         <div class="topbar-title" id="topbar-title">Dashboard</div>
       </div>
       <div class="topbar-right">
@@ -166,6 +187,8 @@
     </div>
   </main>
 </div>
+
+<div class="nav-backdrop" id="nav-backdrop" aria-hidden="true"></div>
 
 <!-- MetaCode Assistant: right-side help chat (js/assistant.js) -->
 <aside class="asst-panel" id="asst-panel" aria-labelledby="asst-title">
@@ -191,7 +214,7 @@
     <div class="asst-empty" id="asst-empty">
       <p class="asst-welcome">Ask me anything about using MetaCode — what a page does, how to run a workflow, what a number means, or how to fix an error.</p>
       <div class="asst-notice" id="asst-key-notice" hidden>
-        <span>MetaCode's AI isn't set up on this server yet, so the assistant can't answer. Settings → AI connection shows why.</span>
+        <span id="asst-notice-text">MetaCode's AI isn't set up on this server yet, so the assistant can't answer. Settings → AI connection shows why.</span>
         <button type="button" class="btn btn-secondary btn-sm" id="asst-notice-settings">Open Settings</button>
       </div>
       <div class="asst-chips-label">Try asking</div>

@@ -325,7 +325,7 @@ const AICoder = (() => {
     let toCode = filterPosts(posts).filter(p => !Object.keys(p.aiCodes || {}).length);
 
     if (!toCode.length) { App.notify('All visible posts are already coded', 'info'); return; }
-    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up on this server — Settings → AI connection shows why', 'error'); return; }
+    if (!App.hasApiKeys()) { App.notify(App.aiUnavailable(), 'error'); return; }
     // Accounts on: sign in first, and say so up front when the plan has fewer posts left than this run needs
     if (window.Account && Account.enabled()) {
       if (!Account.signedIn()) { Account.openSignIn({ reason: 'Sign in to use AI coding — free accounts include ' + MetaPlans.get('free').limits.aiPostsPerWeek.toLocaleString() + ' posts a week.' }); return; }
@@ -358,6 +358,7 @@ const AICoder = (() => {
     const substitutes = {};      // model → posts it coded because the chosen model was rate-limited or failing
     const anyModel = keepGoing();
     let randomPicks = false;     // ("keep going": a model picked at random took over)
+    const backupSubs = {};       // posts the local backup coded (no other provider's model could), by model
     let pending = toCode.slice();
     updateProgress(0, toCode.length);
 
@@ -389,10 +390,13 @@ const AICoder = (() => {
             if (r.ok) { try { codings = parseCodings(r.text); } catch (err) { problem = err.message; } }
             else problem = r.error;
             if (codings) {
-              const updated = App.getState().posts.map(p => p.id === post.id ? Object.assign({}, p, { aiCodes: codings }) : p);
+              // (aiModel: the model that coded the post when it wasn't the one picked — the local backup, say —
+              // so those posts can be found and checked: Export Data has it as ai_coded_by)
+              const updated = App.getState().posts.map(p => p.id === post.id ? Object.assign({}, p, { aiCodes: codings, aiModel: r.model || null }) : p);
               App.setState({ posts: updated });
               coded++; done++; settled.add(post.id);
-              if (r.model) { substitutes[r.model] = (substitutes[r.model] || 0) + 1; if (r.pick === 'random') randomPicks = true; }
+              if (r.model && r.pick === 'backup') backupSubs[r.model] = (backupSubs[r.model] || 0) + 1;
+              else if (r.model) { substitutes[r.model] = (substitutes[r.model] || 0) + 1; if (r.pick === 'random') randomPicks = true; }
               scheduleRefresh();
             } else {
               lastError = problem;
@@ -436,8 +440,11 @@ const AICoder = (() => {
     updateProgress(done, toCode.length);
 
     const subs = Object.keys(substitutes);
-    const subMsg = subs.length ? ' ' + subs.map(m => substitutes[m] + ' of them by “' + App.modelName(m) + '”').join(', ') +
-      (randomPicks ? ' — picked at random from the available models while the chosen one had run out or wasn\'t working.' : ' — the closest model, used while the chosen one was rate-limited or unavailable.') : '';
+    const backups = Object.keys(backupSubs);
+    const subMsg = (subs.length ? ' ' + subs.map(m => substitutes[m] + ' of them by “' + App.modelName(m) + '”').join(', ') +
+      (randomPicks ? ' — picked at random from the available models while the chosen one had run out or wasn\'t working.' : ' — the closest model, used while the chosen one was rate-limited or unavailable.') : '') +
+      (backups.length ? ' ' + backups.map(m => backupSubs[m] + ' by “' + App.modelName(m) + '”').join(', ') +
+        ' — the local backup on this server, used because no other provider\'s model could answer: it\'s smaller, so check those posts (Export Data marks them in ai_coded_by).' : '');
     const doneMsg = (stopFlag
       ? 'Stopped after ' + coded + ' posts.'
       : (coded || !failed ? '✓ Done — ' : 'Nothing was coded — ') + coded + ' posts coded' + (failed ? ', ' + failed + ' could not be coded' + (lastError ? ' (' + lastError.replace(/\.$/, '') + ')' : '') : '') + '.' +
@@ -491,7 +498,7 @@ const AICoder = (() => {
 
   /* ── Single-post coding ──────────────────────*/
   async function codeOne(postId) {
-    if (!App.hasApiKeys()) { App.notify('AI isn\'t set up on this server — Settings → AI connection shows why', 'error'); return; }
+    if (!App.hasApiKeys()) { App.notify(App.aiUnavailable(), 'error'); return; }
     const post = App.getState().posts.find(p => p.id === postId);
     if (!post) return;
 

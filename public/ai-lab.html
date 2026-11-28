@@ -1,21 +1,20 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <!-- Google tag (gtag.js) -->
-  <script async src="https://www.googletagmanager.com/gtag/js?id=G-VYEQCY48SX"></script>
-  <script>
-    window.dataLayer = window.dataLayer || [];
-    function gtag(){dataLayer.push(arguments);}
-    gtag('js', new Date());
-
-    gtag('config', 'G-VYEQCY48SX');
-  </script>
+  <!-- Analytics: only when the server sets METACODE_ANALYTICS_ID (an empty script otherwise) -->
+  <script async src="/analytics.js"></script>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>AI Coding Lab — MetaCode Ultra</title>
   <link rel="icon" type="image/png" href="/img/metacode-mark.png">
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@300;400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <script src="/js/perf.js"></script>
+  <link rel="stylesheet" href="/css/fonts.css">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#0F172A">
+  <link rel="apple-touch-icon" href="/img/icons/apple-touch-icon.png">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="MetaCode">
   <link rel="stylesheet" href="/css/main.css">
   <link rel="stylesheet" href="/css/account.css">
   <link rel="stylesheet" href="/css/ai-lab.css">
@@ -47,6 +46,7 @@
     }
   }
   </script>
+  <script src="/js/pwa.js" defer></script>
 </head>
 <body class="lab-page">
 <a class="lab-skip" href="#lab-main">Skip to content</a>

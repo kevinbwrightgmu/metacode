@@ -159,7 +159,8 @@ function envFor(extra) {
     OPENCODE_DISABLE_MODELS_FETCH: '1',
     OPENCODE_INFERENCE_URL: up.base,
     OPENCODE_MODELS_PATH: fixturePath,
-    OPENCODE_DISABLED_PROVIDERS: 'emis'
+    OPENCODE_DISABLED_PROVIDERS: 'emis',
+    OLLAMA_BACKUP: 'off'                  // (a developer's own Ollama never joins in; the local-backup tests turn it on)
   }, extra);
 }
 

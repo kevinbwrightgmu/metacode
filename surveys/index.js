@@ -20,6 +20,7 @@
 // against the published version with the same logic engine the respondent's
 // browser ran (survey-logic.js).
 
+const { defaultDataDir } = require('../lib/data-dir');
 const express = require('express');
 const path = require('path');
 const crypto = require('crypto');
@@ -208,7 +209,7 @@ function deviceOf(ua) {
 
 function createSurveys(opts) {
   opts = opts || {};
-  const dataDir = opts.dataDir || process.env.SURVEY_DATA_DIR || path.join(__dirname, '..', 'survey-data');
+  const dataDir = opts.dataDir || process.env.SURVEY_DATA_DIR || defaultDataDir('survey-data');
   const store = new SurveyStore(path.resolve(dataDir));
   const pagePath = path.join(__dirname, '..', 'public', 'survey.html');
   const geo = geoConfig(opts.geoHeaders !== undefined ? opts.geoHeaders : process.env.SURVEY_GEO_HEADERS);

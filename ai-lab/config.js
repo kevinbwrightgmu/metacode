@@ -38,6 +38,7 @@
 //   AI_LAB_FINE_TUNING          off (default) | on — fine-tuning through that provider (paid)
 //   AI_LAB_FINE_TUNE_MODELS     base models offered for fine-tuning (comma list)
 
+const { defaultDataDir } = require('../lib/data-dir');
 const path = require('path');
 
 const isLocal = /** @param {string} host */ host => /^(localhost|127\.\d+\.\d+\.\d+|\[::1\])(:\d+)?$/i.test(host);
@@ -107,7 +108,7 @@ function labConfig(env) {
 
   return {
     enabled: flag('AI_LAB_ENABLED', true),
-    dataDir: path.resolve(String(e.AI_LAB_DATA_DIR || '').trim() || path.join(__dirname, '..', 'lab-data')),
+    dataDir: path.resolve(String(e.AI_LAB_DATA_DIR || '').trim() || defaultDataDir('lab-data', e)),
     withoutAccounts: flag('AI_LAB_WITHOUT_ACCOUNTS', false),
     defaultContextTokens: int('AI_LAB_DEFAULT_CONTEXT_TOKENS', 16000, 2000, 2000000),
     maxDocBytes: int('AI_LAB_MAX_DOC_KB', 1024, 1, 20480) * 1024,

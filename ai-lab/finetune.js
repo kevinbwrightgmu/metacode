@@ -24,6 +24,7 @@ const { newId } = require('./store');
 const D = require('./datasets');
 const P = require('./profiles');
 const { logger, redact } = require('../lib/log');
+const { localOnlyBlock } = require('./providers');
 
 const log = logger('ai-lab');
 const ACTIVE = new Set(['validating_files', 'queued', 'running', 'creating']);
@@ -44,6 +45,8 @@ function createFineTuning(deps) {
   function availability() {
     const cfg = deps.getConfig().openai;
     if (!cfg.configured) return { available: false, reason: 'No provider with fine-tuning is configured on this server. MetaCode\'s own AI service doesn\'t offer fine-tuning.' };
+    const blocked = localOnlyBlock(cfg);
+    if (blocked) return { available: false, reason: blocked };
     if (!cfg.fineTuning) return { available: false, reason: 'Fine-tuning through ' + (cfg.isOfficial ? 'OpenAI' : 'the OpenAI-compatible provider') + ' is turned off on this server (the administrator can enable it with AI_LAB_FINE_TUNING=on; it is billed by the provider).' };
     if (!cfg.fineTuneModels.length) return { available: false, reason: 'No base models for fine-tuning are listed (AI_LAB_FINE_TUNE_MODELS).' };
     return { available: true, reason: null };

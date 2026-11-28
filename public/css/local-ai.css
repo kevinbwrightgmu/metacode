@@ -1,0 +1,88 @@
+/* local-ai.css — the AI Model Store, Installed Models, AI Chat and System pages (js/local-ai.js), in MetaCode's
+   own design: main.css's colours, cards, badges and buttons */
+.lai { display: flex; flex-direction: column; gap: 16px; max-width: 1200px; }
+.lai .card { padding: 18px 20px; }
+.lai h3 { font-family: var(--f-display); font-size: 15px; margin: 0 0 10px; }
+.lai-title { font-family: var(--f-display); font-size: 20px; margin: 0 0 4px; }
+.lai-head-row { display: flex; gap: 16px; justify-content: space-between; align-items: flex-start; flex-wrap: wrap; }
+.lai-head-side { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; max-width: 420px; text-align: right; }
+.lai-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
+.lai-chip { font-size: 12px; padding: 3px 10px; border-radius: 99px; background: var(--bg-muted, #F8FAFF); border: 1px solid var(--border); color: var(--tx-second); }
+.lai-source { margin-top: 10px; }
+.lai-warn { color: #B45309; }
+.lai-locked { border-left: 3px solid var(--amber, #F59E0B); }
+.lai-token { display: flex; gap: 8px; margin-top: 10px; max-width: 420px; }
+.lai-locked .lai-warn { margin: 8px 0 0; }
+.lai-tokenline { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.lai-problem { border-left: 3px solid var(--error, #EF4444); }
+
+.lai-tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--border); }
+.lai-tab { background: none; border: none; padding: 10px 14px; font: 500 13.5px var(--f-body); color: var(--tx-second); cursor: pointer; border-bottom: 2px solid transparent; }
+.lai-tab[aria-selected="true"] { color: var(--blue); border-bottom-color: var(--blue); }
+.lai-tier { margin: 6px 0 14px; }
+.lai-tier h3 { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.lai-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 12px; }
+.lai-card { background: var(--bg-surface); border: 1px solid var(--border); border-radius: var(--r-md, 10px); padding: 14px; display: flex; flex-direction: column; gap: 8px; }
+.lai-card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.lai-card h4 { margin: 0; font-family: var(--f-mono); font-size: 14px; word-break: break-all; }
+.lai-desc { margin: 0; font-size: 13px; color: var(--tx-second); line-height: 1.45; display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.lai-facts { display: flex; flex-wrap: wrap; gap: 4px 6px; font-size: 12px; color: var(--tx-second); }
+.lai-facts span { background: var(--bg-muted, #F8FAFF); border-radius: 6px; padding: 1px 7px; }
+.lai-badges { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: auto; }
+.lai-search { display: flex; gap: 8px; margin-top: 4px; }
+.lai-search .form-input { flex: 1; }
+.lai-search .form-select { width: auto; }
+.lai-filters { display: flex; flex-wrap: wrap; gap: 6px; }
+.lai-filter { border: 1px solid var(--border); background: var(--bg-surface); border-radius: 99px; padding: 4px 12px; font: 12.5px var(--f-body); cursor: pointer; color: var(--tx-second); }
+.lai-filter.on { background: var(--blue-lt, #EFF6FF); border-color: var(--blue-mid, #BFDBFE); color: var(--blue); }
+.lai-more { text-align: center; padding: 6px; }
+
+.lai-downloads h3 { margin-bottom: 6px; }
+.lai-job { padding: 10px 0; border-top: 1px solid var(--border); }
+.lai-job:first-of-type { border-top: none; }
+.lai-job-top, .lai-job-foot { display: flex; justify-content: space-between; gap: 10px; align-items: center; flex-wrap: wrap; }
+.lai-job-state { font-size: 12.5px; color: var(--tx-second); }
+.lai-bar { display: block; height: 6px; background: var(--bg-muted, #EEF2FF); border-radius: 99px; overflow: hidden; margin: 8px 0 6px; }
+.lai-bar > span { display: block; height: 100%; background: var(--blue); border-radius: 99px; transition: width .3s ease; }
+.lai-mini { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--tx-second); }
+.lai-mini .lai-bar { width: 70px; margin: 0; }
+
+.lai-table-wrap { overflow-x: auto; }
+.lai-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.lai-table th, .lai-table td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+.lai-table th { font-weight: 600; color: var(--tx-second); font-size: 12px; }
+.lai-table tr.lai-here td { background: var(--blue-lt, #EFF6FF); }
+.lai-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+/* (on its own line below the buttons, and out of the column's width: the buttons stay where they are, the text wraps) */
+.lai-why { flex: 0 0 100%; width: 0; min-width: 100%; }
+.lai-danger { color: var(--error, #EF4444) !important; }
+#lai-installed { display: flex; flex-direction: column; gap: 16px; }
+.lai-features { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px 16px; }
+
+.lai-sys { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.lai-kv { width: 100%; font-size: 13px; border-collapse: collapse; }
+.lai-kv th { text-align: left; font-weight: 600; color: var(--tx-second); padding: 6px 12px 6px 0; width: 38%; vertical-align: top; }
+.lai-kv td { padding: 6px 0; }
+.lai-runtime { padding: 8px 0; border-bottom: 1px solid var(--border); }
+.lai-runtime p { margin: 4px 0 0; }
+.lai-runtime code { white-space: pre-wrap; word-break: break-all; font-size: 11.5px; }
+
+.lai-chat { height: calc(100dvh - var(--topbar-h) - 48px); min-height: 420px; }
+.lai-chat-head { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: flex-end; }
+.lai-chat-head .form-hint { flex-basis: 100%; margin: 0; }
+.lai-chat-model { display: flex; flex-direction: column; gap: 4px; min-width: 240px; }
+.lai-chat-log { flex: 1; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; padding: 4px 2px; }
+.lai-chat-empty { color: var(--tx-muted); text-align: center; margin: auto; font-size: 13.5px; }
+.lai-msg { max-width: min(760px, 88%); padding: 10px 14px; border-radius: 14px; line-height: 1.5; font-size: 14px; white-space: normal; word-wrap: break-word; }
+.lai-user { align-self: flex-end; background: var(--blue); color: #fff; border-bottom-right-radius: 4px; }
+.lai-assistant { align-self: flex-start; background: var(--bg-surface); border: 1px solid var(--border); border-bottom-left-radius: 4px; }
+.lai-note { color: var(--tx-muted); font-size: 12.5px; }
+.lai-chat-form { display: flex; gap: 8px; align-items: flex-end; }
+.lai-chat-form textarea { flex: 1; resize: vertical; min-height: 44px; max-height: 200px; }
+
+@media (max-width: 600px) {
+  .lai .card { padding: 14px; }
+  .lai-head-side { align-items: flex-start; text-align: left; }
+  .lai-search { flex-direction: column; }
+  .lai-chat { height: calc(100dvh - var(--topbar-h) - 32px); }
+}

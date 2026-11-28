@@ -1,0 +1,27 @@
+{
+  "id": "/app.html",
+  "name": "MetaCode",
+  "short_name": "MetaCode",
+  "description": "Social media content analysis and intercoder reliability for researchers. Works offline, with AI models on your own device.",
+  "lang": "en",
+  "dir": "ltr",
+  "start_url": "/app.html#dashboard",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#EEF2FF",
+  "theme_color": "#0F172A",
+  "categories": ["education", "productivity", "utilities"],
+  "icons": [
+    { "src": "/img/icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "/img/icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "/img/icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "shortcuts": [
+    { "name": "Dashboard", "url": "/app.html#dashboard", "icons": [{ "src": "/img/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "AI Coding", "url": "/app.html#ai-coding", "icons": [{ "src": "/img/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "AI Chat", "url": "/app.html#ai-chat", "icons": [{ "src": "/img/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "AI Model Store", "url": "/app.html#model-store", "icons": [{ "src": "/img/icons/icon-192.png", "sizes": "192x192" }] },
+    { "name": "Survey Studio", "url": "/studio.html", "icons": [{ "src": "/img/icons/icon-192.png", "sizes": "192x192" }] }
+  ]
+}

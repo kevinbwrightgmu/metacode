@@ -150,7 +150,8 @@ function loadScraperConfig(env) {
 
   // Durable jobs: where they're kept, how many may wait, how much disk they may use
   c.persistJobs          = bool(env, 'SCRAPER_PERSIST_JOBS', DEFAULTS.persistJobs, warnings);
-  c.dataDir              = require('path').resolve(String(env.SCRAPER_DATA_DIR || '').trim() || require('path').join(__dirname, '..', 'scraper-data'));
+  c.lazyWorker           = String(env.METACODE_PROFILE || '').trim().toLowerCase() === 'lite';
+  c.dataDir              = require('path').resolve(String(env.SCRAPER_DATA_DIR || '').trim() || require('../lib/data-dir').defaultDataDir('scraper-data', env));
   c.maxQueuedJobs        = int(env, 'SCRAPER_MAX_QUEUED_JOBS', DEFAULTS.maxQueuedJobs, 1, 1000, warnings);
   c.maxDiskMb            = int(env, 'SCRAPER_MAX_DISK_MB', DEFAULTS.maxDiskMb, 16, 1024 * 1024, warnings);
   c.maxDiskBytes         = c.maxDiskMb * 1024 * 1024;

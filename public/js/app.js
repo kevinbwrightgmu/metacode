@@ -60,9 +60,48 @@ const App = (() => {
   }
   function setState(patch) { Object.assign(state, patch); save(); }
 
+  // Pages whose script loads when one is first opened: js/local-ai.js (the AI Model Store, Installed Models,
+  // AI Chat and System). The service worker keeps the script, so they open offline too.
+  const lazyScripts = new Map();
+  function loadScript(src) {
+    // (MetaCode was updated while this page ran: a script loaded now would be the new version's, running with
+    // this page's older ones — the page reloads instead, onto the same view)
+    if (!lazyScripts.has(src) && window.MetaPWA && window.MetaPWA.updated) { location.reload(); return new Promise(() => {}); }
+    if (!lazyScripts.has(src)) {
+      lazyScripts.set(src, new Promise((resolve, reject) => {
+        const s = document.createElement('script');
+        s.src = src;
+        s.onload = resolve;
+        s.onerror = () => { lazyScripts.delete(src); reject(new Error('The page\'s script (' + src + ') couldn\'t be loaded.')); };
+        document.head.appendChild(s);
+      }));
+    }
+    return lazyScripts.get(src);
+  }
+  // A page that needs a big library: rendered at once when it's there, else once it has loaded
+  const withLibrary = (src, ready, render) => param => {
+    if (ready()) return render(param);
+    const view = currentView;
+    const box = document.getElementById('view-container');
+    box.innerHTML = '<div class="loading-state">Loading…</div>';
+    loadScript(src).then(() => { if (currentView === view) { box.innerHTML = ''; render(param); } },
+      err => { if (currentView === view) box.innerHTML = '<div class="card"><p>' + esc(err.message) + ' Reload the page to try again.</p></div>'; });
+  };
+  const localAiView = name => () => {
+    const view = currentView;
+    const box = document.getElementById('view-container');
+    box.innerHTML = '<div class="loading-state">Loading…</div>';
+    loadScript('js/local-ai.js').then(() => { if (currentView === view) LocalAI.render(name, box); },
+      err => { if (currentView === view) box.innerHTML = '<div class="card"><p>' + esc(err.message) + ' Reload the page to try again.</p></div>'; });
+  };
+
   /* ── Routing ─────────────────────────────────*/
   const VIEWS = {
     'dashboard':    renderDashboard,
+    'model-store':  localAiView('store'),               // AI on this device (js/local-ai.js)
+    'installed-models': localAiView('installed'),
+    'ai-chat':      localAiView('chat'),
+    'system':       localAiView('system'),
     'projects':     () => ProjectsView.render(),
     'settings':     renderSettings,
     'import':       () => DataManager.render(),
@@ -73,8 +112,8 @@ const App = (() => {
     'human-coding': param => HumanCoder.render(param),           // tabs: coder1, coder2, ai, reliability
     'reliability':  () => ReliabilityAnalyzer.render(),           // the Reliability Analysis tab
     'csv-analyzer': () => CSVAnalyzer.render(),
-    'network':      () => NetworkViz.render(),
-    'metrics':      () => EngagementViz.render(),
+    'network':      withLibrary('vendor/d3/d3.min.js', () => typeof d3 !== 'undefined', () => NetworkViz.render()),       // (D3 and Chart.js load with their page:
+    'metrics':      withLibrary('vendor/chart.js/chart.umd.js', () => typeof Chart !== 'undefined', () => EngagementViz.render()),   //  ~480 KB not parsed on every load)
     'export':       renderExport,
     'account':      param => Account.renderPage(document.getElementById('view-container'), param),
     'invite':       param => Collab.renderInvite(document.getElementById('view-container'), param),   // an invitation to a shared project
@@ -87,7 +126,8 @@ const App = (() => {
     'codebook':'Codebook','ai-coding':'AI Coding','human-coding':'Human Coding',
     'reliability':'Reliability Analysis','csv-analyzer':'Analyze CSV (NetworkX)',
     'network':'Network Graph',
-    'metrics':'Metrics','export':'Export Data','surveys':'Survey Studio','account':'Account & plan','invite':'Invitation'
+    'metrics':'Metrics','export':'Export Data','surveys':'Survey Studio','account':'Account & plan','invite':'Invitation',
+    'model-store':'AI Model Store','installed-models':'Installed Models','ai-chat':'AI Chat','system':'System'
   };
 
   // Former route ids that must keep working (bookmarks, browser history).
@@ -115,6 +155,7 @@ const App = (() => {
     }
     if (!VIEWS[view]) view = 'dashboard';
     currentView = view;
+    setNavOpen(false);
 
     // Sidebar active state
     document.querySelectorAll('.nav-item').forEach(el => {
@@ -253,7 +294,14 @@ const App = (() => {
   }
 
   /* ── Settings ────────────────────────────────*/
+  function wirePerformance() {
+    const sel = document.getElementById('s-perf');
+    if (!sel || !window.MetaPerf) return;
+    sel.value = MetaPerf.setting();
+    sel.addEventListener('change', () => { MetaPerf.set(sel.value); notify('Performance: ' + MetaPerf.describe() + '.', 'success'); });
+  }
   function renderSettings() {
+    setTimeout(wirePerformance, 0);
     const { project, settings } = state;
     const container = document.getElementById('view-container');
     container.innerHTML = `
@@ -347,6 +395,23 @@ const App = (() => {
           </div>
           <div id="key-status-list" style="display:flex;flex-direction:column;gap:6px">
             <div class="text-muted" style="font-size:12.5px">Loading…</div>
+          </div>
+        </div>
+
+        <div class="card" style="grid-column:1/-1" id="s-perf-card">
+          <div class="card-title">Performance</div>
+          <p class="form-hint" style="margin:0 0 12px">How much of the computer MetaCode may use in this browser. Every feature works in every profile.</p>
+          <div style="display:flex;gap:16px;flex-wrap:wrap;align-items:flex-start">
+            <select class="form-select" id="s-perf" style="max-width:260px" aria-label="Performance profile">
+              <option value="auto">Auto${window.MetaPerf ? ' (' + esc(MetaPerf.NAMES[MetaPerf.detect()]) + ' for this device)' : ''}</option>
+              <option value="potato">Potato: very old or low-memory devices</option>
+              <option value="balanced">Balanced</option>
+              <option value="performance">Performance: capable computers</option>
+            </select>
+            <div class="form-hint" style="flex:1;min-width:240px;margin:0">
+              <b>Potato</b> turns off animations, transitions, shadows and blur, draws charts at once, lays out big network graphs faster and syncs in the background every 5 minutes.
+              <b>Balanced</b> is the usual MetaCode. <b>Performance</b> always runs the full network-graph layout, however big the graph.
+            </div>
           </div>
         </div>
 
@@ -515,7 +580,7 @@ const App = (() => {
 
     const headers = ['id','text','author','timestamp',
       'eng_likes','eng_shares','eng_comments','eng_views',
-      ...aiDims, ...humanDims, ...coder2Dims, ...finalDims, ...confDims, 'agree_all'];
+      ...aiDims, ...humanDims, ...coder2Dims, ...finalDims, ...confDims, 'agree_all', 'ai_coded_by'];
 
     const rows = posts.map(p => {
       const agree = codebook.length > 0 && codebook.every(d => {
@@ -532,7 +597,8 @@ const App = (() => {
         ...codebook.map(d => (p.coder2Codes || {})[d.id] || ''),
         ...codebook.map(d => HumanCoder.finalCode(p, d.id) || ''),
         ...codebook.map(d => ((p.aiCodes || {})[d.id]||{}).confidence || ''),
-        agree ? '1' : '0'
+        agree ? '1' : '0',
+        p.aiModel || ''           // (a model other than the one picked coded this post, e.g. the local backup)
       ];
     });
     downloadCSV('metacode_coded_posts.csv', headers, rows);
@@ -659,11 +725,15 @@ const App = (() => {
   // Every ready provider rests until a usage limit resets (or it asked to pause):
   // "until 14:05 (OpenCode Zen's usage limit is used up)", else ''
   function restingSummary(ai) {
-    const ready = (Array.isArray(ai.providers) ? ai.providers : []).filter(p => p && p.ready);
+    const all = (Array.isArray(ai.providers) ? ai.providers : []).filter(p => p && p.ready);
+    // (the local backup doesn't count: while it alone answers, AI is resting, with the backup standing in)
+    const real = all.filter(p => !p.backup);
+    const ready = real.length ? real : all;
     const rests = (Array.isArray(ai.restingProviders) ? ai.restingProviders : []).filter(r => r && Date.parse(r.until) > Date.now());
     if (!ready.length || !ready.every(p => rests.some(r => r.provider === p.id))) return '';
     const soonest = Math.min(...rests.map(r => Date.parse(r.until)));
-    return 'until ' + esc(whenText(soonest)) + ' (' + rests.map(r => esc(providerTitle(r.provider)) + (r.reason === 'paused' ? ' asked to pause' : '\'s usage limit is used up')).join('; ') + ')';
+    return 'until ' + esc(whenText(soonest)) + ' (' + rests.map(r => esc(providerTitle(r.provider)) + (r.reason === 'paused' ? ' asked to pause' : '\'s usage limit is used up')).join('; ') + ')' +
+      (real.length && real.length < all.length ? '; the local backup on this server answers meanwhile' : '');
   }
 
   // Shows what the server read from .env and whether AI is ready — names of
@@ -744,6 +814,14 @@ const App = (() => {
     }
     return modelsPending;
   }
+
+  // A model's entry in the list (the default's for '', the server's choice) — null when the list doesn't have it
+  // or hasn't come yet (modelsReady() waits for it)
+  function modelInfo(id) {
+    const list = modelCache || [];
+    return (id ? list.find(m => m.id === id) : list.find(isDefaultEntry)) || null;
+  }
+  const modelsReady = () => (modelCache ? Promise.resolve() : requestModels().then(() => {}, () => {}));
 
   const providerOf = id => { const s = String(id || ''), i = s.indexOf('/'); return i > 0 ? s.slice(0, i) : ''; };
   const modelPart = id => { const s = String(id || ''), i = s.indexOf('/'); return i > 0 ? s.slice(i + 1) : s; };
@@ -915,7 +993,7 @@ const App = (() => {
   function providerBlock(p) {
     const until = p.resting ? Date.parse(p.resting.until) : NaN;
     const resting = !!p.ready && until > Date.now();
-    const badge = !p.ready ? '<span class="badge badge-red">Not set up</span>'
+    const badge = !p.ready ? '<span class="badge badge-red">' + (p.local ? 'Not ready' : 'Not set up') + '</span>'
       : resting ? '<span class="badge badge-amber" title="' + esc(new Date(until).toLocaleString()) + '">Resting until ' + esc(whenText(until)) + '</span>'
         : '<span class="badge badge-green">Ready</span>';
     const keys = Array.isArray(p.keys) ? p.keys.filter(k => k && typeof k === 'object') : [];
@@ -923,7 +1001,7 @@ const App = (() => {
     const m = p.models && typeof p.models === 'object' ? p.models : {};
     const facts = [];
     if (Number.isFinite(m.listed) && (m.listed || p.ready)) facts.push(m.listed.toLocaleString() + ' model' + (m.listed === 1 ? '' : 's') + (Number.isFinite(m.available) && m.available < m.listed ? ', ' + m.available.toLocaleString() + ' offered now' : ''));
-    facts.push(keyCount ? keyCount + ' key' + (keyCount === 1 ? '' : 's') : p.free === true ? 'free models, no key needed' : 'no key');
+    facts.push(keyCount ? keyCount + ' key' + (keyCount === 1 ? '' : 's') : p.local ? 'runs on this server, no key needed' : p.free === true ? 'free models, no key needed' : 'no key');
     const lines = [];
     if (p.problem) lines.push('<div style="color:var(--error)">' + esc(p.problem) + '</div>');
     if (resting) lines.push('<div style="color:#B45309">' + esc(restingText(p.resting, until)) + '</div>');
@@ -979,6 +1057,12 @@ const App = (() => {
     if (now - (fallbackNoted.get(k) || 0) < 10 * 60 * 1000) return;
     fallbackNoted.set(k, now);
     const asked = modelName(requested), answered = modelName(used);
+    const backup = pick === 'backup' || (Array.isArray(modelCache) && modelCache.some(m => m && m.id === used && m.backup));
+    if (backup) {
+      notify('“' + asked + '” can\'t answer, and no other provider\'s model can right now, so the local backup on this server, “' + answered +
+        '”, is answering. It\'s small and slower: check what it codes.', 'warning', 9000);
+      return;
+    }
     if (pick === 'random') {
       notify((reason === 'rate_limited' ? '“' + asked + '” has run out for now (a usage or rate limit)' : '“' + asked + '” isn\'t working at the AI service right now') +
         ', so “' + answered + '”, picked at random from the available models, is coding instead.', 'warning', 7000);
@@ -996,7 +1080,17 @@ const App = (() => {
     const allMsgs = system ? [{ role: 'system', content: system }, ...messages] : [...messages];
     const body = { messages: allMsgs, max_tokens, temperature: 0.1 };
     if (model) body.model = model;
-    const res  = await fetch('/api/ai', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', 'x-provider': 'openai', 'X-MetaCode-Feature': feature || 'other' }, switchHeader()), body: JSON.stringify(body) });
+    let res;
+    try {
+      res = await fetch('/api/ai', { method: 'POST', headers: Object.assign({ 'Content-Type': 'application/json', 'x-provider': 'openai', 'X-MetaCode-Feature': feature || 'other' }, switchHeader()), body: JSON.stringify(body) });
+    } catch (e) {
+      // (no answer at all: the server stopped, or this device went offline — the top bar says so, and the
+      // page looks again for the server)
+      serverReachable = false;
+      updateApiStatus();
+      scheduleRecheck();
+      throw Object.assign(new Error(aiUnavailable()), { status: 0, type: 'unreachable' });
+    }
     let data = null;
     try { data = await res.json(); } catch (e) { data = null; }
     if (!res.ok) {
@@ -1159,17 +1253,24 @@ const App = (() => {
   // "Can AI features run?" — the server's AI service is answering with at least one provider set up.
   function hasApiKeys() { return !!(serverStatus && serverStatus.ai && serverStatus.ai.ready); }
 
+  // false while the MetaCode server can't be reached (offline, or the server is down): the app keeps working
+  // with the data on this device, and the top bar says why AI isn't available instead of "not set up"
+  let serverReachable = null;
   async function refreshServerKeyInfo() {
     try {
       const res = await fetch('/api/settings/status');
-      if (!res.ok) return;
+      serverReachable = true;
+      if (!res.ok) { updateApiStatus(); return; }
       serverStatus = await res.json();
       updateApiStatus();
       renderEnvStatus();
       // The model names for notes and the assistant (the Settings page asks for the list itself)
       if (hasApiKeys() && !modelCache) requestModels().catch(() => {});
     } catch (e) {
-      // Server unreachable (e.g. app.html opened directly as a file)
+      // Server unreachable: offline, the server stopped, or app.html opened directly as a file
+      serverReachable = false;
+      updateApiStatus();
+      scheduleRecheck();
     }
   }
 
@@ -1177,8 +1278,40 @@ const App = (() => {
     if (connected === null) connected = hasApiKeys();
     const dot   = document.getElementById('status-dot');
     const label = document.getElementById('status-label');
-    if (dot)   dot.className   = 'status-dot' + (connected ? ' connected' : '');
-    if (label) label.textContent = connected ? 'AI ready' : 'AI not set up';
+    const status = document.getElementById('api-status');
+    const away = serverReachable === false;
+    const offline = away && navigator.onLine === false;
+    if (dot)   dot.className   = 'status-dot' + (connected && !away ? ' connected' : '');
+    if (label) label.textContent = offline ? 'Offline' : away ? 'Server unreachable' : connected ? 'AI ready' : 'AI not set up';
+    if (status) status.title = offline ? 'This device is offline. Your work is saved here; AI and other server features come back with the connection.'
+      : away ? 'The MetaCode server isn\'t answering. Your work is saved on this device; AI and other server features come back when the server does.' : '';
+  }
+  window.addEventListener('online', () => { if (serverReachable === false) refreshServerKeyInfo(); });
+  window.addEventListener('offline', () => { serverReachable = false; updateApiStatus(); });
+  // While the server can't be reached, look again now and then (a portable MetaCode opened from its icon before
+  // its server started, a server restarting), and whenever the page comes back into view
+  let recheckTimer = null, recheckDelay = 5000;
+  function scheduleRecheck() {
+    if (recheckTimer || serverReachable !== false) return;
+    recheckTimer = setTimeout(async () => {
+      recheckTimer = null;
+      await refreshServerKeyInfo();
+      if (serverReachable === false) { recheckDelay = Math.min(recheckDelay * 2, 60000); scheduleRecheck(); } else recheckDelay = 5000;
+    }, recheckDelay);
+  }
+  document.addEventListener('visibilitychange', () => { if (!document.hidden && serverReachable === false) refreshServerKeyInfo(); });
+  window.addEventListener('focus', () => { if (serverReachable === false) refreshServerKeyInfo(); });
+  // Why an AI feature can't run now, for its message: the server can't be reached, or AI isn't set up on it
+  function aiUnavailable() {
+    return serverReachable === false ? (navigator.onLine === false ? 'This device is offline' : 'The MetaCode server can\'t be reached') + ': your work is saved here, and AI comes back with the server.'
+      : 'AI isn\'t set up on this server — Settings → AI connection shows why';
+  }
+
+  // Phones and tablets (≤900px): the sidebar opens as a drawer from the ☰ button in the top bar
+  function setNavOpen(open) {
+    document.body.classList.toggle('nav-open', open);
+    const toggle = document.getElementById('nav-toggle');
+    if (toggle) toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
   }
 
   /* ── Modal ───────────────────────────────────*/
@@ -1259,6 +1392,13 @@ const App = (() => {
       });
     });
 
+    // The drawer on phones and tablets: ☰ opens it; a page, the backdrop or Escape closes it
+    const navToggle = document.getElementById('nav-toggle');
+    if (navToggle) navToggle.addEventListener('click', () => setNavOpen(!document.body.classList.contains('nav-open')));
+    const navBackdrop = document.getElementById('nav-backdrop');
+    if (navBackdrop) navBackdrop.addEventListener('click', () => setNavOpen(false));
+    document.addEventListener('keydown', e => { if (e.key === 'Escape' && document.body.classList.contains('nav-open')) setNavOpen(false); });
+
     // Modal close — X button, click-outside, and Escape key
     document.getElementById('modal-close').addEventListener('click', closeModal);
     document.getElementById('modal-backdrop').addEventListener('click', e => {
@@ -1303,6 +1443,7 @@ const App = (() => {
     getCurrentView: () => ({ id: currentView, title: TITLES[currentView] || currentView }),
     getState, setState, save, reloadState, updateSidebarStats,
     callClaude, callClaudeBatch, tooLargeMessage: TOO_LARGE, getParallel, setParallel, maxParallel, updateApiStatus, hasApiKeys, getEnvKeyCount, getServerStatus: () => serverStatus, refreshServerStatus: refreshServerKeyInfo, modelName,
+    modelInfo, modelsReady, aiUnavailable, serverAway: () => serverReachable === false,
     openModal, closeModal,
     notify, esc, extractJSON, downloadCSV, slugify, genId,
     saveProject, saveSettings, downloadBackup, restoreBackup, testApi, clearCodes, resetAll,

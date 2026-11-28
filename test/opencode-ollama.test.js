@@ -1,0 +1,479 @@
+// MetaCode's OpenCode service and its local last-resort backup (opencode/providers/ollama.mjs):
+// Ollama on this server, found by itself (OLLAMA_BACKUP=auto), left out while it isn't there,
+// offering OLLAMA_MODELS (downloaded when missing) as backup models that are never the default
+// while another provider has a model. Against a stand-in for Ollama and one for the AI gateway.
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+const http = require('http');
+const net = require('net');
+
+const TOKEN = 'test-service-token-ollama-0123456789';
+const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'metacode-ollama-'));
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// ── Stand-ins ────────────────────────────────────────────────────────────────
+const ollama = { have: [], pulls: [], pullDelayMs: 0, chats: [], auth: [], formats: [], server: null, base: null,
+  extraTags: [],          // raw /api/tags entries besides `have` (cloud models, embedding models)
+  stall: false,           // /api/pull repeats the same progress line forever (a stalled download)
+  down: false,            // nothing answers (as while Ollama restarts)
+  breakPull: false };     // the next /api/pull is cut off half-way
+function startOllama() {
+  return new Promise(resolve => {
+    ollama.server = http.createServer((req, res) => {
+      let b = '';
+      req.on('data', c => { b += c; });
+      req.on('end', () => {
+        const send = (status, obj) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+        if (ollama.down) return req.socket.destroy();
+        if (req.method === 'GET' && req.url === '/api/tags') return send(200, { models: ollama.have.map(name => ({ name, model: name, size: 123 })).concat(ollama.extraTags) });
+        if (req.method === 'POST' && req.url === '/api/pull') {
+          // (streamed, as Ollama does: a line of progress now and then, then {"status":"success"} or {"error"})
+          const { model, stream } = JSON.parse(b || '{}');
+          ollama.pulls.push({ model, stream });
+          const line = obj => res.write(JSON.stringify(obj) + '\n');
+          res.writeHead(200, { 'content-type': 'application/x-ndjson' });
+          line({ status: 'pulling manifest' });
+          if (/^missing\//.test(model)) return res.end(JSON.stringify({ error: 'pull model manifest: file does not exist' }) + '\n');
+          if (ollama.stall) { const timer = setInterval(() => line({ status: 'pulling 1234', digest: 'sha256:1234', total: 1000, completed: 300 }), 60); res.on('close', () => clearInterval(timer)); return; }
+          if (ollama.breakPull) { ollama.breakPull = false; line({ status: 'pulling 1234', digest: 'sha256:1234', total: 1000, completed: 100 }); return setTimeout(() => req.socket.destroy(), 20); }
+          line({ status: 'pulling 1234', digest: 'sha256:1234', total: 1000, completed: 500 });
+          return setTimeout(() => {
+            if (!ollama.have.includes(model)) ollama.have.push(model);
+            line({ status: 'pulling 1234', digest: 'sha256:1234', total: 1000, completed: 1000 });
+            line({ status: 'verifying sha256 digest' });
+            res.end(JSON.stringify({ status: 'success' }) + '\n');
+          }, ollama.pullDelayMs);
+        }
+        // (like Ollama's: the same list as /api/tags, its cloud and embedding models too)
+        if (req.method === 'GET' && req.url === '/v1/models') {
+          return send(200, { object: 'list', data: ollama.have.concat(ollama.extraTags.map(t => t.name)).map(id => ({ id, object: 'model', created: 0, owned_by: 'library' })) });
+        }
+        if (req.method === 'POST' && req.url === '/v1/chat/completions') {
+          const body = JSON.parse(b || '{}');
+          ollama.chats.push(body.model);
+          ollama.auth.push(req.headers.authorization || null);
+          ollama.formats.push(body.response_format || null);
+          if (!ollama.have.includes(body.model)) return send(404, { error: { message: 'model "' + body.model + '" not found, try pulling it first', type: 'api_error' } });
+          if (body.stream) {
+            res.writeHead(200, { 'content-type': 'text/event-stream' });
+            res.write('data: ' + JSON.stringify({ id: 'c', object: 'chat.completion.chunk', model: body.model, choices: [{ index: 0, delta: { role: 'assistant', content: 'local ' + body.model }, finish_reason: 'stop' }] }) + '\n\n');
+            return res.end('data: [DONE]\n\n');
+          }
+          return send(200, { id: 'c', object: 'chat.completion', created: 1, model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: 'local ' + body.model }, finish_reason: 'stop' }],
+            usage: { prompt_tokens: 3, completion_tokens: 2, total_tokens: 5 } });
+        }
+        send(404, { error: 'not found' });
+      });
+    });
+    ollama.server.listen(0, '127.0.0.1', () => { ollama.base = 'http://127.0.0.1:' + ollama.server.address().port; resolve(); });
+  });
+}
+let gateway = null, gatewayBase = null;
+const gatewaySeen = [];         // every request the gateway stand-in got
+function startGateway() {
+  return new Promise(resolve => {
+    gateway = http.createServer((req, res) => {
+      let b = '';
+      req.on('data', c => { b += c; });
+      req.on('end', () => {
+        gatewaySeen.push(req.method + ' ' + req.url);
+        const send = (status, obj) => { res.writeHead(status, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
+        if (req.url === '/v1/models') return send(200, { object: 'list', data: [{ id: 'gpt-small', object: 'model' }] });
+        const body = JSON.parse(b || '{}');
+        send(200, { id: 'g', object: 'chat.completion', created: 1, model: body.model, choices: [{ index: 0, message: { role: 'assistant', content: 'gateway ' + body.model }, finish_reason: 'stop' }] });
+      });
+    });
+    gateway.listen(0, '127.0.0.1', () => { gatewayBase = 'http://127.0.0.1:' + gateway.address().port + '/v1'; resolve(); });
+  });
+}
+const closedPort = () => new Promise(resolve => { const s = net.createServer(); s.listen(0, '127.0.0.1', () => { const port = s.address().port; s.close(() => resolve(port)); }); });
+
+// ── The service ──────────────────────────────────────────────────────────────
+let S;
+const running = [];
+const logged = [];             // the service's log lines (start() with { capture: true })
+const capture = { info: (...a) => logged.push(a.map(String).join(' ')), warn: (...a) => logged.push(a.map(String).join(' ')), error: (...a) => logged.push(a.map(String).join(' ')) };
+async function start(env, o) {
+  const svc = await S.startService({
+    env: Object.assign({
+      METACODE_ENV_FILE: 'none', METACODE_LOG: 'off', OPENCODE_SERVICE_DATA_DIR: fs.mkdtempSync(path.join(tmp, 'svc-')), OPENCODE_SERVICE_TOKEN: TOKEN,
+      OPENCODE_DISABLE_MODELS_FETCH: '1', OPENCODE_DISABLED_PROVIDERS: 'opencode',
+      EMIS_BASE_URL: gatewayBase, EMIS_API_KEY: 'emis-test-key-0123456789', EMIS_TRANSPORT: 'node', EMIS_MODELS_FILE: 'none',
+      OLLAMA_BASE_URL: ollama.base + '/v1'
+    }, env),
+    port: 0, host: '127.0.0.1', log: o && o.capture ? capture : { info() {}, warn() {}, error() {} }
+  });
+  running.push(svc);
+  return svc;
+}
+async function call(svc, method, p, body) {
+  const res = await fetch(svc.url.replace(/\/v1$/, '') + p, {
+    method, headers: Object.assign({ authorization: 'Bearer ' + TOKEN }, body ? { 'content-type': 'application/json' } : {}), body: body ? JSON.stringify(body) : undefined
+  });
+  const text = await res.text();
+  let json = null;
+  try { json = JSON.parse(text); } catch (e) { json = null; }
+  return { status: res.status, text, json, headers: res.headers };
+}
+const models = async svc => (await call(svc, 'GET', '/v1/models')).json;
+const fileWith = (name, text) => { const f = path.join(fs.mkdtempSync(path.join(tmp, 'cfg-')), name); fs.writeFileSync(f, text); return f; };
+const statusOf = async (svc, id) => (await call(svc, 'GET', '/v1/status')).json.providers.find(p => p.id === id);
+async function until(check, ms, what) {
+  const deadline = Date.now() + (ms || 8000);
+  for (;;) {
+    const v = await check();
+    if (v) return v;
+    if (Date.now() > deadline) assert.fail('timed out waiting for ' + (what || 'a condition'));
+    await sleep(100);
+  }
+}
+
+test.before(async () => {
+  S = await import('../opencode/server.mjs');
+  await startOllama();
+  await startGateway();
+});
+test.after(async () => {
+  for (const svc of running) await svc.close().catch(() => {});
+  ollama.server.closeAllConnections(); await new Promise(r => ollama.server.close(r));
+  gateway.closeAllConnections(); await new Promise(r => gateway.close(r));
+  fs.rmSync(tmp, { recursive: true, force: true });
+});
+test.beforeEach(() => { Object.assign(ollama, { have: [], pulls: [], pullDelayMs: 0, chats: [], auth: [], formats: [], extraTags: [], stall: false, down: false, breakPull: false }); });
+
+test('Ollama answering (OLLAMA_BACKUP=auto, the default): its OLLAMA_MODELS are offered as local backup models — in that order, never the default while the gateway has a model — and answer chats, streamed too', async () => {
+  ollama.have = ['tiny-b:270m', 'tiny-a:0.5b', 'big:70b', 'nomic-embed-text:latest'];
+  const svc = await start({ OLLAMA_MODELS: 'tiny-a:0.5b,tiny-b:270m', OLLAMA_AUTO_PULL: 'off' });
+  const m = await models(svc);
+  // (OpenCode Zen is switched off here: listed, not ready)
+  assert.deepEqual(m.providers.map(p => [p.id, p.ready, !!p.backup]), [['emis', true, false], ['opencode', false, false], ['ollama', true, true]]);
+  const local = m.data.filter(e => e.provider === 'ollama');
+  assert.deepEqual(local.map(e => [e.id, e.name, e.backup, e.local, e.free]), [
+    ['ollama/tiny-a:0.5b', 'tiny-a:0.5b (local backup)', true, true, false],
+    ['ollama/tiny-b:270m', 'tiny-b:270m (local backup)', true, true, false]
+  ]);
+  assert.equal(m.default, 'emis/gpt-small', 'the gateway\'s model is the default');
+  const st = await statusOf(svc, 'ollama');
+  assert.equal(st.ready, true);
+  assert.equal(st.keyCount, 0);
+  assert.match(st.note, /^Last-resort backup: answers only when no other provider's model can, one request at a time\. Models: tiny-a:0\.5b, tiny-b:270m\.$/);
+  // a chat for a local model (Ollama takes no key; any placeholder is sent), asking for JSON (as MetaCode does for AI Coding)
+  const r = await call(svc, 'POST', '/v1/chat/completions', { model: 'ollama/tiny-b:270m', response_format: { type: 'json_object' }, messages: [{ role: 'user', content: 'code this' }] });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.choices[0].message.content, 'local tiny-b:270m');
+  assert.deepEqual(ollama.formats, [{ type: 'json_object' }], 'response_format reaches Ollama');
+  assert.ok(ollama.auth[0], 'a placeholder key is sent');
+  const s = await call(svc, 'POST', '/v1/chat/completions', { model: 'ollama/tiny-a:0.5b', stream: true, messages: [{ role: 'user', content: 'code this' }] });
+  assert.equal(s.status, 200, s.text);
+  assert.match(s.text, /local tiny-a:0\.5b/);
+  // a model Ollama has but OLLAMA_MODELS doesn't name isn't offered
+  const big = await call(svc, 'POST', '/v1/chat/completions', { model: 'ollama/big:70b', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(big.status, 404, big.text);
+  assert.match(big.json.error.message, /isn't one of the local models MetaCode offers \(OLLAMA_MODELS\)/);
+  // a bare id that both could mean goes to the gateway first
+  ollama.have.push('gpt-small');
+  const bare = await call(svc, 'POST', '/v1/chat/completions', { model: 'gpt-small', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(bare.json.choices[0].message.content, 'gateway gpt-small');
+});
+
+test('the backup comes last whatever the config order: a provider listed after it is the default, and gets an id without a provider first', async () => {
+  ollama.have = ['tiny-a:0.5b', 'gpt-small'];
+  // (the operator's own provider "other" comes after "ollama" in the merged config)
+  const cfg = fileWith('opencode.json', JSON.stringify({ provider: { other: { npm: '@ai-sdk/openai-compatible', name: 'Other gateway', options: { baseURL: gatewayBase, apiKey: 'other-key-0123456789' } } } }));
+  const svc = await start({ OLLAMA_MODELS: 'tiny-a:0.5b', OLLAMA_AUTO_PULL: 'off', OPENCODE_CONFIG: cfg, OPENCODE_DISABLED_PROVIDERS: 'opencode,emis' });
+  const m = await models(svc);
+  assert.deepEqual(m.providers.filter(p => p.ready).map(p => p.id), ['ollama', 'other'], 'config order');
+  assert.equal(m.default, 'other/gpt-small', 'not the backup\'s model, though it is listed first');
+  assert.deepEqual(m.data.map(e => e.id), ['ollama/tiny-a:0.5b', 'other/gpt-small']);
+  const bare = await call(svc, 'POST', '/v1/chat/completions', { model: 'gpt-small', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(bare.json.choices[0].message.content, 'gateway gpt-small', 'not Ollama\'s gpt-small');
+  const none = await call(svc, 'POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(none.json.choices[0].message.content, 'gateway gpt-small', 'the default answers');
+});
+
+test('a provider.ollama of the operator\'s own (OPENCODE_CONFIG, as in OpenCode\'s docs) stays an ordinary provider: its models as they are, nothing downloaded, no backup', async () => {
+  ollama.have = ['llama3:8b', 'tiny-a:0.5b'];
+  const cfg = fileWith('opencode.json', JSON.stringify({ provider: { ollama: { npm: '@ai-sdk/openai-compatible', name: 'My Ollama', options: { baseURL: ollama.base + '/v1', apiKey: 'ollama-placeholder-key' } } } }));
+  const svc = await start({ OPENCODE_CONFIG: cfg, OPENCODE_DISABLED_PROVIDERS: 'opencode,emis' });
+  const m = await models(svc);
+  const own = m.data.filter(e => e.provider === 'ollama');
+  // (not the backup; local, as any provider at 127.0.0.1 is: its models are on this machine)
+  assert.deepEqual(own.map(e => [e.id, e.name, !!e.backup, !!e.local]), [['ollama/llama3:8b', 'llama3:8b', false, true], ['ollama/tiny-a:0.5b', 'tiny-a:0.5b', false, true]]);
+  assert.equal(m.default, 'ollama/llama3:8b');
+  assert.equal(m.providers.find(p => p.id === 'ollama').name, 'My Ollama');
+  const r = await call(svc, 'POST', '/v1/chat/completions', { model: 'ollama/llama3:8b', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.json.choices[0].message.content, 'local llama3:8b');
+  await sleep(300);
+  assert.deepEqual(ollama.pulls, [], 'nothing downloaded');
+});
+
+test('OLLAMA_MODELS=all: every chat model Ollama has (not its embedding models); with only Ollama ready, its first model is the default', async () => {
+  ollama.have = ['tiny-b:270m', 'big:70b', 'nomic-embed-text:latest'];
+  const svc = await start({ OLLAMA_MODELS: 'all', OPENCODE_DISABLED_PROVIDERS: 'opencode,emis' });
+  const m = await models(svc);
+  assert.deepEqual(m.data.map(e => e.id), ['ollama/tiny-b:270m', 'ollama/big:70b']);
+  assert.equal(m.default, 'ollama/tiny-b:270m', 'the only provider: its model is the default');
+});
+
+test('nothing answering at OLLAMA_BASE_URL: with auto it is left out of every list; with OLLAMA_BACKUP=on it is listed with the problem; with off it is absent', async () => {
+  const port = await closedPort();
+  const auto = await start({ OLLAMA_BASE_URL: 'http://127.0.0.1:' + port + '/v1' });
+  const st = (await call(auto, 'GET', '/v1/status')).json;
+  assert.deepEqual(st.providers.map(p => p.id), ['emis', 'opencode'], 'no row for a server without Ollama');
+  assert.deepEqual((await models(auto)).providers.map(p => p.id), ['emis', 'opencode']);
+
+  const on = await start({ OLLAMA_BASE_URL: 'http://127.0.0.1:' + port + '/v1', OLLAMA_BACKUP: 'on' });
+  const p = await statusOf(on, 'ollama');
+  assert.equal(p.ready, false);
+  assert.match(p.problem, /^Ollama isn't answering at http:\/\/127\.0\.0\.1:\d+ \(.+\)\. Install and start Ollama on this server \(ollama\.com\), or set OLLAMA_BASE_URL\.$/);
+
+  // …and nothing in the log about it: not at the start, not on Reload .env
+  logged.length = 0;
+  const quiet = await start({ OLLAMA_BASE_URL: 'http://127.0.0.1:' + port + '/v1' }, { capture: true });
+  await call(quiet, 'POST', '/v1/reload');
+  await call(quiet, 'GET', '/v1/models');
+  await sleep(300);
+  assert.ok(logged.length > 0, 'the start line was logged');
+  assert.deepEqual(logged.filter(l => /ollama|local backup/i.test(l)), [], logged.join('\n'));
+
+  // an enabled_providers list without it: no backup, and no row saying it's switched off
+  const allow = fileWith('opencode.json', JSON.stringify({ enabled_providers: ['emis'] }));
+  ollama.have = ['tiny-a:0.5b'];
+  const listed = await start({ OPENCODE_CONFIG: allow, OLLAMA_MODELS: 'tiny-a:0.5b' });
+  assert.deepEqual((await call(listed, 'GET', '/v1/status')).json.providers.map(x => x.id), ['emis', 'opencode']);
+
+  const off = await start({ OLLAMA_BACKUP: 'off', OLLAMA_MODELS: 'tiny-a:0.5b' });
+  assert.deepEqual((await call(off, 'GET', '/v1/status')).json.providers.map(x => x.id), ['emis', 'opencode']);
+  assert.equal((await models(off)).data.some(e => e.provider === 'ollama'), false);
+});
+
+test('OLLAMA_MODELS Ollama doesn\'t have yet are downloaded one after the other (POST /api/pull), then offered; meanwhile the status says so', async () => {
+  ollama.pullDelayMs = 600;
+  const svc = await start({ OLLAMA_MODELS: 'tiny-a:0.5b,tiny-b:270m' });
+  const p = await until(async () => { const x = await statusOf(svc, 'ollama'); return x && /Downloading .*%/.test(x.problem || '') && x; }, 5000, 'downloading');
+  assert.equal(p.ready, false);
+  assert.match(p.problem, /^Downloading tiny-a:0\.5b \(50%\) — the local backup is ready when that's done\.$/);
+  await until(async () => (await statusOf(svc, 'ollama')).ready, 8000, 'ready');
+  assert.deepEqual(ollama.pulls, [{ model: 'tiny-a:0.5b', stream: true }, { model: 'tiny-b:270m', stream: true }], 'one after the other');
+  const local = (await models(svc)).data.filter(e => e.provider === 'ollama').map(e => e.id);
+  assert.deepEqual(local, ['ollama/tiny-a:0.5b', 'ollama/tiny-b:270m']);
+});
+
+test('OLLAMA_AUTO_PULL=off, or a download that fails: nothing more is tried, and the problem says what to run', async () => {
+  const svc = await start({ OLLAMA_MODELS: 'tiny-a:0.5b', OLLAMA_AUTO_PULL: 'off' });
+  const p = await statusOf(svc, 'ollama');
+  assert.equal(p.ready, false);
+  assert.equal(p.problem, 'Ollama has none of the models in OLLAMA_MODELS (tiny-a:0.5b). Run "ollama pull tiny-a:0.5b" on the server (OLLAMA_AUTO_PULL is off), or install a model in the AI Model Store.');
+  assert.deepEqual(ollama.pulls, []);
+
+  const failing = await start({ OLLAMA_MODELS: 'missing/model:1b' });
+  const f = await until(async () => { const x = await statusOf(failing, 'ollama'); return /downloading failed/.test(x.problem || '') && x; }, 5000, 'the failure');
+  assert.match(f.problem, /^Ollama has none of the models in OLLAMA_MODELS \(missing\/model:1b\): downloading failed — missing\/model:1b \(pull model manifest: file does not exist\)\. Run "ollama pull missing\/model:1b" on the server, or install a model in the AI Model Store\.$/);
+});
+
+test('Reload .env: a new OLLAMA_BASE_URL counts at once; unchanged settings leave a download going', async () => {
+  const port = await closedPort();
+  const envFile = fileWith('.env', 'OLLAMA_BACKUP=on\nOLLAMA_AUTO_PULL=off\nOLLAMA_MODELS=tiny-a:0.5b\nOLLAMA_BASE_URL=http://127.0.0.1:' + port + '/v1\n');
+  ollama.have = ['tiny-a:0.5b'];
+  const svc = await start({ METACODE_ENV_FILE: envFile });
+  assert.match((await statusOf(svc, 'ollama')).problem, new RegExp('isn\'t answering at http://127\\.0\\.0\\.1:' + port));
+  fs.writeFileSync(envFile, 'OLLAMA_BACKUP=on\nOLLAMA_AUTO_PULL=off\nOLLAMA_MODELS=tiny-a:0.5b\nOLLAMA_BASE_URL=' + ollama.base + '/v1\n');
+  const r = await call(svc, 'POST', '/v1/reload');
+  const p = r.json.providers.find(x => x.id === 'ollama');
+  assert.equal(p.ready, true, JSON.stringify(p));
+  assert.ok((await models(svc)).data.some(e => e.id === 'ollama/tiny-a:0.5b'));
+
+  // a download going on: a reload that changes nothing for Ollama doesn't start it over
+  ollama.have = [];
+  ollama.pullDelayMs = 1200;
+  fs.writeFileSync(envFile, 'OLLAMA_BACKUP=on\nOLLAMA_MODELS=tiny-b:270m\nOLLAMA_BASE_URL=' + ollama.base + '/v1\n');
+  await call(svc, 'POST', '/v1/reload');
+  await until(async () => /Downloading/.test((await statusOf(svc, 'ollama')).problem || ''), 5000, 'downloading');
+  await call(svc, 'POST', '/v1/reload');
+  await until(async () => (await statusOf(svc, 'ollama')).ready, 8000, 'ready');
+  assert.deepEqual(ollama.pulls.map(x => x.model), ['tiny-b:270m'], 'downloaded once');
+});
+
+test('a proxy set for the internet (HTTPS_PROXY / HTTP_PROXY) doesn\'t get the requests for Ollama on this machine', async () => {
+  ollama.have = ['tiny-a:0.5b'];
+  const port = await closedPort();
+  const svc = await start({ OLLAMA_MODELS: 'tiny-a:0.5b', OLLAMA_AUTO_PULL: 'off', HTTP_PROXY: 'http://127.0.0.1:' + port, HTTPS_PROXY: 'http://127.0.0.1:' + port, OPENCODE_DISABLED_PROVIDERS: 'opencode,emis' });
+  const r = await call(svc, 'POST', '/v1/chat/completions', { model: 'ollama/tiny-a:0.5b', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.choices[0].message.content, 'local tiny-a:0.5b');
+});
+
+// ── The AI Model Store's models, AI_MODE, other servers on this machine ──────
+
+test('OLLAMA_MODELS unset: the default models first, then every other chat model Ollama has (those installed from the AI Model Store)', async () => {
+  ollama.have = ['qwen3:0.6b', 'gemma3:270m', 'nomic-embed-text:latest'];
+  const svc = await start({ OLLAMA_AUTO_PULL: 'off' });
+  const local = (await models(svc)).data.filter(e => e.provider === 'ollama').map(e => e.id);
+  assert.deepEqual(local, ['ollama/gemma3:270m', 'ollama/qwen3:0.6b'], 'gemma3:270m (a default) first; no embedding model');
+  const r = await call(svc, 'POST', '/v1/chat/completions', { model: 'ollama/qwen3:0.6b', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.choices[0].message.content, 'local qwen3:0.6b');
+});
+
+test('AI_MODE=local: models on this machine are first-class — the default, ids without a provider go to them, not "backup" — and nothing is downloaded unasked', async () => {
+  ollama.have = ['gemma3:1b', 'gpt-small'];
+  const svc = await start({ AI_MODE: 'local' });
+  const m = await models(svc);
+  assert.equal(m.default, 'ollama/gemma3:1b', 'a local model is the default, though the gateway has one');
+  assert.deepEqual(m.providers.find(p => p.id === 'ollama'), { id: 'ollama', name: 'On this device (Ollama)', ready: true });
+  const e = m.data.find(x => x.id === 'ollama/gemma3:1b');
+  assert.deepEqual([e.name, !!e.backup, e.local], ['gemma3:1b (on this device)', false, true]);
+  const bare = await call(svc, 'POST', '/v1/chat/completions', { model: 'gpt-small', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(bare.json.choices[0].message.content, 'local gpt-small', 'a bare id goes to the model on this machine');
+  assert.match((await statusOf(svc, 'ollama')).note, /^Models on this device: prompts stay here\./);
+  // no model yet: nothing is downloaded (the Model Store asks first), and the problem says where to get one
+  ollama.have = [];
+  const empty = await start({ AI_MODE: 'local' });
+  await sleep(300);
+  const st = await statusOf(empty, 'ollama');
+  assert.deepEqual(ollama.pulls, []);
+  assert.match(st.problem, /Install one in the AI Model Store/);
+});
+
+test('AI_MODE=local-only: every provider that isn\'t on this machine is switched off; an OpenAI-compatible server on 127.0.0.1 (llama.cpp, LM Studio…) works with no key', async () => {
+  ollama.have = ['gemma3:270m'];
+  const svc = await start({
+    AI_MODE: 'local-only', EMIS_BASE_URL: 'https://emis.example.invalid/v1',
+    OPENCODE_CONFIG: fileWith('opencode.json', JSON.stringify({ provider: { llamacpp: { npm: '@ai-sdk/openai-compatible', name: 'llama.cpp', options: { baseURL: gatewayBase } } } }))
+  });
+  const st = (await call(svc, 'GET', '/v1/status')).json.providers;
+  const byId = id => st.find(p => p.id === id);
+  assert.equal(byId('emis').ready, false);
+  assert.match(byId('emis').problem, /AI_MODE=local-only keeps every prompt on this machine/);
+  assert.match(byId('opencode').problem, /AI_MODE=local-only/);
+  assert.deepEqual([byId('llamacpp').ready, byId('llamacpp').keyCount, byId('llamacpp').problem], [true, 0, null]);
+  const m = await models(svc);
+  assert.deepEqual(m.data.map(e => e.provider).filter((v, i, a) => a.indexOf(v) === i).sort(), ['llamacpp', 'ollama']);
+  assert.equal(m.default, 'ollama/gemma3:270m');
+  const r = await call(svc, 'POST', '/v1/chat/completions', { model: 'llamacpp/gpt-small', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.choices[0].message.content, 'gateway gpt-small');
+  const cloud = await call(svc, 'POST', '/v1/chat/completions', { model: 'emis/gpt-small', messages: [{ role: 'user', content: 'hi' }] });
+  assert.notEqual(cloud.status, 200);
+});
+
+test('AI_MODE=local-only: the AI gateway at an address on this machine (a relay or a tunnel to it) is switched off too — not ready, not listed, never the default, and no prompt reaches it', async () => {
+  // (the gateway stand-in is on 127.0.0.1; nothing answers for Ollama, so no local model is ready either)
+  const svc = await start({ AI_MODE: 'local-only', OLLAMA_BASE_URL: 'http://127.0.0.1:' + await closedPort() + '/v1' });
+  gatewaySeen.length = 0;
+  const emis = await statusOf(svc, 'emis');
+  assert.equal(emis.ready, false);
+  assert.match(emis.problem, /AI_MODE=local-only keeps every prompt on this machine/);
+  const m = await models(svc);
+  assert.ok(!m.data.some(e => e.provider === 'emis'), JSON.stringify(m.data.map(e => e.id)));
+  assert.equal(m.default, null);
+  for (const asked of [{ model: 'emis/gpt-small' }, { model: 'gpt-small' }, {}]) {
+    const r = await call(svc, 'POST', '/v1/chat/completions', Object.assign({ messages: [{ role: 'user', content: 'hi' }] }, asked));
+    assert.notEqual(r.status, 200, JSON.stringify(asked) + ' → ' + r.text.slice(0, 200));
+  }
+  assert.deepEqual(gatewaySeen, [], 'nothing reaches the gateway');
+});
+
+test('POST /v1/local/refresh: a model installed meanwhile is offered at once, not after the next look (30 s)', async () => {
+  ollama.have = ['gemma3:270m'];
+  const svc = await start({ OLLAMA_AUTO_PULL: 'off' });
+  assert.deepEqual((await models(svc)).data.filter(e => e.provider === 'ollama').map(e => e.id), ['ollama/gemma3:270m']);
+  ollama.have.push('qwen3:0.6b');
+  assert.deepEqual((await models(svc)).data.filter(e => e.provider === 'ollama').map(e => e.id), ['ollama/gemma3:270m'], '(not looked at yet)');
+  const r = await call(svc, 'POST', '/v1/local/refresh');
+  assert.deepEqual(r.json, { ok: true, refreshed: ['ollama'] });
+  assert.deepEqual((await models(svc)).data.filter(e => e.provider === 'ollama').map(e => e.id), ['ollama/gemma3:270m', 'ollama/qwen3:0.6b']);
+});
+
+// ── The review's fixes (opencode/providers/ollama.mjs, config.mjs) ───────────
+
+test('Ollama\'s cloud models (they run on Ollama\'s servers: the prompts would leave this one) and embedding models are never offered', async () => {
+  ollama.have = ['gemma3:270m'];
+  ollama.extraTags = [
+    { name: 'gpt-oss:120b-cloud', model: 'gpt-oss:120b-cloud', size: 384, remote_host: 'https://ollama.com:443', remote_model: 'gpt-oss:120b' },
+    { name: 'kimi-k3:cloud', model: 'kimi-k3:cloud', size: 0 },
+    { name: 'nomic-embed-text:latest', model: 'nomic-embed-text:latest', size: 274302450, details: { family: 'nomic-bert' } },
+  ];
+  for (const env of [{}, { METACODE_OLLAMA_MODELS: 'all' }, { AI_MODE: 'local-only' }, { AI_MODE: 'local-only', METACODE_OLLAMA_MODELS: 'gemma3:270m,gpt-oss:120b-cloud' }]) {
+    const svc = await start(Object.assign({ OLLAMA_AUTO_PULL: 'off' }, env));
+    const m = await models(svc);
+    assert.deepEqual(m.data.filter(e => e.provider === 'ollama').map(e => e.id), ['ollama/gemma3:270m'], JSON.stringify(env));
+    if (env.AI_MODE) assert.equal(m.default, 'ollama/gemma3:270m');
+    const cloud = await call(svc, 'POST', '/v1/chat/completions', { model: 'ollama/gpt-oss:120b-cloud', messages: [{ role: 'user', content: 'hi' }] });
+    assert.notEqual(cloud.status, 200, JSON.stringify(env));
+    assert.ok(!ollama.chats.includes('gpt-oss:120b-cloud'));
+  }
+});
+
+test('an Ollama on another machine (OLLAMA_BASE_URL) isn\'t "on this device": AI_MODE=local-only switches it off; otherwise its models aren\'t local, and it says where they run', async () => {
+  // (192.0.2.1: a documentation address, never reached)
+  const off = await start({ AI_MODE: 'local-only', OLLAMA_BASE_URL: 'http://192.0.2.1:11434' });
+  const st = await statusOf(off, 'ollama');
+  assert.equal(st.ready, false);
+  assert.match(st.problem, /AI_MODE=local-only keeps every prompt on this machine, and OLLAMA_BASE_URL is another machine \(192\.0\.2\.1:11434\)/);
+  const away = await start({ AI_MODE: 'local', OLLAMA_BASE_URL: 'http://192.0.2.1:11434', OLLAMA_AUTO_PULL: 'off' });
+  const a = await statusOf(away, 'ollama');
+  assert.deepEqual([a.local, a.name], [false, 'Ollama at 192.0.2.1:11434']);
+  assert.match(a.note, /Models on the Ollama at 192\.0\.2\.1:11434: prompts go to that machine/);
+  // (and the one on this machine: local, and named so)
+  ollama.have = ['gemma3:270m'];
+  const here = await start({ AI_MODE: 'local', OLLAMA_AUTO_PULL: 'off' });
+  const h = await statusOf(here, 'ollama');
+  assert.deepEqual([h.local, h.name], [true, 'On this device (Ollama)']);
+  assert.ok((await models(here)).data.filter(e => e.provider === 'ollama').every(e => e.local === true));
+});
+
+test('an OpenAI-compatible server on this machine (llama.cpp, LM Studio…): its models are local, the default in the local modes when Ollama has none, and it\'s reached without the internet\'s proxy', async () => {
+  const cfg = fileWith('opencode.json', JSON.stringify({ provider: { llamacpp: { npm: '@ai-sdk/openai-compatible', name: 'llama.cpp', options: { baseURL: gatewayBase } } } }));
+  const svc = await start({ AI_MODE: 'local-only', OLLAMA_BACKUP: 'off', EMIS_BASE_URL: 'https://emis.example.invalid/v1', OPENCODE_CONFIG: cfg, HTTPS_PROXY: 'http://127.0.0.1:9', HTTP_PROXY: 'http://127.0.0.1:9' });
+  const st = await statusOf(svc, 'llamacpp');
+  assert.deepEqual([st.ready, st.local, st.keyCount], [true, true, 0]);
+  const m = await models(svc);
+  assert.deepEqual(m.data.filter(e => e.provider === 'llamacpp').map(e => [e.id, e.local]), [['llamacpp/gpt-small', true]]);
+  assert.equal(m.default, 'llamacpp/gpt-small');
+  const r = await call(svc, 'POST', '/v1/chat/completions', { messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.status, 200, r.text);
+  assert.equal(r.json.choices[0].message.content, 'gateway gpt-small');
+});
+
+test('OLLAMA_MODELS set the way Ollama documents it (its models folder) isn\'t taken for a list; METACODE_OLLAMA_MODELS is MetaCode\'s; an address without /v1 works', async () => {
+  ollama.have = ['gemma3:270m', 'qwen3:0.6b'];
+  const svc = await start({ OLLAMA_AUTO_PULL: 'off', OLLAMA_MODELS: '/var/lib/ollama/models', OLLAMA_BASE_URL: ollama.base });
+  assert.deepEqual((await models(svc)).data.filter(e => e.provider === 'ollama').map(e => e.id), ['ollama/gemma3:270m', 'ollama/qwen3:0.6b']);
+  assert.equal((await statusOf(svc, 'ollama')).ready, true);
+  const r = await call(svc, 'POST', '/v1/chat/completions', { model: 'ollama/gemma3:270m', messages: [{ role: 'user', content: 'hi' }] });
+  assert.equal(r.status, 200, r.text);
+  const named = await start({ OLLAMA_AUTO_PULL: 'off', METACODE_OLLAMA_MODELS: 'qwen3:0.6b' });
+  assert.deepEqual((await models(named)).data.filter(e => e.provider === 'ollama').map(e => e.id), ['ollama/qwen3:0.6b']);
+});
+
+test('a stalled download (Ollama repeating the same progress line) is stopped after OLLAMA_PULL_IDLE_SECONDS', async () => {
+  ollama.stall = true;
+  const svc = await start({ METACODE_OLLAMA_MODELS: 'tiny-s:1b', OLLAMA_PULL_IDLE_SECONDS: '1' });
+  const st = await until(async () => { const x = await statusOf(svc, 'ollama'); return /downloading failed/.test(x.problem || '') && x; }, 8000, 'the stalled download given up');
+  assert.match(st.problem, /no progress for 1 s/);
+});
+
+test('a download cut off while Ollama restarts is tried again as soon as Ollama is back (not 10 minutes later)', async () => {
+  ollama.breakPull = true;
+  const svc = await start({ METACODE_OLLAMA_MODELS: 'tiny-r:1b' });
+  await until(async () => /downloading failed/.test((await statusOf(svc, 'ollama')).problem || ''), 5000, 'the cut-off download');
+  ollama.down = true;
+  await call(svc, 'POST', '/v1/local/refresh');            // (a look while Ollama is away)
+  ollama.down = false;
+  await call(svc, 'POST', '/v1/local/refresh');            // (and once it's back)
+  await until(async () => ollama.have.includes('tiny-r:1b'), 5000, 'the download done again');
+  assert.equal(ollama.pulls.filter(p => p.model === 'tiny-r:1b').length, 2);
+});
+
+test('a provider.ollama in OPENCODE_CONFIG without its own "npm" adjusts the backup (a name, a whitelist) instead of removing it', async () => {
+  ollama.have = ['gemma3:270m'];
+  const svc = await start({ OLLAMA_AUTO_PULL: 'off', OPENCODE_CONFIG: fileWith('opencode.json', JSON.stringify({ provider: { ollama: { name: 'Our small models' } } })) }, { capture: true });
+  const m = await models(svc);
+  const p = m.providers.find(x => x.id === 'ollama');
+  assert.deepEqual([p.name, p.backup], ['Our small models', true]);
+  assert.ok(m.data.some(e => e.id === 'ollama/gemma3:270m' && e.backup));
+});

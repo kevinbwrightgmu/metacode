@@ -31,6 +31,7 @@
 // token, stored only as a hash, valid 14 days, for one email address; only
 // the account with that (confirmed) email can accept it.
 
+const { defaultDataDir } = require('../lib/data-dir');
 const express = require('express');
 const crypto = require('crypto');
 const path = require('path');
@@ -58,7 +59,7 @@ const hashToken = t => crypto.createHash('sha256').update(String(t)).digest('hex
  */
 function createCollab(deps) {
   const accounts = deps.accounts;
-  const dir = deps.dataDir || path.resolve(String(process.env.COLLAB_DATA_DIR || '').trim() || path.join(__dirname, '..', 'collab-data'));
+  const dir = deps.dataDir || path.resolve(String(process.env.COLLAB_DATA_DIR || '').trim() || defaultDataDir('collab-data'));
   const store = new CollabStore(dir);
   const L = Object.assign({ ownedProjects: 100, members: 25, pendingInvites: 50, chatPerMinute: 30, streamsPerUser: 8 }, deps.limits || {});
 

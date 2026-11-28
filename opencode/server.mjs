@@ -119,7 +119,10 @@ const MAX_BODY = 32 * 1024 * 1024;
 const MAX_DRAIN = 128 * 1024 * 1024;          // past this, an oversized request is cut off instead of read to the end
 const DEFAULT_UPSTREAM_TIMEOUT_MS = 115000;   // without X-Request-Timeout-Ms (MetaCode's default 120 s − 5 s)
 const MAX_UPSTREAM_TIMEOUT_MS = 600000;
-const PROVIDER_MODULES = { zen: './providers/zen.mjs', 'openai-compatible': './providers/openai-compatible.mjs' };
+const PROVIDER_MODULES = { zen: './providers/zen.mjs', 'openai-compatible': './providers/openai-compatible.mjs', ollama: './providers/ollama.mjs' };
+// (the local last-resort backup: its models answer only when no other provider's can — never the default)
+// (Ollama is the last-resort backup unless AI_MODE=local / local-only makes its models first-class)
+const isBackupSlot = slot => slot.kind === 'ollama' && !(slot.impl && typeof slot.impl.isBackup === 'function' && !slot.impl.isBackup());
 const LEGACY_DEFAULT = 'claude-opus-5.5';     // the gateway's default model before the service
 // How long the routes wait for a provider's model list (MetaCode waits 3 s for /v1/status, 20 s for /v1/models)
 const STATUS_DEADLINE_MS = 2000;
@@ -465,8 +468,16 @@ export async function startService(opts) {
 
   // A bare id (saved before providers): the OpenAI-compatible providers first (config order), then Zen;
   // the first provider that has the model under any spelling wins (its exact spelling before others)
+  // The ready providers whose models are on this machine (their entries say `local`): Ollama's first
+  function localSlots(list) {
+    const here = list.slots.filter(x => list.ready.has(x.id) && (list.byProvider.get(x.id) || []).some(e => e.local));
+    return here.filter(x => x.kind === 'ollama').concat(here.filter(x => x.kind !== 'ollama'));
+  }
+
   function findBare(list, model) {
-    const order = list.slots.filter(s => s.kind !== 'zen').concat(list.slots.filter(s => s.kind === 'zen')).filter(s => list.ready.has(s.id));
+    const local = /^local(-only)?$/i.test(String(env.AI_MODE || '').trim()) ? localSlots(list) : [];
+    const order = local.concat(list.slots.filter(s => s.kind !== 'zen' && !isBackupSlot(s) && !local.includes(s)), list.slots.filter(s => s.kind === 'zen' && !local.includes(s)), list.slots.filter(s => isBackupSlot(s) && !local.includes(s)))
+      .filter(s => list.ready.has(s.id));
     for (const s of order) {
       const entries = list.byProvider.get(s.id);
       const e = entries.find(x => x.model === model) || findIn(entries, model);
@@ -550,6 +561,14 @@ export async function startService(opts) {
     }
     const usable = entries => (entries || []).find(e => e.available !== false);
     const pick = (slot, entry) => ({ target: { slot, entry, variant: null, fullId: entry.id }, id: entry.id, warnings });
+    // AI_MODE=local / local-only: a model on this device is the default whenever one is ready: Ollama's first,
+    // then an OpenAI-compatible server's on this machine (llama.cpp, LM Studio…); entries say `local`
+    if (/^local(-only)?$/i.test(String(env.AI_MODE || '').trim())) {
+      for (const s of localSlots(list)) {
+        const e = (list.byProvider.get(s.id) || []).find(x => x.available !== false && x.local);
+        if (e) return pick(s, e);
+      }
+    }
     const emis = list.slots.find(s => s.id === 'emis');
     const legacyEntry = emis && list.ready.has('emis') ? (list.byProvider.get('emis') || []).find(e => e.model === LEGACY_DEFAULT && e.available !== false) : null;
     if (legacyEntry) return pick(emis, legacyEntry);
@@ -557,7 +576,8 @@ export async function startService(opts) {
       const e = usable(list.byProvider.get(s.id));
       if (e) return pick(s, e);
     }
-    for (const s of list.slots.filter(x => list.ready.has(x.id))) {
+    // (the local backup only when no other provider has a model)
+    for (const s of list.slots.filter(x => list.ready.has(x.id) && !isBackupSlot(x)).concat(list.slots.filter(x => list.ready.has(x.id) && isBackupSlot(x)))) {
       const e = usable(list.byProvider.get(s.id));
       if (e) return pick(s, e);
     }
@@ -573,6 +593,8 @@ export async function startService(opts) {
       provider: e.provider, provider_name: e.providerName, model: e.model, name: e.name, free: e.free,
       available: e.available === true || e.available === false ? e.available : null
     };
+    if (e.backup === true) out.backup = true;           // (used only when no other provider's model can answer)
+    if (e.local === true) out.local = true;             // (runs on this server)
     if (isDefault) out.default = true;
     Object.assign(out, {
       tool_call: e.toolCall, reasoning: e.reasoning, attachment: e.attachment, temperature: e.temperature,
@@ -589,7 +611,8 @@ export async function startService(opts) {
     sendJson(res, 200, {
       object: 'list',
       default: def.id,
-      providers: list.slots.map((s, i) => ({ id: s.id, name: list.statuses[i].name || s.name, ready: list.ready.has(s.id) })),
+      providers: list.slots.map((s, i) => Object.assign({ id: s.id, name: list.statuses[i].name || s.name, ready: list.ready.has(s.id) }, isBackupSlot(s) ? { backup: true } : {}))
+        .filter((p, i) => !list.statuses[i].hidden),
       data: list.entries.map(e => modelJson(e, e.id === def.id))
     });
   }
@@ -610,8 +633,19 @@ export async function startService(opts) {
       ready: list.entries.length > 0,
       default: def.id,
       warnings: [...new Set(warnings)],
-      providers: list.slots.map((s, i) => Object.assign({}, list.statuses[i], { ready: list.ready.has(s.id) }))
+      providers: list.slots.map((s, i) => Object.assign({}, list.statuses[i], { ready: list.ready.has(s.id) })).filter(p => !p.hidden)
     };
+  }
+
+  // The local providers (Ollama) look at what's installed now, without a whole reload
+  async function refreshLocal() {
+    const done = [];
+    for (const slot of slots.values()) {
+      if (slot.impl && typeof slot.impl.refresh === 'function') {
+        try { await slot.impl.refresh(); done.push(slot.id); } catch (e) { log.warn(slot.name + ' couldn\'t look at its models: ' + redact(e && e.message, [], 200)); }
+      }
+    }
+    return { ok: true, refreshed: done };
   }
 
   async function reload() {
@@ -753,6 +787,8 @@ export async function startService(opts) {
       if (route === 'GET /v1/models') { req.resume(); await modelsRoute(req, res); return; }
       if (route === 'GET /v1/status') { req.resume(); sendJson(res, 200, await status()); return; }
       if (route === 'POST /v1/reload') { req.resume(); sendJson(res, 200, await reload()); return; }
+      // MetaCode's AI Model Store installed or deleted a model: the local providers look at it now
+      if (route === 'POST /v1/local/refresh') { req.resume(); sendJson(res, 200, await refreshLocal()); return; }
       if (route === 'POST /v1/chat/completions') {
         let body;
         try { body = await readBody(req); }
@@ -814,9 +850,10 @@ export async function startService(opts) {
   if (envInfo && envInfo.error) warnOnce('The settings file ' + (envInfo.file || '.env') + ' couldn\'t be read: ' + envInfo.error);
   const first = await listModels({ deadlineMs: STATUS_DEADLINE_MS, waitMs: STATUS_WAIT_MS });
   const summary = first.slots.map((s, i) => {
+    if (first.statuses[i].hidden) return '';          // (the local backup while there's no Ollama: nothing to say)
     if (first.ready.has(s.id)) return s.name + ': ' + first.byProvider.get(s.id).length + ' model' + (first.byProvider.get(s.id).length === 1 ? '' : 's');
     return s.name + ': ' + (s.disabled ? 'switched off' : 'not ready' + (first.statuses[i].problem ? ' (' + first.statuses[i].problem.replace(/\.$/, '') + ')' : ''));
-  }).join('; ');
+  }).filter(Boolean).join('; ');
   log.info('MetaCode\'s OpenCode service (OpenCode ' + OPENCODE_AI_VERSION + ') is listening on ' + url.replace(/\/v1$/, '') + ' — ' + (summary || 'no AI providers') + '.');
 
   // Stops taking requests; running chats get graceMs to finish, then are cancelled with a failure that

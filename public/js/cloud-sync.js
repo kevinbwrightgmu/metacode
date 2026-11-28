@@ -462,7 +462,8 @@ const CloudSync = (() => {
     user = id;
     await syncNow();
     clearInterval(pullTimer);
-    pullTimer = setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, 60000);
+    // (every minute while the tab is visible; every 5 minutes on a Potato device: js/perf.js)
+    pullTimer = setInterval(() => { if (document.visibilityState === 'visible') syncNow(); }, window.MetaPerf && MetaPerf.is('potato') ? 300000 : 60000);
   }
   const escHtml = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 

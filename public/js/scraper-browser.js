@@ -17,7 +17,7 @@ const RedditBrowser = (() => {
 
   const PREFIX = '/scramjet/~/';
   const FILES = {
-    sw:         '/scramjet-sw.js',
+    sw:         '/sw.js',             // MetaCode's one service worker (lib/pwa-sw.js), which routes Scramjet's requests too
     scramjet:   '/scramjet/scramjet.js',
     controller: '/scramjet/controller.api.js',
     inject:     '/scramjet/controller.inject.js',
@@ -130,7 +130,18 @@ const RedditBrowser = (() => {
         api.config.injectPath = FILES.inject;
         api.config.wasmPath = FILES.wasm;
         controller = new api.Controller({ serviceworker: sw, transport });
-        await controller.wait();
+        // (a new MetaCode's service worker takes this tab over after an update: the controller registers with it
+        // again, or the frame's pages would stop being routed. serviceWorkerController and setupMessagePort are
+        // scramjet-controller 0.0.14's, the version package.json pins)
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+          const w = navigator.serviceWorker.controller;
+          if (!controller || !w || controller.serviceWorkerController === w) return;
+          controller.serviceWorkerController = w;
+          try { controller.setupMessagePort(); } catch (e) { console.warn('[RedditBrowser] Couldn\'t attach to the new service worker:', e); }
+        });
+        // (a service worker without Scramjet's routing never answers: say so instead of loading forever)
+        const started = await Promise.race([controller.wait().then(() => true), new Promise(r => setTimeout(r, 20000, false))]);
+        if (!started) throw new Error('The in-app browser didn\'t start: this page\'s service worker has no Reddit browser in it. Reload the page; if that doesn\'t help, check that SCRAPER_BROWSER_ENABLED isn\'t false on the server.');
       })().catch(err => { initPromise = null; throw err; });
     }
     await initPromise;

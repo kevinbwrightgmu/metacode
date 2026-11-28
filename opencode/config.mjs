@@ -18,9 +18,13 @@
 //   model, enabled_providers [], disabled_providers []
 //
 // Provider kinds: the id "opencode" is OpenCode Zen (its models come from the
-// catalog, catalog.mjs); any other id with npm "@ai-sdk/openai-compatible" is
-// an OpenAI-compatible provider (providers/openai-compatible.mjs); anything
-// else is skipped with a warning. enabled_providers is an allow-list and
+// catalog, catalog.mjs); the id "ollama" is the local last-resort backup
+// (providers/ollama.mjs: Ollama on this server; left out with OLLAMA_BACKUP=off,
+// or by an enabled_providers list without it; a provider.ollama of the
+// operator's own in OPENCODE_CONFIG is an ordinary provider instead);
+// any other id with npm "@ai-sdk/openai-compatible" is an OpenAI-compatible
+// provider (providers/openai-compatible.mjs); anything else is skipped with a
+// warning. enabled_providers is an allow-list and
 // disabled_providers a deny-list, as in OpenCode; OPENCODE_DISABLED_PROVIDERS
 // (a comma list in .env) switches more providers off.
 //
@@ -47,7 +51,8 @@ export const OPENAI_COMPATIBLE_NPM = '@ai-sdk/openai-compatible';
 const BUILT_IN = {
   provider: {
     emis: { npm: OPENAI_COMPATIBLE_NPM, name: 'AI gateway', options: { baseURL: '{env:EMIS_BASE_URL}', apiKey: '{env:EMIS_API_KEY}' } },
-    opencode: { name: 'OpenCode Zen', options: { apiKey: '{env:OPENCODE_API_KEY}' } }
+    opencode: { name: 'OpenCode Zen', options: { apiKey: '{env:OPENCODE_API_KEY}' } },
+    ollama: { name: 'Local backup (Ollama)', options: { baseURL: '{env:OLLAMA_BASE_URL}' } }
   }
 };
 
@@ -204,7 +209,7 @@ const idList = value => String(value || '').split(',').map(s => s.trim()).filter
  * @param {string} [opts.configPath]   default opencode/opencode.json
  * @param {string} [opts.repoDir]      where relative env paths start (default: the MetaCode folder)
  * @returns {{providers: object[], model: string|null, warnings: string[], files: string[]}}
- *   providers, in config order: {id, kind: 'zen'|'openai-compatible', name, config, disabled}
+ *   providers, in config order: {id, kind: 'zen'|'ollama'|'openai-compatible', name, config, disabled}
  *   config = the merged, cleaned entry ({npm?, name?, options: {…}, models?, whitelist?, blacklist?});
  *   disabled = null, or why the provider is switched off (it is still listed, so the status can say so)
  */
@@ -222,10 +227,11 @@ export function loadConfig(opts) {
   else cfg = substitute(BUILT_IN, { env, dir: path.dirname(configPath), label: 'the built-in config', warnings });
 
   const operatorPath = String(env.OPENCODE_CONFIG || '').trim();
+  let operator = null;
   if (operatorPath) {
     const file = path.resolve(repoDir, expandHome(operatorPath));
     const over = readConfigFile(file, 'OPENCODE_CONFIG', env, warnings);
-    if (over) { cfg = mergeConfigs(cfg, over); files.push(file); }
+    if (over) { cfg = mergeConfigs(cfg, over); files.push(file); operator = over; }
   }
 
   for (const k of Object.keys(cfg)) if (!TOP_KEYS.has(k)) warn('"' + k + '" isn\'t supported by MetaCode\'s OpenCode service and is ignored.');
@@ -244,17 +250,33 @@ export function loadConfig(opts) {
   const enabled = ids('enabled_providers');
   const disabledList = ids('disabled_providers') || [];
   const envDisabled = idList(env.OPENCODE_DISABLED_PROVIDERS);
+  // AI_MODE: cloud (default) | local (models on this machine first, and the default) | local-only (only them:
+  // no prompt leaves this machine; every other provider is switched off)
+  const aiMode = String(env.AI_MODE || '').trim().toLowerCase();
+  if (aiMode && !['cloud', 'local', 'local-only'].includes(aiMode)) warn('AI_MODE "' + aiMode.slice(0, 20) + '" isn\'t cloud, local or local-only; cloud is used.');
+  const localOnly = aiMode === 'local-only';
+  const onThisMachine = url => { try { return shared.isLoopback(new URL(url).hostname); } catch (e) { return false; } };
 
   const providers = [];
   const entries = isObject(cfg.provider) ? Object.entries(cfg.provider) : [];
   if (cfg.provider !== undefined && !isObject(cfg.provider)) warn('"provider" in the config must be an object; it is ignored.');
-  for (const [id, raw] of entries) {
+  for (const [id, entry] of entries) {
+    // "ollama" is MetaCode's local backup (providers/ollama.mjs) — unless the operator set up a provider of that
+    // id themselves in OPENCODE_CONFIG (as OpenCode's own docs do): theirs stays an ordinary OpenAI-compatible
+    // provider, exactly as they wrote it, and there's no local backup
+    // (only one that names its own "npm": other keys — a name, options.baseURL, a whitelist — adjust the backup)
+    const ownOllama = id === 'ollama' && !!operator && isObject(operator.provider) && isObject(operator.provider.ollama) && typeof operator.provider.ollama.npm === 'string';
+    const raw = ownOllama ? operator.provider.ollama : entry;
     if (!PROVIDER_ID.test(id)) { warn('The provider id "' + id.slice(0, 40) + '" can only use letters, digits, ".", "_" and "-"; it is skipped.'); continue; }
     if (!isObject(raw)) { warn('"provider.' + id + '" must be an object; it is skipped.'); continue; }
     const config = cleanProvider(id, raw, warn);
     let kind;
     if (id === 'opencode') kind = 'zen';
-    else if (config.npm === OPENAI_COMPATIBLE_NPM) kind = 'openai-compatible';
+    else if (id === 'ollama' && !ownOllama) {
+      if (shared.isOff(env.OLLAMA_BACKUP)) continue;          // (OLLAMA_BACKUP=off: no local backup at all)
+      if (enabled && !enabled.includes(id)) continue;        // (an allow-list that doesn't name it: no backup, and no row about it)
+      kind = 'ollama';
+    } else if (config.npm === OPENAI_COMPATIBLE_NPM) kind = 'openai-compatible';
     else {
       warn('The provider "' + id + '" is skipped: only OpenCode Zen and OpenAI-compatible providers (npm "' + OPENAI_COMPATIBLE_NPM + '") are supported' +
         (config.npm ? ', not "' + config.npm.slice(0, 60) + '"' : '') + '.');
@@ -268,10 +290,18 @@ export function loadConfig(opts) {
       if (!config.options.transport) config.options.transport = String(env.EMIS_TRANSPORT || '').trim().toLowerCase() || 'auto';
     }
     let disabled = null;
-    if (envDisabled.includes(id)) disabled = 'Switched off by OPENCODE_DISABLED_PROVIDERS.';
+    // (Ollama's address as its provider reads it, ollamaSettings(): OLLAMA_BASE_URL, else 127.0.0.1)
+    const ollamaUrl = kind === 'ollama' ? String((config.options && config.options.baseURL) || env.OLLAMA_BASE_URL || '').trim() || 'http://127.0.0.1:11434' : null;
+    if (localOnly && kind === 'ollama' && !onThisMachine(ollamaUrl)) {
+      disabled = 'Switched off: AI_MODE=local-only keeps every prompt on this machine, and OLLAMA_BASE_URL is another machine (' + (() => { try { return new URL(ollamaUrl).host; } catch (e) { return 'not a URL'; } })() + ').';
+    // (never the AI gateway, wherever its address: it is a service on the internet, and one on 127.0.0.1 is a
+    // relay or a tunnel to it; providers/openai-compatible.mjs doesn't count its models as local either)
+    } else if (localOnly && !(kind === 'ollama' || (kind === 'openai-compatible' && id !== 'emis' && onThisMachine(config.options.baseURL)))) {
+      disabled = 'Switched off: AI_MODE=local-only keeps every prompt on this machine.';
+    } else if (envDisabled.includes(id)) disabled = 'Switched off by OPENCODE_DISABLED_PROVIDERS.';
     else if (disabledList.includes(id)) disabled = 'Switched off by disabled_providers in the service\'s config.';
     else if (enabled && !enabled.includes(id)) disabled = 'Switched off: not in enabled_providers in the service\'s config.';
-    providers.push({ id, kind, name: config.name || (kind === 'zen' ? 'OpenCode Zen' : id), config, disabled });
+    providers.push({ id, kind, name: config.name || (kind === 'zen' ? 'OpenCode Zen' : kind === 'ollama' ? 'Local backup (Ollama)' : id), config, disabled });
   }
   return { providers, model, warnings, files };
 }

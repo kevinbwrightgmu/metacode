@@ -17,6 +17,7 @@ const { createSurveys } = require('./surveys');
 const { createAccounts } = require('./accounts');
 const { createProjects } = require('./projects');
 const { rankSimilar, renamedModel, sameModel, canonicalId, splitModel } = require('./model-match');
+const { createPwa } = require('./lib/pwa');
 const { keepAlive } = require('./lib/keepalive');
 const { createStatusMonitor, statusRoutes } = require('./status-page');
 
@@ -42,10 +43,11 @@ const statusSite = statusRoutes({ publicDir: path.join(__dirname, 'public') });
 app.use(statusSite.hostRouter);
 
 // The AI routes spend the AI providers' quota of the key(s) set up for this server,
-// and the scraper routes make requests to Reddit on this server's behalf, so
+// the scraper routes make requests to Reddit on this server's behalf, and the
+// AI Model Store's (local-ai) download and remove models on this computer, so
 // only MetaCode's own pages (same origin) may call them. The other routes
 // keep the permissive CORS they always had.
-const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?|account(\/.*)?|billing\/(checkout|portal|sync)|network\/analyze|lab(\/.*)?|desktop(\/.*)?|collab(\/.*)?)\/?$/i;
+const AI_ROUTE   = /^\/api\/(ai(\/batch)?|models|keys\/status|settings\/(status|reload)|projects(\/.*)?|scraper(\/.*)?|surveys(\/.*)?|public\/surveys(\/.*)?|account(\/.*)?|billing\/(checkout|portal|sync)|network\/analyze|lab(\/.*)?|desktop(\/.*)?|collab(\/.*)?|local-ai(\/.*)?)\/?$/i;
 const corsForAll = cors();
 app.use((req, res, next) => (AI_ROUTE.test(req.path) ? next() : corsForAll(req, res, next)));
 // …and state-changing requests to them must say they come from this site:
@@ -136,6 +138,11 @@ app.use('/api/collab', collab.router);
 const jsonBody = express.json({ limit: '10mb' });
 app.use((req, res, next) => (/^\/api\/lab(\/|$)/.test(req.path) ? next() : jsonBody(req, res, next)));
 app.get('/status', statusSite.page);   // the status page on the main site too
+// The installable, offline MetaCode (lib/pwa.js): its service worker (/sw.js) keeps the app working with no
+// server and no internet; /analytics.js is empty unless METACODE_ANALYTICS_ID is set
+// (the Scraper's in-app Reddit browser: its routing is in the service worker only while it's on)
+const pwa = createPwa({ publicDir: path.join(__dirname, 'public'), scramjet: () => { const c = scraper.config; return !!(c && c.enabled && c.browserEnabled); } });
+pwa.mount(app);
 // Pages, scripts and styles are revalidated on every load, so an updated
 // MetaCode is never run with yesterday's cached JavaScript.
 app.use(express.static(path.join(__dirname, 'public'), {
@@ -182,11 +189,13 @@ const shared = require('./opencode/shared');
 const { createSupervisor } = require('./opencode/supervisor');
 
 const DEFAULT_TIMEOUT_MS    = 120 * 1000;
+const DEFAULT_LOCAL_TIMEOUT_MS = 5 * 60 * 1000;            // a request to the local backup (a small model on this server's CPU)
 const MODEL_LIST_TTL_MS     = 30 * 1000;                 // the service keeps the providers' own lists; this only spares it repeated calls
 const MODEL_LIST_TIMEOUT_MS = 20 * 1000;
 const MODEL_LIST_RETRY_MS   = 5 * 1000;                  // after a failed fetch, wait this long before trying again
 const STATUS_TIMEOUT_MS     = 3 * 1000;                  // GET /v1/status (readiness)
 const DEFAULT_PAUSE_SEC     = 30;                        // a provider that asked to pause without saying for how long
+const LOCAL_BACKUP_AFTER_MS = 60 * 1000;                 // the local backup doesn't answer while another model is back within this (switchCandidates)
 const MAX_COOLDOWN_MS       = 400 * 24 * 3600 * 1000;    // reset times further out than this are ignored as bogus
 const MODEL_COOLDOWN_MS     = 60 * 1000;                 // a rate-limited model rests this long (doubling while it keeps happening)
 const MODEL_COOLDOWN_MAX_MS = 15 * 60 * 1000;
@@ -210,16 +219,20 @@ function firstSet(env, names) {
   return names.find(n => env[n] !== undefined && String(env[n]).trim() !== '') || null;
 }
 
-// → { off, url, baseHost, custom, managed, model, modelVar, timeoutMs, switching, freeFallback, settings, problem, warnings }
+// → { off, url, baseHost, custom, managed, model, modelVar, timeoutMs, switching, freeFallback, localTimeoutMs, localParallel, settings, problem, warnings }
 function loadAiConfig(env) {
   const settings = shared.serviceSettings(env);
   const config = { off: false, url: null, baseHost: null, custom: false, managed: 'auto', model: '', modelVar: null,
-    timeoutMs: DEFAULT_TIMEOUT_MS, switching: true, freeFallback: false, settings, problem: null, warnings: [] };
+    timeoutMs: DEFAULT_TIMEOUT_MS, switching: true, freeFallback: false, localTimeoutMs: DEFAULT_LOCAL_TIMEOUT_MS, localParallel: 1, localContextTokens: 4096, settings, problem: null, warnings: [] };
 
   const managed = String(env.OPENCODE_SERVICE_MANAGED || '').trim().toLowerCase();
   if (managed === 'on' || managed === 'always' || shared.isOn(managed)) config.managed = 'on';
   else if (shared.isOff(managed)) config.managed = 'off';
   else if (managed && managed !== 'auto') config.warnings.push('OPENCODE_SERVICE_MANAGED must be auto, on or off; using auto.');
+
+  // AI_MODE (the AI service reads it too, opencode/config.mjs): cloud | local | local-only
+  const mode = String(env.AI_MODE || '').trim().toLowerCase();
+  config.mode = ['local', 'local-only'].includes(mode) ? mode : 'cloud';
 
   const modelVar = firstSet(env, ['OPENCODE_MODEL', 'EMIS_MODEL']);
   const model = modelVar ? String(env[modelVar]).trim() : '';
@@ -235,6 +248,27 @@ function loadAiConfig(env) {
   }
   const switchVar = firstSet(env, ['AI_MODEL_SWITCH', 'EMIS_MODEL_SWITCH']);
   config.switching = !(switchVar && shared.isOff(env[switchVar]));
+  // The local backup (Ollama on this server): its time limit per request and how many run at once
+  const localVar = firstSet(env, ['AI_LOCAL_TIMEOUT_MS']);
+  if (localVar) {
+    const ms = Number(env[localVar]);
+    if (Number.isInteger(ms) && ms >= 10000 && ms <= 600000) config.localTimeoutMs = ms;
+    else config.warnings.push('AI_LOCAL_TIMEOUT_MS must be a whole number of milliseconds between 10000 and 600000; using ' + DEFAULT_LOCAL_TIMEOUT_MS + '.');
+  }
+  const parallelVar = firstSet(env, ['AI_LOCAL_PARALLEL']);
+  if (parallelVar) {
+    const n = Number(env[parallelVar]);
+    if (Number.isInteger(n) && n >= 1 && n <= 16) config.localParallel = n;
+    else config.warnings.push('AI_LOCAL_PARALLEL must be a whole number from 1 to 16; using 1.');
+  }
+  // AI_LOCAL_CONTEXT_TOKENS: how much a model on this machine can take in (Ollama's OLLAMA_CONTEXT_LENGTH,
+  // 4096 by default; docs/deploy-vps.md sets 8192). Bigger requests aren't switched to it (see switchCandidates)
+  const contextVar = firstSet(env, ['AI_LOCAL_CONTEXT_TOKENS']);
+  if (contextVar) {
+    const n = Number(String(env[contextVar]).trim());
+    if (Number.isInteger(n) && n >= 2048 && n <= 262144) config.localContextTokens = n;
+    else config.warnings.push('AI_LOCAL_CONTEXT_TOKENS must be a whole number from 2048 to 262144; using 4096.');
+  }
   // AI_FALLBACK_TO_FREE_MODELS=on: a free model may answer for one that isn't free (see closestModel)
   const freeVar = firstSet(env, ['AI_FALLBACK_TO_FREE_MODELS']);
   config.freeFallback = !!(freeVar && shared.isOn(env[freeVar]));
@@ -419,7 +453,7 @@ function freeModelsRestingUntil(provider, now) {
   return st && st.until > now ? st.until : 0;
 }
 function isFreeModel(id) {
-  const info = modelList.result && modelList.result.info.get(id);
+  const info = modelList.result && modelList.result.info.get(splitVariant(id).base);      // ("…#high" is that model)
   return !!(info && info.free === true);
 }
 // The failure a free model gets while its provider's free models rest, without asking the service again
@@ -492,9 +526,22 @@ function onModelAnswered(model) {
   modelDown.delete(model);
   const provider = providerOf(model);
   serverErrors = provider ? serverErrors.filter(e => providerOf(e.model) !== provider) : [];
+  if (provider) providerUnreachable.delete(provider);
 }
 // → { models, status } while several models (of `provider`, when given) are failing with server errors, else null
+// A provider the AI service can't reach (DNS, no route, connection refused or reset): every model of it is
+// skipped for a while — 30 s, then longer up to 2 minutes while it lasts; cleared when it answers again
+const providerUnreachable = new Map();      // provider -> { until, hits, lastAt }
+function onProviderUnreachable(provider, now) {
+  if (!provider) return;
+  const st = providerUnreachable.get(provider) || { until: 0, hits: 0, lastAt: 0 };
+  st.hits = now - st.lastAt < 5 * 60 * 1000 ? st.hits + 1 : 1;
+  st.lastAt = now;
+  st.until = now + Math.min(2 * 60 * 1000, 30 * 1000 * 2 ** Math.min(st.hits - 1, 3));
+  providerUnreachable.set(provider, st);
+}
 function serviceTrouble(now, provider) {
+  if (provider) { const u = providerUnreachable.get(provider); if (u && u.until > now) return { models: [], status: 502, unreachable: true }; }
   const recent = serverErrors.filter(e => now - e.at < SERVICE_TROUBLE_WINDOW_MS && (provider === undefined || providerOf(e.model) === provider));
   return recent.length >= SERVICE_TROUBLE_MODELS ? { models: recent.map(e => e.model), status: recent[recent.length - 1].status } : null;
 }
@@ -509,9 +556,34 @@ function serviceTrouble(now, provider) {
 // The models that may answer for `target` right now: not tried yet, a chat model, not resting or
 // failing, its provider neither resting nor failing as a whole, offered, able to take the request —
 // and not a free model when `target` isn't one (free models' providers may use the prompts), unless
-// AI_FALLBACK_TO_FREE_MODELS=on (or allowFree). restingToo: also models whose provider (or whose provider's
-// free models) rest, to know which could answer once that ends. → { list, base, triedAlready(id), candidates } or null
-async function switchCandidates(target, chatRequest, tried, allowFree, restingToo) {
+// AI_FALLBACK_TO_FREE_MODELS=on (or o.allowFree). o.restingToo: also models whose provider (or whose provider's
+// free models) rest, to know which could answer once that ends.
+// The local backup's models (Ollama on this server: small, slow, much weaker) are candidates only when no other
+// provider's model is, and — unless o.noHoldBack (an AI Coding post that already waited once) — none of those is
+// back within LOCAL_BACKUP_AFTER_MS either: a short rate limit is better waited out (the batch tries the post
+// again) than answered by a small local model.
+// → { list, base, triedAlready(id), candidates, backupOnly (the candidates are the backup's), backSoon (held back
+//   for a model that is back then) } or null
+// The prompt's size in tokens for a model on this machine, on the safe side (3.5 characters a token, and the
+// messages' own markup), without the answer
+function promptTokens(chatRequest) {
+  let chars = 0, messages = 0;
+  for (const m of (chatRequest && chatRequest.messages) || []) {
+    messages++;
+    if (typeof m.content === 'string') chars += m.content.length;
+    else if (Array.isArray(m.content)) m.content.forEach(part => { if (part && typeof part.text === 'string') chars += part.text.length; });
+  }
+  return Math.ceil(chars / 3.5) + 8 * messages;
+}
+// What a model on this machine needs left for its answer
+const MIN_LOCAL_ANSWER_TOKENS = 512;
+// A model on this machine takes in AI_LOCAL_CONTEXT_TOKENS (Ollama's context length) for prompt and answer
+// together: a prompt that leaves less than MIN_LOCAL_ANSWER_TOKENS of it can't go to one (Ollama would drop the
+// start of the prompt, the instructions, without a word)
+const fitsLocal = chatRequest => promptTokens(chatRequest) + MIN_LOCAL_ANSWER_TOKENS <= AI.localContextTokens;
+async function switchCandidates(target, chatRequest, tried, o) {
+  o = o || {};
+  const allowFree = !!o.allowFree, restingToo = !!o.restingToo;
   const list = await getModelList(false);
   if (!list.ok) return null;
   const now = Date.now();
@@ -521,30 +593,75 @@ async function switchCandidates(target, chatRequest, tried, allowFree, restingTo
   const base = splitVariant(target).base;
   const done = new Set(Array.from(tried, t => splitVariant(t).base));
   const freeOk = allowFree || AI.freeFallback || isFree(base);
-  const candidates = list.ids.filter(id => !done.has(id) && (freeOk || !isFree(id)) && !NOT_A_CHAT_MODEL.test(splitModel(id).model) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
-    (restingToo || (!providerRestingUntil(providerOf(id), now) && !(isFree(id) && freeModelsRestingUntil(providerOf(id), now)))) && !serviceTrouble(now, providerOf(id)) &&
-    !(infoOf(id) && infoOf(id).available === false) && !capabilityProblem(chatRequest, infoOf(id)));
+  // (whatever the moment: a chat model, allowed for this request, offered, able to take it)
+  // (a model on this machine whose context can't hold the request isn't switched to: Ollama would drop the start
+  // of the prompt without a word — AI_LOCAL_CONTEXT_TOKENS, as OLLAMA_CONTEXT_LENGTH is set for Ollama)
+  const tooBigForLocal = !fitsLocal(chatRequest);
+  const fits = id => (freeOk || !isFree(id)) && !NOT_A_CHAT_MODEL.test(splitModel(id).model) &&
+    !(infoOf(id) && infoOf(id).available === false) && !capabilityProblem(chatRequest, infoOf(id)) &&
+    !(tooBigForLocal && infoOf(id) && (infoOf(id).backup || infoOf(id).local)) &&
+    // (AI_MODE=local-only: a switch, too, stays on this machine, whatever list the AI service gave — one started
+    // without AI_MODE, or the old list just after Reload .env)
+    (AI.mode !== 'local-only' || !!(infoOf(id) && (infoOf(id).local || infoOf(id).backup)));
+  const candidates = list.ids.filter(id => !done.has(id) && fits(id) && !modelRestingUntil(id, now) && !modelDownUntil(id, now) &&
+    (restingToo || (!providerRestingUntil(providerOf(id), now) && !(isFree(id) && freeModelsRestingUntil(providerOf(id), now)))) && !serviceTrouble(now, providerOf(id)));
   // The same model under another spelling of its id (claude-opus-4-8 / claude-opus-4.8) as one
   // already tried is most likely limited or failing too
   const triedAlready = id => [base, ...done].some(t => sameModel(t, id, list.info));
-  return { list, base, triedAlready, candidates };
+  const isBackup = id => !!(infoOf(id) && infoOf(id).backup);
+  const preferred = candidates.filter(id => !isBackup(id));
+  if (preferred.length || !candidates.length) return { list, base, triedAlready, candidates: preferred, backupOnly: false, backSoon: null };
+  // Only the backup's models are left. When is the first other model back from its rate limit or its
+  // provider's pause? (Models failing — server errors, a provider failing as a whole — or that failed in
+  // other ways have no such time: they don't hold the backup back.)
+  const back = restingToo || o.noHoldBack ? [] : list.ids.filter(id => !isBackup(id) && fits(id) && !modelDownUntil(id, now) && !serviceTrouble(now, providerOf(id)))
+    .map(id => Math.max(modelRestingUntil(id, now), providerRestingUntil(providerOf(id), now), isFree(id) ? freeModelsRestingUntil(providerOf(id), now) : 0))
+    .filter(until => until > now);
+  // (the model asked for under a reasoning variant, "…#high": its own limit is kept under that id)
+  if (target !== base && !restingToo && !o.noHoldBack && fits(base)) { const u = modelRestingUntil(target, now); if (u > now) back.push(u); }
+  const soonest = back.length ? Math.min(...back) : 0;
+  if (soonest && soonest - now <= LOCAL_BACKUP_AFTER_MS) return { list, base, triedAlready, candidates: [], backupOnly: false, backSoon: soonest };
+  return { list, base, triedAlready, candidates, backupOnly: true, backSoon: null };
 }
-async function closestModel(target, chatRequest, tried) {
-  const c = await switchCandidates(target, chatRequest, tried);
+// A model of the local last-resort backup (Ollama on this server). Until the model list is fetched again
+// after Reload .env, the backup's models as last listed: requests already on their way to the backup still
+// wait for its turn and get its time limit (AI_LOCAL_TIMEOUT_MS)
+let lastBackupModels = new Set();
+let lastLocalModels = new Set();
+const localProviders = new Set(['ollama']);       // providers whose models run on this machine, as ever listed
+function isBackupModel(id) {
+  const base = splitVariant(id).base;
+  if (!modelList.result) return lastBackupModels.has(base);
+  const info = modelList.result.info.get(base);
+  return !!(info && info.backup);
+}
+// A model that runs on this machine (Ollama, or an OpenAI-compatible server here): the backup's, or first-class with
+// AI_MODE=local / local-only. Its requests share the CPU, so they wait for their turn (AI_LOCAL_PARALLEL) and
+// get AI_LOCAL_TIMEOUT_MS
+function isLocalModel(id) {
+  const base = splitVariant(id).base;
+  if (!modelList.result) return lastLocalModels.has(base);
+  const info = modelList.result.info.get(base);
+  return !!(info && (info.local || info.backup));
+}
+async function closestModel(target, chatRequest, tried, o) {
+  const c = await switchCandidates(target, chatRequest, tried, o);
   if (!c) return null;
-  // a different model first, other spellings of one already tried last
-  const ranked = rankSimilar(c.base, c.candidates, c.list.info);
+  // a different model first, other spellings of one already tried last; the local backup's models
+  // in their own order (OLLAMA_MODELS: the best first), not by how alike their names are
+  const ranked = c.backupOnly ? c.candidates : rankSimilar(c.base, c.candidates, c.list.info);
   return ranked.find(id => !c.triedAlready(id)) || ranked[0] || null;
 }
 // AI Coding's "keep going" (anyModel): any model that may answer, of any provider, picked at random —
 // the run's current pick while it still may (so a run doesn't hop from model to model)
-async function anyModel(target, chatRequest, tried, current) {
-  const c = await switchCandidates(target, chatRequest, tried);
+async function anyModel(target, chatRequest, tried, current, o) {
+  const c = await switchCandidates(target, chatRequest, tried, o);
   if (!c || !c.candidates.length) return null;
-  if (current && c.candidates.includes(current)) return current;
+  if (current && !c.backupOnly && c.candidates.includes(current)) return current;
   const fresh = c.candidates.filter(id => !c.triedAlready(id));
   const pool = fresh.length ? fresh : c.candidates;
-  return pool[Math.floor(Math.random() * pool.length)];
+  // (the local backup's best model, not one at random)
+  return c.backupOnly ? pool[0] : pool[Math.floor(Math.random() * pool.length)];
 }
 
 // A sentence added after a message's own last one (which may end in a closing bracket or quote)
@@ -571,38 +688,51 @@ async function standInHint(target, chatRequest, prep, o) {
   const limited = prep.switchModels ? Array.from(o.tried || []).filter(m => providerOf(m) !== own && modelRestingUntil(m, now)) : [];
   const limitedToo = () => 'The most similar model' + (limited.length === 1 ? '' : 's') + ' of another AI provider (' + limited.map(m => '"' + modelName(m) + '"').join(', ') +
     ') ' + (limited.length === 1 ? 'is' : 'are') + ' rate-limited too.';
-  const paid = await switchCandidates(target, chatRequest, new Set([target]));
-  if (paid && paid.candidates.length) {
+  const hold = { noHoldBack: !!prep.retried };
+  const paid = await switchCandidates(target, chatRequest, new Set([target]), hold);
+  // (the local backup held back for another model that is back within a minute: when switching would use
+  // that one, an AI Coding run tries the post again then)
+  const heldBack = paid && paid.backSoon && prep.switchModels ? paid.backSoon : null;
+  const orSwitch = prep.inBatch ? ', or turn on "Keep going if the model runs out" next to Run AI Coding' : '';
+  if (paid && paid.candidates.length && !paid.backupOnly) {
     // (switching tried its share of similar models of other providers: they're rate-limited too)
     if (prep.switchModels) return { text: limited.length ? limitedToo() : '' };
     const elsewhere = paid.candidates.every(id => providerOf(id) !== own);
     return { text: !o.long ? '' : (elsewhere ? 'Models of another AI provider' : 'Other models') + ' can answer meanwhile: ' + (prep.ownPicker ? 'pick another model' : 'pick one in Settings → AI models') +
-      (prep.inBatch ? ', or turn on "Keep going if the model runs out" next to Run AI Coding' : '') + '.' };
+      orSwitch + '.' };
   }
-  const free = await switchCandidates(target, chatRequest, new Set([target]), true);
-  if (free && free.candidates.length) {
+  const free = await switchCandidates(target, chatRequest, new Set([target]), Object.assign({ allowFree: true }, hold));
+  if (free && free.candidates.length && !free.backupOnly) {
     return { text: !o.long ? '' : 'Free models of another AI provider can answer meanwhile: ' + (prep.ownPicker ? 'pick one' : 'pick one in Settings → AI models') + ' (marked "· free"), or let them stand in ' +
-      'for paid ones with AI_FALLBACK_TO_FREE_MODELS=on in the server\'s .env (their providers may use the prompts to improve their models).' };
+      'for paid ones with AI_FALLBACK_TO_FREE_MODELS=on in the server\'s .env (their providers may use the prompts to improve their models).', soon: heldBack, held: !!heldBack };
+  }
+  // (only the local backup could answer: with switching on it would have, so something else stopped it)
+  if (paid && paid.backupOnly) {
+    if (prep.switchModels) return { text: limited.length ? limitedToo() : '' };
+    return { text: !o.long ? '' : 'The local backup (small models on this server, slower and weaker) can answer meanwhile: ' +
+      (prep.ownPicker ? 'pick one of its models' : 'pick one of its models in Settings → AI models') + orSwitch + '.' };
   }
   // (why no model of another provider stood in: they rest too — said whatever the wait for those whose
   // models could stand in once their pause ends; one that couldn't anyway, such as a provider with only free
   // models for a paid model, only when the wait is long)
   const others = restingProviders(now).filter(p => p.provider !== own);
   if (others.length) {
-    const later = await switchCandidates(target, chatRequest, new Set([target]), false, true);
+    const later = await switchCandidates(target, chatRequest, new Set([target]), { restingToo: true });
     const usable = new Set(later ? later.candidates.map(providerOf) : []);
     const named = others.filter(p => o.long || usable.has(p.provider));
     const ends = others.filter(p => usable.has(p.provider)).map(p => p.until);
     if (named.length) {
+      const soon = prep.switchModels && ends.length ? Math.min(...ends) : null;     // (when the soonest of those is back)
       return {
         text: named.map(p => providerLabel(p.provider) + ' can\'t answer meanwhile either: ' + (p.reason === 'quota' ? 'its usage limit is used up' : 'it asked MetaCode to pause') +
           ' — it can be used again ' + describeWhen(p.until, now) + '.').join(' ') + (limited.length ? ' ' + limitedToo() : ''),
-        soon: prep.switchModels && ends.length ? Math.min(...ends) : null      // (when the soonest of those is back)
+        soon: soon && heldBack ? Math.min(soon, heldBack) : soon || heldBack, held: !!heldBack
       };
     }
   }
   // (every similar model of the other providers was tried, and each is rate-limited)
-  if (limited.length) return { text: limitedToo() };
+  if (limited.length) return { text: limitedToo(), soon: heldBack, held: !!heldBack };
+  if (heldBack) return { text: '', soon: heldBack, held: true };
   return { text: o.long ? 'No other AI provider can answer right now.' : '' };
 }
 // A failure of the model asked for (rate-limited, its provider or its free models resting) that nothing took
@@ -618,6 +748,10 @@ async function withStandInHint(result, target, chatRequest, prep, tried) {
   if (h.soon) {
     const seconds = Math.max(1, Math.ceil((h.soon - Date.now()) / 1000));
     if (!(out.retryAfterSeconds <= seconds)) out = Object.assign({}, out, { retryAfterSeconds: seconds, standInSoon: true });
+    // (the local backup was held back for a model that is back by then: an AI Coding run tries the post again
+    // then — even when that's when this model's own limit ends, a used-up quota included — and the backup
+    // answers if it has to after all)
+    else if (h.held) out = Object.assign({}, out, { standInSoon: true });
   }
   return out;
 }
@@ -673,6 +807,8 @@ function watchClient(res) {
   const controller = new AbortController();
   const onClose = () => { if (!res.writableFinished) controller.abort(CLIENT_GONE); };
   res.on('close', onClose);
+  // (it may have gone already, while the request was being prepared: 'close' won't come again)
+  if (res.destroyed && !res.writableFinished) controller.abort(CLIENT_GONE);
   return { signal: controller.signal, release: () => res.off('close', onClose) };
 }
 
@@ -873,9 +1009,18 @@ const SERVICE_STATUS = { invalid_request: 400, unsupported_feature: 400, authent
   not_configured: 503, request_too_large: 413, rate_limited: 429, quota_exceeded: 429, cancelled: 499, upstream_error: 502, malformed_response: 502,
   network: 502, timeout: 504, internal_error: 500 };
 
+// A model on this machine (the local backup, or AI_MODE=local) didn't answer in time: what to change is
+// AI_LOCAL_TIMEOUT_MS or a smaller model, whether MetaCode's timer or the AI service's noticed first
+function localTimeout(model) {
+  const backup = isBackupModel(model);
+  return fail(504, 'timeout', 'The ' + (backup ? 'local backup' : 'local') + ' model "' + splitModel(splitVariant(model).base).model + '" didn\'t answer within ' + Math.round(timeoutFor(model) / 1000) +
+    ' seconds. This computer\'s CPU may be too slow for it: pick a smaller model (AI Model Store), or raise AI_LOCAL_TIMEOUT_MS in the server\'s .env file.');
+}
 // One of the service's own errors: its status, type and message (already
 // written for MetaCode's operator) as they are.
 function fromServiceError(r, e) {
+  // (the service's timeout for a local model names AI_TIMEOUT_MS, which isn't that model's limit)
+  if (e.type === 'timeout' && safeModelId(e.model) && isLocalModel(e.model)) return localTimeout(e.model);
   const status = r.status >= 400 && r.status < 600 ? r.status : SERVICE_STATUS[e.type];
   let message = plainText(e.message, 600) || 'The AI service couldn\'t answer (' + e.type + ').';
   if (e.type === 'authentication_error' && !e.provider) message = tokenRefusedMessage();
@@ -905,6 +1050,8 @@ function describeFailure(r, ctx) {
       '. Set OPENCODE_SERVICE_TOKEN in the server\'s .env file (at least 16 characters, the same for the service), or make that folder writable.');
   }
   if (r.failed === 'timeout') {
+    // (a model on this machine has its own, longer limit)
+    if (ctx.model && isLocalModel(ctx.model)) return localTimeout(ctx.model);
     return fail(504, 'timeout', 'The AI service didn\'t answer within ' + timeoutSeconds() + ' seconds. Try again; if this keeps ' +
       'happening, raise AI_TIMEOUT_MS in the server\'s .env file.');
   }
@@ -1202,7 +1349,7 @@ function capability(value) {
 }
 const tokenCount = v => (Number.isInteger(v) && v > 0 && v < 1e9 ? v : null);
 
-// → { ids, info: Map(id → { id, name, named, provider, providerName, model, free, available, toolCall, reasoning, attachment, context, output, variants }), providers, default } or null
+// → { ids, info: Map(id → { id, name, named, provider, providerName, model, free, available, toolCall, reasoning, attachment, context, output, backup, local, variants }), providers, default } or null
 function parseModelList(json) {
   if (!json || typeof json !== 'object' || !Array.isArray(json.data)) return null;
   const ids = [];
@@ -1224,12 +1371,13 @@ function parseModelList(json) {
       available: entry.available === undefined ? true : capability(entry.available),
       toolCall: capability(entry.tool_call), reasoning: capability(entry.reasoning), attachment: capability(entry.attachment),
       context: tokenCount(entry.context_window), output: tokenCount(entry.max_output),
+      backup: entry.backup === true, local: entry.local === true,
       variants: Array.isArray(entry.variants) ? entry.variants.filter(v => typeof v === 'string' && /^[A-Za-z0-9._-]{1,40}$/.test(v)).slice(0, 20) : []
     });
   });
   if (skipped) console.warn('[ai] Skipped ' + skipped + ' model list entr' + (skipped === 1 ? 'y' : 'ies') + ' without a usable id.');
   const providers = Array.isArray(json.providers)
-    ? json.providers.filter(p => p && typeof p === 'object' && safeModelId(p.id)).map(p => ({ id: p.id, name: safeModelName(p.name) || p.id, ready: p.ready !== false }))
+    ? json.providers.filter(p => p && typeof p === 'object' && safeModelId(p.id)).map(p => Object.assign({ id: p.id, name: safeModelName(p.name) || p.id, ready: p.ready !== false }, p.backup === true ? { backup: true } : {}))
     : [];
   const listedDefault = safeModelId(json.default);
   const flagged = json.data.find(entry => entry && entry.default === true && info.has(entry.id));
@@ -1265,6 +1413,9 @@ function getModelList(forceRefresh) {
             modelList.result = result;
             modelList.fetchedAt = Date.now();
             modelList.failure = null;
+            lastBackupModels = new Set(result.ids.filter(id => result.info.get(id) && result.info.get(id).backup));
+            lastLocalModels = new Set(result.ids.filter(id => result.info.get(id) && (result.info.get(id).local || result.info.get(id).backup)));
+            lastLocalModels.forEach(id => localProviders.add(providerOf(id)));
           } else {
             modelList.failure = result;
             modelList.failedAt = Date.now();
@@ -1300,6 +1451,13 @@ function unknownVariant(info, variant) {
 }
 
 function noModelsFailure() {
+  // (AI_MODE=local / local-only: the models on this machine are what's missing, so their problem is said:
+  // "Ollama isn't answering at … Install and start Ollama")
+  if (AI.mode === 'local' || AI.mode === 'local-only') {
+    const providers = serviceState.status && Array.isArray(serviceState.status.providers) ? serviceState.status.providers : [];
+    const local = providers.find(p => p && typeof p === 'object' && p.local && p.problem) || providers.find(p => p && typeof p === 'object' && p.kind === 'ollama' && p.problem);
+    if (local) return fail(503, 'not_configured', 'No AI model on this computer is ready (AI_MODE=' + AI.mode + '): ' + plainText(local.problem, 400));
+  }
   return fail(503, 'not_configured', 'MetaCode\'s AI service has no AI provider set up yet, so there are no models to use. Settings → AI providers shows what each one needs.');
 }
 
@@ -1323,7 +1481,9 @@ function chooseDefaultModel(list) {
       'Change ' + AI.modelVar + ' in the server\'s .env file, or remove it to let the service choose.';
   }
   const usable = id => { const i = list.info.get(id); return !i || i.available !== false; };
+  const backup = id => { const i = list.info.get(id); return !!(i && i.backup); };
   const model = (list.default && ids.includes(list.default) ? list.default : null) ||
+    ids.find(id => usable(id) && !backup(id) && !NOT_A_CHAT_MODEL.test(splitModel(id).model)) ||
     ids.find(id => usable(id) && !NOT_A_CHAT_MODEL.test(splitModel(id).model)) || ids[0];
   if (!model) return { error: noModelsFailure() };
   if (warning) noteOnce('default:' + AI.model, '[ai] The model set in ' + AI.modelVar + ' ("' + AI.model + '") isn\'t offered by the AI service right now; using its default, "' + model + '".');
@@ -1357,9 +1517,10 @@ async function resolveModel(requested) {
   const list = await getModelList(false);
   if (!list.ok) {
     if (FATAL_LIST_FAILURES.has(list.type)) return list;
-    // The list is unavailable for another reason (a hiccup): send the
-    // configured or requested model unverified and let the service decide.
-    const model = AI.model || wanted;
+    // The list is unavailable for another reason (a hiccup): send the requested model (else the configured one)
+    // unverified and let the service decide — never another model than the one asked for (AI Chat turns
+    // switching off: its prompt must go to the model on this device it names)
+    const model = wanted || AI.model;
     return model ? { ok: true, model, verified: false, source: 'opencode', info: null } : list;
   }
   const pick = (model, variant) => ({ ok: true, model: model + (variant ? '#' + variant : ''), verified: true, source: list.source, info: list.info.get(model) || null });
@@ -1374,6 +1535,12 @@ async function resolveModel(requested) {
     if (found === base) return pick(found, variant);
     noteRename(base, found);
     return Object.assign(pick(found, variant), { renamedFrom: wanted });
+  }
+  // A model on this machine that isn't listed now (Ollama isn't answering, the model is still downloading or
+  // was removed): said so, not silently replaced by the default, which may be a cloud model, even a free one
+  if (base && base.includes('/') && localProviders.has(providerOf(base))) {
+    return fail(503, 'not_configured', 'The model on this machine "' + base + '" isn\'t available right now: Ollama isn\'t answering, or the model isn\'t installed. ' +
+      'Try again in a moment, install it in the AI Model Store, or pick another model in Settings → AI models.');
   }
   // Anything else gets the default — the same model Settings shows as selected
   // when the saved one isn't listed, so what's shown is what's used.
@@ -1654,8 +1821,73 @@ function noteEmptyAnswer(completion, model) {
 }
 
 // ── Chat completion (normal JSON response) ───────────────────────────────────
-async function completeChat(chatRequest, ctx, signal, retriedLength) {
-  const r = await aiRequest('POST', '/chat/completions', chatRequest, { timeoutMs: AI.timeoutMs, signal });
+// The local backup runs on this server's CPU: its requests wait here for their turn (AI_LOCAL_PARALLEL at
+// a time, 1 by default; the wait doesn't count toward any time limit), then get AI_LOCAL_TIMEOUT_MS
+const localGates = new Map();     // provider -> { active, waiting: [] }
+// Lets waiting requests in while there's room — also when AI_LOCAL_PARALLEL changed meanwhile (Reload .env):
+// more at once when it went up, none until fewer run when it went down
+function admitLocal(g) {
+  while (g.waiting.length && g.active < AI.localParallel) g.waiting.shift()();
+}
+function acquireLocal(provider, signal) {
+  let g = localGates.get(provider);
+  if (!g) { g = { active: 0, waiting: [] }; localGates.set(provider, g); }
+  const grant = () => {
+    g.active++;
+    let done = false;
+    return () => {
+      if (done) return;
+      done = true;
+      g.active--;
+      admitLocal(g);
+    };
+  };
+  if (g.active < AI.localParallel && !g.waiting.length) return Promise.resolve(grant());
+  if (signal && signal.aborted) return Promise.resolve(null);
+  return new Promise(resolve => {
+    const onAbort = () => { const i = g.waiting.indexOf(go); if (i >= 0) g.waiting.splice(i, 1); resolve(null); };
+    const go = () => { if (signal) signal.removeEventListener('abort', onAbort); resolve(grant()); };
+    g.waiting.push(go);
+    if (signal) signal.addEventListener('abort', onAbort, { once: true });
+  });
+}
+function timeoutFor(model) {
+  return isLocalModel(model) ? AI.localTimeoutMs : AI.timeoutMs;
+}
+// The request as sent to `model`. AI Coding's answers must be one JSON object (prep.jsonAnswer): the local
+// backup's small models often break that when only asked, so Ollama is told to hold them to it
+// (response_format json_object: its output can only be valid JSON) — unless the request says otherwise
+function requestFor(chatRequest, model, prep) {
+  const out = Object.assign({}, chatRequest, { model });
+  if (!isLocalModel(model)) return out;
+  if (prep && prep.jsonAnswer && out.response_format === undefined && !out.tools) out.response_format = { type: 'json_object' };
+  // The model's own settings (AI Model Store → Installed models): its temperature when the request sets none,
+  // and its cap on the answer's length
+  const own = localAi.modelSettings(splitModel(splitVariant(model).base).model);
+  if (own) {
+    if (out.temperature === undefined && own.temperature !== undefined) out.temperature = own.temperature;
+    if (own.maxTokens) out.max_tokens = Math.min(Number(out.max_tokens) || own.maxTokens, own.maxTokens);
+  }
+  // (and the answer gets what is left of the model's context, AI_LOCAL_CONTEXT_TOKENS, at most: a longer budget
+  // would make Ollama drop the start of the prompt to make room)
+  const room = AI.localContextTokens - promptTokens(out);
+  if (room >= MIN_LOCAL_ANSWER_TOKENS) out.max_tokens = Math.min(Number(out.max_tokens) || room, room);
+  return out;
+}
+// recheck(): when the request's turn comes, the model to use instead of the local backup (one that is back
+// meanwhile), or null → { reroute: model } then
+async function completeChat(chatRequest, ctx, signal, recheck) {
+  if (!isLocalModel(chatRequest.model)) return completeChatOnce(chatRequest, ctx, signal);
+  const release = await acquireLocal(providerOf(chatRequest.model), signal);
+  if (!release) return { aborted: true };
+  try {
+    const instead = recheck ? await recheck() : null;
+    if (instead) return { reroute: instead };
+    return await completeChatOnce(chatRequest, ctx, signal);
+  } finally { release(); }
+}
+async function completeChatOnce(chatRequest, ctx, signal, retriedLength) {
+  const r = await aiRequest('POST', '/chat/completions', chatRequest, { timeoutMs: timeoutFor(chatRequest.model), signal });
   if (r.failed === 'aborted') return { aborted: true };
   if (r.failed) return describeFailure(r, ctx);
   // Rate limits: the model rests (answerChat picks the closest one), or its whole provider does
@@ -1673,9 +1905,15 @@ async function completeChat(chatRequest, ctx, signal, retriedLength) {
   // text: ask once more with a bigger budget.
   const c0 = completion.choices[0];
   if (!String(c0.message.content || '').trim() && c0.finish_reason === 'length' && !retriedLength) {
-    const bigger = Math.min(8192, Math.max(1024, (Number(chatRequest.max_tokens) || 256) * 4));
+    let bigger = Math.min(8192, Math.max(1024, (Number(chatRequest.max_tokens) || 256) * 4));
+    // (a model on this machine: within its own cap, Installed Models, and what its context leaves)
+    if (isLocalModel(chatRequest.model)) {
+      const own = localAi.modelSettings(splitModel(splitVariant(chatRequest.model).base).model);
+      bigger = Math.min(bigger, (own && own.maxTokens) || bigger, Math.max(MIN_LOCAL_ANSWER_TOKENS, AI.localContextTokens - promptTokens(chatRequest)));
+      if (bigger <= (Number(chatRequest.max_tokens) || 0)) { noteEmptyAnswer(completion, chatRequest.model); return { ok: true, completion }; }
+    }
     console.warn('[ai] ' + chatRequest.model + ' used all ' + (chatRequest.max_tokens || '?') + ' tokens without answering; retrying with ' + bigger + '.');
-    return completeChat(Object.assign({}, chatRequest, { max_tokens: bigger }), ctx, signal, true);
+    return completeChatOnce(Object.assign({}, chatRequest, { max_tokens: bigger }), ctx, signal, true);
   }
   noteEmptyAnswer(completion, chatRequest.model);
   return { ok: true, completion };
@@ -1758,17 +1996,18 @@ async function openStream(chatRequest, clientSignal) {
   let token;
   try { token = serviceToken(); } catch (e) { return { failed: 'token', code: e.code || '' }; }
   const { controller, unlink } = linkedAbort(clientSignal);
-  let timer = setTimeout(() => controller.abort(TIMED_OUT), AI.timeoutMs);
+  const limit = timeoutFor(chatRequest.model);
+  let timer = setTimeout(() => controller.abort(TIMED_OUT), limit);
   const attempt = {
     controller,
-    restartTimer() { clearTimeout(timer); timer = setTimeout(() => controller.abort(TIMED_OUT), AI.timeoutMs); },
+    restartTimer() { clearTimeout(timer); timer = setTimeout(() => controller.abort(TIMED_OUT), limit); },
     cancel() { if (!controller.signal.aborted) controller.abort(CANCELLED); },
     finish() { clearTimeout(timer); unlink(); }
   };
   try {
     attempt.response = await undici.fetch(AI.url + '/chat/completions', {
       method: 'POST',
-      headers: serviceHeaders(token, 'text/event-stream', true, AI.timeoutMs),
+      headers: serviceHeaders(token, 'text/event-stream', true, limit),
       body: JSON.stringify(Object.assign({}, chatRequest, { stream: true })),
       redirect: 'manual',
       signal: controller.signal,
@@ -1860,7 +2099,8 @@ async function relayStream(res, attempt, model) {
     const reason = attempt.controller.signal.reason;
     if (reason === CLIENT_GONE || res.destroyed) outcome = { gone: true };
     else if (reason === TIMED_OUT) {
-      outcome = { type: 'timeout', message: 'The AI service stopped sending the answer for ' + timeoutSeconds() + ' seconds, so the stream was ended.' };
+      outcome = isLocalModel(model) ? Object.assign({ type: 'timeout' }, { message: localTimeout(model).message })
+        : { type: 'timeout', message: 'The AI service stopped sending the answer for ' + timeoutSeconds() + ' seconds, so the stream was ended.' };
     } else {
       outcome = { type: 'network', message: 'The connection to the AI service dropped in the middle of the answer.' };
     }
@@ -1892,7 +2132,14 @@ async function relayStream(res, attempt, model) {
 
 // One model's attempt: relays the stream, or sends the failure; → { modelLimited }
 // when the model (or its provider) is rate-limited and nothing has been sent yet.
-async function streamWith(res, chatRequest, ctx, signal, tokenRetried) {
+// (a model of the local backup waits for its turn first, as in completeChat)
+async function streamWith(res, chatRequest, ctx, signal) {
+  if (!isLocalModel(chatRequest.model)) return streamWithOnce(res, chatRequest, ctx, signal);
+  const release = await acquireLocal(providerOf(chatRequest.model), signal);
+  if (!release) return;
+  try { return await streamWithOnce(res, chatRequest, ctx, signal); } finally { release(); }
+}
+async function streamWithOnce(res, chatRequest, ctx, signal, tokenRetried) {
   const now0 = Date.now();
   const resting = modelRestingUntil(chatRequest.model, now0);
   if (resting) return { modelLimited: modelLimitedFailure(chatRequest.model, resting, now0) };
@@ -1907,7 +2154,7 @@ async function streamWith(res, chatRequest, ctx, signal, tokenRetried) {
     const r = await readErrorBody(attempt);
     if (r.failed === 'aborted') return;
     if (r.failed) return sendFailure(res, describeFailure(r, ctx));
-    if (!tokenRetried && tokenRefused(r) && tokenChanged()) return streamWith(res, chatRequest, ctx, signal, true);
+    if (!tokenRetried && tokenRefused(r) && tokenChanged()) return streamWithOnce(res, chatRequest, ctx, signal, true);
     if (r.status === 429) return { modelLimited: onLimited(describeFailure(r, ctx), chatRequest.model, Date.now()) };
     return sendFailure(res, describeFailure(r, ctx));
   }
@@ -1930,10 +2177,10 @@ async function streamChat(res, prep) {
     let model = ctx.model, switches = 0, own = null;
     for (;;) {
       tried.add(model);
-      const out = await streamWith(res, Object.assign({}, chatRequest, { model }), Object.assign({}, ctx, { model }), client.signal);
+      const out = await streamWith(res, requestFor(chatRequest, model, prep), Object.assign({}, ctx, { model }), client.signal);
       if (!out || !out.modelLimited) return;
       if (model === ctx.model) own = out.modelLimited;
-      const alt = prep.switchModels && switches < MAX_RATE_LIMIT_SWITCHES ? await closestModel(ctx.model, chatRequest, tried) : null;
+      const alt = prep.switchModels && switches < MAX_RATE_LIMIT_SWITCHES ? await closestModel(ctx.model, chatRequest, tried, { noHoldBack: !!prep.retried }) : null;
       if (!alt) {
         // (what happened to the model asked for, and why nothing stood in — as answerChat says it)
         clearFallbackHeaders(res);
@@ -1976,6 +2223,17 @@ async function prepareChat(body, formatName, opts) {
   }
   const resolved = await resolveModel(chatRequest.model);
   if (!resolved.ok) return { failure: resolved };
+  // AI_MODE=local-only: no prompt leaves this machine (the AI service offers only local models then; this is the
+  // second lock)
+  if (AI.mode === 'local-only' && !isLocalModel(resolved.model)) {
+    return { failure: fail(403, 'local_only', 'This MetaCode keeps every prompt on this machine (AI_MODE=local-only), and "' + resolved.model + '" isn\'t a model here. Pick a model on this device in Settings → AI models, or install one in the AI Model Store.') };
+  }
+  // A model on this machine whose context can't hold the prompt and an answer: refused with what to change, rather
+  // than answered without the prompt's start (Ollama would drop it, the instructions, without a word)
+  if (isLocalModel(resolved.model) && !fitsLocal(chatRequest)) {
+    return { failure: fail(400, 'context_too_long', 'This request is about ' + promptTokens(chatRequest) + ' tokens, and "' + splitModel(splitVariant(resolved.model).base).model +
+      '" on this computer takes in ' + AI.localContextTokens + ' with its answer (AI_LOCAL_CONTEXT_TOKENS). Send less, or let Ollama take more: set OLLAMA_CONTEXT_LENGTH for Ollama (its default is 4096) and AI_LOCAL_CONTEXT_TOKENS in the server\'s .env to the same number, e.g. 16384.') };
+  }
   chatRequest.model = resolved.model;
   const unsupported = capabilityProblem(chatRequest, resolved.info);
   if (unsupported) return { failure: unsupported };
@@ -1990,6 +2248,8 @@ async function prepareChat(body, formatName, opts) {
     anyModel: switchingAllowed() && !!(opts && opts.anyModel),
     pick: (opts && opts.pick) || null,                                 // { to }: the run's current random pick (anyModel)
     inBatch: !!(opts && opts.inBatch),                                 // (AI Coding: its messages can point at its own options)
+    jsonAnswer: !!(opts && opts.jsonAnswer),                           // (AI Coding: the answer must be one JSON object; see requestFor)
+    retried: !!(opts && opts.retried),                                 // (AI Coding: a post tried again after waiting: the local backup isn't held back)
     ownPicker: !!(opts && opts.ownPicker)                              // (the Lab, the desktop app: models are picked there, not in Settings)
   };
 }
@@ -2018,10 +2278,24 @@ async function answerChat(prep, signal) {
   const any = !!prep.anyModel;
   const swapPicked = explicit && prep.switchModels && prep.pickedFallback;
   const tried = new Set();
-  const switchTo = () => (any ? anyModel(ctx.model, chatRequest, tried, prep.pick && prep.pick.to) : closestModel(ctx.model, chatRequest, tried));
+  const hold = { noHoldBack: !!prep.retried };
+  const switchTo = () => (any ? anyModel(ctx.model, chatRequest, tried, prep.pick && prep.pick.to, hold) : closestModel(ctx.model, chatRequest, tried, hold));
   let model = ctx.model, fallback = null, fallbackReason = null;
   let rateSwitches = 0, otherSwitches = 0, result;
   let own = null;               // how the model asked for failed (or was failing, when it was skipped)
+  // The local backup standing in waits for its turn (one request at a time): if the model asked for is back by
+  // then (its rate limit or its provider's pause over), or another provider's model is, that one answers
+  // instead — once per request
+  let rerouted = false;
+  const recheck = async () => {
+    if (rerouted) return null;
+    const now = Date.now(), p = providerOf(ctx.model);
+    const back = own && (isLimit(own) || own.type === 'upstream_error') && !modelRestingUntil(ctx.model, now) && !providerRestingUntil(p, now) &&
+      !(isFreeModel(ctx.model) && freeModelsRestingUntil(p, now)) && !modelDownUntil(ctx.model, now) && !serviceTrouble(now, p);
+    if (back) return ctx.model;
+    const alt = await switchTo();
+    return alt && !isBackupModel(alt) ? alt : null;
+  };
   for (;;) {
     tried.add(model);
     const now = Date.now();
@@ -2037,10 +2311,22 @@ async function answerChat(prep, signal) {
     result = resting ? modelLimitedFailure(model, resting, now)
       : providerResting ? providerRestFailure(providerOf(model), now)
       : freeResting ? freeModelsRestFailure(providerOf(model), model, now)
-      : await completeChat(Object.assign({}, chatRequest, { model }), Object.assign({}, ctx, { model, verified: ctx.verified || model !== ctx.model }), signal);
+      : await completeChat(requestFor(chatRequest, model, prep), Object.assign({}, ctx, { model, verified: ctx.verified || model !== ctx.model }), signal,
+        model !== ctx.model ? recheck : null);
     if (result.aborted) return { aborted: true };
+    if (result.reroute) {
+      rerouted = true;
+      tried.delete(model);           // (it never ran on the backup: if the model rerouted to is refused again, the backup still may answer)
+      model = result.reroute;
+      if (model === ctx.model) { fallback = null; fallbackReason = null; } else fallback = model;
+      continue;
+    }
     if (result.ok) { onModelAnswered(model); break; }
     if (result.type === 'upstream_error') onModelServerError(model, result.upstreamStatus, Date.now());
+    // (a provider the AI service can't reach — no DNS, no route, the connection reset — fails for its models as a
+    // server error does: another model is tried, and the backup last. Not MetaCode's own link to the service)
+    const unreachable = result.type === 'network' && !!result.provider;
+    if (unreachable) { onModelServerError(model, 502, Date.now()); onProviderUnreachable(result.provider, Date.now()); }
     if (model === ctx.model) own = result;
     let why = null;
     // ("keep going": any usage or rate limit counts, a model's own quota too)
@@ -2048,7 +2334,7 @@ async function answerChat(prep, signal) {
       rateSwitches < (any ? ANY_MODEL_SWITCHES : MAX_RATE_LIMIT_SWITCHES)) why = 'rate_limited';
     // (once switching, a similar model that fails in its own way — not offered, not allowed for the
     // key, unreadable answers — is skipped too; a provider failing as a whole isn't switched to: closestModel)
-    else if ((((!explicit || fallbackReason || any) && fallbackType(result)) || (swapPicked && TEMPORARY_MODEL_FAILURES.has(result.type))) &&
+    else if ((((!explicit || fallbackReason || any) && (fallbackType(result) || unreachable)) || (swapPicked && (TEMPORARY_MODEL_FAILURES.has(result.type) || unreachable))) &&
       otherSwitches < (any ? ANY_MODEL_SWITCHES : 2)) why = fallbackReason === 'rate_limited' ? 'rate_limited' : 'failed';
     if (!why) break;
     const alt = await switchTo();     // closest to what was asked for (or, "keep going", the run's pick / one at random)
@@ -2101,7 +2387,7 @@ async function answerChat(prep, signal) {
   }
   if (!result.ok) return { failure: result };
   return { json: prep.format === 'anthropic' ? toAnthropicResponse(result.completion) : result.completion, fallback, fallbackReason, requested: ctx.model,
-    fallbackPick: fallback ? (any ? 'random' : 'closest') : undefined };
+    fallbackPick: fallback ? (isBackupModel(fallback) ? 'backup' : any ? 'random' : 'closest') : undefined };
 }
 
 // Tells the browser which model answered when it wasn't the one asked for
@@ -2122,7 +2408,9 @@ function clearFallbackHeaders(res) {
 app.post('/api/ai', accounts.aiSingle, async (req, res) => {
   try {
     const switchModels = !/^(off|no|false|0)$/i.test(String(req.headers['x-metacode-model-switch'] || ''));
-    const prep = await prepareChat(req.body, String(req.headers['x-provider'] || 'groq').toLowerCase(), { switchModels });
+    // (AI Coding's single posts — "Code this", a post tried again — say so: X-MetaCode-Feature: coding)
+    const jsonAnswer = String(req.headers['x-metacode-feature'] || '').toLowerCase() === 'coding';
+    const prep = await prepareChat(req.body, String(req.headers['x-provider'] || 'groq').toLowerCase(), { switchModels, jsonAnswer });
     if (prep.failure) return sendFailure(res, prep.failure);
     if (prep.chatRequest.stream) return await streamChat(res, prep);
     const client = watchClient(res);
@@ -2215,7 +2503,7 @@ async function aiBatchRoute(req, res) {
     if (gaveUp) return send({ id: item.id, ok: false, status: 503, error: { message: gaveUp, type: 'service_unavailable' } });
     let out;
     try {
-      const prep = await prepareChat(item.body, 'openai', { switchModels, pickedFallback: false, anyModel, pick, inBatch: true });
+      const prep = await prepareChat(item.body, 'openai', { switchModels, pickedFallback: false, anyModel, pick, inBatch: true, jsonAnswer: true, retried: item.tries > 0 || item.serverTries > 0 });
       out = prep.failure ? { failure: prep.failure } : await answerChat(prep, client.signal);
     } catch (err) {
       console.error('[ai] Unexpected error in /api/ai/batch: ' + redact(err && err.message));
@@ -2232,7 +2520,8 @@ async function aiBatchRoute(req, res) {
       item.tries++;
       if (parallel > 1) { parallel = Math.max(1, Math.floor(parallel / 2)); console.warn('[ai] Rate-limited during a batch; running ' + parallel + ' at once now.'); }
       ceiling = Math.min(ceiling, parallel);
-      pausedUntil = Math.max(pausedUntil, Date.now() + Math.min(30, out.failure.retryAfterSeconds || 2 * item.tries) * 1000);
+      // (a model that is back within the minute — standInSoon — is waited for until then, not tried again early)
+      pausedUntil = Math.max(pausedUntil, Date.now() + Math.min(out.failure.standInSoon ? BATCH_RETRY_WAIT_MAX_SECONDS : 30, out.failure.retryAfterSeconds || 2 * item.tries) * 1000);
       queue.unshift(item);
       return;
     }
@@ -2344,6 +2633,8 @@ app.get('/api/models', async (req, res) => {
       if (info.attachment !== null) entry.attachment = info.attachment;
       if (info.context) entry.contextWindow = info.context;
       if (info.output) entry.maxOutput = info.output;
+      if (info.backup) entry.backup = true;       // (the local last-resort backup: answers only when no other provider's model can)
+      if (info.local) entry.local = true;         // (runs on this server)
       return entry;
     });
     const body = Object.assign({ models, providers: list.providers }, base);
@@ -2393,6 +2684,7 @@ function publicProvider(p) {
   const resting = p.resting && typeof p.resting === 'object' && text(p.resting.until, 40) ? p.resting : null;
   return {
     id: p.id, name: safeModelName(p.name) || p.id, kind: text(p.kind, 40), ready: p.ready === true, problem: text(p.problem),
+    backup: p.backup === true, local: p.local === true,
     warnings: Array.isArray(p.warnings) ? p.warnings.map(w => text(w)).filter(Boolean).slice(0, 20) : [],
     keyCount: Number.isInteger(p.keyCount) ? p.keyCount : 0, free: typeof p.free === 'boolean' ? p.free : null, note: text(p.note),
     models: models ? { listed: num(models.listed), available: num(models.available), source: text(models.source, 80), checkedAt: text(models.checkedAt, 40) } : null,
@@ -2629,6 +2921,18 @@ const { createAiLab } = require('./ai-lab');
 const aiLab = createAiLab({ accounts, ai: labAi });
 app.use('/api/lab', aiLab.router);
 app.get(['/ultra/ai-lab', '/ultra/ai-lab/'], aiLab.page);
+// The AI Model Store and local AI on this machine (local-ai/): Ollama's library, installs with progress, this
+// device's hardware and what it can run. Models can be managed from this machine itself, or with
+// LOCAL_AI_ADMIN_TOKEN; anyone may browse.
+const { createLocalAi } = require('./local-ai');
+const localAi = createLocalAi({ env: process.env, isLoopback: require('./owner').isLoopback, onModelsChanged: () => refreshLocalModels() });
+app.use('/api/local-ai', localAi.router);
+// A model was installed or deleted: the AI service looks at Ollama now, and MetaCode at the service's list
+async function refreshLocalModels() {
+  if (notConfigured()) return;
+  try { await aiRequest('POST', '/local/refresh', null, { timeoutMs: 20000, retry: false }); } catch (e) { /* the service looks again within 30 s */ }
+  try { await getModelList(true); } catch (e) { /* the next request fetches it */ }
+}
 // MetaCode Sheets, the desktop app (desktop/): its entitlement, leases and AI routes
 const { createDesktopApi } = require('./desktop-api');
 const desktopApi = createDesktopApi({ accounts, ai: labAi, aiBatchRoute });
@@ -2657,8 +2961,11 @@ async function aiStatusCheck() {
   const ready = providers ? providers.filter(p => p.ready === true) : null;
   if (st.status && (st.status.ready === false || (ready && !ready.length))) return { status: 'off', note: 'AI isn\'t set up on this server.' };
   if (ready && ready.length) {
-    // Every provider that is set up is resting (usage quota used up, or asked to pause)
-    const rest = ready.map(p => {
+    // Every provider that is set up is resting (usage quota used up, or asked to pause). The local backup doesn't
+    // count: while it alone answers, AI is degraded (small models on this server's CPU)
+    const real = ready.filter(p => !p.backup);
+    const backupAnswers = real.length < ready.length;
+    const rest = (real.length ? real : ready).map(p => {
       const own = providerRest.get(p.id);
       const until = Math.max(own && own.until > now ? own.until : 0, p.resting && Date.parse(p.resting.until) > now ? Date.parse(p.resting.until) : 0);
       return until ? { until, quota: (own && own.until > now && own.reason === 'quota') || (p.resting && p.resting.reason === 'quota') } : null;
@@ -2666,7 +2973,8 @@ async function aiStatusCheck() {
     if (rest.every(Boolean)) {
       const first = rest.reduce((a, b) => (b.until < a.until ? b : a));
       const when = describeWhen(first.until, now).replace(/ \(.*\)$/, '');
-      return { status: 'degraded', note: rest.some(r => r.quota) ? 'The usage quota is used up; AI features resume ' + when + '.' : 'Paused briefly at the AI service\'s request; back ' + when + '.' };
+      const note = rest.some(r => r.quota) ? 'The usage quota is used up; AI features resume ' + when : 'Paused briefly at the AI service\'s request; back ' + when;
+      return { status: 'degraded', note: note + (backupAnswers && real.length ? '; the local backup answers meanwhile.' : '.') };
     }
   }
   now = Date.now();
@@ -2760,11 +3068,13 @@ function aiSettings() {
       version: plainText(svc.version, 40), opencode: plainText(svc.opencode, 40), startedAt: plainText(svc.startedAt, 40),
       problem: serviceProblem()
     },
-    providers: serviceProviders(off ? null : st).map(p => ({ id: p.id, name: p.name, ready: p.ready, problem: p.problem, keyCount: p.keyCount, free: p.free, note: p.note,
+    providers: serviceProviders(off ? null : st).map(p => ({ id: p.id, name: p.name, ready: p.ready, problem: p.problem, keyCount: p.keyCount, free: p.free, note: p.note, backup: p.backup, local: p.local,
       models: p.models ? { listed: p.models.listed, available: p.models.available } : null, resting: p.resting })),
     defaultModel, defaultModelName: defaultInfo && defaultInfo.named ? defaultInfo.name : null,
     modelSwitch: switchingAllowed(),
     freeFallback: AI.freeFallback,
+    aiMode: AI.mode,                                          // cloud | local | local-only (AI_MODE)
+    localContextTokens: AI.localContextTokens,                // what a model on this machine takes in (AI_LOCAL_CONTEXT_TOKENS)
     rateLimitedModels: restingModels(now).map(x => ({ model: x.model, until: new Date(x.until).toISOString() })),
     restingProviders: restingProviders(now).map(x => ({ provider: x.provider, until: new Date(x.until).toISOString(), reason: x.reason })),
     maxParallel: aiMaxParallel()
@@ -2799,6 +3109,7 @@ function resetAiState() {
   reprobeTimer = null;
   modelLimits.clear();
   modelDown.clear();
+  providerUnreachable.clear();
   serverErrors = [];
   providerRest.clear();
   freeModelsRest.clear();
@@ -2816,6 +3127,7 @@ app.post('/api/settings/reload', async (req, res) => {
   envLoader.load();
   AI = loadAiConfig(process.env);
   resetAiState();
+  localGates.forEach(admitLocal);     // (a higher AI_LOCAL_PARALLEL lets waiting requests in now)
   try {
     if (JSON.stringify(serviceTarget()) !== serviceTargetKey || serviceForeign()) await startService();
     else if (!notConfigured()) {
@@ -2842,6 +3154,7 @@ app.post('/api/settings/reload', async (req, res) => {
 app.get('/api/health', (req, res) => {
   res.json({
     status:       'ok',
+    app:          'metacode',            // (a launcher started again tells MetaCode from another program by it)
     provider:     'opencode',
     aiConfigured: !notConfigured(),
     aiReady:      aiReady(),
@@ -2867,17 +3180,26 @@ app.use((err, req, res, next) => {
 
 // ── Start ─────────────────────────────────────────────────────────────────────
 // start(port) is also used by the test suite (port 0 = any free port).
+// METACODE_PROFILE=lite: work starts when a feature needs it — the scraper's Python worker on the first scrape,
+// the status checks when the status page is opened, the AI Lab's sandbox probe on the first code run
+const liteProfile = () => String(process.env.METACODE_PROFILE || '').trim().toLowerCase() === 'lite';
+// METACODE_HOST: the address to listen on; the portable launchers use 127.0.0.1 (this computer only). Every
+// address when it's not set.
 function start(port) {
   return new Promise((resolve, reject) => {
-    const server = app.listen(port, async () => {
+    const host = String(process.env.METACODE_HOST || '').trim();
+    const listening = async () => {
       scraper.setPort(server.address().port);
       aiLab.start();                                         // AI Coding Lab: reloads saved evaluation runs
       // MetaCode's AI service: started here when nothing answers at its address (opencode/supervisor.js)
       try { await startService(); } catch (err) { console.error('[ai] Couldn\'t start the AI service: ' + redact(err && err.message)); }
       if (!serviceStarting()) startupProbe();
-      statusMonitor.start();
+      // (METACODE_PROFILE=lite — portable installs, small devices: nothing runs until it's needed; the status page
+      // checks when it's opened)
+      if (!liteProfile()) statusMonitor.start();
       resolve(server);
-    });
+    };
+    const server = host ? app.listen(port, host, listening) : app.listen(port, listening);
     server.on('error', reject);
     server.on('upgrade', accounts.upgradeGuard(scraper.onUpgrade));
     const close = server.close.bind(server);
@@ -2951,10 +3273,49 @@ async function printBanner(PORT) {
   console.log('\n  Open http://localhost:' + PORT + ' in your browser.\n');
 }
 
+// METACODE_OPEN_BROWSER=1 (the portable launchers): MetaCode opens in the browser once it listens, and starting
+// it again while it runs opens the one that runs
+const wantsBrowser = () => /^(1|true|yes|on)$/i.test(String(process.env.METACODE_OPEN_BROWSER || '').trim());
+function openBrowser(url) {
+  const [cmd, argv, opts] = process.platform === 'win32' ? ['cmd', ['/c', 'start', '""', url], { windowsVerbatimArguments: true }]
+    : process.platform === 'darwin' ? ['open', [url], {}] : ['xdg-open', [url], {}];
+  const say = () => console.log('  Open ' + url + ' in your browser.');
+  try {
+    const p = spawn(cmd, argv, Object.assign({ stdio: 'ignore', detached: true, windowsHide: true }, opts));
+    p.on('error', say);
+    p.unref();
+  } catch (e) { say(); }
+}
+// (MetaCode's address on this computer: METACODE_HOST when it names one address, else 127.0.0.1)
+const ownHost = () => { const h = String(process.env.METACODE_HOST || '').trim(); return h && !['0.0.0.0', '::', 'localhost'].includes(h) ? h : '127.0.0.1'; };
+const hostUrl = h => (h.includes(':') ? '[' + h + ']' : h);
+async function answersAsMetaCode(port) {
+  try {
+    const res = await fetch('http://' + hostUrl(ownHost()) + ':' + port + '/api/health', { signal: AbortSignal.timeout(3000) });
+    return res.ok && (await res.json()).app === 'metacode';
+  } catch (e) { return false; }
+}
+// The address the browser opens: localhost, unless MetaCode listens on one other address only (that one), or on
+// 127.0.0.1 only while another program answers at [::1] on the same port (browsers try localhost's IPv6 first)
+async function browserUrl(port) {
+  const h = ownHost();
+  if (h !== '127.0.0.1' && h !== '::1') return 'http://' + hostUrl(h) + ':' + port + '/app.html';
+  if (h === '127.0.0.1' && String(process.env.METACODE_HOST || '').trim() === '127.0.0.1') {
+    const other = await fetch('http://[::1]:' + port + '/api/health', { signal: AbortSignal.timeout(1500) })
+      .then(async r => { try { return (await r.json()).app !== 'metacode'; } catch (e) { return true; } }, () => false);
+    if (other) {
+      console.warn('  ⚠ Another program answers at localhost:' + port + ' over IPv6 ([::1]), so MetaCode opens at http://127.0.0.1:' + port + '. Set another PORT in .env to keep them apart.');
+      return 'http://127.0.0.1:' + port + '/app.html';
+    }
+  }
+  return 'http://localhost:' + port + '/app.html';
+}
+
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;
   start(PORT).then(server => {
     printBanner(server.address().port);
+    if (wantsBrowser()) browserUrl(server.address().port).then(openBrowser);
     // Ctrl+C / pm2 stop: the AI service MetaCode started stops with it
     const shutdown = () => {
       server.close();
@@ -2963,8 +3324,16 @@ if (require.main === module) {
     };
     process.once('SIGINT', shutdown);
     process.once('SIGTERM', shutdown);
-  }, err => {
-    console.error('[server] Couldn\'t start: ' + redact(err && err.message));
+  }, async err => {
+    // (started again while it runs — a second double-click: the one that runs is opened, nothing else starts)
+    if (err && err.code === 'EADDRINUSE' && await answersAsMetaCode(PORT)) {
+      const url = await browserUrl(PORT);
+      console.log('\n  MetaCode is already running at ' + url + (wantsBrowser() ? ': opening it.' : '.') + '\n');
+      if (wantsBrowser()) openBrowser(url);
+      return setTimeout(() => process.exit(0), 500);
+    }
+    console.error('[server] Couldn\'t start: ' + redact(err && err.message) +
+      (err && err.code === 'EADDRINUSE' ? ' (another program uses port ' + PORT + ': set another PORT in .env)' : ''));
     process.exit(1);
   });
 }
